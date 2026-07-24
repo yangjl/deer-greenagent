@@ -406,7 +406,17 @@ def resolve_agent_factory(assistant_id: str | None):
     :func:`build_run_config`.  All ``assistant_id`` values therefore map to the
     same factory; the routing happens inside ``make_lead_agent`` when it reads
     ``cfg["agent_name"]``.
+
+    Exception: the reserved ``dbtl_orchestrator`` assistant_id resolves to the
+    greenagent-gated DBTL orchestrator graph instead of the lead agent. This is
+    an opt-in run target; every other assistant_id keeps the untouched
+    lead-agent path.
     """
+    if assistant_id == "dbtl_orchestrator":
+        from deerflow.agents.dbtl import make_dbtl_orchestrator
+
+        return make_dbtl_orchestrator
+
     from deerflow.agents.lead_agent.agent import make_lead_agent
 
     return make_lead_agent
