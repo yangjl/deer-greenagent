@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "always_require_human_review": [
+    "research-direction",
+    "methodology",
+    "interpretation",
+    "data-use",
+    "project-file-mutation",
+    "knowledge-promotion",
+    "wet-lab-change",
+    "methodological-drift",
+    "evidence-interpretation"
+  ]
+}

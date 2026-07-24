@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "greenagent_version": "0.10.0",
+  "template_id": "project-memory",
+  "initialized_at": "2026-07-24T21:36:48.956Z",
+  "update_policy": "never-overwrite",
+  "files": [
+    {
+      "path": "README.md",
+      "ownership": "project-owned",
+      "template_checksum": "c46e25372e87a070441bf5327918f7e724b4342033ffbcc47ddca12f31825940",
+      "action": "preserved"
+    },
+    {
+      "path": "MEMORY.md",
+      "ownership": "project-owned",
+      "template_checksum": "053bb75c2d2fd4826c71fd2665ecb0ee09e4a28018267e554a701687bc5bc47f",
+      "action": "created"
+    },
+    {
+      "path": "AGENTS.md",
+      "ownership": "project-owned",
+      "template_checksum": "8431f240ac7122b39b4eff1b1b99b67afc78b02866ca27fd45acf6f244da5fbc",
+      "action": "preserved"
+    },
+    {
+      "path": "CLAUDE.md",
+      "ownership": "project-owned",
+      "template_checksum": "1b12d2fe1c0b4eb413bd880da23c89bc786cf59820eb5fc7f4e1035efbe8e65b",
+      "action": "preserved"
+    },
+    {
+      "path": ".github/copilot-instructions.md",
+      "ownership": "project-owned",
+      "template_checksum": "b7323cd7141b2739c82cfe9e9d9ea1a028cb47f1df48e2f1d6c2ae99dd4f00da",
+      "action": "preserved"
+    },
+    {
+      "path": "doc/PROJECT_STATUS.md",
+      "ownership": "project-owned",
+      "template_checksum": "af40ca1387c3e591c666a75bf9c4ab3d7b2a9548baaaa013b079696f7dbc64e9",
+      "action": "created"
+    },
+    {
+      "path": "doc/DECISIONS.md",
+      "ownership": "project-owned",
+      "template_checksum": "059c397a1ea30db9680a7d2cf261ec7e14fc243ef665b78a7ab7aba2c838ab8d",
+      "action": "created"
+    },
+    {
+      "path": "doc/DAILY_LOG.md",
+      "ownership": "project-owned",
+      "template_checksum": "317fd7fbce97efd2f90d746caf0ecb15a465fa8e0639f818d71f9504ff0946ed",
+      "action": "created"
+    },
+    {
+      "path": "doc/WORKLOG.md",
+      "ownership": "project-owned",
+      "template_checksum": "21887a8757f1df4e336ec21f8043dacd2868b73bbc8a12ebb1cadc8615fa64b9",
+      "action": "created"
+    },
+    {
+      "path": "doc/ENVIRONMENT.md",
+      "ownership": "project-owned",
+      "template_checksum": "e81d0d49956d7b3d1aacf966b08a8310db831b9c2dc2cbccce47d9c2ec541171",
+      "action": "created"
+    },
+    {
+      "path": "doc/DATA_PROVENANCE.md",
+      "ownership": "project-owned",
+      "template_checksum": "773ddb9d80126e294d5af86b5e34b9209b8f03000a0aa834673940df1a53567e",
+      "action": "created"
+    },
+    {
+      "path": "doc/REVIEW_QUEUE.md",
+      "ownership": "project-owned",
+      "template_checksum": "eebc355d6afedaa1612dc53be823c522d7b0fbf3c9edbb9cecd9dad8d0d44edf",
+      "action": "created"
+    },
+    {
+      "path": "doc/NEW_PROJECT_CHECKLIST.md",
+      "ownership": "project-owned",
+      "template_checksum": "c53507fa2a6b6772f989880741ba267bb08cb543163868c3c44d533ed25448a1",
+      "action": "created"
+    },
+    {
+      "path": "plan/README.md",
+      "ownership": "project-owned",
+      "template_checksum": "397be61f0e799e7270d4328424b9e49fb281928b2ad4593e14a3d9412e7611a2",
+      "action": "created"
+    },
+    {
+      "path": "profiling/README.md",
+      "ownership": "project-owned",
+      "template_checksum": "73b4ce0fc5d9e3b9b21c70846d355bf5fb955a41dbf61f26bdcf1049d49bdffd",
+      "action": "created"
+    }
+  ]
+}

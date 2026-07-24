@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "greenagent_version": "0.10.0",
+  "initialized_at": "2026-07-24T21:36:48.948Z",
+  "created_roots": [
+    ".greenagent",
+    "local-review"
+  ],
+  "invariant": "Deleting GreenAgent operational directories must not invalidate the research project.",
+  "product_mode": "vscode-multi-agent-harness-dbtl-contracts"
+}

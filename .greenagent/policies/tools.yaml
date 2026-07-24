@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "default": "deny",
+  "horizon": "dbtl-phase-1-contract-only",
+  "enabled_tools": [],
+  "note": "DBTL Phase 1 validates contracts and fixtures only. Model invocation, Builder execution, and Tester execution are disabled."
+}

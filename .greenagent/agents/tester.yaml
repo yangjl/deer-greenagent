@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "role": "tester",
+  "status": "available-manual",
+  "assigned_agent": "unassigned",
+  "execution_mode": "human-operated-vscode",
+  "purpose": "Independently challenge the proposed method and Builder artifacts using known-answer data and a substantively different validation strategy.",
+  "dbtl_stage": "test",
+  "responsibilities": [
+    "define-expected-results-before-testing",
+    "validate-method-with-standard-data",
+    "use-independent-implementation-or-alternative-method",
+    "run-sensitivity-negative-control-and-failure-checks",
+    "route-implementation-defects-to-builder-and-design-defects-to-designer"
+  ],
+  "required_inputs": [
+    "approved-design-package",
+    "phase-action-plan",
+    "builder-handoff",
+    "known-answer-data"
+  ],
+  "required_outputs": [
+    "independent-test-plan",
+    "test-result",
+    "evidence-backed-verdict",
+    "tester-handoff"
+  ],
+  "review_gates": [
+    "evidence-review",
+    "interpretation"
+  ],
+  "independence_requirements": [
+    "not-only-rerun-builder-code",
+    "different-algorithm-software-model-language-data-representation-or-benchmark",
+    "record-when-full-independence-is-not-feasible"
+  ],
+  "permissions": {
+    "read": [
+      "project-workspace",
+      "approved-work-package",
+      "builder-handoff"
+    ],
+    "write": [
+      "test-evidence",
+      ".greenagent/handoffs/"
+    ],
+    "execute": []
+  },
+  "prohibitions": [
+    "silently-edit-implementation",
+    "change-expected-outcomes",
+    "approve-own-work",
+    "accept-builder-rerun-as-independent-validation",
+    "execute-tests-in-dbtl-phase-1"
+  ]
+}

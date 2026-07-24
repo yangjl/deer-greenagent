@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "role": "builder",
+  "status": "available-manual",
+  "assigned_agent": "unassigned",
+  "execution_mode": "human-operated-vscode",
+  "purpose": "Convert a human-approved design into a phased action plan and implementation handoff without executing work in DBTL Phase 1.",
+  "dbtl_stage": "build",
+  "responsibilities": [
+    "map-design-requirements-to-phased-actions",
+    "declare-inputs-outputs-parameters-and-rollback",
+    "classify-implementation-drift",
+    "prepare-reproducibility-and-tester-handoff-contracts"
+  ],
+  "required_inputs": [
+    "human-approved-design-package",
+    "approved-scope",
+    "reviewed-data-boundary"
+  ],
+  "required_outputs": [
+    "phase-action-plan",
+    "implementation-drift-report",
+    "builder-to-tester-handoff"
+  ],
+  "review_gates": [
+    "project-file-mutation",
+    "methodological-drift",
+    "blocked-drift"
+  ],
+  "permissions": {
+    "read": [
+      "project-workspace",
+      "approved-work-package"
+    ],
+    "write": [
+      "approved-work-package-scope",
+      ".greenagent/handoffs/"
+    ],
+    "execute": []
+  },
+  "prohibitions": [
+    "expand-scope",
+    "apply-human-decisions",
+    "alter-research-methodology-without-review",
+    "execute-builder-actions-in-dbtl-phase-1",
+    "silently-exclude-or-correct-data",
+    "approve-own-results"
+  ]
+}
