@@ -26,12 +26,13 @@ import {
   useArtifacts,
 } from "../artifacts";
 import { BrowserViewPanel, useMaybeBrowserView } from "../browser-view";
+import { FileTreePanel, useMaybeFilesPanel } from "../files";
 import { useThread } from "../messages/context";
 import { SidecarPanel, useMaybeSidecar } from "../sidecar";
 
 const RIGHT_PANEL_ANIMATION_MS = 280;
 
-type RightPanelKind = "sidecar" | "artifacts" | "browser";
+type RightPanelKind = "sidecar" | "artifacts" | "browser" | "files";
 
 const ChatBox: React.FC<{
   children: React.ReactNode;
@@ -56,6 +57,8 @@ const ChatBox: React.FC<{
   const sidecarOpen = sidecar?.open ?? false;
   const browserView = useMaybeBrowserView();
   const browserViewOpen = browserEnabled && (browserView?.open ?? false);
+  const filesPanel = useMaybeFilesPanel();
+  const filesPanelOpen = filesPanel?.open ?? false;
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
   useEffect(() => {
@@ -115,9 +118,11 @@ const ChatBox: React.FC<{
     ? "sidecar"
     : browserViewOpen
       ? "browser"
-      : artifactPanelOpen
-        ? "artifacts"
-        : null;
+      : filesPanelOpen
+        ? "files"
+        : artifactPanelOpen
+          ? "artifacts"
+          : null;
   const rightPanelOpen = activeRightPanel !== null;
   const [renderedRightPanel, setRenderedRightPanel] =
     useState<RightPanelKind | null>(activeRightPanel);
@@ -148,6 +153,12 @@ const ChatBox: React.FC<{
   }, [artifactsOpen, setArtifactsOpen, sidecarOpen]);
 
   useEffect(() => {
+    if (sidecarOpen && filesPanelOpen) {
+      filesPanel?.setOpen(false);
+    }
+  }, [sidecarOpen, filesPanelOpen, filesPanel]);
+
+  useEffect(() => {
     if (!browserEnabled && browserView?.open) {
       browserView.close();
     }
@@ -159,6 +170,9 @@ const ChatBox: React.FC<{
     }
     if (renderedRightPanel === "sidecar") {
       return <SidecarPanel />;
+    }
+    if (renderedRightPanel === "files") {
+      return <FileTreePanel threadId={threadId} />;
     }
     if (renderedRightPanel === "artifacts" && selectedArtifact) {
       return (
@@ -231,6 +245,9 @@ const ChatBox: React.FC<{
             if (browserViewOpen) {
               browserView?.close();
             }
+            if (filesPanelOpen) {
+              filesPanel?.setOpen(false);
+            }
             if (artifactsOpen) {
               setArtifactsOpen(false);
             }
@@ -246,7 +263,9 @@ const ChatBox: React.FC<{
                   ? "Sidecar"
                   : renderedRightPanel === "browser"
                     ? "Browser"
-                    : "Artifacts"}
+                    : renderedRightPanel === "files"
+                      ? "Files"
+                      : "Artifacts"}
               </SheetTitle>
               <SheetDescription>
                 Browse the side panel for this conversation.

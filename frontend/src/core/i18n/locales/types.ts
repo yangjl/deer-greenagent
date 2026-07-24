@@ -46,6 +46,20 @@ export interface Translations {
     showBrowser: string;
   };
 
+  workspaceFiles: {
+    title: string;
+    show: string;
+    empty: string;
+    truncated: string;
+    refresh: string;
+    loadFailed: string;
+    retry: string;
+    symlink: string;
+    project: string;
+    noProject: string;
+    linkFailed: string;
+  };
+
   runDuration: {
     reasoning: string;
     working: string;

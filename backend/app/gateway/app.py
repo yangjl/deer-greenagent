@@ -23,6 +23,7 @@ from app.gateway.routers import (
     console,
     features,
     feedback,
+    files,
     github_webhooks,
     input_polish,
     mcp,
@@ -518,6 +519,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)
+
+    # Files API (workspace file listing) is mounted at /api/threads/{thread_id}/files
+    app.include_router(files.router)
 
     # Browser API is mounted at /api/threads/{thread_id}/browser
     app.include_router(browser.router)

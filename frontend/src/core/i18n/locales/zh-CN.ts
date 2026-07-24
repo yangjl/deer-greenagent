@@ -57,6 +57,20 @@ export const zhCN: Translations = {
     showBrowser: "打开浏览器面板",
   },
 
+  workspaceFiles: {
+    title: "工作区文件",
+    show: "浏览工作区文件",
+    empty: "此文件夹为空",
+    truncated: "条目过多，列表已截断",
+    refresh: "刷新",
+    loadFailed: "文件加载失败",
+    retry: "重试",
+    symlink: "符号链接",
+    project: "项目",
+    noProject: "无",
+    linkFailed: "更新项目关联失败",
+  },
+
   runDuration: {
     reasoning: "思考过程",
     working: "执行中…",

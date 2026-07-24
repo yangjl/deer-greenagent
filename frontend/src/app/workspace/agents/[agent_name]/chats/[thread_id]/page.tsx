@@ -11,6 +11,7 @@ import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
+import { FilesTrigger } from "@/components/workspace/files";
 import { GoalStatus } from "@/components/workspace/goal-status";
 import {
   InputBox,
@@ -282,6 +283,7 @@ export default function AgentChatPage() {
                   }
                 />
                 <SidecarTrigger />
+                {!isNewThread && !isMock && <FilesTrigger />}
                 <ExportTrigger threadId={threadId} />
                 <ArtifactTrigger />
               </div>

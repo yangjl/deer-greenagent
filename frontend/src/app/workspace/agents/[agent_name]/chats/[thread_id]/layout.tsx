@@ -2,6 +2,7 @@
 
 import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
 import { ArtifactsProvider } from "@/components/workspace/artifacts";
+import { FilesPanelProvider } from "@/components/workspace/files";
 import { SubtasksProvider } from "@/core/tasks/context";
 
 export default function AgentChatLayout({
@@ -12,7 +13,9 @@ export default function AgentChatLayout({
   return (
     <SubtasksProvider>
       <ArtifactsProvider>
-        <PromptInputProvider>{children}</PromptInputProvider>
+        <FilesPanelProvider>
+          <PromptInputProvider>{children}</PromptInputProvider>
+        </FilesPanelProvider>
       </ArtifactsProvider>
     </SubtasksProvider>
   );

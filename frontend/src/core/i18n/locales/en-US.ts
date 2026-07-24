@@ -57,6 +57,20 @@ export const enUS: Translations = {
     showBrowser: "Open browser panel",
   },
 
+  workspaceFiles: {
+    title: "Files",
+    show: "Browse workspace files",
+    empty: "This folder is empty",
+    truncated: "Listing truncated — too many entries to show",
+    refresh: "Refresh",
+    loadFailed: "Failed to load files",
+    retry: "Retry",
+    symlink: "Symlink",
+    project: "Project",
+    noProject: "None",
+    linkFailed: "Failed to update project link",
+  },
+
   runDuration: {
     reasoning: "Reasoning",
     working: "Working…",
