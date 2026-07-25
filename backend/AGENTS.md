@@ -1216,6 +1216,21 @@ The four operator review classifications are `compatible`, `repairable`,
 thread, checkpoint, or artifact unless `dbtl.mode=graph_enabled`; `manual`
 does not enable LangGraph execution. Preserve this fail-closed ordering.
 
+DBTL Phase 1 adds the durable governance foundation without enabling the
+workflow graph. Alembic revision `0011_dbtl_governance` owns project-scoped
+cycles, stage runs, transition intents/transitions, gate evaluations, typed
+human reviews, work items, artifacts, activity events, memory candidates, and
+knowledge claims/promotions/links, plus validation and cutover evidence.
+`deerflow.persistence.dbtl.DbtlGovernanceRepository` enforces optimistic
+`db_revision` checks, projection hashes, artifact/policy binding, and
+single-use idempotency. The Gateway captures reviewer identity and project
+role from the authenticated membership; client actor fields, internal
+principals, stale revisions, replays, and cross-project access fail closed.
+`GET /api/dbtl/governance/readiness` and the validation/cutover endpoints are
+administrator-only. A cutover can be approved only from a successful
+PostgreSQL validation; SQLite remains useful for local inspection but can
+never report cutover-ready. These controls do not start or advance a cycle.
+
 `threads_meta` carries nullable `workspace_id` and `project_id` plus explicit
 `scope_type` and `visibility`. Existing and newly projectless conversations
 default to `inbox` / `private-owner`; never infer workspace sharing from a

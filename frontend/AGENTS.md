@@ -165,9 +165,12 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   header's `FilesTrigger` remains projectless-chat-only.
 - `src/core/dbtl/` owns the DBTL feature/readiness contracts, query hooks,
   stable inventory grouping, and JSON export helper. Settings → DBTL readiness
-  is a read-only Phase 0 preflight. The project rail's “View readiness” action
-  opens that settings section; it must not introduce repair, migration,
-  promotion, or graph-start controls during this phase.
+  includes the read-only Phase 0 inventory and the administrator-only Phase 1
+  durable-governance checklist. Phase 1 may run a validation, download its
+  evidence, show projection mismatches and rollback posture, and approve a
+  cutover only after every PostgreSQL check passes. It must not repair data,
+  create/advance a cycle, promote knowledge, or start a graph. The project
+  rail's “View readiness” action opens that settings section.
 - `src/app/workspace/[project_slug]/[thread_id]/page.tsx` re-exports the
   canonical chat page. `src/app/workspace/chats/[thread_id]/page.tsx` derives
   its project scope from `useParams().project_slug` (falling back to

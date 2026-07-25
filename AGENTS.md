@@ -111,6 +111,11 @@ Breeding-workspace note:
   `projects`; membership is enforced before project access. PostgreSQL is the
   production authority, while `.greenagent` remains an application-independent
   development protocol and projection.
+- DBTL Phase 1 adds a durable, project-scoped governance schema and strict
+  human-review records, but does not enable cycle execution. Settings → DBTL
+  readiness exposes the administrator validation/evidence/cutover checklist;
+  SQLite is always cutover-blocked and PostgreSQL approval remains distinct
+  from enabling the future Supervisor Graph.
 
 ## Commands: Root vs. Module
 

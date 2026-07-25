@@ -1,8 +1,13 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { fetchDbtlFeature } from "@/core/features/api";
 
-import { fetchDbtlReadiness } from "./api";
+import {
+  approveDbtlCutover,
+  fetchDbtlGovernance,
+  fetchDbtlReadiness,
+  validateDbtlGovernance,
+} from "./api";
 
 export function useDbtlFeature() {
   const query = useQuery({
@@ -26,5 +31,35 @@ export function useDbtlReadiness() {
     staleTime: 0,
     refetchOnMount: true,
     retry: false,
+  });
+}
+
+export function useDbtlGovernance() {
+  return useQuery({
+    queryKey: ["dbtl", "governance"],
+    queryFn: fetchDbtlGovernance,
+    staleTime: 0,
+    refetchOnMount: true,
+    retry: false,
+  });
+}
+
+export function useValidateDbtlGovernance() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: validateDbtlGovernance,
+    onSuccess: (report) => {
+      queryClient.setQueryData(["dbtl", "governance"], report);
+    },
+  });
+}
+
+export function useApproveDbtlCutover() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: approveDbtlCutover,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["dbtl", "governance"] });
+    },
   });
 }

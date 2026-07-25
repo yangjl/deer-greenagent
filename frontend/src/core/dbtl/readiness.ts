@@ -25,3 +25,13 @@ export function buildReadinessExport(report: DbtlReadinessReport) {
     contents: `${JSON.stringify(report, null, 2)}\n`,
   };
 }
+
+export function isValidationStale(
+  validatedAt: string | null | undefined,
+  now = Date.now(),
+  maxAgeMs = 24 * 60 * 60 * 1000,
+) {
+  if (!validatedAt) return true;
+  const timestamp = Date.parse(validatedAt);
+  return !Number.isFinite(timestamp) || now - timestamp > maxAgeMs;
+}

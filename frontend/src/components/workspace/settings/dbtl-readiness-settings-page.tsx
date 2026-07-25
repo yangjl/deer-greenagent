@@ -3,10 +3,14 @@
 import {
   AlertTriangle,
   CheckCircle2,
+  Circle,
+  Database,
   Download,
   FileJson2,
   LockKeyhole,
+  RefreshCw,
   ShieldCheck,
+  XCircle,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -14,7 +18,11 @@ import { Button } from "@/components/ui/button";
 import {
   buildReadinessExport,
   groupReadinessItems,
+  isValidationStale,
+  useApproveDbtlCutover,
+  useDbtlGovernance,
   useDbtlReadiness,
+  useValidateDbtlGovernance,
 } from "@/core/dbtl";
 import { cn } from "@/lib/utils";
 
@@ -38,6 +46,9 @@ function downloadReport(contents: string, filename: string) {
 
 export function DbtlReadinessSettingsPage() {
   const readiness = useDbtlReadiness();
+  const governance = useDbtlGovernance();
+  const validation = useValidateDbtlGovernance();
+  const cutover = useApproveDbtlCutover();
 
   if (readiness.isPending) {
     return (
@@ -103,6 +114,173 @@ export function DbtlReadinessSettingsPage() {
             </p>
           </div>
         </div>
+      </section>
+
+      <section>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="flex items-center gap-2 text-sm font-semibold">
+              <Database className="size-4" />
+              Phase 1 · durable governance
+            </h3>
+            <p className="text-muted-foreground mt-1 max-w-2xl text-xs">
+              Operator checks for the PostgreSQL authority, strict human review
+              gates, revision binding, projection integrity, and legacy-data
+              disposition. Passing these checks does not enable the DBTL graph.
+            </p>
+          </div>
+          <div className="flex gap-2">
+            {governance.data && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  downloadReport(
+                    `${JSON.stringify(governance.data, null, 2)}\n`,
+                    `greenagent-dbtl-governance-${new Date().toISOString().slice(0, 10)}.json`,
+                  )
+                }
+              >
+                <Download />
+                Download evidence
+              </Button>
+            )}
+            <Button
+              type="button"
+              size="sm"
+              disabled={validation.isPending || Boolean(governance.error)}
+              onClick={() => validation.mutate()}
+            >
+              <RefreshCw className={cn(validation.isPending && "animate-spin")} />
+              Run validation
+            </Button>
+          </div>
+        </div>
+
+        {governance.isPending ? (
+          <div className="text-muted-foreground mt-3 rounded-lg border px-4 py-5 text-sm">
+            Checking the durable governance foundation…
+          </div>
+        ) : governance.error || !governance.data ? (
+          <div className="border-amber-300/60 bg-amber-50/60 mt-3 rounded-lg border p-4 dark:bg-amber-950/20">
+            <p className="text-sm font-medium">Operator controls unavailable</p>
+            <p className="text-muted-foreground mt-1 text-xs">
+              {governance.error instanceof Error
+                ? governance.error.message
+                : "Sign in as an administrator to inspect or validate the Phase 1 foundation."}
+            </p>
+          </div>
+        ) : (
+          <div className="mt-3 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3">
+              <div>
+                <p className="text-sm font-medium">
+                  {governance.data.passed_checks} of{" "}
+                  {governance.data.total_checks} foundation checks passed
+                </p>
+                <p className="text-muted-foreground mt-0.5 text-xs">
+                  Database: {governance.data.database_backend} · Schema:{" "}
+                  {governance.data.schema_revision ?? "create-all"}
+                </p>
+              </div>
+              <Badge
+                variant={
+                  governance.data.technical_ready ? "default" : "secondary"
+                }
+              >
+                {governance.data.technical_ready
+                  ? "Technically ready"
+                  : "Cutover blocked"}
+              </Badge>
+            </div>
+
+            <div className="divide-y rounded-lg border">
+              {governance.data.checks.map((check) => (
+                <div key={check.id} className="flex items-start gap-3 px-4 py-3">
+                  {check.status === "passed" ? (
+                    <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-700 dark:text-emerald-400" />
+                  ) : check.status === "waiting" ? (
+                    <Circle className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-400" />
+                  ) : (
+                    <XCircle className="text-destructive mt-0.5 size-4 shrink-0" />
+                  )}
+                  <div>
+                    <p className="text-sm font-medium">{check.title}</p>
+                    <p className="text-muted-foreground mt-0.5 text-xs">
+                      {check.detail}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {governance.data.projection_mismatches.length > 0 && (
+              <details className="rounded-lg border p-3">
+                <summary className="cursor-pointer text-sm font-medium">
+                  View {governance.data.projection_mismatches.length} projection
+                  mismatch(es)
+                </summary>
+                <div className="mt-3 space-y-2">
+                  {governance.data.projection_mismatches.map((mismatch) => (
+                    <code
+                      key={mismatch.cycle_id}
+                      className="bg-muted block rounded px-3 py-2 text-xs"
+                    >
+                      {mismatch.project_id} / {mismatch.cycle_id}
+                    </code>
+                  ))}
+                </div>
+              </details>
+            )}
+
+            <div className="bg-muted/35 rounded-lg border p-4">
+              <p className="text-sm font-medium">Validation and recovery</p>
+              <p className="text-muted-foreground mt-1 text-xs">
+                {governance.data.last_validation
+                  ? `Last validated ${new Date(
+                      governance.data.last_validation.created_at,
+                    ).toLocaleString()}${
+                      isValidationStale(
+                        governance.data.last_validation.created_at,
+                      )
+                        ? " · evidence is older than 24 hours"
+                        : ""
+                    }.`
+                  : "No operator validation has been recorded."}
+              </p>
+              <p className="text-muted-foreground mt-2 text-xs">
+                Rollback: {governance.data.rollback_posture}
+              </p>
+              {governance.data.operator_can_approve ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  className="mt-3"
+                  disabled={cutover.isPending}
+                  onClick={() => {
+                    const validationId =
+                      governance.data.validation_id ??
+                      governance.data.last_validation?.id;
+                    if (validationId) cutover.mutate(validationId);
+                  }}
+                >
+                  Approve PostgreSQL cutover
+                </Button>
+              ) : (
+                <p className="text-muted-foreground mt-3 text-xs font-medium">
+                  Cutover approval appears only after a fresh PostgreSQL
+                  validation passes every technical check.
+                </p>
+              )}
+              {(validation.error ?? cutover.error) && (
+                <p className="text-destructive mt-2 text-xs">
+                  {(validation.error ?? cutover.error)?.message}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
       </section>
 
       <section>

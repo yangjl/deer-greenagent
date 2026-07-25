@@ -1189,9 +1189,10 @@ projects:
   root: ~/DeerFlowProjects
 
 # ── DBTL workflow ────────────────────────────────────────────────────────
-# Phase 0 defaults to audit_only: legacy cycle/handoff records are visible in
-# Settings → DBTL readiness, while all workflow mutations and LangGraph
-# execution remain blocked. graph_enabled must be an explicit operator choice.
+# Phase 0/1 default to audit_only: legacy records and durable-governance checks
+# are visible in Settings → DBTL readiness, while cycle execution remains
+# blocked. PostgreSQL cutover approval and graph_enabled are separate explicit
+# operator decisions; neither is inferred from a successful validation.
 dbtl:
   mode: audit_only # disabled | audit_only | manual | graph_enabled
   policy_version: greenagent-dbtl-v2-draft

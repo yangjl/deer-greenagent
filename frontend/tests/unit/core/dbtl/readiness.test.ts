@@ -3,6 +3,7 @@ import { describe, expect, test } from "@rstest/core";
 import {
   buildReadinessExport,
   groupReadinessItems,
+  isValidationStale,
   type DbtlReadinessReport,
 } from "@/core/dbtl";
 
@@ -65,5 +66,14 @@ describe("DBTL readiness helpers", () => {
     expect(exported.filename).toMatch(/^greenagent-dbtl-readiness-/);
     expect(JSON.parse(exported.contents)).toEqual(report);
     expect(report).toEqual(before);
+  });
+
+  test("marks absent, invalid, or older validation evidence as stale", () => {
+    const now = Date.parse("2026-07-25T12:00:00Z");
+
+    expect(isValidationStale(null, now)).toBe(true);
+    expect(isValidationStale("not-a-date", now)).toBe(true);
+    expect(isValidationStale("2026-07-25T11:00:00Z", now)).toBe(false);
+    expect(isValidationStale("2026-07-23T11:00:00Z", now)).toBe(true);
   });
 });

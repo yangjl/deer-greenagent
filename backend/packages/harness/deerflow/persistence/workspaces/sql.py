@@ -144,16 +144,16 @@ class WorkspaceRepository:
             project = await session.get(ProjectRow, project_id)
             if project is None:
                 return None
-            if (
-                await self._membership_role(
-                    session,
-                    workspace_id=project.workspace_id,
-                    user_id=user_id,
-                )
-                is None
-            ):
+            role = await self._membership_role(
+                session,
+                workspace_id=project.workspace_id,
+                user_id=user_id,
+            )
+            if role is None:
                 return None
-            return self._serialize(project)
+            data = self._serialize(project)
+            data["current_user_role"] = role
+            return data
 
     async def create_project(
         self,

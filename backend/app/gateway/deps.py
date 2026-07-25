@@ -377,6 +377,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     async with AsyncExitStack() as stack:
         config = startup_config
         app.state.checkpoint_channel_mode = freeze_checkpoint_channel_mode(config.database.checkpoint_channel_mode)
+        app.state.dbtl_database_backend = config.database.backend
 
         app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
 
@@ -405,16 +406,19 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
         if sf is not None:
+            from deerflow.persistence.dbtl import DbtlGovernanceRepository
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
             )
             from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
             from deerflow.persistence.workspaces import WorkspaceRepository
 
+            app.state.dbtl_governance_repo = DbtlGovernanceRepository(sf)
             app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
             app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
             app.state.workspace_repo = WorkspaceRepository(sf)
         else:
+            app.state.dbtl_governance_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
             app.state.workspace_repo = None
@@ -565,6 +569,13 @@ def get_workspace_repo(request: Request):
     val = getattr(request.app.state, "workspace_repo", None)
     if val is None:
         raise HTTPException(status_code=503, detail="Workspace repo not available")
+    return val
+
+
+def get_dbtl_governance_repo(request: Request):
+    val = getattr(request.app.state, "dbtl_governance_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="DBTL governance repository not available")
     return val
 
 

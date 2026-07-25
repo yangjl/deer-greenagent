@@ -961,6 +961,15 @@ candidate vocabulary, and exports the report for human review. Enabling graph
 execution requires the explicit operator setting `dbtl.mode: graph_enabled`;
 `manual` permits future administrative maintenance but does not run the graph.
 
+Phase 1 also provisions the durable SQL governance schema and extends Settings
+→ DBTL readiness with an administrator checklist. It reports the active
+database backend and migration revision, strict review identity/revision/replay
+guards, projection mismatches, legacy-data blockers, validation age, evidence
+download, and rollback posture. SQLite installations intentionally show
+PostgreSQL cutover as blocked. “Approve cutover” appears only after a
+PostgreSQL validation passes every technical check, and approval still does
+not enable DBTL classification or LangGraph execution.
+
 `LocalSandboxProvider` keeps host Bash disabled by default. If you explicitly
 enable `sandbox.allow_host_bash: true`, do so only on a fully trusted local
 machine: commands execute on the host, with the selected project folder as
