@@ -16,7 +16,13 @@ import { usePathname } from "next/navigation";
 import { type FormEvent, useState } from "react";
 
 import { SettingsDialog } from "@/components/workspace/settings";
-import { useDbtlFeature } from "@/core/dbtl";
+import {
+  type DbtlControlState,
+  blockedByReadiness,
+  controlAccessibleLabel,
+  dbtlControlState,
+  useDbtlFeature,
+} from "@/core/dbtl";
 import { uuid } from "@/core/utils/uuid";
 import {
   DBTL_PHASES,
@@ -63,11 +69,11 @@ function SectionLabel({
 
 function PhaseDots({
   cycle,
-  disabled,
+  controls,
   onSetPhase,
 }: {
   cycle: DbtlCycle;
-  disabled: boolean;
+  controls: DbtlControlState;
   onSetPhase: (phase: (typeof DBTL_PHASES)[number]) => void;
 }) {
   const activeIndex = DBTL_PHASES.indexOf(cycle.phase);
@@ -78,12 +84,26 @@ function PhaseDots({
         <button
           key={phase}
           type="button"
-          title={`${cycle.name}: mark phase ${phase}`}
-          aria-label={`Mark ${cycle.name} phase as ${phase}`}
-          disabled={disabled}
-          onClick={() => onSetPhase(phase)}
+          title={
+            controls.enabled
+              ? `${cycle.name}: mark phase ${phase}`
+              : controls.reason
+          }
+          // aria-disabled, not disabled: a natively disabled control leaves the
+          // tab order, so a keyboard or screen-reader user cannot reach it to
+          // learn why DBTL is frozen. The handler enforces the freeze instead.
+          aria-disabled={controls.ariaDisabled}
+          aria-label={controlAccessibleLabel(
+            `Mark ${cycle.name} phase as ${phase}`,
+            controls,
+          )}
+          onClick={() => {
+            if (blockedByReadiness(controls)) return;
+            onSetPhase(phase);
+          }}
           className={cn(
-            "size-2 rounded-full transition-transform enabled:hover:scale-150 disabled:cursor-not-allowed",
+            "size-2 rounded-full transition-transform aria-disabled:cursor-not-allowed",
+            controls.enabled && "hover:scale-150",
             index < activeIndex && "bg-emerald-700 dark:bg-emerald-500",
             index === activeIndex &&
               !done &&
@@ -107,7 +127,8 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const { project } = useProjectBySlug(projectSlug);
   const conversations = useProjectConversations(project?.id);
   const dbtl = useDbtlFeature();
-  const cycleMutationsEnabled = dbtl.feature?.graph_execution_enabled === true;
+  const controls = dbtlControlState(dbtl.feature, dbtl.isLoading);
+  const cycleMutationsEnabled = controls.enabled;
   const { plan, update } = useCyclePlan(project?.id, project?.dbtl_phase, {
     persistUpdates: cycleMutationsEnabled,
   });
@@ -138,15 +159,15 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
         action={
           <button
             type="button"
-            aria-label="Start a new cycle"
-            disabled={!cycleMutationsEnabled}
-            title={
-              cycleMutationsEnabled
-                ? "Start a new cycle"
-                : "DBTL workflow controls are disabled during readiness review"
-            }
-            className="text-muted-foreground enabled:hover:text-foreground transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+            aria-label={controlAccessibleLabel("Start a new cycle", controls)}
+            aria-disabled={controls.ariaDisabled}
+            title={controls.enabled ? "Start a new cycle" : controls.reason}
+            className={cn(
+              "text-muted-foreground transition-colors aria-disabled:cursor-not-allowed aria-disabled:opacity-40",
+              controls.enabled && "hover:text-foreground",
+            )}
             onClick={() => {
+              if (blockedByReadiness(controls)) return;
               setCyclesOverride(true);
               update((current) => addCycle(current, uuid()));
             }}
@@ -174,14 +195,11 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
       {!cycleMutationsEnabled && (
         <div className="mx-3 mb-2 rounded-lg border border-amber-700/20 bg-amber-500/5 px-3 py-2">
           <p className="text-foreground text-xs font-medium">
-            DBTL is{" "}
-            {dbtl.isLoading
-              ? "checking readiness"
-              : (dbtl.feature?.mode.replace("_", " ") ?? "disabled")}
+            DBTL is {controls.statusLabel}
           </p>
           <p className="text-muted-foreground mt-1 text-[11px] leading-4">
-            Existing cycles stay visible, but workflow edits and graph runs are
-            locked.
+            {controls.reason} Existing cycles stay visible, but workflow edits
+            and graph runs are locked.
           </p>
           <button
             type="button"
@@ -208,17 +226,29 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
               >
                 <button
                   type="button"
-                  aria-label={
+                  aria-label={controlAccessibleLabel(
                     done
                       ? `Reopen ${entry.name}`
-                      : `Mark ${entry.name} complete`
+                      : `Mark ${entry.name} complete`,
+                    controls,
+                  )}
+                  aria-disabled={controls.ariaDisabled}
+                  title={
+                    controls.enabled
+                      ? done
+                        ? "Reopen cycle"
+                        : "Mark cycle complete"
+                      : controls.reason
                   }
-                  title={done ? "Reopen cycle" : "Mark cycle complete"}
-                  disabled={!cycleMutationsEnabled}
-                  onClick={() =>
-                    update((current) => toggleCycleStatus(current, entry.id))
-                  }
-                  className="text-muted-foreground shrink-0 transition-colors enabled:hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 dark:enabled:hover:text-emerald-400"
+                  onClick={() => {
+                    if (blockedByReadiness(controls)) return;
+                    update((current) => toggleCycleStatus(current, entry.id));
+                  }}
+                  className={cn(
+                    "text-muted-foreground shrink-0 transition-colors aria-disabled:cursor-not-allowed aria-disabled:opacity-40",
+                    controls.enabled &&
+                      "hover:text-emerald-700 dark:hover:text-emerald-400",
+                  )}
                 >
                   {done ? (
                     <CheckCircle2 className="size-3.5 text-emerald-700 dark:text-emerald-400" />
@@ -243,8 +273,8 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                   </span>
                 </button>
                 <PhaseDots
+                  controls={controls}
                   cycle={entry}
-                  disabled={!cycleMutationsEnabled}
                   onSetPhase={(phase) =>
                     update((current) => setCyclePhase(current, entry.id, phase))
                   }
@@ -268,12 +298,21 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           >
             <button
               type="button"
-              aria-label={todo.done ? "Mark as open" : "Mark as done"}
-              disabled={!cycleMutationsEnabled}
-              onClick={() =>
-                update((current) => toggleTodo(current, cycle.id, todo.id))
-              }
-              className="text-muted-foreground shrink-0 transition-colors enabled:hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 dark:enabled:hover:text-emerald-400"
+              aria-label={controlAccessibleLabel(
+                todo.done ? "Mark as open" : "Mark as done",
+                controls,
+              )}
+              aria-disabled={controls.ariaDisabled}
+              title={controls.enabled ? undefined : controls.reason}
+              onClick={() => {
+                if (blockedByReadiness(controls)) return;
+                update((current) => toggleTodo(current, cycle.id, todo.id));
+              }}
+              className={cn(
+                "text-muted-foreground shrink-0 transition-colors aria-disabled:cursor-not-allowed aria-disabled:opacity-40",
+                controls.enabled &&
+                  "hover:text-emerald-700 dark:hover:text-emerald-400",
+              )}
             >
               {todo.done ? (
                 <CheckCircle2 className="size-4 text-emerald-700 dark:text-emerald-400" />
@@ -291,12 +330,20 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
             </span>
             <button
               type="button"
-              aria-label={`Remove to-do: ${todo.text}`}
-              disabled={!cycleMutationsEnabled}
-              onClick={() =>
-                update((current) => removeTodo(current, cycle.id, todo.id))
-              }
-              className="text-muted-foreground/60 enabled:hover:text-destructive shrink-0 opacity-0 transition-opacity group-hover/todo:opacity-100 disabled:cursor-not-allowed"
+              aria-label={controlAccessibleLabel(
+                `Remove to-do: ${todo.text}`,
+                controls,
+              )}
+              aria-disabled={controls.ariaDisabled}
+              title={controls.enabled ? undefined : controls.reason}
+              onClick={() => {
+                if (blockedByReadiness(controls)) return;
+                update((current) => removeTodo(current, cycle.id, todo.id));
+              }}
+              className={cn(
+                "text-muted-foreground/60 shrink-0 opacity-0 transition-opacity group-hover/todo:opacity-100 aria-disabled:cursor-not-allowed",
+                controls.enabled && "hover:text-destructive",
+              )}
             >
               <X className="size-3.5" />
             </button>
@@ -312,10 +359,22 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
             <input
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
-              placeholder="Add a to-do…"
-              aria-label={`Add a to-do to ${cycle.name}`}
-              disabled={!cycleMutationsEnabled}
-              className="border-border placeholder:text-muted-foreground/60 w-full border-b bg-transparent py-1 text-sm outline-none focus:border-emerald-600"
+              placeholder={
+                controls.enabled ? "Add a to-do…" : "To-dos are locked"
+              }
+              aria-label={controlAccessibleLabel(
+                `Add a to-do to ${cycle.name}`,
+                controls,
+              )}
+              // readOnly rather than disabled: the field keeps focus so its
+              // locked reason is reachable and announced.
+              readOnly={!controls.enabled}
+              aria-disabled={controls.ariaDisabled}
+              title={controls.enabled ? undefined : controls.reason}
+              className={cn(
+                "border-border placeholder:text-muted-foreground/60 w-full border-b bg-transparent py-1 text-sm outline-none focus:border-emerald-600",
+                !controls.enabled && "cursor-not-allowed opacity-60",
+              )}
             />
           </form>
         )}
