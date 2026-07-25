@@ -727,13 +727,20 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 """
 
 
-def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
+def _get_memory_context(
+    agent_name: str | None = None,
+    *,
+    app_config: AppConfig | None = None,
+    user_id: str | None = None,
+) -> str:
     """Get memory context for injection into system prompt.
 
     Args:
         agent_name: If provided, loads per-agent memory. If None, loads global memory.
         app_config: Explicit application config. When provided, memory options
             are read from this value instead of the global config singleton.
+        user_id: Explicit memory bucket. When omitted, uses the current
+            authenticated user's global bucket.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
@@ -753,7 +760,7 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
             return ""
 
         memory_content = get_memory_manager().get_context(
-            user_id=get_effective_user_id(),
+            user_id=user_id or get_effective_user_id(),
             agent_name=agent_name,
         )
 

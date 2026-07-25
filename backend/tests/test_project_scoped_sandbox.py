@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from deerflow.config.paths import Paths
+from deerflow.sandbox.local.local_sandbox import PathMapping
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
 
 
@@ -78,6 +79,30 @@ class TestProjectScopedWorkspace:
         first = provider.acquire("thread-1", user_id="alice", project_id="project-abc", project_root=str(project_root))
         second = provider.acquire("thread-1", user_id="alice", project_id="project-abc", project_root=str(project_root))
         assert first == second
+
+    def test_project_scope_removes_an_overlapping_parent_mount(self, project_root: Path):
+        provider = LocalSandboxProvider()
+        provider._path_mappings.append(
+            PathMapping(
+                container_path="/mnt/projects",
+                local_path=str(project_root.parent),
+                read_only=False,
+            )
+        )
+
+        scoped = provider.get(
+            provider.acquire(
+                "thread-1",
+                user_id="alice",
+                project_id="project-abc",
+                project_root=str(project_root),
+            )
+        )
+        unscoped = provider.get(provider.acquire("thread-2", user_id="alice"))
+
+        assert scoped is not None and unscoped is not None
+        assert all(not (mapping.container_path == "/mnt/projects" and mapping.local_path == str(project_root.parent)) for mapping in scoped.path_mappings)
+        assert any(mapping.container_path == "/mnt/projects" and mapping.local_path == str(project_root.parent) for mapping in unscoped.path_mappings)
 
 
 class TestAsyncAcquire:

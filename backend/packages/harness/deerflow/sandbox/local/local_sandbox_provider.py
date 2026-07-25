@@ -351,6 +351,37 @@ class LocalSandboxProvider(SandboxProvider):
 
         return mappings
 
+    def _static_mappings_for_project(self, project_root: str | None) -> list[PathMapping]:
+        """Drop parent mounts that can redirect a scoped run into a sibling.
+
+        A selected project already has its canonical read-write mapping at
+        ``/mnt/user-data/workspace``. If a custom mount exposes an ancestor
+        such as ``/mnt/projects -> ~/Documents/projects``, retaining it lets
+        the model accidentally create files in another project. Skills and
+        non-overlapping shared mounts remain available.
+        """
+        if not project_root:
+            return list(self._path_mappings)
+        resolved_project = Path(project_root).resolve()
+        filtered: list[PathMapping] = []
+        for mapping in self._path_mappings:
+            if mapping.container_path.startswith("/mnt/skills"):
+                filtered.append(mapping)
+                continue
+            try:
+                mapped_root = Path(mapping.local_path).resolve()
+                if resolved_project == mapped_root or resolved_project.is_relative_to(mapped_root):
+                    logger.info(
+                        "Hiding overlapping mount %s from project-scoped sandbox %s",
+                        mapping.container_path,
+                        resolved_project,
+                    )
+                    continue
+            except OSError:
+                pass
+            filtered.append(mapping)
+        return filtered
+
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None, project_id: str | None = None, project_root: str | None = None) -> str:
         """Return a sandbox id scoped to *thread_id* (or the generic singleton).
 
@@ -389,7 +420,11 @@ class LocalSandboxProvider(SandboxProvider):
 
         # ``_build_thread_path_mappings`` touches the filesystem
         # (``ensure_thread_dirs``); release the lock during I/O.
-        new_mappings = list(self._path_mappings) + self._build_thread_path_mappings(thread_id, user_id=effective_user_id, project_root=project_root)
+        new_mappings = self._static_mappings_for_project(project_root) + self._build_thread_path_mappings(
+            thread_id,
+            user_id=effective_user_id,
+            project_root=project_root,
+        )
 
         with self._lock:
             # Re-check after the lock-free I/O: another caller may have

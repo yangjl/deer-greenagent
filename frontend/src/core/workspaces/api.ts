@@ -5,6 +5,7 @@ import { getBackendBaseURL } from "@/core/config";
 import type {
   Project,
   ProjectCreatePayload,
+  ProjectFolderListing,
   Workspace,
   WorkspaceCreatePayload,
 } from "./types";
@@ -63,6 +64,20 @@ export async function createProject(
       },
     ),
     "Failed to create project.",
+  );
+}
+
+export async function fetchProjectFolders(
+  path?: string,
+): Promise<ProjectFolderListing> {
+  const query = new URLSearchParams();
+  if (path) {
+    query.set("path", path);
+  }
+  const suffix = query.size ? `?${query.toString()}` : "";
+  return readJson<ProjectFolderListing>(
+    await fetch(apiUrl(`/project-folders${suffix}`)),
+    "Failed to browse local project folders.",
   );
 }
 

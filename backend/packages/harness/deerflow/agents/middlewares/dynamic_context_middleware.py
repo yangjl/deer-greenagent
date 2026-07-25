@@ -37,10 +37,17 @@ from datetime import datetime
 from typing import TYPE_CHECKING, override
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, RemoveMessage, SystemMessage
 from langgraph.runtime import Runtime
 
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.agents.memory.scope import (
+    memory_scope_label,
+    resolve_scoped_memory_user_id,
+)
+from deerflow.runtime.context_keys import (
+    CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+    is_project_scoped_context,
+)
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -59,6 +66,7 @@ _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 # SystemMessage. Detection reads this instead of regex-parsing message content,
 # so it is never exposed to user-influenceable memory content.
 _REMINDER_DATE_KEY = "reminder_date"
+_MEMORY_SCOPE_KEY = "memory_scope"
 _SUMMARY_MESSAGE_NAME = "summary"
 
 
@@ -74,6 +82,19 @@ def is_dynamic_context_reminder(message: object) -> bool:
     # Once all active checkpoints are migrated, the HumanMessage branch can be
     # removed and this function can check SystemMessage exclusively.
     return isinstance(message, (HumanMessage, SystemMessage)) and bool(message.additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY))
+
+
+def is_dynamic_memory_reminder(message: object) -> bool:
+    """Return whether *message* is a persisted memory snapshot."""
+    return isinstance(message, HumanMessage) and is_dynamic_context_reminder(message) and bool(message.id) and str(message.id).endswith("__memory")
+
+
+def dynamic_memory_scope(message: object) -> str | None:
+    """Return the bucket label attached to a persisted memory snapshot."""
+    if not is_dynamic_memory_reminder(message):
+        return None
+    scope = message.additional_kwargs.get(_MEMORY_SCOPE_KEY)
+    return scope if isinstance(scope, str) and scope else None
 
 
 def _last_injected_date(messages: list) -> str | None:
@@ -148,7 +169,12 @@ class DynamicContextMiddleware(AgentMiddleware):
         self._agent_name = agent_name
         self._app_config = app_config
 
-    def _build_full_reminder(self) -> tuple[str, str | None]:
+    def _build_full_reminder(
+        self,
+        *,
+        include_memory: bool = True,
+        memory_user_id: str | None = None,
+    ) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
 
         Framework-owned data (date) is separated from user-owned data (memory)
@@ -158,8 +184,16 @@ class DynamicContextMiddleware(AgentMiddleware):
         """
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
-        memory_context = _get_memory_context(self._agent_name, app_config=self._app_config) if injection_enabled else ""
+        injection_enabled = include_memory and (self._app_config.memory.injection_enabled if self._app_config else True)
+        memory_context = (
+            _get_memory_context(
+                self._agent_name,
+                app_config=self._app_config,
+                user_id=memory_user_id,
+            )
+            if injection_enabled
+            else ""
+        )
         current_date = datetime.now().strftime("%Y-%m-%d, %A")
 
         date_reminder = "\n".join(
@@ -191,6 +225,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         memory_content: str | None = None,
         *,
         reminder_date: str | None = None,
+        memory_scope: str = "user",
     ) -> list[SystemMessage | HumanMessage]:
         """Return messages using the ID-swap technique.
 
@@ -225,7 +260,11 @@ class DynamicContextMiddleware(AgentMiddleware):
                 HumanMessage(
                     content=memory_content,
                     id=f"{stable_id}__memory",
-                    additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                        _MEMORY_SCOPE_KEY: memory_scope,
+                    },
                 )
             )
 
@@ -239,7 +278,63 @@ class DynamicContextMiddleware(AgentMiddleware):
         )
         return messages
 
-    def _inject(self, state) -> dict | None:
+    def _project_memory_update(
+        self,
+        messages: list,
+        *,
+        memory_user_id: str,
+        memory_scope: str,
+    ) -> list[HumanMessage | RemoveMessage]:
+        """Replace a legacy/global snapshot with the selected project's memory."""
+        snapshots = [message for message in messages if is_dynamic_memory_reminder(message)]
+        if any(dynamic_memory_scope(message) == memory_scope for message in snapshots):
+            return []
+
+        _, memory_block = self._build_full_reminder(
+            include_memory=True,
+            memory_user_id=memory_user_id,
+        )
+        updates: list[HumanMessage | RemoveMessage] = []
+        replacement_id: str | None = None
+        for snapshot in snapshots:
+            if replacement_id is None and snapshot.id:
+                replacement_id = str(snapshot.id)
+                continue
+            if snapshot.id:
+                updates.append(RemoveMessage(id=snapshot.id))
+
+        if replacement_id is None:
+            date_message = next(
+                (message for message in messages if isinstance(message, SystemMessage) and is_dynamic_context_reminder(message) and message.id),
+                None,
+            )
+            replacement_id = f"{date_message.id}__memory" if date_message is not None else f"{uuid.uuid4()}__memory"
+
+        if memory_block:
+            updates.append(
+                HumanMessage(
+                    content=memory_block,
+                    id=replacement_id,
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                        _MEMORY_SCOPE_KEY: memory_scope,
+                    },
+                )
+            )
+        elif snapshots:
+            updates.append(RemoveMessage(id=replacement_id))
+        return updates
+
+    def _inject(
+        self,
+        state,
+        *,
+        include_memory: bool = True,
+        memory_user_id: str | None = None,
+        memory_scope: str = "user",
+        project_scoped: bool = False,
+    ) -> dict | None:
         messages = list(state.get("messages", []))
         if not messages:
             return None
@@ -258,31 +353,66 @@ class DynamicContextMiddleware(AgentMiddleware):
             first_idx = next((i for i, m in enumerate(messages) if _is_user_injection_target(m)), None)
             if first_idx is None:
                 return None
-            date_reminder, memory_block = self._build_full_reminder()
+            date_reminder, memory_block = self._build_full_reminder(
+                include_memory=include_memory,
+                memory_user_id=memory_user_id,
+            )
             logger.info(
                 "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into first HumanMessage id=%r",
                 memory_block is not None,
                 messages[first_idx].id,
             )
-            result_msgs = self._make_reminder_and_user_messages(messages[first_idx], date_reminder, memory_block, reminder_date=current_date)
+            result_msgs = self._make_reminder_and_user_messages(
+                messages[first_idx],
+                date_reminder,
+                memory_block,
+                reminder_date=current_date,
+                memory_scope=memory_scope,
+            )
             return {"messages": result_msgs}
 
+        project_memory_updates = (
+            self._project_memory_update(
+                messages,
+                memory_user_id=memory_user_id,
+                memory_scope=memory_scope,
+            )
+            if project_scoped and include_memory and memory_user_id is not None
+            else []
+        )
+
         if last_date == current_date:
-            # ── Same day: nothing to do ──────────────────────────────────────────
-            return None
+            # Existing project conversations may still carry a user-global
+            # frozen snapshot. Re-scope it even when the date is unchanged.
+            return {"messages": project_memory_updates} if project_memory_updates else None
 
         # ── Midnight crossed: inject date-update reminder as a SystemMessage ──
         last_human_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
         if last_human_idx is None:
             return None
 
-        result_msgs = self._make_reminder_and_user_messages(messages[last_human_idx], self._build_date_update_reminder(), reminder_date=current_date)
+        result_msgs = [
+            *project_memory_updates,
+            *self._make_reminder_and_user_messages(
+                messages[last_human_idx],
+                self._build_date_update_reminder(),
+                reminder_date=current_date,
+                memory_scope=memory_scope,
+            ),
+        ]
         logger.info("DynamicContextMiddleware: midnight crossing detected — injected date update before current turn")
         return {"messages": result_msgs}
 
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:
-        result = self._inject(state)
+        context = getattr(runtime, "context", None)
+        result = self._inject(
+            state,
+            include_memory=True,
+            memory_user_id=resolve_scoped_memory_user_id(runtime),
+            memory_scope=memory_scope_label(context),
+            project_scoped=is_project_scoped_context(context),
+        )
         self._record_effective_memory(state, result, runtime)
         return result
 
@@ -300,8 +430,16 @@ class DynamicContextMiddleware(AgentMiddleware):
         # the request degrades gracefully (no new dynamic-context update)
         # rather than hanging. Frozen context already in state remains active.
         try:
+            context = getattr(runtime, "context", None)
             result = await asyncio.wait_for(
-                asyncio.to_thread(self._inject, state),
+                asyncio.to_thread(
+                    self._inject,
+                    state,
+                    include_memory=True,
+                    memory_user_id=resolve_scoped_memory_user_id(runtime),
+                    memory_scope=memory_scope_label(context),
+                    project_scoped=is_project_scoped_context(context),
+                ),
                 timeout=_INJECT_TIMEOUT_SECONDS,
             )
         except TimeoutError:

@@ -19,6 +19,7 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  useSidebar,
 } from "@/components/ui/sidebar";
 import {
   Tooltip,
@@ -33,16 +34,28 @@ import { cn } from "@/lib/utils";
 import { ProjectFiles } from "./project-rail/project-files";
 import { CreateProjectDialog } from "./projects/create-dialogs";
 
+export type SelectedProjectFile = {
+  projectId: string;
+  path: string;
+};
+
 /**
  * Project-first navigation (foundation demo): the active workspace's projects
  * are listed as folders and conversations live only inside a project, so
  * there are no independent Chats/Inbox entries.
  */
-export function WorkspaceNavChatList() {
+export function WorkspaceNavChatList({
+  selectedFile,
+  onFileOpen,
+}: {
+  selectedFile: SelectedProjectFile | null;
+  onFileOpen: (file: SelectedProjectFile) => void;
+}) {
   const { t } = useI18n();
   const pathname = usePathname();
   const { enabled: agentsEnabled } = useAgentsApiEnabled();
   const { workspaceId, projects } = useActiveWorkspaceProjects();
+  const { state: sidebarState } = useSidebar();
   const [projectOpen, setProjectOpen] = useState(false);
   // Projects whose folder tree is expanded inline in the sidebar.
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(
@@ -89,25 +102,7 @@ export function WorkspaceNavChatList() {
             const FolderIcon = active || isExpanded ? FolderOpen : FolderClosed;
             return (
               <SidebarMenuItem key={project.id}>
-                <div className="flex items-center">
-                  <button
-                    type="button"
-                    aria-label={
-                      isExpanded
-                        ? `Collapse ${project.name} files`
-                        : `Show ${project.name} files`
-                    }
-                    aria-expanded={isExpanded}
-                    onClick={() => toggleExpanded(project.id)}
-                    className="text-muted-foreground hover:text-foreground shrink-0 p-1 transition-colors"
-                  >
-                    <ChevronRight
-                      className={cn(
-                        "size-3 transition-transform",
-                        isExpanded && "rotate-90",
-                      )}
-                    />
-                  </button>
+                {sidebarState === "collapsed" ? (
                   <SidebarMenuButton
                     isActive={active}
                     tooltip={project.name}
@@ -119,7 +114,7 @@ export function WorkspaceNavChatList() {
                     >
                       <FolderIcon
                         className={
-                          active || isExpanded
+                          active
                             ? "text-emerald-700 dark:text-emerald-400"
                             : undefined
                         }
@@ -127,10 +122,60 @@ export function WorkspaceNavChatList() {
                       <span className="truncate">{project.name}</span>
                     </Link>
                   </SidebarMenuButton>
-                </div>
-                {isExpanded && (
+                ) : (
+                  <div className="flex items-center">
+                    <button
+                      type="button"
+                      aria-label={
+                        isExpanded
+                          ? `Collapse ${project.name} files`
+                          : `Show ${project.name} files`
+                      }
+                      aria-expanded={isExpanded}
+                      onClick={() => toggleExpanded(project.id)}
+                      className="text-muted-foreground hover:text-foreground shrink-0 p-1 transition-colors"
+                    >
+                      <ChevronRight
+                        className={cn(
+                          "size-3 transition-transform",
+                          isExpanded && "rotate-90",
+                        )}
+                      />
+                    </button>
+                    <SidebarMenuButton
+                      isActive={active}
+                      tooltip={project.name}
+                      asChild
+                    >
+                      <Link
+                        className="text-muted-foreground"
+                        href={pathOfProject(project.slug)}
+                      >
+                        <FolderIcon
+                          className={
+                            active || isExpanded
+                              ? "text-emerald-700 dark:text-emerald-400"
+                              : undefined
+                          }
+                        />
+                        <span className="truncate">{project.name}</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </div>
+                )}
+                {sidebarState === "expanded" && isExpanded && (
                   <div className="border-border/60 mt-0.5 ml-3 border-l pl-1">
-                    <ProjectFiles projectId={project.id} />
+                    <ProjectFiles
+                      projectId={project.id}
+                      selectedPath={
+                        selectedFile?.projectId === project.id
+                          ? selectedFile.path
+                          : null
+                      }
+                      onFileOpen={(path) =>
+                        onFileOpen({ projectId: project.id, path })
+                      }
+                    />
                   </div>
                 )}
               </SidebarMenuItem>

@@ -31,6 +31,52 @@ def configured_projects_root(request: Request | None = None) -> Path:
     return get_app_config().projects.resolved_root()
 
 
+def allowed_project_roots(request: Request | None = None) -> list[Path]:
+    """Host folders that a human may choose and the agent may write.
+
+    ``projects.root`` is always allowed. Writable ``sandbox.mounts`` extend
+    the chooser to other operator-approved host folders. Read-only mounts are
+    intentionally excluded because a project workspace must be writable.
+    """
+    roots = [configured_projects_root(request)]
+    try:
+        for mount in get_app_config().sandbox.mounts or []:
+            if not mount.read_only:
+                roots.append(Path(mount.host_path).expanduser())
+    except Exception:
+        logger.warning("Could not load writable sandbox mounts for project locations", exc_info=True)
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        resolved = root.expanduser().resolve()
+        key = str(resolved)
+        if key not in seen:
+            seen.add(key)
+            unique.append(resolved)
+    return unique
+
+
+def resolve_allowed_project_path(
+    raw_path: str,
+    *,
+    request: Request | None = None,
+    must_exist: bool = False,
+) -> Path:
+    """Resolve an absolute path inside an operator-approved writable root."""
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("Project folder paths must be absolute")
+    resolved = candidate.resolve()
+    if not any(resolved == root or resolved.is_relative_to(root) for root in allowed_project_roots(request)):
+        raise ValueError("Project folder must be inside a configured human and AI accessible path")
+    if must_exist and not resolved.is_dir():
+        raise ValueError("Selected project folder does not exist or is not a directory")
+    if resolved.exists() and not resolved.is_dir():
+        raise ValueError("Project folder path points to a file")
+    return resolved
+
+
 def compute_project_root(name: str, *, projects_root: Path, taken: set[str]) -> Path:
     """Folder for a new project: ``projects_root/<human name>``.
 

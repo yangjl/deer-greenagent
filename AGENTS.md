@@ -84,6 +84,12 @@ Breeding-workspace note:
   or validated first-run intent). Conversations are views onto that folder,
   not its owner. See [backend/AGENTS.md](backend/AGENTS.md) for the
   storage/scope/run-context triple that must stay aligned.
+  Project creation can use the configured default root, adopt an existing
+  folder, accept an absolute existing-or-new path, or create a named folder
+  under a selected parent. Custom locations must be under `projects.root` or a
+  writable `sandbox.mounts` host root. Project-scoped local sandboxes hide an
+  overlapping parent mount so `/mnt/user-data/workspace` remains the canonical
+  and unambiguous write target.
 - The authenticated product surface is project-first with three rails: sidebar
   projects, a project rail (DBTL cycles, per-cycle to-dos, conversations), and
   chat in the main area. Project workspaces live at `/workspace/<project-slug>`
@@ -92,6 +98,15 @@ Breeding-workspace note:
   through thread metadata `project_id`; legacy projectless conversations stay
   at `/workspace/chats`. Cycles/to-dos are a browser-local review projection —
   DBTL orchestration is deferred per the 2026-07-25 foundation-demo rescope.
+- The project folder tree appears only under the expandable project rows in
+  the first sidebar rail. File selection opens the project-scoped content
+  inspector and temporarily collapses that rail; the second project rail does
+  not duplicate the project header/tree.
+- Memory follows the same durable project scope: project conversations load
+  and learn from a `(user_id, project_id)`-specific bucket, while unfiled chats
+  retain user-global memory. Older project conversations replace legacy global
+  snapshots on their next run, and current project identity overrides stale
+  claims in their existing visible history.
 - The shared SQL persistence layer owns `workspaces`, `workspace_members`, and
   `projects`; membership is enforced before project access. PostgreSQL is the
   production authority, while `.greenagent` remains an application-independent

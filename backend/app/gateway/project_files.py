@@ -1,9 +1,9 @@
-"""Read-only listing of a project's human-visible folder.
+"""Read-only access to a project's human-visible folder.
 
 A project owns its folder (e.g. ``~/Documents/projects/G2F``), so this
-listing needs no conversation: the same tree is what every conversation in
-the project reads and writes through the sandbox, and what the human sees in
-Finder. File *content* is still served by the artifacts endpoint.
+access needs no conversation: the same tree is what every conversation in the
+project reads and writes through the sandbox, and what the human sees in
+Finder.
 """
 
 from __future__ import annotations
@@ -40,3 +40,14 @@ def list_project_directory(root: str, path: str) -> FilesListResponse:
         if virtual_path == VIRTUAL_PATH_PREFIX and exc.status_code == 404:
             return FilesListResponse(path=virtual_path, entries=[], truncated=False)
         raise
+
+
+def resolve_project_file(root: str, path: str) -> tuple[Path, str]:
+    """Resolve one virtual project file while preserving traversal errors."""
+    virtual_path = _normalize_virtual_path(path)
+    try:
+        return resolve_project_virtual_path(Path(root), virtual_path), virtual_path
+    except ValueError as exc:
+        if "traversal" in str(exc):
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

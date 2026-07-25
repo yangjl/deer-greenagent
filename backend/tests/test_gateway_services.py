@@ -1455,6 +1455,126 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
     assert context.get("channel_user_id") is None
 
 
+def test_start_run_session_files_new_thread_before_first_project_run(
+    _stub_app_config,
+    tmp_path,
+):
+    """A normal browser user must get the same atomic project filing as IM.
+
+    Regression: ``start_run`` previously resolved ``owner_user_id`` only from
+    the trusted internal-owner header. For session callers it was therefore
+    ``None``, so ``file_thread_into_requested_project`` returned early. The UI's
+    later PUT eventually filed the thread, but the first model call had already
+    loaded user-global memory and answered for the wrong project.
+    """
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    project_root = tmp_path / "test2"
+
+    class _WorkspaceRepo:
+        async def get_project(self, project_id: str, *, user_id: str):
+            if project_id != "project-test2" or user_id != "browser-user":
+                return None
+            return {
+                "id": project_id,
+                "workspace_id": "workspace-1",
+                "root_path": str(project_root),
+            }
+
+        async def get_project_record(self, project_id: str):
+            if project_id != "project-test2":
+                return None
+            return {
+                "id": project_id,
+                "name": "test2",
+                "root_path": str(project_root),
+            }
+
+        async def update_project_root(self, project_id: str, root_path: str):
+            raise AssertionError("stored root should not require backfill")
+
+    async def _scenario():
+        thread_store = MemoryThreadMetaStore(InMemoryStore())
+        run_store = MemoryRunStore()
+        state = SimpleNamespace(
+            stream_bridge=SimpleNamespace(),
+            run_manager=RunManager(store=run_store),
+            checkpointer=InMemorySaver(),
+            store=InMemoryStore(),
+            run_event_store=SimpleNamespace(),
+            run_events_config=None,
+            thread_store=thread_store,
+            workspace_repo=_WorkspaceRepo(),
+        )
+        request = SimpleNamespace(
+            headers={},
+            state=SimpleNamespace(
+                auth_source="session",
+                user=SimpleNamespace(id="browser-user", system_role="user"),
+            ),
+            app=SimpleNamespace(state=state),
+        )
+        body = SimpleNamespace(
+            assistant_id="lead_agent",
+            input={"messages": [{"role": "human", "content": "Which project?"}]},
+            metadata={},
+            config=None,
+            context={"project_id": "project-test2"},
+            on_disconnect="cancel",
+            multitask_strategy="reject",
+            stream_mode=None,
+            stream_subgraphs=False,
+            interrupt_before=None,
+            interrupt_after=None,
+        )
+        captured_context: dict[str, object] = {}
+
+        async def fake_run_agent(*args, **kwargs):
+            captured_context.update(kwargs["config"]["context"])
+
+        with (
+            patch(
+                "app.gateway.services.resolve_agent_factory",
+                return_value=object(),
+            ),
+            patch(
+                "app.gateway.services.run_agent",
+                side_effect=fake_run_agent,
+            ),
+        ):
+            record = await start_run(body, "thread-first-project-run", request)
+            await record.task
+
+        return (
+            captured_context,
+            await thread_store.get(
+                "thread-first-project-run",
+                user_id="browser-user",
+            ),
+            await run_store.get(record.run_id, user_id="browser-user"),
+        )
+
+    context, thread_record, run_record = asyncio.run(_scenario())
+
+    assert context["project_id"] == "project-test2"
+    assert context["project_root"] == str(project_root)
+    assert context["user_id"] == "browser-user"
+    assert thread_record is not None
+    assert thread_record["project_id"] == "project-test2"
+    assert run_record is not None
+    assert run_record["user_id"] == "browser-user"
+
+
 def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
     import asyncio
     from types import SimpleNamespace

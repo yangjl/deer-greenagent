@@ -22,6 +22,7 @@ import logging
 from langchain.tools import tool
 
 from deerflow.agents.memory.manager import get_memory_manager
+from deerflow.agents.memory.scope import scoped_memory_user_id
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
@@ -39,7 +40,8 @@ def _resolve_scope(runtime: Runtime | None = None) -> tuple[str | None, str]:
     agent_name = None
     if isinstance(context, dict) and context.get("agent_name"):
         agent_name = str(context["agent_name"])
-    return agent_name, resolve_runtime_user_id(runtime)
+    user_id = resolve_runtime_user_id(runtime)
+    return agent_name, scoped_memory_user_id(user_id, context)
 
 
 def _memory_content_key(content: str) -> str:

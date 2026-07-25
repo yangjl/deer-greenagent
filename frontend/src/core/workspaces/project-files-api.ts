@@ -42,6 +42,37 @@ export async function fetchProjectFiles(
   );
 }
 
+export function urlOfProjectFile({
+  projectId,
+  path,
+  download = false,
+}: {
+  projectId: string;
+  path: string;
+  download?: boolean;
+}): string {
+  const query = new URLSearchParams({ path });
+  if (download) {
+    query.set("download", "true");
+  }
+  return projectUrl(projectId, `/file?${query}`);
+}
+
+export async function loadProjectFileContent({
+  projectId,
+  path,
+}: {
+  projectId: string;
+  path: string;
+}): Promise<{ content: string; url: string }> {
+  const url = urlOfProjectFile({ projectId, path });
+  const response = await fetch(url);
+  if (!response.ok) {
+    await throwGatewayApiError(response, "Failed to load project file.");
+  }
+  return { content: await response.text(), url };
+}
+
 export async function fetchProjectThreads(
   projectId: string,
 ): Promise<ProjectConversation[]> {
@@ -66,7 +97,10 @@ export async function addThreadToProject(
     { method: "PUT" },
   );
   if (!response.ok) {
-    await throwGatewayApiError(response, "Failed to add the conversation to the project.");
+    await throwGatewayApiError(
+      response,
+      "Failed to add the conversation to the project.",
+    );
   }
 }
 
@@ -80,6 +114,9 @@ export async function removeThreadFromProject(
     { method: "DELETE" },
   );
   if (!response.ok) {
-    await throwGatewayApiError(response, "Failed to remove the conversation from the project.");
+    await throwGatewayApiError(
+      response,
+      "Failed to remove the conversation from the project.",
+    );
   }
 }

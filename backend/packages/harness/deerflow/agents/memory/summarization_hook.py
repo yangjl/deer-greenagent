@@ -5,6 +5,7 @@ from __future__ import annotations
 from deerflow.agents.memory import get_memory_manager
 from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
 from deerflow.config.memory_config import get_memory_config
+from deerflow.runtime.context_keys import is_project_scoped_context
 from deerflow.runtime.user_context import resolve_runtime_user_id
 
 
@@ -16,7 +17,7 @@ def memory_flush_hook(event: SummarizationEvent) -> None:
     ``manager.add_nowait``) does the filtering, human/AI validation, and
     correction/reinforcement detection.
     """
-    if not get_memory_config().enabled or not event.thread_id:
+    if not get_memory_config().enabled or not event.thread_id or is_project_scoped_context(getattr(event.runtime, "context", None)):
         return
 
     user_id = resolve_runtime_user_id(event.runtime)

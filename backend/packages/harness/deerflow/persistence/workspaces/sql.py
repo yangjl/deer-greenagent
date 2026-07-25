@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
@@ -202,6 +203,21 @@ class WorkspaceRepository:
         async with self._sf() as session:
             row = await session.get(ProjectRow, project_id)
             return self._serialize(row) if row is not None else None
+
+    async def list_claimed_project_roots(self) -> set[str]:
+        """Canonical folder paths already owned by any active project.
+
+        Internal, unscoped lookup used during project creation. A physical
+        folder cannot safely be owned by projects in two workspace security
+        boundaries, even when the caller belongs to both.
+        """
+        stmt = select(ProjectRow.root_path).where(
+            ProjectRow.status == "active",
+            ProjectRow.root_path.is_not(None),
+        )
+        async with self._sf() as session:
+            rows = await session.execute(stmt)
+            return {str(Path(path).expanduser().resolve()) for path in rows.scalars() if isinstance(path, str) and path}
 
     async def update_project_root(self, project_id: str, root_path: str) -> None:
         """Backfill/repair the project's human-visible folder path."""

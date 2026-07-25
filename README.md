@@ -905,22 +905,54 @@ Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigge
 
 ## Breeding Workspaces and Projects
 
-The workspace UI now opens on `/workspace/projects` instead of directly in a
-new chat. A workspace is the collaboration and security boundary; projects
-inside it carry a crop profile and DBTL/reconciliation status. The global
-`/workspace/inbox` remains available for exploratory human-agent conversations
-that do not belong to a project yet, and existing chat routes continue to work.
+The workspace UI is project-first: `/workspace` opens the first project (or the
+first-run workspace/project flow), project conversations live at
+`/workspace/<project-slug>/<thread_id>`, and projectless conversations remain
+under `/workspace/chats`. A workspace is the collaboration and security
+boundary; projects inside it carry a crop profile and DBTL/reconciliation
+status.
+
+Every project owns a real local folder. When creating one, choose the default
+`projects.root/<project-name>` location, adopt an existing folder, enter a full
+path, or create a new folder under a selected parent. Custom paths must be
+inside an operator-approved writable location: `projects.root` or a writable
+`sandbox.mounts[*].host_path`. The folder browser only exposes those roots.
+One physical folder can belong to only one active project, even across
+different workspaces.
+For a project-scoped conversation, the selected folder is always available to
+the agent at `/mnt/user-data/workspace`; an overlapping shared parent mount is
+hidden from that sandbox so relative requests such as “create README.md in this
+project” cannot land in a sibling project.
+Project conversations use memory scoped to the selected project. Global user
+memory remains available only in projectless chats; each project learns and
+loads its own facts without importing another project's context. Older
+conversation checkpoints are repaired on their next run: a legacy global
+snapshot is replaced with the selected project's snapshot, and a current-turn
+project identity block overrides stale project claims in the visible history.
+The selected folder and durable thread scope are authoritative, so switching
+projects cannot carry an old “active project” answer with it.
+The project file tree has one home: expand a project in the first navigation
+rail. Selecting a file opens a project-scoped content inspector without
+requiring a conversation; the first rail temporarily minimizes while the
+inspector is open and returns to its prior state when it closes. The second
+project rail stays focused on cycles, to-dos, agents, and conversations.
 
 The foundation API is:
 
 - `GET/POST /api/workspaces`
 - `GET/POST /api/workspaces/{workspace_id}/projects`
 - `GET /api/projects/{project_id}`
+- `GET /api/project-folders` (browse writable, operator-approved local folders)
 
 Workspace, membership, and project records use the shared SQL persistence
 engine. PostgreSQL is the production authority; SQLite remains suitable for
 single-user local development. The temporary `.greenagent` filesystem is not
 read by application code and is not an application state authority.
+
+`LocalSandboxProvider` keeps host Bash disabled by default. If you explicitly
+enable `sandbox.allow_host_bash: true`, do so only on a fully trusted local
+machine: commands execute on the host, with the selected project folder as
+their working directory.
 
 ## Terminal Workbench (TUI)
 

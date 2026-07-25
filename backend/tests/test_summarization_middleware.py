@@ -387,6 +387,31 @@ def test_memory_flush_hook_forwards_raw_messages_to_manager(monkeypatch: pytest.
     assert kwargs["agent_name"] is None
 
 
+def test_memory_flush_hook_skips_project_scoped_conversations(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = MagicMock()
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_config", lambda: MemoryConfig(enabled=True))
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_manager", lambda: manager)
+    runtime = _runtime(thread_id="thread-test2")
+    runtime.context.update(
+        {
+            "project_id": "project-test2",
+            "project_root": "/Users/jyang21/Documents/projects/test2",
+        }
+    )
+
+    memory_flush_hook(
+        SummarizationEvent(
+            messages_to_summarize=tuple(_messages()[:2]),
+            preserved_messages=(),
+            thread_id="thread-test2",
+            agent_name=None,
+            runtime=runtime,
+        )
+    )
+
+    manager.add_nowait.assert_not_called()
+
+
 def test_memory_flush_hook_preserves_agent_scoped_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = MagicMock()
     monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_config", lambda: MemoryConfig(enabled=True))

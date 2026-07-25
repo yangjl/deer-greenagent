@@ -15,12 +15,16 @@ function FileRow({
   isDirectory,
   expanded,
   onToggle,
+  onOpen,
+  selected,
 }: {
   name: string;
   depth: number;
   isDirectory: boolean;
   expanded?: boolean;
   onToggle?: () => void;
+  onOpen?: () => void;
+  selected?: boolean;
 }) {
   const Icon = isDirectory ? (expanded ? FolderOpen : Folder) : FileIcon;
   const content = (
@@ -40,17 +44,30 @@ function FileRow({
     </>
   );
   const className =
-    "flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-xs transition-colors hover:bg-muted/60";
+    "focus-visible:ring-ring flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-xs outline-none transition-colors hover:bg-muted/60 focus-visible:ring-2";
   const style = { paddingLeft: 8 + depth * INDENT_PX };
 
   return isDirectory ? (
-    <button type="button" onClick={onToggle} className={className} style={style}>
+    <button
+      type="button"
+      onClick={onToggle}
+      className={className}
+      style={style}
+    >
       {content}
     </button>
   ) : (
-    <div className={cn(className, "cursor-default")} style={style}>
+    <button
+      type="button"
+      onClick={onOpen}
+      className={cn(
+        className,
+        selected && "bg-muted text-foreground font-medium",
+      )}
+      style={style}
+    >
       {content}
-    </div>
+    </button>
   );
 }
 
@@ -58,10 +75,14 @@ function FileBranch({
   projectId,
   path,
   depth,
+  selectedPath,
+  onFileOpen,
 }: {
   projectId: string;
   path: string;
   depth: number;
+  selectedPath: string | null;
+  onFileOpen: (path: string) => void;
 }) {
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -112,6 +133,7 @@ function FileBranch({
               depth={depth}
               isDirectory={entry.type === "directory"}
               expanded={isOpen}
+              selected={selectedPath === entry.path}
               onToggle={() =>
                 setExpanded((current) => {
                   const next = new Set(current);
@@ -123,12 +145,15 @@ function FileBranch({
                   return next;
                 })
               }
+              onOpen={() => onFileOpen(entry.path)}
             />
             {entry.type === "directory" && isOpen && (
               <FileBranch
                 projectId={projectId}
                 path={entry.path}
                 depth={depth + 1}
+                selectedPath={selectedPath}
+                onFileOpen={onFileOpen}
               />
             )}
           </div>
@@ -143,15 +168,31 @@ function FileBranch({
  * whether or not a conversation is open — every conversation in the project
  * reads and writes this same workspace.
  */
-export function ProjectFiles({ projectId }: { projectId: string | null }) {
+export function ProjectFiles({
+  projectId,
+  selectedPath,
+  onFileOpen,
+}: {
+  projectId: string | null;
+  selectedPath: string | null;
+  onFileOpen: (path: string) => void;
+}) {
   if (!projectId) {
     return (
       <div className="text-muted-foreground px-4 py-1 text-xs">Loading…</div>
     );
   }
   return (
-    <div className="px-2">
-      <FileBranch projectId={projectId} path={WORKSPACE_FILES_ROOT} depth={0} />
-    </div>
+    <>
+      <div className="px-2">
+        <FileBranch
+          projectId={projectId}
+          path={WORKSPACE_FILES_ROOT}
+          depth={0}
+          selectedPath={selectedPath}
+          onFileOpen={onFileOpen}
+        />
+      </div>
+    </>
   );
 }

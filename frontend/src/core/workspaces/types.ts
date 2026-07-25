@@ -39,4 +39,26 @@ export type ProjectCreatePayload = {
   slug?: string;
   description?: string;
   crop_profile?: string;
+  location_mode?: ProjectLocationMode;
+  root_path?: string;
+  parent_path?: string;
+  folder_name?: string;
+};
+
+export type ProjectLocationMode =
+  | "default"
+  | "existing"
+  | "full_path"
+  | "new_under_parent";
+
+export type ProjectFolderEntry = {
+  name: string;
+  path: string;
+};
+
+export type ProjectFolderListing = {
+  current_path: string;
+  parent_path: string | null;
+  allowed_roots: string[];
+  directories: ProjectFolderEntry[];
 };

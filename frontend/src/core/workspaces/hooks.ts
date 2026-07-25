@@ -1,15 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
-
 import {
   createProject,
   createWorkspace,
+  fetchProjectFolders,
   fetchProject,
   fetchProjects,
   fetchWorkspaces,
 } from "./api";
-import { fetchProjectFiles, fetchProjectThreads } from "./project-files-api";
+import {
+  fetchProjectFiles,
+  fetchProjectThreads,
+  loadProjectFileContent,
+} from "./project-files-api";
 import { projectConversationsQueryKey } from "./project-threads";
 import type { ProjectCreatePayload, WorkspaceCreatePayload } from "./types";
 
@@ -33,6 +37,18 @@ export function useProject(projectId: string | null | undefined) {
     queryKey: ["projects", projectId],
     queryFn: () => fetchProject(projectId ?? ""),
     enabled: Boolean(projectId),
+  });
+}
+
+export function useProjectFolders(
+  path: string | undefined,
+  options: { enabled?: boolean } = {},
+) {
+  return useQuery({
+    queryKey: ["project-folders", path ?? ""],
+    queryFn: () => fetchProjectFolders(path),
+    enabled: options.enabled ?? true,
+    retry: false,
   });
 }
 
@@ -92,6 +108,24 @@ export function useProjectFiles(
     queryKey: projectFilesQueryKey(projectId ?? "", path),
     queryFn: () => fetchProjectFiles(projectId ?? "", path),
     enabled: (options.enabled ?? true) && Boolean(projectId),
+    staleTime: 30 * 1000,
+    retry: false,
+  });
+}
+
+export function useProjectFileContent(
+  projectId: string | null | undefined,
+  path: string | null | undefined,
+  options: { enabled?: boolean } = {},
+) {
+  return useQuery({
+    queryKey: ["projects", projectId ?? "", "file", path ?? ""],
+    queryFn: () =>
+      loadProjectFileContent({
+        projectId: projectId ?? "",
+        path: path ?? "",
+      }),
+    enabled: (options.enabled ?? true) && Boolean(projectId) && Boolean(path),
     staleTime: 30 * 1000,
     retry: false,
   });

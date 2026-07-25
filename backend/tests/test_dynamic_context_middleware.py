@@ -10,6 +10,7 @@ from unittest import mock
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from deerflow.agents.memory.scope import scoped_memory_user_id
 from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
     DynamicContextMiddleware,
@@ -23,10 +24,11 @@ def _make_middleware(**kwargs) -> DynamicContextMiddleware:
     return DynamicContextMiddleware(**kwargs)
 
 
-def _fake_runtime(journal=None, *, pre_existing_message_ids=()):
+def _fake_runtime(journal=None, *, pre_existing_message_ids=(), **context_values):
     context = {"__run_journal": journal} if journal is not None else {}
     if pre_existing_message_ids:
         context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
+    context.update(context_values)
     return SimpleNamespace(context=context)
 
 
@@ -114,6 +116,88 @@ def test_memory_included_when_present():
     assert "User prefers Python." in msgs[1].content
 
     assert msgs[2].content == "Hi"
+
+
+def test_project_scoped_run_loads_only_its_project_memory():
+    """Project facts load from a project bucket, not user-global memory.
+
+    A global snapshot can describe a different project and must never compete
+    with the durable ``project_id`` / ``project_root`` selected for this run.
+    """
+    mw = _make_middleware()
+    state = {"messages": [HumanMessage(content="Which project is this?", id="msg-1")]}
+
+    with (
+        mock.patch(
+            "deerflow.agents.lead_agent.prompt._get_memory_context",
+            return_value="",
+        ) as get_memory,
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-07-25, Saturday"
+        result = mw.before_agent(
+            state,
+            _fake_runtime(
+                user_id="user-1",
+                project_id="project-test2",
+                project_root="/Users/jyang21/Documents/projects/test2",
+            ),
+        )
+
+    get_memory.assert_called_once_with(
+        None,
+        app_config=None,
+        user_id=scoped_memory_user_id(
+            "user-1",
+            {
+                "project_id": "project-test2",
+                "project_root": "/Users/jyang21/Documents/projects/test2",
+            },
+        ),
+    )
+    assert result is not None
+    assert [message.id for message in result["messages"]] == ["msg-1", "msg-1__user"]
+    assert all(not str(message.id or "").endswith("__memory") for message in result["messages"])
+
+
+def test_existing_thread_replaces_legacy_global_snapshot_with_project_memory():
+    mw = _make_middleware()
+    today = "2026-07-25, Saturday"
+    state = {
+        "messages": [
+            _date_reminder_msg(today, "msg-1"),
+            _reminder_msg(
+                "<memory>Active project: greenagent-test</memory>",
+                "msg-1__memory",
+            ),
+            HumanMessage(content="Earlier question", id="msg-1__user"),
+            AIMessage(content="greenagent-test", id="reply-1"),
+            HumanMessage(content="Which project is current?", id="msg-2"),
+        ]
+    }
+
+    with (
+        mock.patch(
+            "deerflow.agents.lead_agent.prompt._get_memory_context",
+            return_value="<memory>\nProject objective: drought resistance.\n</memory>",
+        ) as get_memory,
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = today
+        result = mw.before_agent(
+            state,
+            _fake_runtime(
+                user_id="user-1",
+                project_id="project-drought",
+                project_root="/Users/jyang21/Documents/projects/Drought resistent",
+            ),
+        )
+
+    assert result is not None
+    project_memory = next(message for message in result["messages"] if isinstance(message, HumanMessage) and message.additional_kwargs.get("memory_scope") == "project:project-drought")
+    assert "drought resistance" in project_memory.content
+    assert project_memory.id == "msg-1__memory"
+    get_memory.assert_called_once()
 
 
 def test_first_run_records_exact_effective_memory():

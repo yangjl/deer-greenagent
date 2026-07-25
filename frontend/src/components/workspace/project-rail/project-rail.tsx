@@ -9,7 +9,6 @@ import {
   MessagesSquare,
   Plus,
   RefreshCcw,
-  Sprout,
   X,
 } from "lucide-react";
 import Link from "next/link";
@@ -36,7 +35,6 @@ import {
 } from "@/core/workspaces";
 import { cn } from "@/lib/utils";
 
-import { ProjectFiles } from "./project-files";
 import { useCyclePlan } from "./use-cycle-plan";
 
 /** Agent roster placeholder until project agent assignment ships. */
@@ -95,9 +93,9 @@ function PhaseDots({
 }
 
 /**
- * Second rail of the project workspace: the project folder tree, DBTL cycles
- * (the "Tasks" analog), the selected cycle's to-do list (the "Drive" analog),
- * the agents on the project, and its conversations. Chat renders to the right.
+ * Second rail of the project workspace: DBTL cycles (the "Tasks" analog), the
+ * selected cycle's to-do list (the "Drive" analog), the agents on the project,
+ * and its conversations. The project tree lives only in the first rail.
  */
 export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const pathname = usePathname();
@@ -105,8 +103,6 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const conversations = useProjectConversations(project?.id);
   const { plan, update } = useCyclePlan(project?.id, project?.dbtl_phase);
   const [draft, setDraft] = useState("");
-  // Open by default: seeing the project folder is the point.
-  const [filesOpen, setFilesOpen] = useState(true);
   const [cyclesOverride, setCyclesOverride] = useState<boolean | null>(null);
   const cycle = plan ? selectedCycle(plan) : null;
   // Cycles minimize themselves once nothing is running; an explicit click
@@ -123,35 +119,6 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
 
   return (
     <aside className="border-border bg-muted/20 hidden w-64 shrink-0 flex-col overflow-y-auto border-r md:flex">
-      <div className="border-border border-b px-2 pt-3 pb-2">
-        <button
-          type="button"
-          onClick={() => setFilesOpen((open) => !open)}
-          aria-expanded={filesOpen}
-          className="hover:bg-muted/60 flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors"
-        >
-          <ChevronRight
-            className={cn(
-              "text-muted-foreground size-3.5 shrink-0 transition-transform",
-              filesOpen && "rotate-90",
-            )}
-          />
-          <Sprout className="size-4 shrink-0 text-emerald-700 dark:text-emerald-400" />
-          <span className="min-w-0 flex-1 truncate font-semibold">
-            {project?.name ?? "…"}
-          </span>
-        </button>
-        {project?.root_path && (
-          <div
-            className="text-muted-foreground/70 truncate px-8 pb-1 font-mono text-[10px]"
-            title={project.root_path}
-          >
-            {project.root_path.replace(/^\/Users\/[^/]+/, "~")}
-          </div>
-        )}
-        {filesOpen && <ProjectFiles projectId={project?.id ?? null} />}
-      </div>
-
       <SectionLabel
         action={
           <button
@@ -208,7 +175,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                   onClick={() =>
                     update((current) => toggleCycleStatus(current, entry.id))
                   }
-                  className="text-muted-foreground hover:text-emerald-700 shrink-0 transition-colors dark:hover:text-emerald-400"
+                  className="text-muted-foreground shrink-0 transition-colors hover:text-emerald-700 dark:hover:text-emerald-400"
                 >
                   {done ? (
                     <CheckCircle2 className="size-3.5 text-emerald-700 dark:text-emerald-400" />
@@ -261,7 +228,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
               onClick={() =>
                 update((current) => toggleTodo(current, cycle.id, todo.id))
               }
-              className="text-muted-foreground hover:text-emerald-700 shrink-0 transition-colors dark:hover:text-emerald-400"
+              className="text-muted-foreground shrink-0 transition-colors hover:text-emerald-700 dark:hover:text-emerald-400"
             >
               {todo.done ? (
                 <CheckCircle2 className="size-4 text-emerald-700 dark:text-emerald-400" />

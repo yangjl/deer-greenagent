@@ -113,6 +113,13 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   by-slug lookup is the durable fix.
 - `/workspace` has no surface of its own: `workspace-landing.tsx` forwards into
   the first project, or runs the first-run workspace/project create flow.
+- `components/workspace/projects/create-dialogs.tsx` owns the project identity
+  plus four location choices: default root, existing folder, absolute full
+  path, or a new folder under a selected parent.
+  `local-folder-picker-dialog.tsx` browses only the Gateway's writable
+  allowlisted roots through `GET /api/project-folders`.
+  `core/workspaces/project-location.ts` is the React-free payload/path helper
+  and must mirror the backend's human-readable folder-name sanitization.
 - `useThreadStream` adds `project_id` to the submitted run context when the
   conversation lives under a project route. This is what files a brand-new
   conversation into its project atomically with the first run (the server
@@ -125,9 +132,11 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   the new conversation into its project through that PUT — do not reintroduce
   the thread-metadata association it replaced.
 - `src/core/workspaces/` owns REST types, API calls, and TanStack Query hooks
-  for `/api/workspaces` and `/api/projects`, plus two **pure, React-free**
+  for `/api/workspaces`, `/api/projects`, and `/api/project-folders`, plus
+  **pure, React-free**
   modules: `project-threads.ts` (route builders, slug rules, and the
-  conversation query key) and `cycle-planning.ts`
+  conversation query key), `project-location.ts` (creation-location payload
+  and path preview helpers), and `cycle-planning.ts`
   (immutable DBTL cycle + to-do model). Server components and
   `core/threads/hooks.ts` import these modules directly, never the
   `@/core/workspaces` barrel, which pulls React hooks into server bundles.
@@ -137,18 +146,20 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   project rail beside its children, so the rail survives navigation between
   conversations.
 - Sidebar project rows are two-target: the chevron expands the project's
-  folder tree inline (`ProjectFiles`, shared with the rail), the name opens
-  the project workspace. The rail's folder disclosure defaults to open.
+  folder tree inline (`ProjectFiles`), and the name opens the project
+  workspace. This is the tree's single UI home; the project rail must not
+  duplicate it. File rows open `ProjectFilePreview`, a project-id-scoped sheet
+  that works without a conversation, temporarily collapses the first sidebar
+  rail, and restores its prior state on close.
 - `src/components/workspace/project-rail/` owns the rail: a disclosure on the
-  project name that expands the folder tree (`project-files.tsx`), DBTL cycles
-  (inline phase control plus a complete/reopen control), the selected cycle's
-  to-do list, an agents placeholder, and the project's conversations. The
-  Cycles section auto-minimizes when `hasActiveCycle(plan)` is false; an
-  explicit click on the section header overrides that default. The tree is the
-  project's own (`GET /api/projects/{id}/files`) and renders with no
-  conversation open. The chat header's `FilesTrigger` is therefore rendered
-  only outside a project (unfiled chats), so the same tree does not get two
-  doors.
+  DBTL cycles (inline phase control plus a complete/reopen control), the
+  selected cycle's to-do list, an agents placeholder, and the project's
+  conversations. The Cycles section auto-minimizes when
+  `hasActiveCycle(plan)` is false; an explicit click on the section header
+  overrides that default. Project tree listings use
+  `GET /api/projects/{id}/files`, while preview/download uses
+  `GET /api/projects/{id}/file`; both work without a conversation. The chat
+  header's `FilesTrigger` remains projectless-chat-only.
 - `src/app/workspace/[project_slug]/[thread_id]/page.tsx` re-exports the
   canonical chat page. `src/app/workspace/chats/[thread_id]/page.tsx` derives
   its project scope from `useParams().project_slug` (falling back to

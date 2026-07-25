@@ -263,6 +263,43 @@ class TestMemoryAddTool:
         assert result["status"] == "added"
         assert captured == {"agent_name": "code-agent", "user_id": "runtime-user"}
 
+    def test_project_runtime_uses_project_specific_user_bucket(self, monkeypatch):
+        captured = {}
+        mgr = _MockManager(facts=[], created_fact={"id": "fact_new", "content": "x"})
+        orig_create = mgr.create_fact
+
+        def spy(content, category="context", confidence=0.5, *, agent_name=None, user_id=None):
+            captured["user_id"] = user_id
+            return orig_create(
+                content,
+                category=category,
+                confidence=confidence,
+                agent_name=agent_name,
+                user_id=user_id,
+            )
+
+        mgr.create_fact = spy
+        _install_manager(monkeypatch, mgr)
+
+        import deerflow.agents.memory.tools as tools_mod
+        from deerflow.agents.memory.scope import scoped_memory_user_id
+
+        tools_mod.resolve_runtime_user_id = lambda runtime: "runtime-user"
+        runtime = SimpleNamespace(
+            context={
+                "project_id": "project-test2",
+                "project_root": "/Users/jyang21/Documents/projects/test2",
+            }
+        )
+
+        result = json.loads(memory_add_tool.func(runtime, "Project uses Python"))
+
+        assert result["status"] == "added"
+        assert captured["user_id"] == scoped_memory_user_id(
+            "runtime-user",
+            runtime.context,
+        )
+
     def test_rejects_existing_duplicate_content(self, monkeypatch):
         """Should not create a fact whose normalized content already exists."""
         existing = [{"id": "fact_existing", "content": "User prefers dark mode"}]

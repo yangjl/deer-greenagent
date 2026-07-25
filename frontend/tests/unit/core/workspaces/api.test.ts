@@ -8,6 +8,7 @@ import { fetch } from "@/core/api/fetcher";
 import {
   createProject,
   createWorkspace,
+  fetchProjectFolders,
   fetchProjects,
   fetchWorkspaces,
 } from "@/core/workspaces/api";
@@ -72,6 +73,21 @@ describe("workspace api", () => {
       crop_profile: "maize-v1",
     });
     expect(mockedFetch.mock.calls[1]?.[1]?.method).toBe("POST");
+  });
+
+  it("browses an encoded human and AI accessible local folder", async () => {
+    mockedFetch.mockResolvedValue(
+      jsonResponse({
+        current_path: "/Users/me/My Projects",
+        directories: [],
+      }),
+    );
+
+    await fetchProjectFolders("/Users/me/My Projects");
+
+    expect(mockedFetch.mock.calls[0]?.[0] as string).toContain(
+      "/api/project-folders?path=%2FUsers%2Fme%2FMy+Projects",
+    );
   });
 
   it("surfaces the gateway conflict detail", async () => {

@@ -329,7 +329,7 @@ Before changing a later authorization phase, read the [authorization RFC](../doc
 
 **Lead-only middlewares** (`build_middlewares`, appended after the base):
 
-14. **DynamicContextMiddleware** - Injects the current date (and optionally memory) as a `<system-reminder>` into the first HumanMessage, keeping the base system prompt fully static for prefix-cache reuse
+14. **DynamicContextMiddleware** - Injects the current date (and optionally memory) as a `<system-reminder>` into the first HumanMessage, keeping the base system prompt fully static for prefix-cache reuse. Unfiled conversations read the authenticated user's global memory bucket; project conversations derive a stable bucket from `(user_id, project_id)`. On the next run of an older project thread, a frozen legacy/global snapshot is replaced with the selected project's snapshot.
 15. **SkillActivationMiddleware** - Detects strict `/skill-name task` syntax on the latest real user message, resolves only enabled and runtime-allowed skills, injects the `SKILL.md` body as hidden current-turn context, and records a `middleware:skill_activation` audit event
 16. **SkillToolPolicyMiddleware** - Applies `allowed-tools` only after real activation; passive enabled skills and a custom agent's configured skill allowlist do not clamp the lead toolset. A run-scoped slash activation is authoritative and suppresses `skill_context` as a policy source, so reading another skill cannot widen the explicit skill's tools; without slash activation, skills captured after configured `read_file` loads retain the existing union semantics. The middleware filters model-visible schemas and blocks unauthorized execution, resolving canonical paths against the live enabled/agent-allowed registry on every model call, then stores a versioned, JSON-safe, middleware-token-bound decision signed by policy source plus active paths in run context for the resulting tool calls to reuse. The next model call always refreshes it, and malformed, foreign, stale, or unmatched decisions fall back to live resolution. `tool_search` and `describe_skill` remain framework-safe discovery tools under a restrictive policy; they may reveal or promote metadata, but a deferred business tool must still be declared by the active policy before its schema or execution can survive the policy middleware. The decision's owner token is authorization-sensitive, so its reserved context key is owned by `runtime.secret_context` and included in `REDACTED_CONTEXT_KEYS` for observable and persisted context copies. Registry load failures and a non-empty active set with no authorized skill fail closed to framework-safe tools; an individual stale path is skipped only when at least one valid active skill remains. This is best-effort behavioral scoping rather than a hard security boundary: alternate loads such as `bash cat` are not captured, and bounded autonomous `skill_context` can evict old entries. `task` is not framework-exempt, so a restricted skill cannot delegate around its policy. The middleware must remain immediately after `SkillActivationMiddleware` (which publishes the slash source through `runtime.secret_context`'s public path helpers authenticated by a required token shared only within the assembled middleware chain) and immediately before `DurableContextMiddleware`; assembly and compiled-graph tests pin ordering, token sharing, schema filtering, and execution blocking.
 17. **DurableContextMiddleware** - Captures `task` delegations into `ThreadState.delegations` (including in-progress dispatches and terminal result summaries) and loaded skill-file references (name/path/description, parsed in-memory - not the body) into `ThreadState.skill_context` before summarization can compact the paired tool-call/result messages, then projects durable context into each model request. Static authority rules are injected as a `SystemMessage`; untrusted field values (`summary_text`, delegation results, skill descriptions) are injected separately as a hidden `HumanMessage` data block so compressed history, delegated work, and which skills are active stay visible without being stored as `messages` or promoted to system-role instructions. `build_subagent_runtime_middlewares` also attaches this middleware immediately before subagent summarization so a compacted `summary_text` is projected ahead of a preserved assistant/tool tail instead of leaving strict providers with an assistant-first request.
@@ -337,7 +337,7 @@ Before changing a later authorization phase, read the [authorization RFC](../doc
 19. **TodoListMiddleware** - *(optional, if `is_plan_mode`)* Task tracking with the `write_todos` tool
 20. **TokenUsageMiddleware** - *(optional, if `token_usage.enabled`)* Records token usage metrics; subagent usage is merged back into the dispatching AIMessage by message position
 21. **TitleMiddleware** - Auto-generates the thread title after the first complete exchange and normalizes structured message content before prompting the title model. If a first-turn run is interrupted before this middleware can write a title, `runtime/runs/worker.py` keeps the run in a finalizing state, persists a local fallback title from the latest checkpoint or original run input, and then syncs it to `threads_meta.display_name`. Replacement runs admitted by `multitask_strategy="interrupt"` / `"rollback"` wait for older same-thread finalization before entering the graph; the interrupted run only skips the fallback title write once a later run has started and may have advanced the checkpoint.
-22. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses)
+22. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses). Project runs write to the same `(user_id, project_id)`-derived bucket used by injection and, during migration, admit only messages created by the current run so legacy cross-project history cannot seed the new bucket.
 23. **ViewImageMiddleware** - *(optional, if the model supports vision)* Injects a hidden HumanMessage with base64 image data, identified by a reserved ID prefix plus a server-owned metadata marker, before the LLM call. Because `before_model`, `model`, and `after_model` are separate graph nodes, the `before_model` and `model` node checkpoints for that call still contain the payload; `after_model` / `aafter_model` then emits `RemoveMessage`, so subsequent checkpoints do not retain it
 24. **McpRoutingMiddleware** - *(optional, if `tool_search.enabled` and PR1 MCP routing metadata produce a routing index)* Auto-promotes matching deferred MCP tool schemas before the model call by writing a minimal `promoted` state update. It matches only the latest real `HumanMessage`, uses the global `tool_search.auto_promote_top_k` limit (default 3, clamped to 1..5), never executes tools, and must be installed before `DeferredToolFilterMiddleware`
 25. **DeferredToolFilterMiddleware** - *(optional, if `tool_search.enabled`)* Hides deferred (MCP) tool schemas from the bound model until `tool_search` or `McpRoutingMiddleware` promotes them (reads per-thread promotions from `ThreadState.promoted`, hash-scoped)
@@ -1115,6 +1115,14 @@ places that must stay aligned:
    without project storage (AIO, E2B, BoxLite) ignore both kwargs.
    `Paths` keeps no project layout; the old internal
    `.deer-flow/users/{user}/projects/…` bucket is gone.
+   Project creation supports four explicit location modes: `default` under
+   `projects.root`, `existing` folder adoption, an existing-or-new
+   `full_path`, and `new_under_parent`. Custom locations are canonicalized and
+   must remain inside `projects.root` or a writable
+   `sandbox.mounts[*].host_path`; `GET /api/project-folders` provides the
+   membership-gated directory browser for those allowlisted roots. Folder
+   ownership is global across active project rows: one physical directory
+   cannot be claimed by projects in two workspace security boundaries.
 2. **Scope record** — `threads_meta.project_id/workspace_id/scope_type` is the
    durable membership (`create(..., project_id=...)`,
    `set_conversation_scope()`, `list_by_project()`, owner-scoped in both
@@ -1125,6 +1133,11 @@ places that must stay aligned:
 3. **Run context** — a new conversation's run request may carry
    `context.project_id` as intent; `services.py::file_thread_into_requested_project`
    honors it only after verifying membership (closes the first-run race).
+   `services.py::resolve_run_owner_user_id` resolves ordinary browser/API
+   callers from the authenticated session user and trusted internal callers
+   from their server-validated owner header; both paths must resolve the owner
+   before filing, or the first model call can load projectless memory before a
+   later frontend thread-assignment request arrives.
    Then `apply_project_scope_context` stamps `context["project_id"]` **and**
    `context["project_root"]` from the durable records, dropping any
    caller-supplied values first — both are authorization-sensitive because
@@ -1139,12 +1152,39 @@ its access mode). Without these the model assumes it cannot touch the local
 filesystem and hands back terminal commands. Never checkpointed; mounts are
 re-read from live config per request; tests in
 `tests/test_project_context_middleware.py`.
+For a project-scoped local sandbox, a custom mount whose host path contains the
+project root is deliberately omitted: `/mnt/user-data/workspace` is the
+canonical project path, and retaining an overlapping parent such as
+`/mnt/projects` lets a vague request accidentally target a sibling project.
+The prompt applies the same filter and explicitly anchors relative file
+requests (for example `README.md`) to the canonical workspace. Projectless
+conversations retain the configured shared mount.
+Project scope also forms a memory-isolation boundary. `agents.memory.scope`
+derives a stable backend bucket from the authenticated `user_id` plus durable
+`project_id`; `DynamicContextMiddleware`, `MemoryMiddleware`, and tool-mode
+memory CRUD all use that same bucket. Projectless chats retain the existing
+user-global bucket. On an older project thread's next run, dynamic context
+replaces a frozen legacy/global `__memory` snapshot with project memory (or
+removes it when that project has not learned anything yet). The
+pre-summarization hook intentionally does not backfill project memory from
+legacy history, while post-run memory learns only current-run messages.
+`ProjectContextMiddleware` additionally removes any mismatched snapshot from
+the model-bound request and injects a compact hidden current-project data block
+immediately before the latest visible user message. That recency anchor plus
+the request-only system contract makes durable `project_id`/`project_root`
+authoritative over stale assistant replies and summaries without rewriting
+visible conversation history.
 
 Project-scoped Gateway routes live in `app/gateway/routers/workspaces.py`:
 `GET /api/projects/{id}/threads`, `PUT|DELETE /api/projects/{id}/threads/{thread_id}`,
-and `GET /api/projects/{id}/files` (listing in `app/gateway/project_files.py`,
-reusing the files router's `scan_directory`). Creation computes and creates
-(or adopts) the human folder before the row is committed. Tests:
+`GET /api/projects/{id}/files`, `GET /api/projects/{id}/file`, and
+`GET /api/project-folders` (project path resolution in
+`app/gateway/project_files.py`, with directory listings reusing the files
+router's `scan_directory`). The singular `file` endpoint serves text, inline
+binary previews, and downloads through the same response rules as thread
+artifacts, but is addressed by project id so it needs no conversation.
+Creation computes and creates (or adopts) the human folder before the row is
+committed. Tests:
 `tests/test_project_paths.py`, `tests/test_project_scoped_sandbox.py`,
 `tests/test_thread_conversation_scope.py`,
 `tests/test_project_workspace_router.py`,

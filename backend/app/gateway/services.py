@@ -481,6 +481,27 @@ def inject_authenticated_user_context(
         runtime_context["oauth_id"] = getattr(user, "oauth_id", None)
 
 
+def resolve_run_owner_user_id(request: Request) -> str | None:
+    """Return the durable owner for a browser or trusted internal run.
+
+    Internal channel callers may act for the owner in the server-validated
+    ``X-DeerFlow-Owner-User-Id`` header. Ordinary authenticated browser/API
+    callers own their run directly through ``request.state.user``. Keeping
+    those paths together is required for atomic first-run project filing:
+    ``file_thread_into_requested_project`` must receive an owner before the
+    graph starts, not wait for the frontend's later project-thread PUT.
+    """
+    internal_owner = get_trusted_internal_owner_user_id(request)
+    if internal_owner:
+        return internal_owner
+
+    user = getattr(getattr(request, "state", None), "user", None)
+    if getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+        return None
+    user_id = getattr(user, "id", None)
+    return str(user_id) if user_id is not None else None
+
+
 def resolve_agent_factory(assistant_id: str | None):
     """Resolve the agent factory callable from config.
 
@@ -1025,7 +1046,7 @@ async def start_run(
                 detail=f"Model {model_name!r} is not in the configured model allowlist",
             )
 
-    owner_user_id = get_trusted_internal_owner_user_id(request)
+    owner_user_id = resolve_run_owner_user_id(request)
     # Stateless run endpoints carry thread_id in the request *body*, so the
     # @require_permission(owner_check=True) decorator -- which resolves ownership
     # from the path param -- cannot protect them. Enforce thread ownership here,

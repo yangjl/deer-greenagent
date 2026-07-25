@@ -9,8 +9,13 @@ from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.memory import get_memory_manager
+from deerflow.agents.memory.scope import scoped_memory_user_id
 from deerflow.config.memory_config import get_memory_config
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.context_keys import (
+    CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+    is_project_scoped_context,
+)
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 
 if TYPE_CHECKING:
@@ -63,7 +68,6 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         config = self._memory_config or get_memory_config()
         if not config.enabled:
             return None
-
         # Get thread ID from runtime context first, then fall back to LangGraph's configurable metadata
         thread_id = runtime.context.get("thread_id") if runtime.context else None
         if thread_id is None:
@@ -74,16 +78,27 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             return None
 
         # Get messages from state
-        messages = state.get("messages", [])
+        messages = list(state.get("messages", []))
         if not messages:
             logger.debug("No messages in state, skipping memory update")
             return None
+        runtime_context = runtime.context if isinstance(runtime.context, dict) else {}
+        if is_project_scoped_context(runtime_context):
+            # Do not seed a project's new memory bucket from arbitrary legacy
+            # history that may predate durable project filing. Only learn from
+            # messages created by this run.
+            pre_existing = runtime_context.get(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY)
+            if isinstance(pre_existing, (frozenset, set, list, tuple)):
+                pre_existing_ids = {str(message_id) for message_id in pre_existing if message_id}
+                messages = [message for message in messages if not getattr(message, "id", None) or str(getattr(message, "id")) not in pre_existing_ids]
+                if not messages:
+                    logger.debug("No current-run messages, skipping project memory update")
+                    return None
 
         # Capture user_id at enqueue time while the request context is still alive.
         # threading.Timer fires on a different thread where ContextVar values are not
         # propagated, so we must store user_id explicitly in ConversationContext.
-        user_id = get_effective_user_id()
-        runtime_context = runtime.context if isinstance(runtime.context, dict) else {}
+        user_id = scoped_memory_user_id(resolve_runtime_user_id(runtime), runtime_context)
         trace_id = normalize_trace_id(runtime_context.get(DEERFLOW_TRACE_METADATA_KEY))
         if trace_id is None:
             try:
