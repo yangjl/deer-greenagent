@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "id": "workspace-oriented-breeding-foundation-report",
+  "cycle_id": "workspace-oriented-breeding-design",
+  "authorization": "human-approval-2026-07-24-phase-2-builder-execution",
+  "status": "implemented-and-self-tested",
+  "completed_scope": [
+    "workspace-membership-project-persistence",
+    "workspace-and-project-gateway-apis",
+    "private-global-inbox-conversation-defaults",
+    "workspace-first-navigation-and-project-portfolio",
+    "project-dbtl-and-reconciliation-overview",
+    "documentation-and-migration-parity"
+  ],
+  "phase_status": {
+    "B0": "foundation-complete",
+    "B1": "foundation-complete",
+    "B2": "foundation-complete",
+    "B3": "foundation-complete",
+    "B4": "pending",
+    "B5": "pending",
+    "B6": "pending",
+    "B7": "pending",
+    "B8": "pending"
+  },
+  "self_checks": [
+    {
+      "name": "backend-focused-regression",
+      "status": "passed",
+      "result": "148 passed, 1 upstream deprecation warning"
+    },
+    {
+      "name": "frontend-suite",
+      "status": "passed",
+      "result": "88 files, 757 tests passed"
+    },
+    {
+      "name": "frontend-check",
+      "status": "passed",
+      "result": "ESLint and TypeScript passed"
+    },
+    {
+      "name": "backend-ruff",
+      "status": "passed",
+      "result": "Focused changed-file checks passed"
+    },
+    {
+      "name": "live-route-probe",
+      "status": "passed",
+      "result": "Projects route returned the expected anonymous auth redirect and /api/workspaces returned the expected 401 auth boundary on the running stack"
+    }
+  ],
+  "residual_risks": [
+    "Membership invitation and management APIs remain pending.",
+    "Validated project conversation attachment remains pending.",
+    "Durable DBTL review/reconciliation, agent team, breeding data, and knowledge promotion are later phases.",
+    "PostgreSQL concurrency and failure-injection testing remains a release gate."
+  ],
+  "independent_validation": "not-yet-performed"
+}

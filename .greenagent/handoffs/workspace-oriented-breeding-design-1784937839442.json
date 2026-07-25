@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "workspace-oriented-breeding-design-1784937839442",
+  "work_item_id": "workspace-oriented-breeding-design",
+  "from_role": "tester",
+  "to_role": "builder",
+  "from_agent": "codex",
+  "to_agent": "codex",
+  "summary": "Tester verdict FAIL with evidence_state BLOCKED: executable regressions pass, but same-agent continuity and missing authenticated, PostgreSQL, contract, browser, accessibility, and orientation evidence prevent independent acceptance. B4-B8 remain pending; no implementation was edited by Tester.",
+  "evidence": [
+    "plan/test/2026-07-24-workspace-oriented-breeding-foundation-test-result.json",
+    "plan/test/2026-07-24-workspace-oriented-breeding-foundation-drift-report.md",
+    "plan/test/2026-07-24-workspace-oriented-breeding-human-escalation.md"
+  ],
+  "authorization": "human-directed",
+  "created_at": "2026-07-25T00:03:59.442Z"
+}

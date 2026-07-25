@@ -2,9 +2,11 @@
   "schema_version": 1,
   "role": "tester",
   "status": "available-manual",
-  "assigned_agent": "unassigned",
+  "assigned_agent": "codex",
   "execution_mode": "human-operated-vscode",
   "purpose": "Independently challenge the proposed method and Builder artifacts using known-answer data and a substantively different validation strategy.",
+  "protocol_phase": 2,
+  "execution_authorization": "human-tester-request-2026-07-24",
   "dbtl_stage": "test",
   "responsibilities": [
     "define-expected-results-before-testing",
@@ -44,7 +46,11 @@
       "test-evidence",
       ".greenagent/handoffs/"
     ],
-    "execute": []
+    "execute": [
+      "approved-tester-actions",
+      "approved-known-answer-tests",
+      "approved-regression-tests"
+    ]
   },
   "prohibitions": [
     "silently-edit-implementation",
@@ -52,5 +58,6 @@
     "approve-own-work",
     "accept-builder-rerun-as-independent-validation",
     "execute-tests-in-dbtl-phase-1"
-  ]
+  ],
+  "assigned_at": "2026-07-24T23:53:06.174Z"
 }

@@ -1,0 +1,383 @@
+{
+  "schema_version": 1,
+  "id": "workspace-oriented-breeding-design-package",
+  "cycle_id": "workspace-oriented-breeding-design",
+  "research_question": "Does making a durable breeding project the primary structured-work object, while retaining a global human-agent Inbox for projectless work, improve long-term orientation, accountability, evidence traceability, and safe human-AI collaboration without regressing DeerFlow's existing run and streaming behavior?",
+  "hypotheses": [
+    {
+      "id": "H0",
+      "statement": "A project-first layout will not materially improve a returning team member's correct identification of DBTL state, accountable owner, blocking review, supporting evidence, and next decision compared with the current chat-first interface.",
+      "kind": "null",
+      "falsification": "In a controlled task study using identical project state, the project-first prototype has a meaningfully lower median correct orientation time with no worse error rate than the current interface."
+    },
+    {
+      "id": "H1",
+      "statement": "A project-first workbench with a visible DBTL lifecycle, review inbox, evidence provenance, and contextual AI-team inspector will reduce reconstruction work and make long-term breeding activity safer and more legible.",
+      "kind": "alternative",
+      "falsification": "Users still depend on conversation search to answer the five orientation questions, or the project surface increases incorrect decisions, missed gates, or cross-project information exposure."
+    },
+    {
+      "id": "H2",
+      "statement": "Keeping chat primary and adding project tags, filters, and a stronger artifact sidebar is sufficient for the requested long-term workflow.",
+      "kind": "competing",
+      "falsification": "Tagged chat cannot present authoritative cross-thread state, team accountability, structured trial records, and review gates without recreating a project domain behind the conversation UI."
+    },
+    {
+      "id": "H3",
+      "statement": "A conventional project board with labels and templates is sufficient; first-class DBTL and breeding semantics are unnecessary.",
+      "kind": "competing",
+      "falsification": "Observed workflows repeatedly require stage-specific evidence, transition authority, season and environment context, pedigree or trial relationships, and validation rules that generic labels cannot enforce."
+    }
+  ],
+  "evidence": [
+    {
+      "source_id": "frontend/src/app/workspace/page.tsx:8-19",
+      "source_type": "project-evidence",
+      "claim": "The workspace root currently redirects into a chat rather than a project portfolio or durable project home.",
+      "verification_status": "verified"
+    },
+    {
+      "source_id": "frontend/src/components/workspace/workspace-nav-chat-list.tsx:21-93",
+      "source_type": "project-evidence",
+      "claim": "The primary navigation currently centers Chats, Agents, and Scheduled Tasks.",
+      "verification_status": "verified"
+    },
+    {
+      "source_id": "frontend/src/app/workspace/chats/[thread_id]/page.tsx:261-442",
+      "source_type": "project-evidence",
+      "claim": "The main workspace canvas is a thread message list and composer, while files, artifacts, browser, goals, todos, and schedules are thread accessories.",
+      "verification_status": "verified"
+    },
+    {
+      "source_id": "backend/app/gateway/thread_project.py:1-14",
+      "source_type": "project-evidence",
+      "claim": "The existing project concept is a per-thread filesystem link stored beside and deleted with the thread.",
+      "verification_status": "verified"
+    },
+    {
+      "source_id": "backend/app/gateway/authz.py:90-107",
+      "source_type": "project-evidence",
+      "claim": "All authenticated users receive the same global permissions; project membership and project roles are absent.",
+      "verification_status": "verified"
+    },
+    {
+      "source_id": "backend/packages/harness/deerflow/persistence/agents/model.py:1-31",
+      "source_type": "project-evidence",
+      "claim": "Custom agents are stored per user and are not assigned to project teams.",
+      "verification_status": "verified"
+    },
+    {
+      "source_id": "backend/packages/harness/deerflow/persistence/scheduled_tasks/model.py:1-34",
+      "source_type": "project-evidence",
+      "claim": "Scheduled tasks are user- and optionally thread-scoped rather than project-, cycle-, or work-item-scoped.",
+      "verification_status": "verified"
+    },
+    {
+      "source_id": "backend/app/gateway/routers/memory.py:1-36",
+      "source_type": "project-evidence",
+      "claim": "Memory ownership is resolved around a user; no explicit shared project memory or validated knowledge boundary is present.",
+      "verification_status": "verified"
+    },
+    {
+      "source_id": "backend/packages/harness/deerflow/agents/dbtl/orchestrator.py:1-20",
+      "source_type": "project-evidence",
+      "claim": "DBTL is a Phase-one run target with stub execution, a fixed path, GreenAgent validation, and human interrupts; role agents are explicitly deferred.",
+      "verification_status": "verified"
+    },
+    {
+      "source_id": "plan/design/2026-07-24-project-oriented-refactor-design.md",
+      "source_type": "project-evidence",
+      "claim": "The second Designer plan independently supports a project-root shell, project conversations, project files, DBTL cycle visibility, team assignments, Console activity, task events, tracing, and preservation of existing chat and run internals.",
+      "verification_status": "verified"
+    }
+  ],
+  "assumptions": [
+    "The intended product supports multiple humans collaborating over projects that outlive individual conversations.",
+    "PostgreSQL is the authoritative production store for project, DBTL, approval, artifact, and knowledge state.",
+    "GreenAgent remains a temporary deterministic development evaluator and projection adapter and will eventually be retired.",
+    "Plant-breeding records require both structured transactional storage and document-oriented knowledge retrieval.",
+    "Existing thread streaming, event ordering, run lifecycle, and scheduled-task concurrency behavior must remain compatible.",
+    "The current project-link feature is migration input rather than the desired durable project model.",
+    "Projectless human-agent conversation is a supported long-term Inbox workflow rather than only a migration exception.",
+    "Maize is the first reference breeding workflow while the relational core remains crop-neutral.",
+    "Learn-stage AI output is provisional Working Memory until an authorized human promotes it.",
+    "The first version of this package was independently derived; this revision explicitly consolidates plan/design/2026-07-24-project-oriented-refactor-design.md."
+  ],
+  "alternatives": [
+    "Keep chat primary and add project tags, saved filters, and cross-thread artifact search.",
+    "Adopt a generic task-board information architecture and represent DBTL and breeding semantics through labels.",
+    "Make DBTL cycles the top-level object and omit the broader project and team layer.",
+    "Use the .greenagent filesystem as the authoritative project and DBTL store.",
+    "Create a project shell but leave authorization, memory, agents, and schedules user- or thread-scoped."
+  ],
+  "design": {
+    "summary": "Make the durable breeding project the root structured-work object; retain a global workspace Inbox for projectless human-agent collaboration; represent threads as explicitly scoped working sessions; expose database-authoritative DBTL cycles, human reviews, generic maize-first breeding records, data, governed knowledge, team assignments, and activity.",
+    "high_level_goal": "Create a long-lived AI plant-breeding operating system in which humans and bounded AI agents collaborate through durable projects, explicit DBTL state, structured records, provenance, and human authority.",
+    "in_scope": [
+      "Workspace and project information architecture",
+      "Human and AI project-team model",
+      "DBTL lifecycle and review experience",
+      "Project authorization and audit requirements",
+      "Breeding database and knowledge boundaries",
+      "Migration constraints and tester requirements"
+    ],
+    "out_of_scope": [
+      "Implementation code",
+      "Phased Builder action plan",
+      "Automatic human decisions",
+      "Complete crop ontology",
+      "Final vector database, embedding model, or cloud vendor selection"
+    ],
+    "human_direction": {
+      "authorization_reference": "human-direction-2026-07-24-integrated-plan",
+      "database_authority": "PostgreSQL is the final production authority; .greenagent is temporary and will be retired.",
+      "production_database": "PostgreSQL required; SQLite restricted to single-user local development, demos, and tests.",
+      "projectless_work": "Provide a global Inbox where humans and workspace-scoped agents can chat without selecting a project.",
+      "reference_crop": "Maize first, with generic relational breeding entities and versioned JSONB or extension tables for maize-specific attributes.",
+      "knowledge_governance": "Learn output enters Project Working Memory and requires an authorized human promotion event before becoming Validated Project Knowledge."
+    },
+    "primary_object_hierarchy": [
+      "workspace",
+      "inbox_or_project",
+      "dbtl_cycle",
+      "work_item_or_breeding_record",
+      "run_or_working_session",
+      "artifact_or_activity_event"
+    ],
+    "project_navigation": [
+      "Overview",
+      "DBTL",
+      "Work",
+      "Materials",
+      "Trials",
+      "Data",
+      "Knowledge",
+      "Team",
+      "Activity",
+      "Settings"
+    ],
+    "workspace_navigation": [
+      "Projects",
+      "Inbox",
+      "Review inbox",
+      "Agent library",
+      "Search",
+      "Settings"
+    ],
+    "visual_thesis": "A calm field-and-laboratory operating system with paper-white working surfaces, deep botanical green as the single action and lifecycle accent, rigorous scientific typography, quiet dividers, dense tables, and minimal ornamental chrome.",
+    "content_plan": [
+      "Global workspace and project switcher with Inbox, cross-project reviews, and search",
+      "Stable project navigation with current program, season, and environment context",
+      "Primary operational canvas for the selected project object",
+      "Context inspector for evidence, provenance, team, discussion, and Ask team",
+      "Durable chronological activity and decision history"
+    ],
+    "interaction_thesis": [
+      "Expandable DBTL lifecycle stages show owners, evidence requirements, gate status, and allowed transitions.",
+      "Shared-layout transitions preserve orientation between portfolio, project, and cycle.",
+      "Agent activity appears as restrained state changes in the activity stream and inspector with reduced-motion support."
+    ],
+    "collaboration_entities": [
+      "workspaces",
+      "workspace_members",
+      "projects",
+      "project_members",
+      "project_agent_assignments",
+      "conversation_scopes",
+      "work_items",
+      "comments",
+      "decisions",
+      "approvals",
+      "activity_events"
+    ],
+    "conversation_scope": {
+      "fields": [
+        "workspace_id",
+        "project_id nullable",
+        "scope_type inbox | project | scratchpad",
+        "visibility workspace | project-members | private-owner"
+      ],
+      "legacy_rule": "Unassigned legacy threads appear in the Inbox with private-owner visibility until explicitly shared or moved.",
+      "durability_rule": "Projectless Inbox conversations are a supported permanent state."
+    },
+    "dbtl_entities": [
+      "dbtl_cycles",
+      "dbtl_transitions",
+      "dbtl_artifacts",
+      "dbtl_reviews",
+      "dbtl_gate_evaluations"
+    ],
+    "breeding_entities": [
+      "germplasm",
+      "pedigree_edges",
+      "crosses",
+      "populations",
+      "sites",
+      "seasons",
+      "environments",
+      "trials",
+      "plots",
+      "traits",
+      "observations",
+      "selections"
+    ],
+    "reference_breeding_profile": {
+      "crop": "maize",
+      "core_strategy": "Keep germplasm, pedigree, cross, population, environment, trial, plot, trait, observation, and selection entities crop-neutral.",
+      "extension_strategy": "Store maize-specific fields in versioned JSONB documents or typed extension tables using a schema profile such as maize-v1 until tests establish stable relational fields.",
+      "example_extension_concepts": [
+        "heterotic group",
+        "maturity group",
+        "inbred or hybrid classification",
+        "maize-specific trait metadata"
+      ]
+    },
+    "knowledge_entities": [
+      "knowledge_sources",
+      "knowledge_documents",
+      "knowledge_chunks",
+      "knowledge_claims",
+      "knowledge_links",
+      "knowledge_retrieval_events",
+      "project_working_memory",
+      "knowledge_promotion_reviews"
+    ],
+    "memory_scopes": [
+      "personal memory",
+      "project working memory",
+      "validated project knowledge"
+    ],
+    "authorization": {
+      "workspace_roles": [
+        "owner",
+        "administrator",
+        "member",
+        "observer"
+      ],
+      "project_roles": [
+        "breeding lead",
+        "scientist",
+        "data steward",
+        "field operator",
+        "reviewer",
+        "observer"
+      ],
+      "invariants": [
+        "Authorize every project-owned object from workspace and project membership.",
+        "Filter knowledge by authorization before ranking or generation.",
+        "Separate agent tool capability from project data scope.",
+        "Prevent agents and non-interactive runs from satisfying human gates.",
+        "Attribute every mutation to a human, agent, or system actor and authorization context."
+      ]
+    },
+    "dbtl_contract": {
+      "database_role": "Final authority for project, cycle, transition, approval, artifact, activity, and knowledge state",
+      "greenagent_role": "Temporary deterministic development policy evaluator and database-derived projection adapter",
+      "deerflow_role": "Durable project, collaboration, query, activity, review, and reconciliation layer",
+      "human_review_surface": [
+        "from and proposed states",
+        "proposer and accountable human",
+        "required and missing artifacts",
+        "artifact versions and diffs",
+        "validation errors",
+        "evidence and data-use constraints",
+        "approve, request changes, or reject",
+        "documented authorization reference"
+      ],
+      "consistency_requirement": "Every cycle has a monotonic db_revision and canonical projection hash. A stale, missing, or conflicting .greenagent projection sets reconciliation_blocked, disables further transitions, and is rebuilt only from PostgreSQL.",
+      "synchronization_states": [
+        "in_sync",
+        "projection_pending",
+        "reconciliation_blocked",
+        "projection_retired"
+      ],
+      "transition_order": [
+        "Create an idempotent transition intent at the expected database revision.",
+        "Project the exact database revision into the temporary GreenAgent adapter.",
+        "Persist the GreenAgent input, output, version, and artifact hashes.",
+        "Commit transition, approval, artifacts, activity, and next revision atomically in PostgreSQL.",
+        "Refresh the .greenagent projection best-effort after commit.",
+        "Compare revisions and hashes; block on disagreement and repair only from PostgreSQL."
+      ]
+    },
+    "database_boundary": {
+      "production_requirement": "PostgreSQL is mandatory for production and multi-user collaboration.",
+      "local_compatibility": "SQLite is limited to single-user local development, demos, and tests.",
+      "preflight": "Reject production or multi-user configuration that selects SQLite.",
+      "retrieval_start": "Permission-filtered metadata and full-text search",
+      "embedding_boundary": "Optional retrieval implementation behind an interface; never a prerequisite for provenance or authorization"
+    },
+    "knowledge_promotion": {
+      "lifecycle": [
+        "Learn-stage output",
+        "Project Working Memory",
+        "awaiting human promotion review",
+        "Validated Project Knowledge",
+        "superseded or retracted"
+      ],
+      "default_retrieval": "Validated Project Knowledge plus authoritative structured records",
+      "working_memory_rule": "Provisional retrieval is opt-in and visibly labeled unvalidated.",
+      "promotion_rule": "Only a dedicated human authorization command with immutable reviewer, evidence, source, limitation, and scope metadata may promote knowledge."
+    },
+    "migration_invariants": [
+      "Existing threads and runs remain readable.",
+      "Project associations begin nullable and tighten only after verified backfill.",
+      "Projectless Inbox and Scratchpad conversations remain supported.",
+      "Legacy threads enter the Inbox with private-owner visibility and are never silently shared.",
+      "Deleting a thread never deletes a durable project.",
+      "Existing project-link markers migrate idempotently.",
+      "User-global memory never silently becomes shared knowledge.",
+      "Scheduled tasks retain the existing run lifecycle and overlap guarantees.",
+      "Agent definitions remain reusable; assignments add project scope.",
+      "Existing event sequence and streaming behavior remain intact.",
+      "Authorization is enforced in repositories and APIs, not just the frontend.",
+      "Historical scientific artifacts are superseded, never overwritten.",
+      "PostgreSQL always wins over .greenagent projection state.",
+      "Projection mismatch blocks DBTL progression and remains visible until database-led repair.",
+      "Learn-stage outputs cannot enter Validated Project Knowledge without a human promotion event."
+    ],
+    "consolidated_existing_seams": [
+      "Mount the existing chat page and streaming hooks as project sessions and the global Inbox.",
+      "Reuse project-folder candidates and FileTreePanel for project creation and Files.",
+      "Use the Console API as a seed for project Activity.",
+      "Use task_* events for DBTL stage lifecycle.",
+      "Extend Langfuse tracing to project, cycle, stage, agent, and reconciliation metadata.",
+      "Reuse Human Input Cards for conversational review prompts while the durable Review Inbox remains authoritative.",
+      "Reuse scheduled-task and channel delivery for project- or Inbox-routed gate notifications."
+    ],
+    "builder_boundary": "The Builder owns the phased action plan only after human design approval."
+  },
+  "estimand": "For a returning authorized breeding-project member given an identical project state, the difference between the project-first and current chat-first interfaces in median time to correctly identify the breeding objective, DBTL stage, accountable owner, blocking gate, supporting evidence, and next required decision, accompanied by the difference in incorrect or unauthorized actions.",
+  "tester_requirements": [
+    "Compare current and proposed prototypes on correct time-to-orientation for DBTL state, owner, blocker, evidence, and next decision.",
+    "Verify cross-project isolation for routes, APIs, files, artifacts, breeding records, and knowledge retrieval.",
+    "Verify that agents, schedulers, service tokens, and replayed approvals cannot satisfy human-gated DBTL transitions.",
+    "Verify idempotency and reconciliation across GreenAgent evaluation and database persistence failure modes.",
+    "Verify that PostgreSQL remains authoritative across missing, stale, corrupt, and failed .greenagent projections and reconciler restarts.",
+    "Verify source and version provenance plus insufficient-evidence behavior for every knowledge answer.",
+    "Verify that Learn output remains Working Memory until a distinct authorized human promotion event creates Validated Project Knowledge.",
+    "Verify that thread deletion cannot delete or orphan a project, cycle, trial, decision, or validated knowledge record.",
+    "Verify global Inbox collaboration, permanent projectless conversations, private Scratchpads, safe legacy migration, and explicit visibility changes.",
+    "Verify compatibility of thread history, event order, active-run constraints, scheduled-task overlap, and streaming.",
+    "Verify keyboard, screen-reader, mobile, reduced-motion, dense-table, loading, empty, error, and offline states.",
+    "Verify agent assignment enforcement for tools, data, budget, writes, and approvals.",
+    "Verify actor and authorization attribution for every durable project mutation.",
+    "Validate the generic breeding schema and versioned extension mechanism against the approved maize reference workflow."
+  ],
+  "human_decisions": [
+    "RESOLVED human-direction-2026-07-24-integrated-plan: PostgreSQL is the production authority and SQLite is local single-user only.",
+    "RESOLVED human-direction-2026-07-24-integrated-plan: .greenagent is a temporary development projection/evaluator; database state is final.",
+    "RESOLVED human-direction-2026-07-24-integrated-plan: provide a global human-agent Inbox and do not force exploratory or legacy threads into projects.",
+    "RESOLVED human-direction-2026-07-24-integrated-plan: use maize as the first reference workflow while keeping core schemas generic and extensions versioned.",
+    "RESOLVED human-direction-2026-07-24-integrated-plan: Learn output enters Working Memory and requires human promotion into Validated Project Knowledge.",
+    "DEFERRED under human-approval-2026-07-24-integrated-design: Builder proposes the workspace security boundary and global Inbox participation policy.",
+    "DEFERRED under human-approval-2026-07-24-integrated-design: Builder proposes the mandatory generic records and maize-v1 extension profile.",
+    "DEFERRED under human-approval-2026-07-24-integrated-design: Builder proposes private-owner visibility and sharing behavior for migrated legacy threads.",
+    "DEFERRED under human-approval-2026-07-24-integrated-design: Builder proposes AI write versus propose-only authority.",
+    "DEFERRED under human-approval-2026-07-24-integrated-design: Builder proposes any additional human-gated DBTL transitions.",
+    "DEFERRED under human-approval-2026-07-24-integrated-design: Builder proposes evidence grades and reviewer authority for knowledge promotion.",
+    "DEFERRED under human-approval-2026-07-24-integrated-design: Builder proposes reconciliation retry limits, alerting, and recovery authority.",
+    "RESOLVED human-approval-2026-07-24-integrated-design: the integrated design is approved for Builder planning and handoff."
+  ],
+  "review_status": "approved"
+}

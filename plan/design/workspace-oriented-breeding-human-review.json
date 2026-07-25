@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "id": "workspace-oriented-breeding-human-review",
+  "cycle_id": "workspace-oriented-breeding-design",
+  "work_item_id": "workspace-oriented-breeding-design",
+  "review_type": "design-approval-before-build",
+  "status": "approved",
+  "requested_at": "2026-07-24T22:44:00.000Z",
+  "requested_by": {
+    "role": "designer",
+    "agent": "codex"
+  },
+  "artifacts": [
+    "plan/design/2026-07-24-project-oriented-refactor-design.md",
+    "plan/design/workspace-oriented-breeding-system-design.md",
+    "plan/design/workspace-oriented-breeding-design-package.json",
+    "plan/design/workspace-oriented-breeding-designer-debate.json"
+  ],
+  "recorded_human_direction": [
+    {
+      "decision": "PostgreSQL is the final production authority; .greenagent is a temporary development tool and will be retired.",
+      "authorization_reference": "human-direction-2026-07-24-integrated-plan"
+    },
+    {
+      "decision": "PostgreSQL is required in production and SQLite is limited to single-user local use.",
+      "authorization_reference": "human-direction-2026-07-24-integrated-plan"
+    },
+    {
+      "decision": "Provide a global Inbox where humans and agents can chat without requiring project attachment.",
+      "authorization_reference": "human-direction-2026-07-24-integrated-plan"
+    },
+    {
+      "decision": "Use maize as the first reference workflow while keeping the initial breeding schema generic with versioned JSONB or extension fields.",
+      "authorization_reference": "human-direction-2026-07-24-integrated-plan"
+    },
+    {
+      "decision": "Learn-stage output enters Project Working Memory and requires human approval before promotion to Validated Project Knowledge.",
+      "authorization_reference": "human-direction-2026-07-24-integrated-plan"
+    }
+  ],
+  "decisions_deferred_to_builder_proposal": [
+    "Workspace security boundary and global Inbox participation policy.",
+    "Generic breeding records and maize-v1 extension profile.",
+    "Private-owner visibility and sharing policy for migrated legacy threads.",
+    "Agent write authority and additional human DBTL gates.",
+    "Validated-knowledge promotion authority and evidence requirements.",
+    "Reconciliation retry limits, alerts, and recovery authority."
+  ],
+  "authorization_reference": "human-approval-2026-07-24-integrated-design",
+  "reviewer": "human",
+  "reviewed_at": "2026-07-24T23:13:53.783Z",
+  "notes": "The human explicitly approved the complete integrated design and authorized Designer-to-Builder handoff. Remaining detailed choices are Builder proposals constrained by the approved design and retain their applicable human review gates."
+}

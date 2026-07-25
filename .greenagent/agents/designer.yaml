@@ -2,7 +2,7 @@
   "schema_version": 1,
   "role": "designer",
   "status": "available-manual",
-  "assigned_agent": "unassigned",
+  "assigned_agent": "codex",
   "execution_mode": "human-operated-vscode",
   "purpose": "Develop reviewable hypotheses and a big-picture design from human goals, evidence, and project constraints.",
   "dbtl_stage": "design",
@@ -50,5 +50,6 @@
     "apply-human-decisions",
     "hide-minority-designer-positions",
     "present-unverified-citations-as-evidence"
-  ]
+  ],
+  "assigned_at": "2026-07-24T22:44:13.507Z"
 }

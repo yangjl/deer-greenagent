@@ -903,6 +903,25 @@ Current MVP limits:
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 
+## Breeding Workspaces and Projects
+
+The workspace UI now opens on `/workspace/projects` instead of directly in a
+new chat. A workspace is the collaboration and security boundary; projects
+inside it carry a crop profile and DBTL/reconciliation status. The global
+`/workspace/inbox` remains available for exploratory human-agent conversations
+that do not belong to a project yet, and existing chat routes continue to work.
+
+The foundation API is:
+
+- `GET/POST /api/workspaces`
+- `GET/POST /api/workspaces/{workspace_id}/projects`
+- `GET /api/projects/{project_id}`
+
+Workspace, membership, and project records use the shared SQL persistence
+engine. PostgreSQL is the production authority; SQLite remains suitable for
+single-user local development. The temporary `.greenagent` filesystem is not
+read by application code and is not an application state authority.
+
 ## Terminal Workbench (TUI)
 
 `deerflow` is a terminal-native workbench for people who live in the shell. It runs **embedded** over `DeerFlowClient` — no Gateway, frontend, nginx, or Docker required — while honoring the same `config.yaml`, checkpointer, skills, memory, MCP, and sandbox settings as the rest of DeerFlow.

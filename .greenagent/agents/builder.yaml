@@ -2,9 +2,11 @@
   "schema_version": 1,
   "role": "builder",
   "status": "available-manual",
-  "assigned_agent": "unassigned",
+  "assigned_agent": "codex",
   "execution_mode": "human-operated-vscode",
-  "purpose": "Convert a human-approved design into a phased action plan and implementation handoff without executing work in DBTL Phase 1.",
+  "purpose": "Implement the human-approved phased action plan, self-test each phase, record drift, and prepare the Tester handoff.",
+  "protocol_phase": 2,
+  "execution_authorization": "human-approval-2026-07-24-phase-2-builder-execution",
   "dbtl_stage": "build",
   "responsibilities": [
     "map-design-requirements-to-phased-actions",
@@ -36,14 +38,17 @@
       "approved-work-package-scope",
       ".greenagent/handoffs/"
     ],
-    "execute": []
+    "execute": [
+      "approved-builder-actions",
+      "approved-self-tests"
+    ]
   },
   "prohibitions": [
     "expand-scope",
     "apply-human-decisions",
     "alter-research-methodology-without-review",
-    "execute-builder-actions-in-dbtl-phase-1",
     "silently-exclude-or-correct-data",
     "approve-own-results"
-  ]
+  ],
+  "assigned_at": "2026-07-24T23:15:07.778Z"
 }

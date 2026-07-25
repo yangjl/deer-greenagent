@@ -1,0 +1,645 @@
+{
+  "schema_version": 1,
+  "id": "workspace-oriented-breeding-phase-action-plan",
+  "cycle_id": "workspace-oriented-breeding-design",
+  "design_package_id": "workspace-oriented-breeding-design-package",
+  "authorization_reference": "human-builder-go-2026-07-24",
+  "requirements": {
+    "R-001": "PostgreSQL is the authoritative production store; SQLite is single-user local only and production preflight rejects it.",
+    "R-002": "Workspaces, projects, memberships, project roles, and repository-level authorization are durable first-class resources.",
+    "R-003": "A global human-agent Inbox supports permanent projectless conversations, private Scratchpads, and privacy-preserving legacy migration.",
+    "R-004": "The UI becomes project-first while reusing existing thread streaming, message history, files, artifacts, browser, sidecar, and human-input capabilities.",
+    "R-005": "DBTL cycles, transitions, gate evaluations, artifacts, approvals, revisions, projection hashes, and reconciliation state are database-authoritative.",
+    "R-006": "Human-gated transitions use a durable Review Inbox and cannot be satisfied by agents, schedules, service identities, or replayed approvals.",
+    "R-007": "Human members and AI agents form project teams with explicit capabilities, data scopes, budgets, write authority, escalation owners, and audit attribution.",
+    "R-008": "The breeding core is crop-neutral; maize is the first reference workflow and uses versioned JSONB or extension tables for crop-specific attributes.",
+    "R-009": "Learn output enters Project Working Memory and requires an immutable authorized human promotion into Validated Project Knowledge.",
+    "R-010": "Existing run lifecycle, event ordering, streaming, scheduling overlap, thread history, channels, and legacy routes remain compatible.",
+    "R-011": "Project, cycle, stage, actor, authorization, reconciliation, cost, accessibility, and operational states are observable and testable.",
+    "R-012": "Migrations, configuration, documentation, deployment checks, backfills, rollback, and support diagnostics ship with the implementation."
+  },
+  "resolved_builder_proposals": {
+    "workspace_security": "Treat workspace as the collaboration and security boundary. Workspace members may access workspace-visible Inbox threads; project resources additionally require project membership. System administrators manage deployment but receive no implicit project-data access.",
+    "legacy_visibility": "Backfill unassigned legacy threads into the Inbox as private-owner. Sharing or moving to a project is an explicit audited action.",
+    "agent_write_authority": "Agents propose by default. Direct structured-record writes require an assignment capability and remain audited; approvals, knowledge promotion, membership, and authorization-policy changes are human-only.",
+    "additional_human_gates": "Keep the existing GreenAgent design approval, evidence review, and knowledge approval gates. Add human approval for project membership/role changes, knowledge promotion, policy changes, reconciliation imports, and methodological schema-profile changes.",
+    "knowledge_standard": "Promotion requires a project reviewer, source and version provenance, scope, limitations, producing run, evidence grade, and an immutable authorization event.",
+    "reconciliation_policy": "Retry projection refresh three times with bounded backoff, then set reconciliation_blocked and alert project owners plus workspace administrators. Only project owners or designated reconciliation operators may rebuild the projection from PostgreSQL.",
+    "maize_v1_boundary": "Start with generic germplasm, pedigree, cross, population, site, season, environment, trial, plot, trait, observation, and selection records. Keep heterotic group, maturity group, inbred/hybrid class, and maize-specific trait metadata in a validated maize-v1 extension document."
+  },
+  "phases": [
+    {
+      "id": "B0-contracts-and-test-baseline",
+      "objective": "Freeze the database-authority, authorization, API, event, migration, and reconciliation contracts before feature code changes.",
+      "designer_requirement_ids": [
+        "R-001",
+        "R-002",
+        "R-003",
+        "R-005",
+        "R-010",
+        "R-012"
+      ],
+      "prerequisites": [
+        "Human-approved design package",
+        "Current backend and frontend test suites passing",
+        "A clean inventory of user-owned changes before implementation"
+      ],
+      "wet_lab_actions": [],
+      "dry_lab_actions": [
+        "Add cross-component contracts for workspace/project roles, conversation scope, DBTL synchronization states, actor envelopes, knowledge lifecycle, and maize-v1 extension metadata.",
+        "Write migration and compatibility tests first for nullable project/workspace associations, legacy threads, active runs, and scheduled tasks.",
+        "Define repository and API error semantics for forbidden, missing, revision conflict, active-run conflict, and reconciliation-blocked states.",
+        "Add a production preflight contract that rejects SQLite when production or multi-user mode is enabled.",
+        "Document the authoritative PostgreSQL and temporary .greenagent adapter boundary in root and module AGENTS documentation."
+      ],
+      "inputs": [
+        "plan/design/workspace-oriented-breeding-design-package.json",
+        "plan/design/workspace-oriented-breeding-system-design.md",
+        "Existing contracts directory",
+        "Existing migration, authorization, run, and thread tests"
+      ],
+      "outputs": [
+        "Versioned JSON contracts and TypeScript/Python types",
+        "Failing-first compatibility and boundary tests",
+        "Database-authority ADR and configuration contract",
+        "Approved error and state vocabulary"
+      ],
+      "parameters": {
+        "db_authority": "postgresql",
+        "sqlite_mode": "single-user-local-only",
+        "projection_adapter": "greenagent-temporary",
+        "feature_flags": [
+          "workspace_projects",
+          "global_inbox",
+          "dbtl_persistence",
+          "breeding_records",
+          "project_knowledge"
+        ]
+      },
+      "self_checks": [
+        "Contract fixtures parse in Python and TypeScript.",
+        "No application runtime module imports .greenagent paths directly.",
+        "Compatibility tests capture current thread ordering, active-run, scheduled-overlap, and legacy-route behavior.",
+        "Documentation states PostgreSQL authority and the SQLite production prohibition consistently."
+      ],
+      "tester_handoff": [
+        "Contract fixtures with expected valid and invalid examples",
+        "Baseline outputs for existing thread, run, and scheduler invariants",
+        "List of intentionally deferred behavior"
+      ],
+      "rollback": "Remove only the new contract fixtures, documentation, and failing-first tests; no runtime or schema state exists yet."
+    },
+    {
+      "id": "B1-workspace-project-persistence-and-rbac",
+      "objective": "Create the authoritative workspace/project collaboration core and enforce membership at repository and API boundaries.",
+      "designer_requirement_ids": [
+        "R-001",
+        "R-002",
+        "R-007",
+        "R-010",
+        "R-012"
+      ],
+      "prerequisites": [
+        "B0 contracts accepted",
+        "PostgreSQL integration test environment available",
+        "Migration head and create_all parity tests understood"
+      ],
+      "wet_lab_actions": [],
+      "dry_lab_actions": [
+        "Add ORM models, repositories, Alembic migration, and registration for workspaces, workspace_members, projects, project_members, project_agent_assignments, decisions, approvals, and activity_events.",
+        "Add project_id and workspace_id nullable associations to threads_meta, runs, scheduled_tasks, and relevant event/artifact metadata without breaking legacy rows.",
+        "Implement project-scoped authorization helpers that compose system authentication, workspace membership, project membership, and object ownership.",
+        "Add CRUD APIs for workspaces, projects, memberships, roles, and agent assignments with audit events.",
+        "Add production configuration preflight for PostgreSQL and explicit SQLite local limitations.",
+        "Add indexes and uniqueness constraints for membership, slugs, project status, project-scoped active work, and audit lookup."
+      ],
+      "inputs": [
+        "B0 contracts",
+        "deerflow.persistence Base and migration framework",
+        "Gateway authz and dependency injection seams",
+        "Existing UserRow, ThreadMetaRow, RunRow, AgentRow, and ScheduledTaskRow"
+      ],
+      "outputs": [
+        "Authoritative workspace/project schema",
+        "Repositories and API routers",
+        "Project-scoped RBAC and audit events",
+        "PostgreSQL production preflight",
+        "Migration and authorization test suite"
+      ],
+      "parameters": {
+        "workspace_roles": [
+          "owner",
+          "administrator",
+          "member",
+          "observer"
+        ],
+        "project_roles": [
+          "breeding_lead",
+          "scientist",
+          "data_steward",
+          "field_operator",
+          "reviewer",
+          "observer"
+        ],
+        "admin_project_access": "no_implicit_access",
+        "project_associations_initially_nullable": true
+      },
+      "self_checks": [
+        "Fresh create_all and Alembic upgrade produce equivalent schemas.",
+        "Cross-workspace and cross-project reads and writes fail closed.",
+        "Legacy rows with null workspace/project associations remain readable only under legacy rules.",
+        "Every mutation emits an actor-attributed activity event.",
+        "Production startup rejects SQLite while local single-user startup remains supported."
+      ],
+      "tester_handoff": [
+        "Migration upgrade/downgrade fixtures for SQLite local and PostgreSQL production",
+        "RBAC matrix covering every workspace and project role",
+        "Cross-tenant negative tests and audit-event fixtures",
+        "Index and concurrency invariants"
+      ],
+      "rollback": "Disable the feature flag, keep new tables and nullable columns intact, and route traffic through legacy thread ownership. Downgrade is permitted only before any workspace/project production data is created."
+    },
+    {
+      "id": "B2-global-inbox-and-conversation-scopes",
+      "objective": "Introduce a safe global human-agent Inbox, private Scratchpads, project conversations, and reversible legacy-thread classification.",
+      "designer_requirement_ids": [
+        "R-003",
+        "R-004",
+        "R-007",
+        "R-010",
+        "R-012"
+      ],
+      "prerequisites": [
+        "B1 workspace and membership APIs",
+        "Conversation-scope contract",
+        "Existing thread search, history, create, rename, delete, and path helpers mapped"
+      ],
+      "wet_lab_actions": [],
+      "dry_lab_actions": [
+        "Add scope_type, visibility, workspace_id, and nullable project_id to the thread metadata API and query layer.",
+        "Backfill legacy user threads idempotently as inbox/private-owner without changing message history or event sequence.",
+        "Add explicit audited operations to share an Inbox thread, make a private Scratchpad, move a thread into a project, or remove a project association back to Inbox when policy permits.",
+        "Extend thread creation, listing, search, branching, sidecars, schedules, channels, files, and export to preserve conversation scope.",
+        "Add workspace-agent participation rules and prevent project agents from entering workspace Inbox unless separately assigned at workspace scope.",
+        "Preserve existing /workspace/chats routes as compatibility redirects resolved through scope-aware path helpers."
+      ],
+      "inputs": [
+        "Workspace/project repositories",
+        "Existing thread metadata and LangGraph thread APIs",
+        "Existing recent-chat, channel, sidecar, scheduler, and file-link behavior"
+      ],
+      "outputs": [
+        "Conversation-scope persistence and APIs",
+        "Global Inbox and Scratchpad backend queries",
+        "Idempotent legacy classification command",
+        "Scope-aware path and authorization helpers",
+        "Privacy and compatibility tests"
+      ],
+      "parameters": {
+        "scope_types": [
+          "inbox",
+          "project",
+          "scratchpad"
+        ],
+        "visibility_values": [
+          "workspace",
+          "project-members",
+          "private-owner"
+        ],
+        "legacy_default_scope": "inbox",
+        "legacy_default_visibility": "private-owner",
+        "forced_project_assignment": false
+      },
+      "self_checks": [
+        "Legacy threads remain private and retain canonical event ordering.",
+        "Moving or sharing a thread is explicit, authorized, audited, and idempotent.",
+        "Projectless conversations continue to stream, schedule, branch, export, and use sidecars.",
+        "A project agent cannot access workspace Inbox without workspace assignment.",
+        "Old URLs resolve without redirect loops or remount-related stream loss."
+      ],
+      "tester_handoff": [
+        "Legacy backfill fixtures and rerun-idempotency evidence",
+        "Conversation scope and visibility authorization matrix",
+        "Path/redirect compatibility cases",
+        "Streaming and history regression results for every scope"
+      ],
+      "rollback": "Disable Inbox routing and continue resolving legacy URLs; retain scope metadata as ignored nullable fields. Never reverse a user's explicit share or project move automatically."
+    },
+    {
+      "id": "B3-workspace-first-frontend-shell",
+      "objective": "Make Projects and Inbox the primary workspace while reusing the stable chat and operational components.",
+      "designer_requirement_ids": [
+        "R-003",
+        "R-004",
+        "R-010",
+        "R-011"
+      ],
+      "prerequisites": [
+        "B1 project APIs",
+        "B2 conversation-scope APIs",
+        "Frontend route and query contracts generated"
+      ],
+      "wet_lab_actions": [],
+      "dry_lab_actions": [
+        "Change /workspace from a chat redirect to the project portfolio.",
+        "Add /workspace/inbox and nested /workspace/projects/[project_id] routes for Overview, DBTL, Work, Materials, Trials, Data, Knowledge, Team, Activity, Settings, and Sessions.",
+        "Refactor the sidebar into global workspace navigation plus selected-project navigation, keeping one clear accent and avoiding dashboard-card mosaics.",
+        "Reuse MessageList, InputBox, ChatBox, files, artifacts, browser, sidecar, goals, todos, and streaming hooks inside Inbox and project sessions.",
+        "Reuse project-folder candidates and FileTreePanel for project creation and a full-page Files/Project storage surface.",
+        "Add project portfolio, empty/loading/error/offline states, project switcher, global search entry, and responsive/mobile navigation.",
+        "Add TanStack Query domains and invalidation rules for workspaces, projects, memberships, Inbox threads, and project summaries."
+      ],
+      "inputs": [
+        "Approved visual/content/interaction thesis",
+        "Workspace/project and conversation APIs",
+        "Existing WorkspaceContent, WorkspaceSidebar, ChatPage, ChatBox, FileTreePanel, and query provider"
+      ],
+      "outputs": [
+        "Workspace portfolio and global Inbox",
+        "Nested project shell and navigation",
+        "Reused chat working sessions",
+        "Responsive project Files and Overview surfaces",
+        "Frontend unit and Playwright coverage"
+      ],
+      "parameters": {
+        "primary_nav": [
+          "Projects",
+          "Inbox",
+          "Review inbox",
+          "Agent library",
+          "Search",
+          "Settings"
+        ],
+        "project_nav": [
+          "Overview",
+          "DBTL",
+          "Work",
+          "Materials",
+          "Trials",
+          "Data",
+          "Knowledge",
+          "Team",
+          "Activity",
+          "Settings"
+        ],
+        "accent": "botanical-green",
+        "cards": "only_when_card_is_interaction",
+        "motion": "shared-layout-and-state-only"
+      },
+      "self_checks": [
+        "A user can reach Inbox or a project without entering a new chat.",
+        "Existing streams do not remount or lose state when thread IDs are created.",
+        "Headings and labels alone communicate project status and available actions.",
+        "Keyboard, screen-reader, mobile, reduced-motion, offline, loading, empty, and error states are covered.",
+        "Frontend check, unit tests, and mocked Playwright flows pass."
+      ],
+      "tester_handoff": [
+        "Route and navigation map",
+        "Desktop/mobile screenshots or recordings",
+        "Accessibility checks and keyboard paths",
+        "Prototype orientation-task fixtures for H0/H1 evaluation",
+        "Legacy route regression matrix"
+      ],
+      "rollback": "Restore the /workspace legacy redirect and old sidebar behind a feature flag while retaining new routes for direct access."
+    },
+    {
+      "id": "B4-dbtl-persistence-reconciliation-and-review",
+      "objective": "Move DBTL product state into PostgreSQL, isolate GreenAgent behind temporary adapters, and expose durable human review plus blocked reconciliation.",
+      "designer_requirement_ids": [
+        "R-005",
+        "R-006",
+        "R-010",
+        "R-011",
+        "R-012"
+      ],
+      "prerequisites": [
+        "B1 project persistence and RBAC",
+        "B3 project shell",
+        "Approved DBTL contracts and existing GreenAgent CLI adapter tests"
+      ],
+      "wet_lab_actions": [],
+      "dry_lab_actions": [
+        "Add DBTL cycle, transition intent, gate evaluation, artifact, review, and synchronization ORM models, repositories, migrations, and APIs.",
+        "Implement DBTLPolicyEvaluator and DBTLProjectionAdapter interfaces; keep .greenagent access inside the temporary adapter only.",
+        "Implement monotonic db_revision, canonical projection hash, idempotency keys, optimistic expected-revision checks, and transactional transition commits.",
+        "Implement post-commit projection refresh, three bounded retries, mismatch detection, reconciliation_blocked, owner/operator alerts, and database-led rebuild.",
+        "Persist complete policy input/output, GreenAgent version, artifact hashes, actor, authorization, and activity events.",
+        "Prevent agents, schedules, service identities, and replayed authorization references from satisfying human gates.",
+        "Build project DBTL lifecycle, durable Review Inbox, evidence/artifact diff, transition actions, and Reconciliation blocked inspector.",
+        "Emit stage lifecycle through task_* events and attach project/cycle/stage/revision metadata to tracing."
+      ],
+      "inputs": [
+        "Approved strict reconciliation contract",
+        "Existing dbtl orchestrator and GreenAgent CLI wrapper",
+        "RunManager, RunEventStore, human-input protocol, Console API, notifications, and tracing callbacks"
+      ],
+      "outputs": [
+        "Database-authoritative DBTL schema and APIs",
+        "Temporary GreenAgent evaluator/projection adapter",
+        "Reconciler and operational alerts",
+        "DBTL timeline and Review Inbox",
+        "Policy, concurrency, failure-injection, and authorization tests"
+      ],
+      "parameters": {
+        "sync_states": [
+          "in_sync",
+          "projection_pending",
+          "reconciliation_blocked",
+          "projection_retired"
+        ],
+        "projection_retry_count": 3,
+        "projection_retry_strategy": "bounded-exponential-backoff",
+        "rebuild_direction": "postgresql-to-projection-only",
+        "transition_write": "single-postgresql-transaction",
+        "human_authorization_replay": "deny"
+      },
+      "self_checks": [
+        "A committed PostgreSQL revision is never overwritten by a stale file.",
+        "Every injected write failure reaches the specified synchronization state.",
+        "Further transitions stop while reconciliation_blocked but read-only history remains available.",
+        "Projection deletion and corruption are repaired only from PostgreSQL.",
+        "Human approvals are identity-bound, single-use, and immutable.",
+        "DBTL stage events and traces include project, cycle, stage, and revision."
+      ],
+      "tester_handoff": [
+        "State-machine transition table and human-gate matrix",
+        "Failure-injection cases for each transition write step",
+        "Concurrent transition and idempotency results",
+        "Projection mismatch/rebuild evidence",
+        "Review Inbox accessibility and authorization cases"
+      ],
+      "rollback": "Disable database-driven DBTL execution and leave persisted cycles read-only. Do not re-promote .greenagent to authority; operate the legacy DBTL run target only in explicit development mode until repaired."
+    },
+    {
+      "id": "B5-team-agents-automation-and-activity",
+      "objective": "Turn human members and AI agents into an auditable project team with scoped work, automation, notifications, and activity.",
+      "designer_requirement_ids": [
+        "R-002",
+        "R-006",
+        "R-007",
+        "R-010",
+        "R-011"
+      ],
+      "prerequisites": [
+        "B1 assignments and membership persistence",
+        "B2 workspace Inbox scope",
+        "B4 DBTL review and transition APIs"
+      ],
+      "wet_lab_actions": [],
+      "dry_lab_actions": [
+        "Add project Team UI for humans and reusable agent assignments.",
+        "Enforce assignment capabilities for allowed tools, data scopes, writable object types, budgets, active dates, autonomy, and escalation owner.",
+        "Default agents to propose-only; require explicit assignment capability for direct structured-record writes.",
+        "Add durable project work items, comments, decisions, mentions, and activity views using actor envelopes.",
+        "Add project_id, cycle_id, and work_item_id to schedules while preserving the existing run lifecycle and overlap index guarantees.",
+        "Route pending gates and handoffs through existing notification and channel mechanisms with explicit Inbox/project routing.",
+        "Filter Console API reporting by workspace/project and expose run, token, model, cost, failure, and agent-stage summaries."
+      ],
+      "inputs": [
+        "Project membership and agent assignment models",
+        "Existing AgentRow/config, scheduler, channels, Console API, notifications, and run metadata"
+      ],
+      "outputs": [
+        "Project Team and assignment management",
+        "Capability-scoped agent execution context",
+        "Project work, decisions, comments, mentions, and activity",
+        "Project/cycle-aware schedules and notifications",
+        "Project operations and cost reporting"
+      ],
+      "parameters": {
+        "agent_default_write_mode": "propose-only",
+        "human_only_actions": [
+          "membership changes",
+          "role changes",
+          "knowledge promotion",
+          "authorization policy changes",
+          "reconciliation imports",
+          "methodological schema-profile changes"
+        ],
+        "scheduled_human_gate_behavior": "pause-and-notify",
+        "overlap_policy": "preserve-existing-skip-invariant"
+      },
+      "self_checks": [
+        "Agent capability and data-scope denials fail closed.",
+        "Every work, decision, automation, and notification event has actor and run attribution.",
+        "Scheduled runs pause at human gates and never approve them.",
+        "Existing scheduled overlap and active-run database constraints remain atomic.",
+        "Project reports exclude unauthorized projects and include DBTL correlation identifiers."
+      ],
+      "tester_handoff": [
+        "Human/agent capability matrix",
+        "Scheduler gate and overlap concurrency cases",
+        "Channel/notification routing cases",
+        "Activity and audit completeness fixtures",
+        "Console project-filtering evidence"
+      ],
+      "rollback": "Disable Team mutations and project-aware automation while retaining assignments and activity as read-only audit data. Fall back to user-owned custom agents without widening access."
+    },
+    {
+      "id": "B6-generic-breeding-core-and-maize-v1",
+      "objective": "Add authoritative crop-neutral breeding records and validate the extension mechanism against a maize reference workflow.",
+      "designer_requirement_ids": [
+        "R-008",
+        "R-011",
+        "R-012"
+      ],
+      "prerequisites": [
+        "B1 project authorization",
+        "B5 project team write capabilities",
+        "Approved maize-v1 Builder proposal remains within the generic-core boundary"
+      ],
+      "wet_lab_actions": [],
+      "dry_lab_actions": [
+        "Add project-scoped ORM models, repositories, migrations, and APIs for germplasm, pedigree edges, crosses, populations, sites, seasons, environments, trials, plots, traits, observations, and selections.",
+        "Add immutable source/import metadata, record revisions, supersession, validation status, and actor/run attribution.",
+        "Define a versioned extension-document contract and maize-v1 JSON Schema for heterotic group, maturity group, inbred/hybrid class, and maize trait metadata.",
+        "Add CSV/API ingestion staging, validation reports, duplicate detection, partial-failure handling, and explicit commit.",
+        "Add Materials, Trials, and Data project views using dense tables, filters, relationship navigation, validation status, and context inspectors.",
+        "Seed synthetic maize reference fixtures only; do not import private research data."
+      ],
+      "inputs": [
+        "Generic breeding entity contract",
+        "Maize-v1 extension proposal",
+        "Project RBAC and agent write capabilities",
+        "Approved synthetic reference fixtures"
+      ],
+      "outputs": [
+        "Authoritative generic breeding schema and APIs",
+        "Maize-v1 extension schema and validators",
+        "Staged ingestion and validation workflow",
+        "Materials, Trials, and Data UI",
+        "Synthetic maize end-to-end fixtures"
+      ],
+      "parameters": {
+        "core_crop_specificity": "none",
+        "reference_crop": "maize",
+        "extension_storage": "postgresql-jsonb-or-versioned-extension-table",
+        "extension_profile": "maize-v1",
+        "source_data": "synthetic-until-separately-approved",
+        "historical_mutation": "supersede-never-overwrite"
+      },
+      "self_checks": [
+        "All records require project authorization and provenance.",
+        "Pedigree cycles and invalid cross/population relationships are rejected.",
+        "Wrong-version or invalid maize extensions fail with field-level diagnostics.",
+        "Ingestion preview cannot mutate authoritative records.",
+        "Synthetic maize workflow can progress from germplasm through selection with full attribution."
+      ],
+      "tester_handoff": [
+        "Entity and relationship invariants",
+        "Maize-v1 known-valid and known-invalid fixtures",
+        "Ingestion partial-failure and idempotency cases",
+        "Authorization and provenance matrix",
+        "Materials/Trials/Data accessibility cases"
+      ],
+      "rollback": "Disable breeding-record mutations and keep imported records read-only. Never delete authoritative records during rollback; supersede invalid imports through audited remediation."
+    },
+    {
+      "id": "B7-working-memory-and-validated-knowledge",
+      "objective": "Implement permission-filtered project knowledge with a strict Working Memory to human-approved Validated Knowledge promotion pipeline.",
+      "designer_requirement_ids": [
+        "R-006",
+        "R-009",
+        "R-011",
+        "R-012"
+      ],
+      "prerequisites": [
+        "B1 project RBAC",
+        "B4 durable human reviews",
+        "B6 authoritative breeding records and provenance"
+      ],
+      "wet_lab_actions": [],
+      "dry_lab_actions": [
+        "Add knowledge source, document, chunk, claim, link, retrieval event, Working Memory, promotion review, supersession, and retraction models and migrations.",
+        "Implement source ingestion with project/data-use scope, document version, checksum, parser status, and citation locations.",
+        "Implement permission filtering before full-text ranking; keep embedding retrieval behind an optional interface.",
+        "Write Learn-stage output only to provisional Project Working Memory with producing run, agent, sources, limitations, and evidence grade.",
+        "Add a dedicated identity-bound promotion command that creates an immutable review event and Validated Project Knowledge version.",
+        "Default authoritative retrieval to validated knowledge plus structured records; require explicit opt-in and warning labels for Working Memory.",
+        "Build Knowledge sources, Working Memory review queue, Validated Knowledge, citation, supersession, retraction, and insufficient-evidence UI."
+      ],
+      "inputs": [
+        "Existing personal memory backend and API as a separation boundary",
+        "Project review and actor authorization infrastructure",
+        "Breeding record provenance",
+        "Approved evidence-grade and reviewer proposal"
+      ],
+      "outputs": [
+        "Project knowledge schema and ingestion",
+        "Permission-filtered full-text retrieval",
+        "Working Memory and promotion review pipeline",
+        "Validated Knowledge UI and citations",
+        "Hallucination-pollution and cross-project isolation tests"
+      ],
+      "parameters": {
+        "working_memory_authority": "provisional",
+        "validated_knowledge_authority": "human-promoted",
+        "default_retrieval": "validated-plus-structured-records",
+        "provisional_retrieval": "explicit-opt-in-with-warning",
+        "automatic_promotion": false,
+        "embedding_requirement": "optional"
+      },
+      "self_checks": [
+        "Learn-stage runs cannot create validated records.",
+        "Promotion is reviewer-authorized, single-purpose, immutable, and evidence-versioned.",
+        "Permission filtering occurs before ranking or generation.",
+        "Every answer has source/version citations or returns insufficient evidence.",
+        "Personal memory never appears in project knowledge without explicit reviewed import.",
+        "Superseded and retracted knowledge is excluded from default retrieval."
+      ],
+      "tester_handoff": [
+        "Knowledge lifecycle state-machine cases",
+        "Cross-project retrieval attacks",
+        "Promotion authorization and replay cases",
+        "Citation/source-version fixtures",
+        "Insufficient-evidence and retraction behavior"
+      ],
+      "rollback": "Disable project knowledge generation and retrieval while retaining sources, Working Memory, and review records read-only. Never downgrade Working Memory into personal memory or promote it during rollback."
+    },
+    {
+      "id": "B8-migration-hardening-and-release-readiness",
+      "objective": "Prove safe migration, operational recovery, accessibility, performance, and end-to-end behavior before the workspace-first experience becomes the default.",
+      "designer_requirement_ids": [
+        "R-001",
+        "R-003",
+        "R-004",
+        "R-005",
+        "R-006",
+        "R-008",
+        "R-009",
+        "R-010",
+        "R-011",
+        "R-012"
+      ],
+      "prerequisites": [
+        "B1 through B7 implemented and self-tested",
+        "Production-like PostgreSQL and Redis environment",
+        "Approved rollback runbook and support-bundle redaction rules"
+      ],
+      "wet_lab_actions": [],
+      "dry_lab_actions": [
+        "Run idempotent backfills for workspace defaults, private Inbox legacy threads, project links, project-aware runs/schedules, and database-derived GreenAgent projections.",
+        "Add startup and periodic reconciliation observability, alerts, support-bundle fields, and operator runbooks.",
+        "Run full backend, frontend, migration, blocking-IO, E2E, accessibility, concurrency, failure-injection, and authorization suites.",
+        "Measure project portfolio, Inbox, DBTL timeline, breeding tables, and knowledge search against defined latency and scale targets.",
+        "Run current-versus-project-first orientation study fixtures for H0/H1 and record limitations without interpreting scientific outcomes.",
+        "Update README, root/module AGENTS, configuration examples, install/doctor/support guidance, and release notes.",
+        "Keep the old workspace redirect and sidebar behind a release rollback flag until migration and acceptance evidence are approved."
+      ],
+      "inputs": [
+        "All prior phase outputs",
+        "Synthetic maize project fixture",
+        "Legacy thread/run/schedule fixtures",
+        "Production-like PostgreSQL/Redis",
+        "Tester acceptance matrix"
+      ],
+      "outputs": [
+        "Idempotent backfill and reconciliation evidence",
+        "Complete self-test report",
+        "Operational dashboards, alerts, and runbooks",
+        "Accessibility/performance evidence",
+        "Updated documentation and release rollback controls",
+        "Builder-to-Tester handoff package"
+      ],
+      "parameters": {
+        "default_enablement": "after-tester-and-human-approval",
+        "legacy_ui_rollback_flag": true,
+        "destructive_backfill": false,
+        "production_database": "postgresql",
+        "test_data": "synthetic-and-redacted-only"
+      },
+      "self_checks": [
+        "Backfills are idempotent and never broaden legacy visibility.",
+        "Database/projection mismatch is detectable and recoverable after restart.",
+        "All required test commands pass with no undocumented skips.",
+        "Workspace-first routes meet accessibility and agreed latency targets.",
+        "Support artifacts expose revisions and errors without credentials or private research data.",
+        "Documentation matches implemented configuration, architecture, and rollback."
+      ],
+      "tester_handoff": [
+        "Complete changed-file and requirement traceability matrix",
+        "Self-test command outputs and environment description",
+        "Known limitations and implementation drift report",
+        "Migration/backfill/reconciliation evidence",
+        "Rollback rehearsal evidence",
+        "Orientation-study fixtures without Designer-favoring interpretation"
+      ],
+      "rollback": "Disable workspace-first default routing and all mutation feature flags, retain new data read-only, continue legacy chat operations, and repair forward. Do not downgrade production schemas after irreversible user data exists."
+    }
+  ],
+  "cross_phase_rules": [
+    "Backend features and bug fixes are test-driven; write failing tests before implementation.",
+    "No phase begins until prerequisites and prior self-checks pass.",
+    "Any methodological, authorization, data-use, wet-lab, or scope drift is recorded and routed to its required human gate.",
+    "Each migration supports create_all parity, Alembic upgrade, legacy data, and production PostgreSQL.",
+    "Every user-facing change updates README and every architecture change updates the relevant AGENTS file.",
+    "No private research data is introduced; maize fixtures are synthetic until separately approved.",
+    "Builder does not interpret scientific results or approve its own output."
+  ],
+  "human_input_needed": [
+    "Cross-check and approve this phased action plan before the cycle transitions from build-planning to building.",
+    "Confirm that the resolved Builder proposals remain within the approved design or request specific changes.",
+    "Authorize project-file mutation for implementation after plan approval."
+  ],
+  "review_status": "approved"
+}

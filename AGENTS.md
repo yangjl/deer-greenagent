@@ -74,6 +74,29 @@ Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
 - Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. The key is honored only for internally-authenticated callers (the scheduler launch path); client-supplied `context.non_interactive` is dropped.
 
+Breeding-workspace note:
+- **The project owns the data, in a human-visible folder.** A project's
+  workspace is a real directory under `config.yaml -> projects.root` (e.g.
+  `~/Documents/projects/G2F`) that the human can browse in Finder; the sandbox
+  mounts it for every conversation in the project, the file API lists it
+  (`GET /api/projects/{id}/files`), and membership is a durable record
+  (`threads_meta.project_id`, written via `PUT /api/projects/{id}/threads/{thread}`
+  or validated first-run intent). Conversations are views onto that folder,
+  not its owner. See [backend/AGENTS.md](backend/AGENTS.md) for the
+  storage/scope/run-context triple that must stay aligned.
+- The authenticated product surface is project-first with three rails: sidebar
+  projects, a project rail (DBTL cycles, per-cycle to-dos, conversations), and
+  chat in the main area. Project workspaces live at `/workspace/<project-slug>`
+  and their conversations at `/workspace/<project-slug>/<thread_id>`; opening a
+  project lands directly in a conversation. Conversations belong to a project
+  through thread metadata `project_id`; legacy projectless conversations stay
+  at `/workspace/chats`. Cycles/to-dos are a browser-local review projection —
+  DBTL orchestration is deferred per the 2026-07-25 foundation-demo rescope.
+- The shared SQL persistence layer owns `workspaces`, `workspace_members`, and
+  `projects`; membership is enforced before project access. PostgreSQL is the
+  production authority, while `.greenagent` remains an application-independent
+  development protocol and projection.
+
 ## Commands: Root vs. Module
 
 **Root `make` targets drive the whole stack** (run from the repo root):
