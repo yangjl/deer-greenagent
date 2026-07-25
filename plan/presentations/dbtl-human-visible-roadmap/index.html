@@ -1,0 +1,721 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>GreenAgent DBTL · Human-Visible Implementation Roadmap</title>
+    <link rel="stylesheet" href="assets/fonts.css" />
+    <link rel="stylesheet" href="assets/base.css" />
+    <link rel="stylesheet" href="assets/animations/animations.css" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body class="tpl-tech-sharing">
+    <div class="deck">
+      <section class="slide cover" data-title="Cover">
+        <p class="kicker">greenagent / builder roadmap / 2026-07-25</p>
+        <h1 class="h1 anim-fade-up" data-anim="fade-up">
+          DBTL that humans<br />
+          can <span class="grad-text">see, test, and trust</span>
+        </h1>
+        <p class="lede mt-m">
+          Nine dependency-ordered slices for a project-centric AI research
+          platform.
+        </p>
+        <div class="title-tags mt-l">
+          <span class="tag">PostgreSQL authority</span>
+          <span class="tag">DeerMem scopes</span>
+          <span class="tag">LangGraph stages</span>
+          <span class="tag">plant-science validity</span>
+        </div>
+        <div class="deck-footer">
+          <span class="mono">internal design + builder review</span>
+          <span class="slide-number" data-current="1" data-total="12"></span>
+        </div>
+        <div class="notes">
+          This deck is the visual companion to the Builder plan. The core
+          promise is that no implementation phase is considered complete if it
+          can only be verified through database inspection or logs. Each phase
+          has a user-visible state, an interaction, a seeded demonstration, and
+          a human go/no-go decision.
+        </div>
+      </section>
+
+      <section class="slide" data-title="Sequence">
+        <p class="kicker">dependency-order.yml</p>
+        <h2 class="h2">Autonomy comes last.</h2>
+        <p class="lede mt-s">
+          The graph may only build on foundations already proven in the UI.
+        </p>
+        <div class="sequence mt-l anim-fade-up" data-anim="fade-up">
+          <div class="sequence-group trust">
+            <span class="phase-id">P0</span>
+            <strong>Freeze</strong>
+            <small>readiness</small>
+          </div>
+          <div class="arrow">→</div>
+          <div class="sequence-group trust">
+            <span class="phase-id">P1</span>
+            <strong>Trust</strong>
+            <small>DB + gates</small>
+          </div>
+          <div class="arrow">→</div>
+          <div class="sequence-group memory">
+            <span class="phase-id">P2</span>
+            <strong>Scope</strong>
+            <small>memory</small>
+          </div>
+          <div class="arrow">→</div>
+          <div class="sequence-group manual">
+            <span class="phase-id">P3</span>
+            <strong>Prove</strong>
+            <small>manual DBTL</small>
+          </div>
+          <div class="arrow">→</div>
+          <div class="sequence-group graph">
+            <span class="phase-id">P4–5</span>
+            <strong>Route</strong>
+            <small>proposal + graph</small>
+          </div>
+          <div class="arrow">→</div>
+          <div class="sequence-group science">
+            <span class="phase-id">P6–8</span>
+            <strong>Research</strong>
+            <small>evidence + knowledge</small>
+          </div>
+        </div>
+        <div class="rule-grid mt-l">
+          <div class="rule">
+            <span>01</span>
+            <p>Trust the database and gates before graph execution.</p>
+          </div>
+          <div class="rule">
+            <span>02</span>
+            <p>Only a human upgrades ordinary work into a durable cycle.</p>
+          </div>
+          <div class="rule">
+            <span>03</span>
+            <p>Reconcile data before Build; validity outranks accuracy.</p>
+          </div>
+        </div>
+        <div class="deck-footer">
+          <span class="mono">hard dependencies, not calendar milestones</span>
+          <span class="slide-number" data-current="2" data-total="12"></span>
+        </div>
+        <div class="notes">
+          The roadmap is intentionally ordered around risk. P0 through P3 prove
+          authority and review behavior without classifier or graph complexity.
+          P4 introduces only a no-record proposal. P5 adds the thin supervisor.
+          Scientific execution begins in P6 only after the earlier contracts
+          pass.
+        </div>
+      </section>
+
+      <section class="slide" data-title="Shared UI">
+        <p class="kicker">interaction-shell.tsx</p>
+        <h2 class="h2">Extend the project workspace.</h2>
+        <div class="workspace-shell mt-l anim-fade-up" data-anim="fade-up">
+          <div class="rail primary-rail">
+            <div class="brand">GreenAgent</div>
+            <div class="rail-label">PROJECTS</div>
+            <div class="project active">▱ G2F</div>
+            <div class="project">▱ Drought trial</div>
+            <div class="project">▱ test2</div>
+            <div class="rail-note">Projects + files stay here</div>
+          </div>
+          <div class="rail cycle-rail">
+            <div class="rail-label">CYCLES</div>
+            <div class="cycle active">↻ Cycle 01</div>
+            <div class="stage done">✓ Design</div>
+            <div class="stage blocked">! Reconciliation</div>
+            <div class="stage locked">· Build</div>
+            <div class="stage locked">· Test</div>
+            <div class="stage locked">· Learn</div>
+            <div class="rail-label lower">CONVERSATIONS</div>
+            <div class="conversation">Which project…</div>
+          </div>
+          <div class="main-area">
+            <div class="app-topbar">
+              <span>G2F · Cycle 01</span>
+              <span class="status-chip warning">Blocked</span>
+            </div>
+            <div class="main-copy">
+              <span class="eyebrow">DATA RECONCILIATION</span>
+              <h3>Every decision has a state, reason, and evidence trail.</h3>
+              <div class="surface-row">
+                <div class="surface">
+                  <b>State</b>
+                  <span>What the system believes</span>
+                </div>
+                <div class="surface">
+                  <b>Action</b>
+                  <span>What the user may do</span>
+                </div>
+                <div class="surface">
+                  <b>Evidence</b>
+                  <span>Why it is allowed</span>
+                </div>
+                <div class="surface">
+                  <b>Recovery</b>
+                  <span>How to unblock safely</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="deck-footer">
+          <span class="mono">same rails · same chat · new durable state</span>
+          <span class="slide-number" data-current="3" data-total="12"></span>
+        </div>
+        <div class="notes">
+          The first rail remains the single home for project files. The second
+          rail evolves from localStorage cycle planning into durable project
+          state. Chat remains the default main view. Selecting a DBTL item opens
+          structured detail without losing the conversation context.
+        </div>
+      </section>
+
+      <section class="slide" data-title="P0–P1 Trust">
+        <p class="kicker">phases / 0–1</p>
+        <h2 class="h2">Make foundation risk visible.</h2>
+        <div class="grid g2 mt-l">
+          <div>
+            <div class="phase-banner">
+              <span class="phase-id">P0</span>
+              <div>
+                <b>Freeze unsafe DBTL</b>
+                <small>read-only inventory, no repair action</small>
+              </div>
+            </div>
+            <div class="settings-panel mt-m">
+              <div class="panel-head">
+                <b>DBTL readiness</b>
+                <span class="status-chip warning">Audit only</span>
+              </div>
+              <div class="check-row">
+                <span>Experimental orchestrator</span><b>Frozen</b>
+              </div>
+              <div class="check-row">
+                <span>Database authority</span><b class="bad">Not verified</b>
+              </div>
+              <div class="check-row">
+                <span>Existing records</span><b class="warn">3 need review</b>
+              </div>
+              <button class="button secondary">Inspect existing records</button>
+            </div>
+          </div>
+          <div>
+            <div class="phase-banner">
+              <span class="phase-id">P1</span>
+              <div>
+                <b>Trust PostgreSQL + gates</b>
+                <small>typed, identity-bound, revision-bound</small>
+              </div>
+            </div>
+            <div class="settings-panel mt-m">
+              <div class="panel-head">
+                <b>Foundation readiness</b>
+                <span class="status-chip danger">7 / 9</span>
+              </div>
+              <div class="check-row ok">
+                <span>✓ Schema parity</span><b>Passed</b>
+              </div>
+              <div class="check-row ok">
+                <span>✓ Review identity</span><b>Verified</b>
+              </div>
+              <div class="check-row">
+                <span>✕ Projection consistency</span
+                ><b class="bad">2 mismatches</b>
+              </div>
+              <button class="button disabled">Approve cutover</button>
+            </div>
+          </div>
+        </div>
+        <div class="callout mt-l">
+          <b>Human test:</b> inject a mismatch and replayed approval; cutover
+          stays impossible until both are resolved and revalidated.
+        </div>
+        <div class="deck-footer">
+          <span class="mono">backend foundation gets an operator UX</span>
+          <span class="slide-number" data-current="4" data-total="12"></span>
+        </div>
+        <div class="notes">
+          P0 freezes the unsafe path and exposes a read-only inventory. P1 turns
+          the same Settings section into a foundation checklist. PostgreSQL
+          cutover is a specific human decision: after technical validation, it
+          makes PostgreSQL the DBTL authority. Until then, later phases remain
+          blocked.
+        </div>
+      </section>
+
+      <section class="slide" data-title="P2 Memory">
+        <p class="kicker">phase / 2</p>
+        <h2 class="h2">Sharing memory is a review action.</h2>
+        <div class="memory-layout mt-l">
+          <div class="memory-stats">
+            <div class="metric">
+              <strong>24</strong><span>private legacy facts</span>
+            </div>
+            <div class="metric accent">
+              <strong>7</strong><span>suggested for G2F</span>
+            </div>
+            <div class="metric">
+              <strong>2</strong><span>need classification</span>
+            </div>
+          </div>
+          <div class="review-card anim-fade-up" data-anim="fade-up">
+            <div class="review-head">
+              <span class="tag">legacy · private</span>
+              <span class="mono">fact 3 / 7</span>
+            </div>
+            <h3>Yield units were standardized to Mg/ha for the 2024 trial.</h3>
+            <div class="fact-meta">
+              <span>Source bucket</span>
+              <b>user/jyang21 · legacy-project-4</b>
+              <span>Suggested scope</span>
+              <b>G2F project working memory</b>
+              <span>Reason</span>
+              <b>matched authoritative project/user pair</b>
+              <span>Checksum</span>
+              <b class="mono">98f1…a27c</b>
+            </div>
+            <div class="button-row">
+              <button class="button secondary">Keep private</button>
+              <button class="button primary">Share with G2F</button>
+              <button class="button secondary">Quarantine</button>
+            </div>
+          </div>
+        </div>
+        <div class="privacy-rule mt-l">
+          <span>PERSONAL</span><i>human approval</i><span>PROJECT</span
+          ><i>separate later action</i><span>SELECTED PROJECTS</span>
+        </div>
+        <div class="deck-footer">
+          <span class="mono"
+            >no bulk “share all” · unknown buckets quarantine</span
+          >
+          <span class="slide-number" data-current="5" data-total="12"></span>
+        </div>
+        <div class="notes">
+          Existing DeerMem facts do not become shared merely because a folder is
+          now called a project. The migration view gives each user control over
+          their own legacy facts. A two-user test proves that only explicitly
+          shared facts become project-retrievable.
+        </div>
+      </section>
+
+      <section class="slide" data-title="P3 Manual DBTL">
+        <p class="kicker">phase / 3</p>
+        <h2 class="h2">Prove DBTL manually first.</h2>
+        <div class="manual-flow mt-l anim-fade-up" data-anim="fade-up">
+          <div class="timeline">
+            <div class="timeline-item done">
+              <span>✓</span>
+              <div><b>Design</b><small>approved · rev 2</small></div>
+            </div>
+            <div class="timeline-item active">
+              <span>!</span>
+              <div><b>Data reconciliation</b><small>1 blocker</small></div>
+            </div>
+            <div class="timeline-item locked">
+              <span>·</span>
+              <div><b>Build</b><small>locked</small></div>
+            </div>
+            <div class="timeline-item locked">
+              <span>·</span>
+              <div><b>Test</b><small>locked</small></div>
+            </div>
+            <div class="timeline-item locked">
+              <span>·</span>
+              <div><b>Learn</b><small>locked</small></div>
+            </div>
+          </div>
+          <div class="stage-panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">DATA RECONCILIATION</span>
+                <h3>Cycle 01 · revision 4</h3>
+              </div>
+              <span class="status-chip danger">Blocked</span>
+            </div>
+            <div class="blocker">
+              <b>Hybrid ID coverage</b>
+              <span
+                >19 records cannot join to the curated germplasm table.</span
+              >
+              <a>Open evidence →</a>
+            </div>
+            <div class="activity-line">
+              <span>Human review required</span>
+              <span>actor + revision recorded</span>
+            </div>
+            <div class="button-row end">
+              <button class="button secondary">Request changes</button>
+              <button class="button disabled">Approve ready for Build</button>
+            </div>
+          </div>
+        </div>
+        <div class="callout mt-l">
+          Restart the stack after approval: the same cycle, revision, blocker,
+          reviewer, and activity timeline must return.
+        </div>
+        <div class="deck-footer">
+          <span class="mono"
+            >database-backed rail · no localStorage authority</span
+          >
+          <span class="slide-number" data-current="6" data-total="12"></span>
+        </div>
+        <div class="notes">
+          P3 is the decisive foundation proof. Humans create and advance a cycle
+          through the durable contracts, with no classifier and no stage agents.
+          The same sequence must survive process restart, duplicate submission,
+          and concurrent review.
+        </div>
+      </section>
+
+      <section class="slide" data-title="P4 Proposal">
+        <p class="kicker">phase / 4</p>
+        <h2 class="h2">Recommend DBTL. Never silently upgrade.</h2>
+        <div class="chat-frame mt-l">
+          <div class="chat-header">G2F · ordinary project conversation</div>
+          <div class="user-bubble">
+            Design and validate a genomic-selection experiment across the 2024
+            environments.
+          </div>
+          <div class="proposal-card anim-fade-up" data-anim="fade-up">
+            <div class="proposal-title">
+              <span class="proposal-icon">↻</span>
+              <div>
+                <b>This looks like multi-step research work.</b>
+                <span>No cycle has been created yet.</span>
+              </div>
+            </div>
+            <div class="proposal-body">
+              <span class="eyebrow">PROPOSED OBJECTIVE</span>
+              <p>
+                Compare genomic-selection approaches across target environments
+                with explicit validity checks.
+              </p>
+              <span class="eyebrow">MISSING BEFORE START</span>
+              <div class="missing">
+                <span>target trait</span><span>season range</span
+                ><span>validation expectation</span>
+              </div>
+            </div>
+            <div class="button-row">
+              <button class="button primary">Start DBTL setup</button>
+              <button class="button secondary">Keep as ordinary chat</button>
+              <button class="button secondary">Not sure</button>
+            </div>
+          </div>
+        </div>
+        <div class="test-strip mt-l">
+          <span>Explain README → ordinary</span>
+          <span>Create chart → ordinary</span>
+          <span>Research program → proposal</span>
+          <span>Dismiss → zero DBTL rows</span>
+        </div>
+        <div class="deck-footer">
+          <span class="mono">shadow telemetry ≠ domain records</span>
+          <span class="slide-number" data-current="7" data-total="12"></span>
+        </div>
+        <div class="notes">
+          The explicit warning is part of the product contract, not optional
+          copy. No cycle exists while this card is visible. Dismissal,
+          ignorance, or “ordinary chat” leaves no DBTL domain record. Shadow
+          classifier telemetry lives separately.
+        </div>
+      </section>
+
+      <section class="slide" data-title="P5 Supervisor">
+        <p class="kicker">phase / 5</p>
+        <h2 class="h2">A thin graph, not a new chat product.</h2>
+        <div class="supervisor-layout mt-l">
+          <div class="graph-map">
+            <div class="node input">Project request</div>
+            <div class="connector"></div>
+            <div class="node supervisor">Project supervisor</div>
+            <div class="branch-row">
+              <div>
+                <span class="branch-line"></span>
+                <div class="node ordinary">Ordinary lead agent</div>
+              </div>
+              <div>
+                <span class="branch-line"></span>
+                <div class="node clarify">Clarify / propose</div>
+              </div>
+              <div>
+                <span class="branch-line"></span>
+                <div class="node continue">Continue cycle</div>
+              </div>
+            </div>
+          </div>
+          <div class="composer-mock">
+            <div class="chat-copy">
+              Main chat rendering, artifacts, tasks, goals, and history remain
+              unchanged.
+            </div>
+            <div class="context-chip">Ordinary project work⌄</div>
+            <div class="composer"><span>Ask GreenAgent…</span><b>↑</b></div>
+            <div class="preserve-grid">
+              <span>✓ project mount</span><span>✓ memory scope</span
+              ><span>✓ streaming</span><span>✓ cancellation</span
+              ><span>✓ artifacts</span><span>✓ titles</span>
+            </div>
+          </div>
+        </div>
+        <div class="callout mt-l">
+          The context chip affects the next request only; every routing choice
+          is echoed in run activity.
+        </div>
+        <div class="deck-footer">
+          <span class="mono"
+            >supervisor routes · existing lead agent works</span
+          >
+          <span class="slide-number" data-current="8" data-total="12"></span>
+        </div>
+        <div class="notes">
+          The supervisor has only enough intelligence to choose the correct
+          branch. It does not replace the lead agent or own scientific stage
+          logic. The regression review deliberately mixes ordinary work,
+          proposal dismissal, cycle continuation, stop, and regenerate in one
+          conversation.
+        </div>
+      </section>
+
+      <section class="slide" data-title="P6 Reconciliation">
+        <p class="kicker">phase / 6</p>
+        <h2 class="h2">Reconcile inputs before Build.</h2>
+        <div class="recon-panel mt-l anim-fade-up" data-anim="fade-up">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">DATA RECONCILIATION · G2F</span>
+              <h3>Source decisions are reviewable evidence.</h3>
+            </div>
+            <span class="status-chip danger">1 blocker</span>
+          </div>
+          <div class="recon-table">
+            <div class="recon-row header">
+              <span>Field</span><span>Source A</span><span>Source B</span
+              ><span>Decision</span>
+            </div>
+            <div class="recon-row">
+              <b>Treatment coding</b><span>WW / WS</span><span>0 / 1</span
+              ><span class="decision ok">Mapped ✓</span>
+            </div>
+            <div class="recon-row">
+              <b>Yield units</b><span>bu/ac</span><span>Mg/ha</span
+              ><span class="decision ok">Converted ✓</span>
+            </div>
+            <div class="recon-row">
+              <b>Hybrid ID</b><span>19 missing</span><span>complete</span
+              ><span class="decision blocked">BLOCKED</span>
+            </div>
+            <div class="recon-row">
+              <b>Population group</b><span>inferred</span><span>curated</span
+              ><span class="decision review">Human review</span>
+            </div>
+          </div>
+          <div class="recon-footer">
+            <span>Raw data unchanged · dataset hash 3d87…e0b2</span>
+            <button class="button disabled">Approve ready for Build</button>
+          </div>
+        </div>
+        <div class="agent-line mt-l">
+          <span>StageSpec</span><i>selects constraints</i
+          ><span>AgentSelector</span><i>fans out</i><span>specialists</span
+          ><i>return</i><span>structured evidence</span>
+        </div>
+        <div class="deck-footer">
+          <span class="mono"
+            >agent proposals never hide scientific ambiguity</span
+          >
+          <span class="slide-number" data-current="9" data-total="12"></span>
+        </div>
+        <div class="notes">
+          This is the first useful graph-enabled scientific slice. Specialized
+          agents can propose mappings and generate artifacts, but unresolved
+          contradictions stay visible and block Build. Dataset hash changes
+          invalidate the prior reconciliation approval.
+        </div>
+      </section>
+
+      <section class="slide" data-title="P7 Validity">
+        <p class="kicker">phase / 7</p>
+        <h2 class="h2">Accuracy is a metric. Validity is the decision.</h2>
+        <div class="validity-grid mt-l">
+          <div class="result-card">
+            <span class="eyebrow">HEADLINE RESULT</span>
+            <div class="big-metric">0.94</div>
+            <span class="metric-label">pooled predictive accuracy</span>
+            <div class="small-metrics">
+              <span><b>0.31</b> RMSE</span>
+              <span><b>95%</b> coverage</span>
+            </div>
+          </div>
+          <div class="validity-card anim-fade-up" data-anim="fade-up">
+            <span class="eyebrow">VALIDITY ASSESSMENT · PACK V3</span>
+            <div class="validity-row pass">
+              <span>Fold composition</span><b>PASSED</b>
+            </div>
+            <div class="validity-row fail">
+              <span>Structure-null</span><b>FAILED</b>
+            </div>
+            <div class="validity-row fail">
+              <span>Leakage check</span><b>FAILED</b>
+            </div>
+            <div class="validity-row pass">
+              <span>Tester holdout</span><b>PASSED</b>
+            </div>
+            <div class="outcome invalid">
+              <span>SCIENTIFIC OUTCOME</span>
+              <strong>INVALIDATED</strong>
+              <p>
+                High accuracy is rejected because structure and leakage checks
+                failed.
+              </p>
+            </div>
+          </div>
+        </div>
+        <div class="outcome-strip mt-l">
+          <span class="supported">SUPPORTED</span>
+          <span class="negative">NOT SUPPORTED</span>
+          <span class="inconclusive">INCONCLUSIVE</span>
+          <span class="invalidated">INVALIDATED</span>
+        </div>
+        <div class="deck-footer">
+          <span class="mono"
+            >non-binary outcomes · explicit rework routing</span
+          >
+          <span class="slide-number" data-current="10" data-total="12"></span>
+        </div>
+        <div class="notes">
+          Reviewers see headline performance and validity side by side. The
+          visual hierarchy intentionally makes the scientific outcome more
+          important than the large metric. The required demonstration also
+          includes an inconclusive case and a valid negative result.
+        </div>
+      </section>
+
+      <section class="slide" data-title="P8 Knowledge">
+        <p class="kicker">phase / 8</p>
+        <h2 class="h2">Learn proposes. Humans promote.</h2>
+        <div class="knowledge-flow mt-l">
+          <div class="knowledge-card candidate">
+            <span class="eyebrow">WORKING MEMORY</span>
+            <h3>Candidate finding</h3>
+            <p>
+              Model X did not improve target-environment prediction under
+              protocol v3.
+            </p>
+            <div class="knowledge-meta">
+              <span>Evidence</span><b>4 artifacts · 2 reviews</b>
+              <span>Limitations</span><b>2024 environments only</b>
+            </div>
+            <button class="button primary">Propose project knowledge</button>
+          </div>
+          <div class="knowledge-arrow">
+            <span>human<br />review</span>→
+          </div>
+          <div class="knowledge-card validated">
+            <span class="eyebrow">VALIDATED PROJECT KNOWLEDGE</span>
+            <h3>Negative finding</h3>
+            <p>
+              Reviewer, evidence grade, limitations, and scope are immutable.
+            </p>
+            <button class="button secondary">Publish…</button>
+          </div>
+          <div class="knowledge-arrow">
+            <span>separate<br />scope choice</span>→
+          </div>
+          <div class="knowledge-card selected">
+            <span class="eyebrow">SELECTED PROJECTS</span>
+            <h3>Published to 2</h3>
+            <div class="project-pill">G2F drought follow-up</div>
+            <div class="project-pill">2025 validation set</div>
+            <small>No workspace-wide default</small>
+          </div>
+        </div>
+        <div class="callout mt-l">
+          Inconclusive may close with zero candidates. Retraction removes
+          current retrieval everywhere published while preserving audit history.
+        </div>
+        <div class="deck-footer">
+          <span class="mono">candidate ≠ claim ≠ publication</span>
+          <span class="slide-number" data-current="11" data-total="12"></span>
+        </div>
+        <div class="notes">
+          The three knowledge states are deliberately separated. A candidate is
+          provisional. Project promotion is one human review. Publication is a
+          second action with selected-project scope. Retraction affects current
+          retrieval but leaves the immutable history available.
+        </div>
+      </section>
+
+      <section class="slide" data-title="Review Contract">
+        <p class="kicker">definition-of-done.md</p>
+        <h2 class="h2">A phase ships evidence, not promises.</h2>
+        <div class="evidence-grid mt-l anim-fade-up" data-anim="fade-up">
+          <div class="evidence-item">
+            <span>01</span><b>Visible state</b
+            ><small>normal + blocked + recovery</small>
+          </div>
+          <div class="evidence-item">
+            <span>02</span><b>Seeded demo</b
+            ><small>repeatable synthetic fixture</small>
+          </div>
+          <div class="evidence-item">
+            <span>03</span><b>Automated tests</b
+            ><small>unit → PostgreSQL → E2E</small>
+          </div>
+          <div class="evidence-item">
+            <span>04</span><b>Accessibility</b
+            ><small>keyboard + focus + reduced motion</small>
+          </div>
+          <div class="evidence-item">
+            <span>05</span><b>Activity trail</b
+            ><small>actor + revision + evidence</small>
+          </div>
+          <div class="evidence-item">
+            <span>06</span><b>Rollback</b
+            ><small>disable mutations, retain history</small>
+          </div>
+          <div class="evidence-item">
+            <span>07</span><b>Human decision</b
+            ><small>named reviewer + timestamp</small>
+          </div>
+          <div class="evidence-item accent">
+            <span>08</span><b>Next phase gate</b
+            ><small>explicit go / no-go</small>
+          </div>
+        </div>
+        <div class="mode-line mt-l">
+          <span>disabled</span><i>→</i><span>audit</span><i>→</i
+          ><span>manual</span><i>→</i><span>proposal</span><i>→</i
+          ><span>supervisor</span><i>→</i><span>stages</span><i>→</i
+          ><span>knowledge</span>
+        </div>
+        <div class="closing mt-l">
+          <b>Approve one phase at a time.</b>
+          <span>
+            The overall plan is a guideline—not blanket authorization to migrate
+            data or enable graph execution.
+          </span>
+        </div>
+        <div class="deck-footer">
+          <span class="mono"
+            >← → navigate · O overview · S notes · F fullscreen</span
+          >
+          <span class="slide-number" data-current="12" data-total="12"></span>
+        </div>
+        <div class="notes">
+          Every phase review receives the same evidence bundle: screenshots,
+          fixture manifest, automated test summary, accessibility summary,
+          activity or migration report, limitations, rollback instruction, and a
+          named decision. Product screenshots replace these mockups as each
+          phase matures.
+        </div>
+      </section>
+    </div>
+    <script src="assets/runtime.js"></script>
+  </body>
+</html>
