@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -55,6 +55,7 @@ import {
 } from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
+import { pathOfProject, useProjectBySlug } from "@/core/workspaces";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -63,6 +64,22 @@ export default function ChatPage() {
   const router = useRouter();
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
+  // Project scope (foundation demo): a conversation under
+  // /workspace/<project-slug> keeps the project rail mounted and routes
+  // within the project; the `?project_id=` form is the flat-route fallback.
+  // Either way the project id is stamped onto the thread metadata on lazy
+  // creation so the project can list its conversations.
+  const searchParams = useSearchParams();
+  const { project_slug: routeProjectSlug } = useParams<{
+    project_slug?: string;
+  }>();
+  const { project: routeProject } = useProjectBySlug(routeProjectSlug);
+  const projectId = routeProjectSlug
+    ? (routeProject?.id ?? null)
+    : searchParams.get("project_id");
+  const chatBasePath = routeProjectSlug
+    ? pathOfProject(routeProjectSlug)
+    : "/workspace/chats";
   // `isNewThread` tracks whether the backend has the thread yet — gates the
   // SDK's history fetch (see issue #2746).  `isWelcomeMode` is the visual
   // welcome layout (centered input, hero, quick actions); we flip it to false
@@ -113,6 +130,7 @@ export default function ChatPage() {
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
     context: settings.context,
+    projectId,
     isMock,
     // onSend only animates the UI; do NOT flip `isNewThread` here — the
     // LangGraph SDK eagerly fetches /history the moment it receives a
@@ -122,7 +140,7 @@ export default function ChatPage() {
     },
     onStart: (createdThreadId) => {
       // ! Important: Never use next.js router for navigation in this case, otherwise it will cause the thread to re-mount and lose all states. Use native history API instead.
-      history.replaceState(null, "", `/workspace/chats/${createdThreadId}`);
+      history.replaceState(null, "", `${chatBasePath}/${createdThreadId}`);
       setThreadId(createdThreadId);
       setIsNewThread(false);
     },
@@ -157,9 +175,10 @@ export default function ChatPage() {
       !hasMoreHistory &&
       !hasThreadMessages
     ) {
-      router.replace("/workspace/chats/new");
+      router.replace(`${chatBasePath}/new`);
     }
   }, [
+    chatBasePath,
     hasMoreHistory,
     hasThreadMessages,
     isHistoryLoading,
@@ -230,14 +249,14 @@ export default function ChatPage() {
           messageIds,
         });
         toast.success(t.conversation.branchCreated);
-        router.push(`/workspace/chats/${response.thread_id}`);
+        router.push(`${chatBasePath}/${response.thread_id}`);
       } catch (error) {
         toast.error(
           error instanceof Error ? error.message : t.conversation.branchFailed,
         );
       }
     },
-    [branchThread, isMock, isNewThread, router, t, threadId],
+    [branchThread, chatBasePath, isMock, isNewThread, router, t, threadId],
   );
 
   const tokenUsageInlineMode = tokenUsageEnabled
@@ -296,7 +315,11 @@ export default function ChatPage() {
                 />
                 <SidecarTrigger />
                 {browserEnabled && <BrowserTrigger />}
-                {!isNewThread &&
+                {/* Inside a project the rail already browses the files, so the
+                    top-bar trigger would be a second door to the same tree; it
+                    stays for unfiled chats, which have no rail. */}
+                {!routeProjectSlug &&
+                  !isNewThread &&
                   !isMock &&
                   env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
                     <FilesTrigger />

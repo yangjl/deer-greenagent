@@ -96,6 +96,65 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
 
 ### Interaction Ownership
 
+- The workspace UI is project-first with three rails (2026-07-25
+  foundation-demo rescope, revision 3): the sidebar lists one folder entry per
+  project of the active workspace, the project rail carries
+  cycles/to-dos/conversations, and chat renders in the main area. The sidebar
+  `PROJECTS` group label carries only a `+` create action — there is no
+  portfolio route; `/workspace/projects` was removed. Legacy projectless
+  conversations stay at `/workspace/chats` under "Unfiled chats".
+- Project routes are flat and name-bearing: `/workspace/<project-slug>`
+  redirects into `/workspace/<project-slug>/new`, and conversations live at
+  `/workspace/<project-slug>/<thread_id>`. Next.js resolves static segments
+  before `[project_slug]`, so `projectSlugOfName` must keep guarding new slugs
+  against `RESERVED_WORKSPACE_SEGMENTS`; add any new static `/workspace/*`
+  route to that list. Slug→project resolution is currently client-side via
+  `useProjectBySlug` against the active workspace's project list — a backend
+  by-slug lookup is the durable fix.
+- `/workspace` has no surface of its own: `workspace-landing.tsx` forwards into
+  the first project, or runs the first-run workspace/project create flow.
+- `useThreadStream` adds `project_id` to the submitted run context when the
+  conversation lives under a project route. This is what files a brand-new
+  conversation into its project atomically with the first run (the server
+  validates membership); the post-creation `PUT` remains as a durable
+  belt-and-suspenders. Do not remove either half.
+- `src/core/workspaces/project-files-api.ts` owns the project-scoped calls: a
+  project's file tree (`GET /api/projects/{id}/files`) and its conversations
+  (`GET /api/projects/{id}/threads`, `PUT|DELETE .../threads/{thread}`). Both
+  are addressed by project id and need no conversation. Thread creation files
+  the new conversation into its project through that PUT — do not reintroduce
+  the thread-metadata association it replaced.
+- `src/core/workspaces/` owns REST types, API calls, and TanStack Query hooks
+  for `/api/workspaces` and `/api/projects`, plus two **pure, React-free**
+  modules: `project-threads.ts` (route builders, slug rules, and the
+  conversation query key) and `cycle-planning.ts`
+  (immutable DBTL cycle + to-do model). Server components and
+  `core/threads/hooks.ts` import these modules directly, never the
+  `@/core/workspaces` barrel, which pulls React hooks into server bundles.
+  Cycles/to-dos are a browser-local projection persisted in `localStorage` per
+  project — a review aid, not DBTL orchestration and not a durable record.
+- `src/app/workspace/[project_slug]/layout.tsx` mounts `ChatProviders` and the
+  project rail beside its children, so the rail survives navigation between
+  conversations.
+- Sidebar project rows are two-target: the chevron expands the project's
+  folder tree inline (`ProjectFiles`, shared with the rail), the name opens
+  the project workspace. The rail's folder disclosure defaults to open.
+- `src/components/workspace/project-rail/` owns the rail: a disclosure on the
+  project name that expands the folder tree (`project-files.tsx`), DBTL cycles
+  (inline phase control plus a complete/reopen control), the selected cycle's
+  to-do list, an agents placeholder, and the project's conversations. The
+  Cycles section auto-minimizes when `hasActiveCycle(plan)` is false; an
+  explicit click on the section header overrides that default. The tree is the
+  project's own (`GET /api/projects/{id}/files`) and renders with no
+  conversation open. The chat header's `FilesTrigger` is therefore rendered
+  only outside a project (unfiled chats), so the same tree does not get two
+  doors.
+- `src/app/workspace/[project_slug]/[thread_id]/page.tsx` re-exports the
+  canonical chat page. `src/app/workspace/chats/[thread_id]/page.tsx` derives
+  its project scope from `useParams().project_slug` (falling back to
+  `?project_id=`) and routes replaceState/redirect/branch targets through the
+  matching base path, so a project conversation never navigates out of its
+  project.
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns branch-from-turn submission and navigation; sidecar `MessageList` instances do not receive the branch action.
 - `src/app/workspace/chats/[thread_id]/page.tsx` gates the Workspace Browser trigger and browser right panel on `/api/features -> browser_control.enabled`; default/failed feature discovery hides the browser control so optional backend installs do not show a dead Live socket.

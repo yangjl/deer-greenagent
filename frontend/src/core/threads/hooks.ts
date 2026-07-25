@@ -28,6 +28,8 @@ import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
+import { addThreadToProject } from "../workspaces/project-files-api";
+import { projectConversationsQueryKey } from "../workspaces/project-threads";
 
 import { branchThreadFromTurn, fetchThreadTokenUsage } from "./api";
 import {
@@ -48,6 +50,12 @@ export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   displayThreadId?: string | null | undefined;
   context: LocalSettings["context"];
+  /**
+   * Project this conversation belongs to. On lazy thread creation the thread
+   * metadata is patched with `project_id` (same pattern as `agent_name`) so
+   * the project page can list its conversations via metadata search.
+   */
+  projectId?: string | null | undefined;
   isMock?: boolean;
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string) => void;
@@ -970,6 +978,7 @@ export function useThreadStream({
   threadId,
   displayThreadId,
   context,
+  projectId,
   isMock,
   onSend,
   onStart,
@@ -1076,11 +1085,14 @@ export function useThreadStream({
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
+      const createdMetadata = context.agent_name
+        ? { agent_name: context.agent_name }
+        : {};
       upsertThreadInSearchCache(queryClient, {
         thread_id: meta.thread_id,
         created_at: now,
         updated_at: now,
-        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
+        metadata: createdMetadata,
         status: "busy",
         values: {
           title: t.pages.newChat,
@@ -1093,7 +1105,7 @@ export function useThreadStream({
         thread_id: meta.thread_id,
         created_at: now,
         updated_at: now,
-        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
+        metadata: createdMetadata,
         status: "busy",
         values: {
           title: t.pages.newChat,
@@ -1104,9 +1116,19 @@ export function useThreadStream({
       });
       if (context.agent_name && !isMock) {
         void getAPIClient()
-          .threads.update(meta.thread_id, {
-            metadata: { agent_name: context.agent_name },
-          })
+          .threads.update(meta.thread_id, { metadata: createdMetadata })
+          .catch(() => ({}));
+      }
+      // Project membership is a durable scope row, not chat metadata: the
+      // backend records it and the sandbox mounts that project's workspace
+      // for every conversation in it.
+      if (projectId && !isMock) {
+        void addThreadToProject(projectId, meta.thread_id)
+          .then(() =>
+            queryClient.invalidateQueries({
+              queryKey: projectConversationsQueryKey(projectId),
+            }),
+          )
           .catch(() => ({}));
       }
     },
@@ -1552,6 +1574,10 @@ export function useThreadStream({
             context: {
               ...extraContext,
               ...context,
+              // Files a brand-new conversation into its project atomically
+              // with the first run (server validates membership), so the
+              // first run already mounts the project workspace.
+              ...(projectId ? { project_id: projectId } : {}),
               thinking_enabled: context.mode !== "flash",
               is_plan_mode: context.mode === "pro" || context.mode === "ultra",
               subagent_enabled: context.mode === "ultra",
@@ -1586,6 +1612,7 @@ export function useThreadStream({
       thread,
       t.uploads.uploadingFiles,
       context,
+      projectId,
       queryClient,
       humanMessageCount,
       persistedMessages,
@@ -1657,6 +1684,7 @@ export function useThreadStream({
           },
           context: {
             ...context,
+            ...(projectId ? { project_id: projectId } : {}),
             thinking_enabled: context.mode !== "flash",
             is_plan_mode: context.mode === "pro" || context.mode === "ultra",
             subagent_enabled: context.mode === "ultra",
@@ -1696,7 +1724,7 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [context, humanMessageCount, persistedMessages, queryClient, thread],
+    [context, humanMessageCount, persistedMessages, projectId, queryClient, thread],
   );
 
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,

@@ -5,6 +5,8 @@ import { redirect } from "next/navigation";
 
 import { env } from "@/env";
 
+import { WorkspaceLanding } from "./workspace-landing";
+
 export default function WorkspacePage() {
   if (env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true") {
     const firstThread = fs
@@ -16,5 +18,5 @@ export default function WorkspacePage() {
       return redirect(`/workspace/chats/${firstThread.name}`);
     }
   }
-  return redirect("/workspace/chats/new");
+  return <WorkspaceLanding />;
 }
