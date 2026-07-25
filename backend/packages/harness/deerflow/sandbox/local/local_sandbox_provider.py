@@ -77,6 +77,9 @@ class LocalSandboxProvider(SandboxProvider):
         self._path_mappings = self._setup_path_mappings()
         self._generic_sandbox: LocalSandbox | None = None
         self._thread_sandboxes: OrderedDict[tuple[str, str], LocalSandbox] = OrderedDict()
+        # Project scope each cached sandbox was built for, so a conversation
+        # that gets filed into a project is rebuilt instead of reused.
+        self._thread_projects: dict[tuple[str, str], str | None] = {}
         self._max_cached_threads = max_cached_threads
         self._lock = threading.Lock()
 
@@ -231,7 +234,7 @@ class LocalSandboxProvider(SandboxProvider):
         return (user_id, thread_id)
 
     @staticmethod
-    def _build_thread_path_mappings(thread_id: str, *, user_id: str | None = None) -> list[PathMapping]:
+    def _build_thread_path_mappings(thread_id: str, *, user_id: str | None = None, project_root: str | None = None) -> list[PathMapping]:
         """Build per-thread path mappings for /mnt/user-data, /mnt/acp-workspace,
         and /mnt/skills/custom.
 
@@ -239,13 +242,37 @@ class LocalSandboxProvider(SandboxProvider):
         :func:`get_effective_user_id` for legacy callers.  Custom skills are
         mounted per-user (read-only) because agent writes custom skills via
         ``skill_manage_tool`` on the host filesystem, not inside the sandbox.
+
+        When *project_root* is given, the entire agent-visible
+        ``/mnt/user-data`` tree resolves into the project's **human-visible
+        folder** (e.g. ``~/Documents/projects/G2F``): the root itself is the
+        workspace (``/mnt/user-data`` and ``/mnt/user-data/workspace`` both
+        alias it), with ``uploads/`` and ``outputs/`` as plain subfolders.
+        The Gateway upload path moves in lockstep
+        (``get_uploads_dir(..., project_root=...)``); changing one side
+        without the other hides uploads from the agent.
         """
         from deerflow.config import get_app_config
         from deerflow.config.paths import get_paths
+        from deerflow.projects.storage import ensure_project_dirs as ensure_project_root_dirs
+        from deerflow.projects.storage import project_outputs_dir, project_uploads_dir, project_workspace_dir
 
         paths = get_paths()
         effective_user_id = LocalSandboxProvider._effective_acquire_user_id(user_id)
         paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
+
+        if project_root:
+            root = Path(project_root)
+            ensure_project_root_dirs(root)
+            user_data_dir = root
+            work_dir = project_workspace_dir(root)
+            uploads_dir = project_uploads_dir(root)
+            outputs_dir = project_outputs_dir(root)
+        else:
+            user_data_dir = paths.sandbox_user_data_dir(thread_id, user_id=effective_user_id)
+            work_dir = paths.sandbox_work_dir(thread_id, user_id=effective_user_id)
+            uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id)
+            outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id)
 
         mappings = [
             # Aggregate parent mapping so ``ls /mnt/user-data`` and other
@@ -255,22 +282,22 @@ class LocalSandboxProvider(SandboxProvider):
             # because ``_find_path_mapping`` sorts by container_path length.
             PathMapping(
                 container_path=_USER_DATA_VIRTUAL_PREFIX,
-                local_path=str(paths.sandbox_user_data_dir(thread_id, user_id=effective_user_id)),
+                local_path=str(user_data_dir),
                 read_only=False,
             ),
             PathMapping(
                 container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/workspace",
-                local_path=str(paths.sandbox_work_dir(thread_id, user_id=effective_user_id)),
+                local_path=str(work_dir),
                 read_only=False,
             ),
             PathMapping(
                 container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/uploads",
-                local_path=str(paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id)),
+                local_path=str(uploads_dir),
                 read_only=False,
             ),
             PathMapping(
                 container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/outputs",
-                local_path=str(paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id)),
+                local_path=str(outputs_dir),
                 read_only=False,
             ),
             PathMapping(
@@ -324,7 +351,7 @@ class LocalSandboxProvider(SandboxProvider):
 
         return mappings
 
-    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None, project_id: str | None = None, project_root: str | None = None) -> str:
         """Return a sandbox id scoped to *thread_id* (or the generic singleton).
 
         - ``thread_id=None`` keeps the legacy singleton with id ``"local"`` for
@@ -349,10 +376,12 @@ class LocalSandboxProvider(SandboxProvider):
         effective_user_id = self._effective_acquire_user_id(user_id)
         key = self._thread_key(thread_id, effective_user_id)
 
-        # Fast path under lock.
+        # Fast path under lock. A cached sandbox is only reusable when it was
+        # built for the same project scope: filing a conversation into a
+        # project has to stop it writing into its own tree.
         with self._lock:
             cached = self._thread_sandboxes.get(key)
-            if cached is not None:
+            if cached is not None and self._thread_projects.get(key) == project_id:
                 # Mark as most-recently used so frequently-touched threads
                 # survive eviction.
                 self._thread_sandboxes.move_to_end(key)
@@ -360,15 +389,16 @@ class LocalSandboxProvider(SandboxProvider):
 
         # ``_build_thread_path_mappings`` touches the filesystem
         # (``ensure_thread_dirs``); release the lock during I/O.
-        new_mappings = list(self._path_mappings) + self._build_thread_path_mappings(thread_id, user_id=effective_user_id)
+        new_mappings = list(self._path_mappings) + self._build_thread_path_mappings(thread_id, user_id=effective_user_id, project_root=project_root)
 
         with self._lock:
             # Re-check after the lock-free I/O: another caller may have
             # populated the cache while we were computing mappings.
             cached = self._thread_sandboxes.get(key)
-            if cached is None:
+            if cached is None or self._thread_projects.get(key) != project_id:
                 cached = LocalSandbox(self._sandbox_id_for_thread(thread_id, effective_user_id), path_mappings=new_mappings)
                 self._thread_sandboxes[key] = cached
+                self._thread_projects[key] = project_id
                 self._evict_until_within_cap_locked()
             else:
                 self._thread_sandboxes.move_to_end(key)
@@ -381,6 +411,7 @@ class LocalSandboxProvider(SandboxProvider):
         """
         while len(self._thread_sandboxes) > self._max_cached_threads:
             evicted_key, _ = self._thread_sandboxes.popitem(last=False)
+            self._thread_projects.pop(evicted_key, None)
             logger.info(
                 "Evicting LocalSandbox cache entry for user/thread %s/%s (cap=%d)",
                 evicted_key[0],
@@ -434,6 +465,7 @@ class LocalSandboxProvider(SandboxProvider):
         with self._lock:
             self._generic_sandbox = None
             self._thread_sandboxes.clear()
+            self._thread_projects.clear()
             _singleton = None
 
     def shutdown(self) -> None:

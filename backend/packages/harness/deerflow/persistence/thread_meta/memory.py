@@ -46,6 +46,8 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
         display_name: str | None = None,
         metadata: dict | None = None,
+        workspace_id: str | None = None,
+        project_id: str | None = None,
     ) -> dict:
         resolved_user_id = resolve_user_id(user_id, method_name="MemoryThreadMetaStore.create")
         now = now_iso()
@@ -53,6 +55,10 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             "thread_id": thread_id,
             "assistant_id": assistant_id,
             "user_id": resolved_user_id,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "scope_type": "project" if project_id else "inbox",
+            "visibility": "private-owner",
             "display_name": display_name,
             "status": "idle",
             "metadata": metadata or {},
@@ -91,6 +97,42 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             offset=offset,
         )
         return [self._item_to_dict(item) for item in items]
+
+    async def set_conversation_scope(
+        self,
+        thread_id: str,
+        *,
+        workspace_id: str | None,
+        project_id: str | None,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> None:
+        """File a conversation into a project, or return it to the inbox."""
+        record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.set_conversation_scope")
+        if record is None:
+            return
+        record["workspace_id"] = workspace_id
+        record["project_id"] = project_id
+        record["scope_type"] = "project" if project_id else "inbox"
+        record["updated_at"] = now_iso()
+        await self._store.aput(THREADS_NS, thread_id, record)
+
+    async def list_by_project(
+        self,
+        project_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> list[dict[str, Any]]:
+        """Conversations filed into ``project_id``, newest first."""
+        resolved_user_id = resolve_user_id(user_id, method_name="MemoryThreadMetaStore.list_by_project")
+        filter_dict: dict[str, Any] = {"project_id": project_id}
+        if resolved_user_id is not None:
+            filter_dict["user_id"] = resolved_user_id
+        items = await self._store.asearch(THREADS_NS, filter=filter_dict, limit=limit, offset=offset)
+        rows = [self._item_to_dict(item) for item in items]
+        rows.sort(key=lambda row: row.get("updated_at") or "", reverse=True)
+        return rows
 
     async def check_access(self, thread_id: str, user_id: str, *, require_existing: bool = False) -> bool:
         item = await self._store.aget(THREADS_NS, thread_id)
@@ -149,6 +191,10 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             "thread_id": item.key,
             "assistant_id": val.get("assistant_id"),
             "user_id": val.get("user_id"),
+            "workspace_id": val.get("workspace_id"),
+            "project_id": val.get("project_id"),
+            "scope_type": val.get("scope_type", "inbox"),
+            "visibility": val.get("visibility", "private-owner"),
             "display_name": val.get("display_name"),
             "status": val.get("status", "idle"),
             "metadata": val.get("metadata", {}),

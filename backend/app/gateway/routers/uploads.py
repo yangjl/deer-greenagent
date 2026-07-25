@@ -13,8 +13,8 @@ from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config
+from app.gateway.project_scope import resolve_thread_project_scope
 from deerflow.config.app_config import AppConfig
-from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.uploads.manager import (
@@ -233,19 +233,20 @@ def _sync_upload_to_sandbox(sandbox, file_path: os.PathLike[str] | str, virtual_
     sandbox.update_file(virtual_path, Path(file_path).read_bytes())
 
 
-def _list_uploaded_files_for_thread(thread_id: str, user_id: str) -> dict:
-    uploads_dir = get_uploads_dir(thread_id, user_id=user_id)
+def _list_uploaded_files_for_thread(thread_id: str, user_id: str, project_root: str | None = None) -> dict:
+    uploads_dir = get_uploads_dir(thread_id, user_id=user_id, project_root=project_root)
     result = list_files_in_dir(uploads_dir)
     enrich_file_listing(result, thread_id)
 
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=user_id)
+    # The agent-visible path is always /mnt/user-data/uploads regardless of
+    # which host tree backs it, so report the virtual location consistently.
     for f in result["files"]:
-        f["path"] = str(sandbox_uploads / f["filename"])
+        f["path"] = f"/mnt/user-data/uploads/{f['filename']}"
     return result
 
 
-def _delete_uploaded_file_for_thread(thread_id: str, filename: str, user_id: str) -> dict:
-    uploads_dir = get_uploads_dir(thread_id, user_id=user_id)
+def _delete_uploaded_file_for_thread(thread_id: str, filename: str, user_id: str, project_root: str | None = None) -> dict:
+    uploads_dir = get_uploads_dir(thread_id, user_id=user_id, project_root=project_root)
     return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
 
 
@@ -314,7 +315,8 @@ async def upload_files(
 
     try:
         effective_user_id = get_effective_user_id()
-        uploads_dir = await run_file_io(ensure_uploads_dir, thread_id, user_id=effective_user_id)
+        _, project_root = await resolve_thread_project_scope(request, thread_id)
+        uploads_dir = await run_file_io(ensure_uploads_dir, thread_id, user_id=effective_user_id, project_root=project_root)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     sandbox_uploads = uploads_dir
@@ -458,7 +460,8 @@ async def get_upload_limits(
 async def list_uploaded_files(thread_id: str, request: Request) -> UploadListResponse:
     """List all files in a thread's uploads directory."""
     try:
-        result = await run_file_io(_list_uploaded_files_for_thread, thread_id, get_effective_user_id())
+        _, project_root = await resolve_thread_project_scope(request, thread_id)
+        result = await run_file_io(_list_uploaded_files_for_thread, thread_id, get_effective_user_id(), project_root)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -470,7 +473,8 @@ async def list_uploaded_files(thread_id: str, request: Request) -> UploadListRes
 async def delete_uploaded_file(thread_id: str, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
     try:
-        return await run_file_io(_delete_uploaded_file_for_thread, thread_id, filename, get_effective_user_id())
+        _, project_root = await resolve_thread_project_scope(request, thread_id)
+        return await run_file_io(_delete_uploaded_file_for_thread, thread_id, filename, get_effective_user_id(), project_root)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"File not found: {filename}")
     except PathTraversalError:

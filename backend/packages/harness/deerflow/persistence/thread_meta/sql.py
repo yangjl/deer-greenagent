@@ -42,6 +42,8 @@ class ThreadMetaRepository(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
         display_name: str | None = None,
         metadata: dict | None = None,
+        workspace_id: str | None = None,
+        project_id: str | None = None,
     ) -> dict:
         # Auto-resolve user_id from contextvar when AUTO; explicit None
         # creates an orphan row (used by migration scripts).
@@ -53,6 +55,9 @@ class ThreadMetaRepository(ThreadMetaStore):
             user_id=resolved_user_id,
             display_name=display_name,
             metadata_json=metadata or {},
+            workspace_id=workspace_id,
+            project_id=project_id,
+            scope_type="project" if project_id else "inbox",
             created_at=now,
             updated_at=now,
         )
@@ -77,6 +82,50 @@ class ThreadMetaRepository(ThreadMetaStore):
             if resolved_user_id is not None and row.user_id != resolved_user_id:
                 return None
             return self._row_to_dict(row)
+
+    async def set_conversation_scope(
+        self,
+        thread_id: str,
+        *,
+        workspace_id: str | None,
+        project_id: str | None,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> None:
+        """File a conversation into a project, or return it to the inbox."""
+        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.set_conversation_scope")
+        async with self._sf() as session:
+            stmt = (
+                update(ThreadMetaRow)
+                .where(ThreadMetaRow.thread_id == thread_id)
+                .values(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    scope_type="project" if project_id else "inbox",
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            if resolved_user_id is not None:
+                stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
+            await session.execute(stmt)
+            await session.commit()
+
+    async def list_by_project(
+        self,
+        project_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> list[dict[str, Any]]:
+        """Conversations filed into ``project_id``, newest first."""
+        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.list_by_project")
+        async with self._sf() as session:
+            stmt = select(ThreadMetaRow).where(ThreadMetaRow.project_id == project_id)
+            if resolved_user_id is not None:
+                stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
+            stmt = stmt.order_by(ThreadMetaRow.updated_at.desc()).limit(limit).offset(offset)
+            rows = (await session.execute(stmt)).scalars().all()
+            return [self._row_to_dict(row) for row in rows]
 
     async def check_access(self, thread_id: str, user_id: str, *, require_existing: bool = False) -> bool:
         """Check if ``user_id`` has access to ``thread_id``.

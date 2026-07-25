@@ -37,7 +37,7 @@ def resolve_linked_project_path(thread_id: str, virtual_path: str, user_id: str 
     return actual
 
 
-def resolve_thread_virtual_path(thread_id: str, virtual_path: str, user_id: str | None = None) -> Path:
+def resolve_thread_virtual_path(thread_id: str, virtual_path: str, user_id: str | None = None, project_root: str | None = None) -> Path:
     """Resolve a virtual path to the actual filesystem path.
 
     Paths under ``/mnt/user-data`` resolve into the thread's user-data tree.
@@ -62,6 +62,20 @@ def resolve_thread_virtual_path(thread_id: str, virtual_path: str, user_id: str 
         HTTPException: If the path is invalid or outside allowed directories.
     """
     resolved_user = user_id or get_effective_user_id()
+    if project_root:
+        # A filed conversation's whole /mnt/user-data tree IS the project's
+        # human-visible folder, matching the sandbox mount.
+        from deerflow.projects.storage import resolve_project_virtual_path
+
+        try:
+            return resolve_project_virtual_path(Path(project_root), virtual_path)
+        except ValueError as e:
+            if "traversal" in str(e):
+                raise HTTPException(status_code=403, detail=str(e))
+            project_path = resolve_linked_project_path(thread_id, virtual_path, user_id=resolved_user)
+            if project_path is not None:
+                return project_path
+            raise HTTPException(status_code=400, detail=str(e))
     try:
         return get_paths().resolve_virtual_path(thread_id, virtual_path, user_id=resolved_user)
     except ValueError as e:

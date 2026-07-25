@@ -18,6 +18,24 @@ from deerflow.sandbox import get_sandbox_provider
 logger = logging.getLogger(__name__)
 
 
+def _runtime_project_scope(runtime: Runtime) -> tuple[str | None, str | None]:
+    """(project_id, project_root) owning this run's workspace, if any.
+
+    The Gateway resolves both server-side from the conversation's durable
+    scope row and injects them into the run context; a client cannot supply
+    them. Absent (unfiled conversations, embedded callers) means
+    conversation-scoped storage.
+    """
+    context = getattr(runtime, "context", None) or {}
+    project_id = context.get("project_id")
+    project_root = context.get("project_root")
+    if not isinstance(project_id, str) or not project_id:
+        return None, None
+    if not isinstance(project_root, str) or not project_root:
+        return None, None
+    return project_id, project_root
+
+
 class SandboxMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
@@ -49,15 +67,15 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         super().__init__()
         self._lazy_init = lazy_init
 
-    def _acquire_sandbox(self, thread_id: str, *, user_id: str) -> str:
+    def _acquire_sandbox(self, thread_id: str, *, user_id: str, project_id: str | None = None, project_root: str | None = None) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = provider.acquire(thread_id, user_id=user_id)
+        sandbox_id = provider.acquire(thread_id, user_id=user_id, project_id=project_id, project_root=project_root)
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
-    async def _acquire_sandbox_async(self, thread_id: str, *, user_id: str) -> str:
+    async def _acquire_sandbox_async(self, thread_id: str, *, user_id: str, project_id: str | None = None, project_root: str | None = None) -> str:
         provider = get_sandbox_provider()
-        sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+        sandbox_id = await provider.acquire_async(thread_id, user_id=user_id, project_id=project_id, project_root=project_root)
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
@@ -75,7 +93,8 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             thread_id = (runtime.context or {}).get("thread_id")
             if thread_id is None:
                 return super().before_agent(state, runtime)
-            sandbox_id = self._acquire_sandbox(thread_id, user_id=resolve_runtime_user_id(runtime))
+            scope_project_id, scope_project_root = _runtime_project_scope(runtime)
+            sandbox_id = self._acquire_sandbox(thread_id, user_id=resolve_runtime_user_id(runtime), project_id=scope_project_id, project_root=scope_project_root)
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return super().before_agent(state, runtime)
@@ -92,7 +111,8 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             thread_id = (runtime.context or {}).get("thread_id")
             if thread_id is None:
                 return await super().abefore_agent(state, runtime)
-            sandbox_id = await self._acquire_sandbox_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+            scope_project_id, scope_project_root = _runtime_project_scope(runtime)
+            sandbox_id = await self._acquire_sandbox_async(thread_id, user_id=resolve_runtime_user_id(runtime), project_id=scope_project_id, project_root=scope_project_root)
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
         return await super().abefore_agent(state, runtime)

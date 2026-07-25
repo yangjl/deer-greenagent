@@ -82,7 +82,6 @@ def test_upload_and_list_response_models_expose_size_as_int(tmp_path):
 
     with (
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
-        patch.object(uploads, "get_paths", return_value=paths),
     ):
         result = asyncio.run(call_unwrapped(uploads.list_uploaded_files, "thread-local", request=MagicMock()))
 

@@ -1,5 +1,6 @@
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -49,7 +50,7 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         self._paths = Paths(base_dir) if base_dir else get_paths()
         self._lazy_init = lazy_init
 
-    def _get_thread_paths(self, thread_id: str, user_id: str | None = None) -> dict[str, str]:
+    def _get_thread_paths(self, thread_id: str, user_id: str | None = None, project_root: str | None = None) -> dict[str, str]:
         """Get the paths for a thread's data directories.
 
         Args:
@@ -59,13 +60,25 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         Returns:
             Dictionary with workspace_path, uploads_path, and outputs_path.
         """
+        if project_root:
+            # A filed conversation reads and writes the project's
+            # human-visible folder — matching the sandbox mount and the
+            # Gateway upload path.
+            from deerflow.projects.storage import project_outputs_dir, project_uploads_dir, project_workspace_dir
+
+            root = Path(project_root)
+            return {
+                "workspace_path": str(project_workspace_dir(root)),
+                "uploads_path": str(project_uploads_dir(root)),
+                "outputs_path": str(project_outputs_dir(root)),
+            }
         return {
             "workspace_path": str(self._paths.sandbox_work_dir(thread_id, user_id=user_id)),
             "uploads_path": str(self._paths.sandbox_uploads_dir(thread_id, user_id=user_id)),
             "outputs_path": str(self._paths.sandbox_outputs_dir(thread_id, user_id=user_id)),
         }
 
-    def _create_thread_directories(self, thread_id: str, user_id: str | None = None) -> dict[str, str]:
+    def _create_thread_directories(self, thread_id: str, user_id: str | None = None, project_root: str | None = None) -> dict[str, str]:
         """Create the thread data directories.
 
         Args:
@@ -76,7 +89,11 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             Dictionary with the created directory paths.
         """
         self._paths.ensure_thread_dirs(thread_id, user_id=user_id)
-        return self._get_thread_paths(thread_id, user_id=user_id)
+        if project_root:
+            from deerflow.projects.storage import ensure_project_dirs
+
+            ensure_project_dirs(Path(project_root))
+        return self._get_thread_paths(thread_id, user_id=user_id, project_root=project_root)
 
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
@@ -90,13 +107,16 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             raise ValueError("Thread ID is required in runtime context or config.configurable")
 
         user_id = get_effective_user_id()
+        project_root = context.get("project_root")
+        if not isinstance(project_root, str) or not project_root:
+            project_root = None
 
         if self._lazy_init:
             # Lazy initialization: only compute paths, don't create directories
-            paths = self._get_thread_paths(thread_id, user_id=user_id)
+            paths = self._get_thread_paths(thread_id, user_id=user_id, project_root=project_root)
         else:
             # Eager initialization: create directories immediately
-            paths = self._create_thread_directories(thread_id, user_id=user_id)
+            paths = self._create_thread_directories(thread_id, user_id=user_id, project_root=project_root)
             logger.debug("Created thread data directories for thread %s", thread_id)
 
         messages = list(state.get("messages", []))

@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 29
+config_version: 30
 
 # ============================================================================
 # Logging
@@ -1180,6 +1180,13 @@ uploads:
   #               Better heading/table extraction; faster on most files.
   # markitdown  — always use MarkItDown (original behaviour, no extra dependency).
   pdf_converter: auto
+
+# ── Projects ─────────────────────────────────────────────────────────────
+# A project's workspace is a real, human-visible folder created under this
+# root (e.g. ~/Documents/projects/G2F). Conversations filed into a project
+# read and write that folder through the sandbox.
+projects:
+  root: ~/DeerFlowProjects
 
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider

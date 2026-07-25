@@ -1092,6 +1092,83 @@ Multi-file upload with automatic document conversion:
 
 See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
 
+### Breeding Workspace Persistence
+
+**A project owns its data; a conversation is a view onto it — and the
+project's workspace is a real, human-visible folder** (``projects.root/<name>``,
+default ``~/DeerFlowProjects``, e.g. ``~/Documents/projects/G2F``), browsable
+in Finder and editable outside DeerFlow. That ownership is realized in three
+places that must stay aligned:
+
+1. **Storage** — `deerflow.projects.storage` owns the layout: the project
+   root IS the workspace (`/mnt/user-data` and `/mnt/user-data/workspace`
+   both alias it in the sandbox), with `uploads/` and `outputs/` as plain
+   visible subfolders. `project_folder_name` keeps folder names human-readable
+   but path-safe; `resolve_project_virtual_path` enforces containment.
+   `LocalSandboxProvider.acquire(..., project_id=..., project_root=...)` maps
+   the whole `/mnt/user-data` tree there; the Gateway upload path
+   (`get_uploads_dir(..., project_root=...)`), `ThreadDataMiddleware` /
+   `UploadsMiddleware` (read `context["project_root"]`), `workspace_changes`
+   snapshots, and `resolve_thread_virtual_path(..., project_root=...)` (files
+   + artifacts routers) all resolve the same folder — changing one view
+   without the others splits the agent's and the human's reality. Providers
+   without project storage (AIO, E2B, BoxLite) ignore both kwargs.
+   `Paths` keeps no project layout; the old internal
+   `.deer-flow/users/{user}/projects/…` bucket is gone.
+2. **Scope record** — `threads_meta.project_id/workspace_id/scope_type` is the
+   durable membership (`create(..., project_id=...)`,
+   `set_conversation_scope()`, `list_by_project()`, owner-scoped in both
+   stores), and `projects.root_path` (migration 0010) records the folder.
+   `app/gateway/project_scope.py` owns folder computation/adoption, lazy
+   backfill for pre-0010 rows, and `resolve_thread_project_scope(request,
+   thread_id) -> (project_id, project_root)` used by uploads/files/artifacts.
+3. **Run context** — a new conversation's run request may carry
+   `context.project_id` as intent; `services.py::file_thread_into_requested_project`
+   honors it only after verifying membership (closes the first-run race).
+   Then `apply_project_scope_context` stamps `context["project_id"]` **and**
+   `context["project_root"]` from the durable records, dropping any
+   caller-supplied values first — both are authorization-sensitive because
+   they decide which folder the sandbox mounts read-write.
+
+`ProjectContextMiddleware` (lead chain, immediately before
+`SystemMessageCoalescingMiddleware`) injects a request-only system block so
+the model knows where it lives: `<project_context>` (scoped runs — the
+workspace IS the human folder) and `<local_folders>` (every run — each
+operator-configured `sandbox.mounts` entry as a host↔container path map with
+its access mode). Without these the model assumes it cannot touch the local
+filesystem and hands back terminal commands. Never checkpointed; mounts are
+re-read from live config per request; tests in
+`tests/test_project_context_middleware.py`.
+
+Project-scoped Gateway routes live in `app/gateway/routers/workspaces.py`:
+`GET /api/projects/{id}/threads`, `PUT|DELETE /api/projects/{id}/threads/{thread_id}`,
+and `GET /api/projects/{id}/files` (listing in `app/gateway/project_files.py`,
+reusing the files router's `scan_directory`). Creation computes and creates
+(or adopts) the human folder before the row is committed. Tests:
+`tests/test_project_paths.py`, `tests/test_project_scoped_sandbox.py`,
+`tests/test_thread_conversation_scope.py`,
+`tests/test_project_workspace_router.py`,
+`tests/test_run_project_scope_context.py`.
+
+`deerflow.persistence.workspaces` owns the additive `workspaces`,
+`workspace_members`, and `projects` tables. `WorkspaceRepository` enforces
+active membership before project reads or writes; workspace creation
+atomically adds the creator as owner. The Gateway exposes these records through
+`app.gateway.routers.workspaces` and initializes the repository from the shared
+SQL session factory in `langgraph_runtime`.
+
+Project rows currently carry the generic collaboration foundation plus
+`crop_profile`, `dbtl_phase`, and `reconciliation_status`. Keep crop-specific
+attributes out of these core tables; maize-specific structure belongs in
+versioned extension records in later breeding-data migrations. PostgreSQL is
+the intended production authority. No application module may read `.greenagent`
+as authoritative state.
+
+`threads_meta` carries nullable `workspace_id` and `project_id` plus explicit
+`scope_type` and `visibility`. Existing and newly projectless conversations
+default to `inbox` / `private-owner`; never infer workspace sharing from a
+missing project id.
+
 ### Plan Mode
 
 TodoList middleware for complex multi-step tasks:

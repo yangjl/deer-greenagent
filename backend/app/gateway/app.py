@@ -36,6 +36,7 @@ from app.gateway.routers import (
     thread_runs,
     threads,
     uploads,
+    workspaces,
 )
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
@@ -534,6 +535,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Scheduled tasks API is mounted at /api/scheduled-tasks
     app.include_router(scheduled_tasks.router)
+
+    # Workspace/project collaboration API is mounted at /api/workspaces.
+    app.include_router(workspaces.router)
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)

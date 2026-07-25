@@ -34,6 +34,8 @@ class ThreadMetaStore(abc.ABC):
         user_id: str | None | _AutoSentinel = AUTO,
         display_name: str | None = None,
         metadata: dict | None = None,
+        workspace_id: str | None = None,
+        project_id: str | None = None,
     ) -> dict:
         pass
 
@@ -78,6 +80,34 @@ class ThreadMetaStore(abc.ABC):
         Intended for trusted internal repair/migration paths. No-op if the
         row does not exist or the caller fails the owner check.
         """
+        pass
+
+    @abc.abstractmethod
+    async def set_conversation_scope(
+        self,
+        thread_id: str,
+        *,
+        workspace_id: str | None,
+        project_id: str | None,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> None:
+        """File a conversation into a project, or return it to the inbox.
+
+        ``project_id=None`` clears the scope back to ``inbox``. No-op if the
+        row does not exist or the caller fails the owner check.
+        """
+        pass
+
+    @abc.abstractmethod
+    async def list_by_project(
+        self,
+        project_id: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> list[dict[str, Any]]:
+        """Conversations filed into ``project_id``, newest first."""
         pass
 
     @abc.abstractmethod

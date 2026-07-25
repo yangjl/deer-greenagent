@@ -943,6 +943,8 @@ def test_memory_thread_meta_store_writes_iso_on_create() -> None:
     record = asyncio.run(_scenario())
     assert _ISO_TIMESTAMP_RE.match(record["created_at"]), record
     assert _ISO_TIMESTAMP_RE.match(record["updated_at"]), record
+    assert record["scope_type"] == "inbox"
+    assert record["visibility"] == "private-owner"
 
 
 def test_get_thread_state_returns_iso_for_legacy_checkpoint_metadata() -> None:

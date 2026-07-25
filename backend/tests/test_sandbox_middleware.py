@@ -24,7 +24,7 @@ class _SyncProvider(SandboxProvider):
         self.thread_ids: list[str | None] = []
         self.user_ids: list[str | None] = []
 
-    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None, project_id: str | None = None, project_root: str | None = None) -> str:
         self.thread_ids.append(thread_id)
         self.user_ids.append(user_id)
         return "sync-sandbox"
@@ -84,11 +84,11 @@ class _AsyncOnlyProvider(SandboxProvider):
         self.released_ids: list[str] = []
         self.sandbox = _SandboxStub("async-sandbox")
 
-    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None, project_id: str | None = None, project_root: str | None = None) -> str:
         del user_id
         raise AssertionError("async middleware should not call sync acquire")
 
-    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None, project_id: str | None = None, project_root: str | None = None) -> str:
         self.thread_ids.append(thread_id)
         self.user_ids.append(user_id)
         return "async-sandbox"
@@ -127,7 +127,7 @@ async def test_provider_default_acquire_async_offloads_sync_acquire(monkeypatch:
     assert sandbox_id == "sync-sandbox"
     assert provider.thread_ids == ["thread-1"]
     assert provider.user_ids == [None]
-    assert calls == [(provider.acquire, ("thread-1",), {"user_id": None})]
+    assert calls == [(provider.acquire, ("thread-1",), {"user_id": None, "project_id": None, "project_root": None})]
 
 
 @pytest.mark.anyio

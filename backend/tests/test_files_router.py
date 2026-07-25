@@ -15,7 +15,7 @@ from deerflow.uploads import UPLOAD_STAGING_PREFIX, UPLOAD_STAGING_SUFFIX
 def client(tmp_path, monkeypatch):
     """TestClient over an authed app; virtual paths resolve into tmp_path."""
 
-    def fake_resolve(_thread_id: str, virtual_path: str, user_id=None):
+    def fake_resolve(_thread_id: str, virtual_path: str, user_id=None, project_root=None):
         stripped = virtual_path.lstrip("/")
         prefix = "mnt/user-data"
         if stripped != prefix and not stripped.startswith(prefix + "/"):
@@ -114,7 +114,7 @@ def test_list_files_missing_root_returns_empty_listing_with_linked_project(tmp_p
     """A never-run thread has no user-data dir yet; the root must still render."""
     missing_root = tmp_path / "does-not-exist"
 
-    def fake_resolve(_thread_id: str, _virtual_path: str, user_id=None):
+    def fake_resolve(_thread_id: str, _virtual_path: str, user_id=None, project_root=None):
         return missing_root
 
     monkeypatch.setattr(files_router, "resolve_thread_virtual_path", fake_resolve)
@@ -289,4 +289,4 @@ def test_list_files_scandir_runs_off_event_loop(client, tmp_path, monkeypatch) -
     response = client.get("/api/threads/t1/files", params={"path": "/mnt/user-data"})
 
     assert response.status_code == 200
-    assert any("_scan_directory" in name for name in calls)
+    assert any("scan_directory" in name for name in calls)

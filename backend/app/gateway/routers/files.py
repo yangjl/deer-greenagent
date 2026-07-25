@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import resolve_thread_virtual_path
+from app.gateway.project_scope import resolve_thread_project_scope
 from app.gateway.thread_project import (
     clear_project_link,
     list_project_candidates,
@@ -90,8 +91,12 @@ def _entry_sort_key(entry: FileEntry) -> tuple[int, str]:
     return (0 if entry.type == "directory" else 1, entry.name.lower())
 
 
-def _scan_directory(actual_path: Path, virtual_path: str) -> FilesListResponse:
-    """Worker-thread body: stat + scandir are blocking filesystem IO."""
+def scan_directory(actual_path: Path, virtual_path: str) -> FilesListResponse:
+    """Worker-thread body: stat + scandir are blocking filesystem IO.
+
+    Shared with the project-scoped listing in
+    :mod:`app.gateway.project_files`, so both trees render identically.
+    """
     if not actual_path.exists():
         raise HTTPException(status_code=404, detail=f"Directory not found: {virtual_path}")
     if not actual_path.is_dir():
@@ -197,10 +202,11 @@ async def list_files(
     owner_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else None
 
     virtual_path = _normalize_virtual_path(path)
-    actual_path = await asyncio.to_thread(resolve_thread_virtual_path, thread_id, virtual_path, user_id=owner_user_id)
+    _, project_root = await resolve_thread_project_scope(request, thread_id)
+    actual_path = await asyncio.to_thread(resolve_thread_virtual_path, thread_id, virtual_path, user_id=owner_user_id, project_root=project_root)
 
     try:
-        listing = await asyncio.to_thread(_scan_directory, actual_path, virtual_path)
+        listing = await asyncio.to_thread(scan_directory, actual_path, virtual_path)
     except HTTPException as exc:
         # A thread's user-data tree is materialized lazily by the run
         # middleware, so a brand-new (or never-run) thread has no root dir

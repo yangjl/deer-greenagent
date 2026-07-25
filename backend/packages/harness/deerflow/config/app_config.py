@@ -25,6 +25,7 @@ from deerflow.config.input_polish_config import InputPolishConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.projects_config import ProjectsConfig
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.config.reload_boundary import format_field_description
 from deerflow.config.run_events_config import RunEventsConfig
@@ -208,6 +209,7 @@ class AppConfig(BaseModel):
         description="Hard server-side ceiling for a client-supplied run recursion_limit. Client values above this are clamped; prevents runaway LangGraph super-steps (LLM cost / DoS).",
     )
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
+    projects: ProjectsConfig = Field(default_factory=ProjectsConfig, description="Human-visible project workspace storage")
     sandbox: SandboxConfig = Field(
         description=format_field_description(
             "sandbox",

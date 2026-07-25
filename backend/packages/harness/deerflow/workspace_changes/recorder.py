@@ -23,27 +23,39 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 
-def build_thread_workspace_roots(thread_id: str, *, user_id: str | None = None) -> list[WorkspaceRoot]:
+def build_thread_workspace_roots(thread_id: str, *, user_id: str | None = None, project_root: str | None = None) -> list[WorkspaceRoot]:
+    """Roots the run reads/writes: the project's human folder when the
+    conversation is filed into one (matching the sandbox mount), else the
+    thread's own."""
     paths = get_paths()
+    if project_root:
+        from deerflow.projects.storage import project_outputs_dir, project_workspace_dir
+
+        root = Path(project_root)
+        work_dir = project_workspace_dir(root)
+        outputs_dir = project_outputs_dir(root)
+    else:
+        work_dir = paths.sandbox_work_dir(thread_id, user_id=user_id)
+        outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=user_id)
     return [
         WorkspaceRoot(
             name="workspace",
-            host_path=paths.sandbox_work_dir(thread_id, user_id=user_id),
+            host_path=work_dir,
             virtual_prefix="/mnt/user-data/workspace",
         ),
         WorkspaceRoot(
             name="outputs",
-            host_path=paths.sandbox_outputs_dir(thread_id, user_id=user_id),
+            host_path=outputs_dir,
             virtual_prefix="/mnt/user-data/outputs",
         ),
     ]
 
 
-def _prepare_capture(thread_id: str, *, user_id: str | None, include_text: bool) -> tuple[list[WorkspaceRoot], Path | None]:
+def _prepare_capture(thread_id: str, *, user_id: str | None, project_root: str | None, include_text: bool) -> tuple[list[WorkspaceRoot], Path | None]:
     # Worker thread: resolving the sandbox roots hits the filesystem, and mkdtemp
     # creates the text cache directory — both blocking IO that must stay off the
     # event loop.
-    roots = build_thread_workspace_roots(thread_id, user_id=user_id)
+    roots = build_thread_workspace_roots(thread_id, user_id=user_id, project_root=project_root)
     text_cache_dir = Path(tempfile.mkdtemp(prefix="deerflow-workspace-changes-")) if include_text else None
     return roots, text_cache_dir
 
@@ -79,6 +91,7 @@ async def capture_workspace_snapshot(
     thread_id: str,
     *,
     user_id: str | None = None,
+    project_root: str | None = None,
     limits: WorkspaceChangeLimits | None = None,
     include_text: bool = True,
 ) -> WorkspaceSnapshot:
@@ -86,7 +99,7 @@ async def capture_workspace_snapshot(
     # handoff must be cancellation-safe: if the run is cancelled after mkdtemp
     # but before we receive the path, the shielded worker still finishes and we
     # reclaim its result to remove the orphaned dir before re-raising.
-    prepare = asyncio.ensure_future(asyncio.to_thread(_prepare_capture, thread_id, user_id=user_id, include_text=include_text))
+    prepare = asyncio.ensure_future(asyncio.to_thread(_prepare_capture, thread_id, user_id=user_id, project_root=project_root, include_text=include_text))
     try:
         roots, text_cache_dir = await asyncio.shield(prepare)
     except asyncio.CancelledError:
@@ -124,10 +137,11 @@ async def record_workspace_changes(
     before: WorkspaceSnapshot,
     *,
     user_id: str | None = None,
+    project_root: str | None = None,
     limits: WorkspaceChangeLimits | None = None,
 ) -> dict | None:
     try:
-        roots = await asyncio.to_thread(build_thread_workspace_roots, thread_id, user_id=user_id)
+        roots = await asyncio.to_thread(build_thread_workspace_roots, thread_id, user_id=user_id, project_root=project_root)
         after_metadata = await asyncio.to_thread(
             scan_workspace_roots,
             roots,

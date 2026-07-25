@@ -258,6 +258,89 @@ _SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset({"is_internal", "au
 _CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification"})
 
 
+async def file_thread_into_requested_project(
+    request_context: dict | None,
+    *,
+    thread_id: str,
+    owner_user_id: str | None,
+    thread_store,
+    workspace_repo,
+) -> None:
+    """Honor a run request's ask to file its conversation into a project.
+
+    Closes the first-run race: a brand-new conversation is created by the same
+    request that starts its first run, so a follow-up ``PUT /api/projects/...``
+    lands too late for that run's sandbox mapping. The request may therefore
+    carry ``context.project_id`` as *intent* — honored only after the server
+    verifies the caller is a member of that project (the repository returns
+    ``None`` for non-members), and written owner-scoped so a caller can only
+    file a conversation they own. Failures are non-fatal: the run proceeds
+    conversation-scoped.
+    """
+    if not request_context or thread_store is None or workspace_repo is None or not owner_user_id:
+        return
+    requested = request_context.get("project_id")
+    if not isinstance(requested, str) or not requested:
+        return
+    try:
+        project = await workspace_repo.get_project(requested, user_id=owner_user_id)
+        if project is None:
+            logger.warning("Ignoring request to file thread %s into unreachable project %s", sanitize_log_param(thread_id), sanitize_log_param(requested))
+            return
+        await thread_store.set_conversation_scope(
+            thread_id,
+            workspace_id=project.get("workspace_id"),
+            project_id=requested,
+            user_id=owner_user_id,
+        )
+    except Exception:
+        logger.warning("Failed to file thread %s into requested project (non-fatal)", sanitize_log_param(thread_id))
+
+
+async def apply_project_scope_context(config: dict, thread_id: str, thread_store, workspace_repo=None, request=None) -> None:
+    """Stamp the conversation's owning project into the run context.
+
+    ``context["project_id"]``/``context["project_root"]`` decide which
+    project's human-visible folder the sandbox mounts, so they are
+    authorization-sensitive: any caller-supplied values are dropped first and
+    replaced from the conversation's durable ``threads_meta`` row (and the
+    project's ``root_path``). An unfiled conversation, a missing row, or a
+    store failure all leave no project scope, which falls back to
+    conversation-scoped storage.
+    """
+    context = config.setdefault("context", {})
+    context.pop("project_id", None)
+    context.pop("project_root", None)
+    configurable = config.get("configurable", {})
+    configurable.pop("project_id", None)
+    configurable.pop("project_root", None)
+
+    if thread_store is None:
+        return
+    try:
+        record = await thread_store.get(thread_id)
+    except Exception:
+        logger.warning("Failed to resolve project scope for thread %s (non-fatal)", sanitize_log_param(thread_id))
+        return
+    project_id = (record or {}).get("project_id")
+    if not isinstance(project_id, str) or not project_id:
+        return
+    context["project_id"] = project_id
+
+    if workspace_repo is None:
+        return
+    try:
+        from app.gateway.project_scope import ensure_project_root
+
+        project = await workspace_repo.get_project_record(project_id)
+        if project is not None:
+            root = await ensure_project_root(workspace_repo, project, request)
+            if root:
+                context["project_root"] = root
+    except Exception:
+        logger.warning("Failed to resolve project root for thread %s (non-fatal)", sanitize_log_param(thread_id))
+
+
 def strip_internal_context_keys(config: dict[str, Any]) -> None:
     """Drop internal-only keys a non-internal caller smuggled into the run config.
 
@@ -1030,6 +1113,23 @@ async def start_run(
             # ``body.config`` is free-form and copied verbatim by
             # ``build_run_config``; scrub internal-only keys smuggled there.
             strip_internal_context_keys(config)
+        # A new conversation's run request may carry the project to file it
+        # into (validated against membership) — then the owning project is
+        # re-derived from the durable scope row, never taken from the caller.
+        await file_thread_into_requested_project(
+            getattr(body, "context", None),
+            thread_id=thread_id,
+            owner_user_id=owner_user_id,
+            thread_store=run_ctx.thread_store,
+            workspace_repo=getattr(request.app.state, "workspace_repo", None) if request is not None else None,
+        )
+        await apply_project_scope_context(
+            config,
+            thread_id,
+            run_ctx.thread_store,
+            workspace_repo=getattr(request.app.state, "workspace_repo", None) if request is not None else None,
+            request=request,
+        )
         internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
         inject_authenticated_user_context(
             config,

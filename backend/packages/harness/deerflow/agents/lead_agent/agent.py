@@ -408,6 +408,14 @@ def build_middlewares(
 
         assert_mcp_routing_before_deferred_filter(middlewares)
 
+    # Tell the agent its workspace is the project's human-visible folder, so
+    # it writes files instead of handing back copy-paste terminal commands.
+    # Must run before SystemMessageCoalescingMiddleware, which merges the
+    # injected SystemMessage into the single leading system block.
+    from deerflow.agents.middlewares.project_context_middleware import ProjectContextMiddleware
+
+    middlewares.append(ProjectContextMiddleware())
+
     # Coalesce every SystemMessage into a single leading one before the request
     # reaches the provider. Strict backends (vLLM, SGLang, Qwen, Anthropic)
     # reject non-leading SystemMessages. See system_message_coalescing_middleware.py.

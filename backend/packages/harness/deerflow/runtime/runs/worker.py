@@ -477,10 +477,17 @@ async def run_agent(
 
         if event_store is not None:
             workspace_changes_user_id = get_effective_user_id()
+            # Server-stamped by the Gateway (apply_project_scope_context): a
+            # filed conversation's run reads/writes the project tree, so the
+            # change snapshots must watch the same roots the sandbox mounts.
+            workspace_changes_project_root = (config.get("context") or {}).get("project_root") if isinstance(config, dict) else None
+            if not isinstance(workspace_changes_project_root, str) or not workspace_changes_project_root:
+                workspace_changes_project_root = None
             try:
                 pre_run_workspace_snapshot = await capture_workspace_snapshot(
                     thread_id,
                     user_id=workspace_changes_user_id,
+                    project_root=workspace_changes_project_root,
                 )
             except Exception:
                 logger.warning("Could not capture pre-run workspace snapshot for run %s", run_id, exc_info=True)
@@ -804,6 +811,7 @@ async def run_agent(
                     run_id,
                     pre_run_workspace_snapshot,
                     user_id=workspace_changes_user_id,
+                    project_root=workspace_changes_project_root,
                 )
             except Exception:
                 logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)

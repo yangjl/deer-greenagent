@@ -56,10 +56,7 @@ def _resolve_greenagent_binary() -> str:
     fallback = Path.home() / ".local" / "bin" / "greenagent"
     if fallback.exists():
         return str(fallback)
-    raise GreenAgentUnavailableError(
-        "greenagent CLI not found on PATH or at ~/.local/bin/greenagent. "
-        "Install the greenagent harness to enable DBTL gating."
-    )
+    raise GreenAgentUnavailableError("greenagent CLI not found on PATH or at ~/.local/bin/greenagent. Install the greenagent harness to enable DBTL gating.")
 
 
 class SubprocessGreenAgentGate:

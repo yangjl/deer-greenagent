@@ -117,10 +117,7 @@ def build_dbtl_graph(gate: GreenAgentGate) -> StateGraph:
                 "cycle_id": state["dbtl_cycle_id"],
                 "from_state": state["dbtl_state"],
                 "to_state": target,
-                "prompt": (
-                    f"Approve DBTL transition {state['dbtl_state']} -> {target}? "
-                    "Reply with an authorization reference to proceed."
-                ),
+                "prompt": (f"Approve DBTL transition {state['dbtl_state']} -> {target}? Reply with an authorization reference to proceed."),
             }
         )
         approved, authorization = _parse_human_decision(decision)

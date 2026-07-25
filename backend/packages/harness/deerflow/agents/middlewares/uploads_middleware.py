@@ -226,7 +226,17 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 thread_id = get_config().get("configurable", {}).get("thread_id")
             except RuntimeError:
                 pass
-        uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=get_effective_user_id()) if thread_id else None
+        context_project_root = (runtime.context or {}).get("project_root") if runtime is not None else None
+        if not isinstance(context_project_root, str) or not context_project_root:
+            context_project_root = None
+        if thread_id and context_project_root:
+            from deerflow.projects.storage import project_uploads_dir
+
+            uploads_dir = project_uploads_dir(Path(context_project_root))
+        elif thread_id:
+            uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
+        else:
+            uploads_dir = None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []

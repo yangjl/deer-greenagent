@@ -42,15 +42,24 @@ def validate_thread_id(thread_id: str) -> None:
         raise ValueError(f"Invalid thread_id: {thread_id!r}")
 
 
-def get_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
-    """Return the uploads directory path for a thread (no side effects)."""
+def get_uploads_dir(thread_id: str, *, user_id: str | None = None, project_root: str | None = None) -> Path:
+    """Return the uploads directory path for a conversation (no side effects).
+
+    A conversation filed into a project uploads into the project's
+    human-visible folder (``<root>/uploads``) so the Gateway write path and
+    the sandbox mount stay in lockstep.
+    """
     validate_thread_id(thread_id)
+    if project_root:
+        from deerflow.projects.storage import project_uploads_dir
+
+        return project_uploads_dir(Path(project_root))
     return get_paths().sandbox_uploads_dir(thread_id, user_id=user_id or get_effective_user_id())
 
 
-def ensure_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
-    """Return the uploads directory for a thread, creating it if needed."""
-    base = get_uploads_dir(thread_id, user_id=user_id)
+def ensure_uploads_dir(thread_id: str, *, user_id: str | None = None, project_root: str | None = None) -> Path:
+    """Return the uploads directory for a conversation, creating it if needed."""
+    base = get_uploads_dir(thread_id, user_id=user_id, project_root=project_root)
     base.mkdir(parents=True, exist_ok=True)
     return base
 

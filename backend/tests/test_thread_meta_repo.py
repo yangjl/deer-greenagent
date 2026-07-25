@@ -46,6 +46,15 @@ class TestThreadMetaRepository:
         assert record["metadata"] == {"key": "value"}
 
     @pytest.mark.anyio
+    async def test_create_defaults_legacy_and_projectless_threads_to_private_inbox(self, repo):
+        record = await repo.create("t1", user_id="user1")
+
+        assert record["workspace_id"] is None
+        assert record["project_id"] is None
+        assert record["scope_type"] == "inbox"
+        assert record["visibility"] == "private-owner"
+
+    @pytest.mark.anyio
     async def test_get_nonexistent(self, repo):
         assert await repo.get("nonexistent") is None
 

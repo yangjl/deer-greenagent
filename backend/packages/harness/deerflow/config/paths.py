@@ -373,24 +373,33 @@ class Paths:
             ValueError: If the path does not start with the expected virtual
                         prefix or a path-traversal attempt is detected.
         """
-        stripped = virtual_path.lstrip("/")
-        prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
-
-        # Require an exact segment-boundary match to avoid prefix confusion
-        # (e.g. reject paths like "mnt/user-dataX/...").
-        if stripped != prefix and not stripped.startswith(prefix + "/"):
-            raise ValueError(f"Path must start with /{prefix}")
-
-        relative = stripped[len(prefix) :].lstrip("/")
         base = self.sandbox_user_data_dir(thread_id, user_id=user_id).resolve()
-        actual = (base / relative).resolve()
+        return _resolve_under_user_data(base, virtual_path)
 
-        try:
-            actual.relative_to(base)
-        except ValueError:
-            raise ValueError("Access denied: path traversal detected")
 
-        return actual
+def _resolve_under_user_data(base: Path, virtual_path: str) -> Path:
+    """Resolve *virtual_path* under an already-resolved user-data *base*.
+
+    Shared by the thread- and project-scoped resolvers so both enforce the
+    same prefix and traversal rules.
+    """
+    stripped = virtual_path.lstrip("/")
+    prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
+
+    # Require an exact segment-boundary match to avoid prefix confusion
+    # (e.g. reject paths like "mnt/user-dataX/...").
+    if stripped != prefix and not stripped.startswith(prefix + "/"):
+        raise ValueError(f"Path must start with /{prefix}")
+
+    relative = stripped[len(prefix) :].lstrip("/")
+    actual = (base / relative).resolve()
+
+    try:
+        actual.relative_to(base)
+    except ValueError:
+        raise ValueError("Access denied: path traversal detected")
+
+    return actual
 
 
 # ── Singleton ────────────────────────────────────────────────────────────

@@ -14,15 +14,25 @@ class SandboxProvider(ABC):
     needs_upload_permission_adjustment: bool = True
 
     @abstractmethod
-    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None, project_id: str | None = None, project_root: str | None = None) -> str:
         """Acquire a sandbox environment and return its ID.
+
+        Args:
+            thread_id: Conversation the sandbox serves.
+            user_id: Owner whose storage bucket the sandbox resolves under.
+            project_id: Project that owns the durable workspace, when the
+                conversation belongs to one (cache identity).
+            project_root: The project's human-visible folder to mount as the
+                workspace. Providers that do not implement project-owned
+                storage ignore both and fall back to conversation-scoped
+                directories.
 
         Returns:
             The ID of the acquired sandbox environment.
         """
         pass
 
-    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None, project_id: str | None = None, project_root: str | None = None) -> str:
         """Acquire a sandbox without blocking the event loop.
 
         Most sandbox providers expose a synchronous lifecycle API because local
@@ -30,7 +40,7 @@ class SandboxProvider(ABC):
         this method so those blocking operations run in a worker thread instead
         of stalling the event loop.
         """
-        return await asyncio.to_thread(self.acquire, thread_id, user_id=user_id)
+        return await asyncio.to_thread(self.acquire, thread_id, user_id=user_id, project_id=project_id, project_root=project_root)
 
     @abstractmethod
     def get(self, sandbox_id: str) -> Sandbox | None:

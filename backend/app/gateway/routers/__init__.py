@@ -11,6 +11,7 @@ from . import (
     thread_runs,
     threads,
     uploads,
+    workspaces,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "threads",
     "thread_runs",
     "uploads",
+    "workspaces",
 ]
