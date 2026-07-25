@@ -10,7 +10,10 @@ rs.mock("@/core/config", () => ({
 
 import { fetchAgentsApiEnabled } from "@/core/agents/api";
 import { fetch as fetcher } from "@/core/api/fetcher";
-import { fetchBrowserControlEnabled } from "@/core/features/api";
+import {
+  fetchBrowserControlEnabled,
+  fetchDbtlFeature,
+} from "@/core/features/api";
 
 const mockedFetch = rs.mocked(fetcher);
 
@@ -77,5 +80,40 @@ describe("fetchBrowserControlEnabled", () => {
   test("throws when the features request fails", async () => {
     mockedFetch.mockResolvedValueOnce(jsonResponse(500, {}));
     await expect(fetchBrowserControlEnabled()).rejects.toThrow();
+  });
+});
+
+describe("fetchDbtlFeature", () => {
+  test("returns the backend DBTL safety contract", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        agents_api: { enabled: true },
+        dbtl: {
+          mode: "audit_only",
+          mutations_enabled: false,
+          graph_execution_enabled: false,
+          reason: "Inspection only",
+        },
+      }),
+    );
+
+    await expect(fetchDbtlFeature()).resolves.toEqual({
+      mode: "audit_only",
+      mutations_enabled: false,
+      graph_execution_enabled: false,
+      reason: "Inspection only",
+    });
+  });
+
+  test("fails closed when an older backend omits the DBTL contract", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { agents_api: { enabled: true } }),
+    );
+
+    await expect(fetchDbtlFeature()).resolves.toMatchObject({
+      mode: "disabled",
+      mutations_enabled: false,
+      graph_execution_enabled: false,
+    });
   });
 });

@@ -142,6 +142,9 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   `@/core/workspaces` barrel, which pulls React hooks into server bundles.
   Cycles/to-dos are a browser-local projection persisted in `localStorage` per
   project — a review aid, not DBTL orchestration and not a durable record.
+  During DBTL Phase 0 the projection stays visible but all mutation controls
+  fail closed unless `/api/features` reports
+  `dbtl.graph_execution_enabled=true`.
 - `src/app/workspace/[project_slug]/layout.tsx` mounts `ChatProviders` and the
   project rail beside its children, so the rail survives navigation between
   conversations.
@@ -160,6 +163,11 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   `GET /api/projects/{id}/files`, while preview/download uses
   `GET /api/projects/{id}/file`; both work without a conversation. The chat
   header's `FilesTrigger` remains projectless-chat-only.
+- `src/core/dbtl/` owns the DBTL feature/readiness contracts, query hooks,
+  stable inventory grouping, and JSON export helper. Settings → DBTL readiness
+  is a read-only Phase 0 preflight. The project rail's “View readiness” action
+  opens that settings section; it must not introduce repair, migration,
+  promotion, or graph-start controls during this phase.
 - `src/app/workspace/[project_slug]/[thread_id]/page.tsx` re-exports the
   canonical chat page. `src/app/workspace/chats/[thread_id]/page.tsx` derives
   its project scope from `useParams().project_slug` (falling back to

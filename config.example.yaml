@@ -1188,6 +1188,14 @@ uploads:
 projects:
   root: ~/DeerFlowProjects
 
+# ── DBTL workflow ────────────────────────────────────────────────────────
+# Phase 0 defaults to audit_only: legacy cycle/handoff records are visible in
+# Settings → DBTL readiness, while all workflow mutations and LangGraph
+# execution remain blocked. graph_enabled must be an explicit operator choice.
+dbtl:
+  mode: audit_only # disabled | audit_only | manual | graph_enabled
+  policy_version: greenagent-dbtl-v2-draft
+
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
   # Host bash execution is disabled by default because LocalSandboxProvider is

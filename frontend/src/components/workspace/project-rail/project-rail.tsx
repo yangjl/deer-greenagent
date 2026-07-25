@@ -15,6 +15,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { type FormEvent, useState } from "react";
 
+import { SettingsDialog } from "@/components/workspace/settings";
+import { useDbtlFeature } from "@/core/dbtl";
 import { uuid } from "@/core/utils/uuid";
 import {
   DBTL_PHASES,
@@ -61,9 +63,11 @@ function SectionLabel({
 
 function PhaseDots({
   cycle,
+  disabled,
   onSetPhase,
 }: {
   cycle: DbtlCycle;
+  disabled: boolean;
   onSetPhase: (phase: (typeof DBTL_PHASES)[number]) => void;
 }) {
   const activeIndex = DBTL_PHASES.indexOf(cycle.phase);
@@ -76,9 +80,10 @@ function PhaseDots({
           type="button"
           title={`${cycle.name}: mark phase ${phase}`}
           aria-label={`Mark ${cycle.name} phase as ${phase}`}
+          disabled={disabled}
           onClick={() => onSetPhase(phase)}
           className={cn(
-            "size-2 rounded-full transition-transform hover:scale-150",
+            "size-2 rounded-full transition-transform enabled:hover:scale-150 disabled:cursor-not-allowed",
             index < activeIndex && "bg-emerald-700 dark:bg-emerald-500",
             index === activeIndex &&
               !done &&
@@ -101,16 +106,21 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const pathname = usePathname();
   const { project } = useProjectBySlug(projectSlug);
   const conversations = useProjectConversations(project?.id);
-  const { plan, update } = useCyclePlan(project?.id, project?.dbtl_phase);
+  const dbtl = useDbtlFeature();
+  const cycleMutationsEnabled = dbtl.feature?.graph_execution_enabled === true;
+  const { plan, update } = useCyclePlan(project?.id, project?.dbtl_phase, {
+    persistUpdates: cycleMutationsEnabled,
+  });
   const [draft, setDraft] = useState("");
   const [cyclesOverride, setCyclesOverride] = useState<boolean | null>(null);
+  const [readinessOpen, setReadinessOpen] = useState(false);
   const cycle = plan ? selectedCycle(plan) : null;
   // Cycles minimize themselves once nothing is running; an explicit click
   // always wins over that default.
   const cyclesOpen = cyclesOverride ?? hasActiveCycle(plan);
   function submitTodo(event: FormEvent) {
     event.preventDefault();
-    if (!cycle) {
+    if (!cycle || !cycleMutationsEnabled) {
       return;
     }
     update((current) => addTodo(current, cycle.id, uuid(), draft));
@@ -119,12 +129,23 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
 
   return (
     <aside className="border-border bg-muted/20 hidden w-64 shrink-0 flex-col overflow-y-auto border-r md:flex">
+      <SettingsDialog
+        open={readinessOpen}
+        onOpenChange={setReadinessOpen}
+        defaultSection="dbtl"
+      />
       <SectionLabel
         action={
           <button
             type="button"
             aria-label="Start a new cycle"
-            className="text-muted-foreground hover:text-foreground transition-colors"
+            disabled={!cycleMutationsEnabled}
+            title={
+              cycleMutationsEnabled
+                ? "Start a new cycle"
+                : "DBTL workflow controls are disabled during readiness review"
+            }
+            className="text-muted-foreground enabled:hover:text-foreground transition-colors disabled:cursor-not-allowed disabled:opacity-40"
             onClick={() => {
               setCyclesOverride(true);
               update((current) => addCycle(current, uuid()));
@@ -150,6 +171,27 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           {!cyclesOpen && plan?.cycles.length ? ` · ${plan.cycles.length}` : ""}
         </button>
       </SectionLabel>
+      {!cycleMutationsEnabled && (
+        <div className="mx-3 mb-2 rounded-lg border border-amber-700/20 bg-amber-500/5 px-3 py-2">
+          <p className="text-foreground text-xs font-medium">
+            DBTL is{" "}
+            {dbtl.isLoading
+              ? "checking readiness"
+              : (dbtl.feature?.mode.replace("_", " ") ?? "disabled")}
+          </p>
+          <p className="text-muted-foreground mt-1 text-[11px] leading-4">
+            Existing cycles stay visible, but workflow edits and graph runs are
+            locked.
+          </p>
+          <button
+            type="button"
+            onClick={() => setReadinessOpen(true)}
+            className="mt-1.5 text-xs font-medium text-emerald-700 hover:underline dark:text-emerald-400"
+          >
+            View readiness
+          </button>
+        </div>
+      )}
       {cyclesOpen && (
         <div className="px-2">
           {/* The phase and completion controls sit beside the select button,
@@ -172,10 +214,11 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                       : `Mark ${entry.name} complete`
                   }
                   title={done ? "Reopen cycle" : "Mark cycle complete"}
+                  disabled={!cycleMutationsEnabled}
                   onClick={() =>
                     update((current) => toggleCycleStatus(current, entry.id))
                   }
-                  className="text-muted-foreground shrink-0 transition-colors hover:text-emerald-700 dark:hover:text-emerald-400"
+                  className="text-muted-foreground shrink-0 transition-colors enabled:hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 dark:enabled:hover:text-emerald-400"
                 >
                   {done ? (
                     <CheckCircle2 className="size-3.5 text-emerald-700 dark:text-emerald-400" />
@@ -201,6 +244,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                 </button>
                 <PhaseDots
                   cycle={entry}
+                  disabled={!cycleMutationsEnabled}
                   onSetPhase={(phase) =>
                     update((current) => setCyclePhase(current, entry.id, phase))
                   }
@@ -225,10 +269,11 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
             <button
               type="button"
               aria-label={todo.done ? "Mark as open" : "Mark as done"}
+              disabled={!cycleMutationsEnabled}
               onClick={() =>
                 update((current) => toggleTodo(current, cycle.id, todo.id))
               }
-              className="text-muted-foreground shrink-0 transition-colors hover:text-emerald-700 dark:hover:text-emerald-400"
+              className="text-muted-foreground shrink-0 transition-colors enabled:hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-40 dark:enabled:hover:text-emerald-400"
             >
               {todo.done ? (
                 <CheckCircle2 className="size-4 text-emerald-700 dark:text-emerald-400" />
@@ -247,10 +292,11 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
             <button
               type="button"
               aria-label={`Remove to-do: ${todo.text}`}
+              disabled={!cycleMutationsEnabled}
               onClick={() =>
                 update((current) => removeTodo(current, cycle.id, todo.id))
               }
-              className="text-muted-foreground/60 hover:text-destructive shrink-0 opacity-0 transition-opacity group-hover/todo:opacity-100"
+              className="text-muted-foreground/60 enabled:hover:text-destructive shrink-0 opacity-0 transition-opacity group-hover/todo:opacity-100 disabled:cursor-not-allowed"
             >
               <X className="size-3.5" />
             </button>
@@ -268,6 +314,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
               onChange={(event) => setDraft(event.target.value)}
               placeholder="Add a to-do…"
               aria-label={`Add a to-do to ${cycle.name}`}
+              disabled={!cycleMutationsEnabled}
               className="border-border placeholder:text-muted-foreground/60 w-full border-b bg-transparent py-1 text-sm outline-none focus:border-emerald-600"
             />
           </form>

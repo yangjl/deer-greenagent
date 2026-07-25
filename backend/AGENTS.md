@@ -1204,6 +1204,18 @@ versioned extension records in later breeding-data migrations. PostgreSQL is
 the intended production authority. No application module may read `.greenagent`
 as authoritative state.
 
+DBTL Phase 0 is an explicit audit-only safety boundary. `AppConfig.dbtl.mode`
+defaults to `audit_only`; `app.gateway.dbtl_readiness` may inspect legacy
+`.greenagent/dbtl-cycles/*.json` and `.greenagent/handoffs/*.json` beside the
+active config solely to produce `GET /api/dbtl/readiness`. The scanner is
+deterministic, exposes only relative paths, and never opens a file for writing.
+The four operator review classifications are `compatible`, `repairable`,
+`invalid_or_ambiguous`, and `safe_to_supersede` (the last requires an explicit
+`superseded_by` marker). This inventory is not authoritative DBTL state.
+`start_run` rejects the reserved `dbtl_orchestrator` before creating a run,
+thread, checkpoint, or artifact unless `dbtl.mode=graph_enabled`; `manual`
+does not enable LangGraph execution. Preserve this fail-closed ordering.
+
 `threads_meta` carries nullable `workspace_id` and `project_id` plus explicit
 `scope_type` and `visibility`. Existing and newly projectless conversations
 default to `inbox` / `private-owner`; never infer workspace sharing from a

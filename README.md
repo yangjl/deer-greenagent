@@ -947,7 +947,19 @@ The foundation API is:
 Workspace, membership, and project records use the shared SQL persistence
 engine. PostgreSQL is the production authority; SQLite remains suitable for
 single-user local development. The temporary `.greenagent` filesystem is not
-read by application code and is not an application state authority.
+an application state authority. During the DBTL foundation's audit-only Phase
+0, Settings → DBTL readiness performs a read-only inventory of legacy cycle
+and handoff JSON files beside the active `config.yaml`; it never repairs,
+migrates, or promotes them.
+
+DBTL defaults to `dbtl.mode: audit_only`. Existing cycle projections remain
+visible in the project rail, but cycle/to-do mutations and the experimental
+`dbtl_orchestrator` LangGraph are blocked. The readiness view shows preflight
+checks, groups legacy records as compatible, repairable, invalid/ambiguous, or
+explicitly safe to supersede, documents the proposed Test and knowledge
+candidate vocabulary, and exports the report for human review. Enabling graph
+execution requires the explicit operator setting `dbtl.mode: graph_enabled`;
+`manual` permits future administrative maintenance but does not run the graph.
 
 `LocalSandboxProvider` keeps host Bash disabled by default. If you explicitly
 enable `sandbox.allow_host_bash: true`, do so only on a fully trusted local

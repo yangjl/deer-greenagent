@@ -19,6 +19,7 @@ import {
 export function useCyclePlan(
   projectId: string | null | undefined,
   projectPhase: string | null | undefined,
+  options: { persistUpdates?: boolean } = {},
 ) {
   const [plan, setPlan] = useState<CyclePlan | null>(null);
 
@@ -45,18 +46,20 @@ export function useCyclePlan(
           return current;
         }
         const next = updater(current);
-        try {
-          window.localStorage.setItem(
-            cyclePlanStorageKey(projectId),
-            serializeCyclePlan(next),
-          );
-        } catch {
-          // Quota/private-mode failures degrade to in-memory state.
+        if (options.persistUpdates) {
+          try {
+            window.localStorage.setItem(
+              cyclePlanStorageKey(projectId),
+              serializeCyclePlan(next),
+            );
+          } catch {
+            // Quota/private-mode failures degrade to in-memory state.
+          }
         }
         return next;
       });
     },
-    [projectId],
+    [options.persistUpdates, projectId],
   );
 
   return { plan, update };

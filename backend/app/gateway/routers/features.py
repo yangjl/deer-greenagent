@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from app.gateway.browser_capability import browser_capability
+from app.gateway.dbtl_readiness import dbtl_mode_reason
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
 
@@ -28,11 +29,21 @@ class BrowserControlFeature(BaseModel):
     enabled: bool = Field(..., description="Whether the live browser routes and UI are available")
 
 
+class DbtlFeature(BaseModel):
+    """Current project-scoped DBTL operating mode."""
+
+    mode: str
+    mutations_enabled: bool
+    graph_execution_enabled: bool
+    reason: str
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
     agents_api: AgentsApiFeature
     browser_control: BrowserControlFeature
+    dbtl: DbtlFeature
 
 
 @router.get(
@@ -47,4 +58,10 @@ async def list_features(config: AppConfig = Depends(get_config)) -> FeaturesResp
     return FeaturesResponse(
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         browser_control=BrowserControlFeature(enabled=browser.available),
+        dbtl=DbtlFeature(
+            mode=config.dbtl.mode,
+            mutations_enabled=config.dbtl.mutations_enabled,
+            graph_execution_enabled=config.dbtl.graph_execution_enabled,
+            reason=dbtl_mode_reason(config.dbtl),
+        ),
     )

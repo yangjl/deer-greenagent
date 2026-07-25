@@ -7,6 +7,7 @@ import {
   BrainIcon,
   PaletteIcon,
   SparklesIcon,
+  WorkflowIcon,
   UserIcon,
   WrenchIcon,
 } from "lucide-react";
@@ -23,6 +24,7 @@ import { AboutSettingsPage } from "@/components/workspace/settings/about-setting
 import { AccountSettingsPage } from "@/components/workspace/settings/account-settings-page";
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
 import { ChannelsSettingsPage } from "@/components/workspace/settings/channels-settings-page";
+import { DbtlReadinessSettingsPage } from "@/components/workspace/settings/dbtl-readiness-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
@@ -34,6 +36,7 @@ type SettingsSection =
   | "account"
   | "appearance"
   | "channels"
+  | "dbtl"
   | "memory"
   | "tools"
   | "skills"
@@ -85,6 +88,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
         label: t.settings.sections.memory,
         icon: BrainIcon,
       },
+      {
+        id: "dbtl",
+        label: t.settings.sections.dbtl,
+        icon: WorkflowIcon,
+      },
       { id: "tools", label: t.settings.sections.tools, icon: WrenchIcon },
       { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
       { id: "about", label: t.settings.sections.about, icon: InfoIcon },
@@ -94,6 +102,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.appearance,
       t.settings.sections.channels,
       t.settings.sections.memory,
+      t.settings.sections.dbtl,
       t.settings.sections.tools,
       t.settings.sections.skills,
       t.settings.sections.notification,
@@ -145,6 +154,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}
+              {activeSection === "dbtl" && <DbtlReadinessSettingsPage />}
               {activeSection === "tools" && <ToolSettingsPage />}
               {activeSection === "skills" && (
                 <SkillSettingsPage

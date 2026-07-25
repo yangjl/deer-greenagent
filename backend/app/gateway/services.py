@@ -517,6 +517,8 @@ def resolve_agent_factory(assistant_id: str | None):
     lead-agent path.
     """
     if assistant_id == "dbtl_orchestrator":
+        if not get_app_config().dbtl.graph_execution_enabled:
+            raise DbtlExecutionDisabledError("DBTL LangGraph execution is disabled. Review Settings → DBTL readiness; an operator must explicitly set dbtl.mode=graph_enabled before this assistant can run.")
         from deerflow.agents.dbtl import make_dbtl_orchestrator
 
         return make_dbtl_orchestrator
@@ -524,6 +526,19 @@ def resolve_agent_factory(assistant_id: str | None):
     from deerflow.agents.lead_agent.agent import make_lead_agent
 
     return make_lead_agent
+
+
+class DbtlExecutionDisabledError(RuntimeError):
+    """Raised before a run is created when DBTL graph execution is disabled."""
+
+
+def ensure_dbtl_execution_allowed(assistant_id: str | None) -> None:
+    if assistant_id != "dbtl_orchestrator":
+        return
+    try:
+        resolve_agent_factory(assistant_id)
+    except DbtlExecutionDisabledError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 # Lead-agent recursion budget bounds. The Gateway must NOT trust a
@@ -1022,6 +1037,10 @@ async def start_run(
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
     """
+    # Phase 0 fail-closed boundary: reject the experimental orchestrator before
+    # creating a run row, thread metadata, checkpoints, or project artifacts.
+    ensure_dbtl_execution_allowed(body.assistant_id)
+
     stream_modes = normalize_stream_modes(body.stream_mode)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)

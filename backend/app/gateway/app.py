@@ -21,6 +21,7 @@ from app.gateway.routers import (
     channel_connections,
     channels,
     console,
+    dbtl,
     features,
     feedback,
     files,
@@ -505,6 +506,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Features API is mounted at /api/features
     app.include_router(features.router)
+
+    # DBTL readiness API is read-only during the audit-only foundation phase.
+    app.include_router(dbtl.router)
 
     # Console API (cross-thread observability) is mounted at /api/console
     app.include_router(console.router)

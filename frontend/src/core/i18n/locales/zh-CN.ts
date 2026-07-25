@@ -692,6 +692,7 @@ export const zhCN: Translations = {
       account: "账号",
       appearance: "外观",
       channels: "渠道",
+      dbtl: "DBTL 就绪状态",
       memory: "记忆",
       tools: "工具",
       skills: "技能",

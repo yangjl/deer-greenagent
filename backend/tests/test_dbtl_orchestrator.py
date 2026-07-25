@@ -153,10 +153,42 @@ def test_stub_writes_artifact_placeholders(tmp_path):
     assert written.exists()
 
 
-def test_resolve_agent_factory_routes_dbtl_and_leaves_default():
+def test_resolve_agent_factory_rejects_dbtl_when_graph_is_not_enabled(monkeypatch):
+    services = pytest.importorskip("app.gateway.services")
+    from deerflow.config.dbtl_config import DbtlConfig
+
+    monkeypatch.setattr(services, "get_app_config", lambda: type("Config", (), {"dbtl": DbtlConfig()})())
+
+    with pytest.raises(services.DbtlExecutionDisabledError):
+        services.resolve_agent_factory("dbtl_orchestrator")
+
+
+def test_dbtl_run_gate_returns_conflict_before_run_creation(monkeypatch):
+    services = pytest.importorskip("app.gateway.services")
+    from fastapi import HTTPException
+
+    from deerflow.config.dbtl_config import DbtlConfig
+
+    monkeypatch.setattr(services, "get_app_config", lambda: type("Config", (), {"dbtl": DbtlConfig()})())
+
+    with pytest.raises(HTTPException) as exc_info:
+        services.ensure_dbtl_execution_allowed("dbtl_orchestrator")
+
+    assert exc_info.value.status_code == 409
+    assert "explicitly set dbtl.mode=graph_enabled" in exc_info.value.detail
+
+
+def test_resolve_agent_factory_routes_enabled_dbtl_and_leaves_default(monkeypatch):
     services = pytest.importorskip("app.gateway.services")
     from deerflow.agents.dbtl import make_dbtl_orchestrator
     from deerflow.agents.lead_agent.agent import make_lead_agent
+    from deerflow.config.dbtl_config import DbtlConfig
+
+    monkeypatch.setattr(
+        services,
+        "get_app_config",
+        lambda: type("Config", (), {"dbtl": DbtlConfig(mode="graph_enabled")})(),
+    )
 
     assert services.resolve_agent_factory("dbtl_orchestrator") is make_dbtl_orchestrator
     # Any other assistant_id still resolves to the untouched lead-agent factory.
