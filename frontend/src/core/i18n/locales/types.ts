@@ -429,6 +429,7 @@ export interface Translations {
     startConversation: string;
     branchCreated: string;
     branchFailed: string;
+    streamReplayGap: string;
   };
 
   // Chats
