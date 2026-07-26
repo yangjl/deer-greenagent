@@ -26,6 +26,8 @@ from langchain_core.runnables import RunnableConfig
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.dbtl.agent_selector import AgentCandidate, build_candidates
 from deerflow.dbtl.cycle_state import StageStatus, stage_for_state
+from deerflow.dbtl.review_markdown import render_review_markdown, render_stage_digest
+from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
 from deerflow.dbtl.stage_runner import (
     AsyncWorkerDispatcher,
     DispatchOutcome,
@@ -206,8 +208,15 @@ def _write_stage_package(
     cycle: dict[str, Any],
     outcome: StageExecutionOutcome,
     idempotency_key: str,
-) -> tuple[str, str]:
-    """Atomically write the human-visible evidence package and return URI/hash."""
+) -> tuple[str, str, str]:
+    """Write the review package and return the URI/hash of the reviewed document.
+
+    Two files are written: the structured JSON that gates and later phases need,
+    and the Markdown rendering a person actually reads. **The Markdown is the
+    returned artifact**, so the approval binds to the document that was read
+    rather than to a machine record nobody opened. The Markdown names the JSON
+    and its hash, so the audit chain stays intact in one direction.
+    """
     root = Path(project_root).expanduser().resolve()
     ensure_project_dirs(root)
     payload = {
@@ -222,11 +231,49 @@ def _write_stage_package(
         "satisfies_gate": False,
     }
     encoded = (json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-    content_hash = hashlib.sha256(encoded).hexdigest()
-    relative = Path("dbtl") / _safe_token(str(cycle["id"])) / outcome.plan.spec.stage / f"stage-run-{_safe_token(idempotency_key)}-{content_hash[:12]}.json"
-    destination = project_outputs_dir(root) / relative
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    data_hash = hashlib.sha256(encoded).hexdigest()
 
+    stage = outcome.plan.spec.stage
+    revision = cycle.get("db_revision")
+    # Named for a person browsing the project folder, not for a machine: the
+    # cycle's own title leads, and the content suffix only disambiguates.
+    stage_dir = stage_output_dir(
+        cycle_id=str(cycle["id"]),
+        cycle_title=str(cycle.get("title") or ""),
+        stage=stage,
+    )
+    data_relative = stage_dir / stage_file_name(
+        stage=stage,
+        kind="package",
+        revision=revision,
+        content_hash=data_hash,
+    )
+
+    document = render_review_markdown(
+        payload,
+        data_filename=data_relative.name,
+        data_hash=data_hash,
+    ).encode("utf-8")
+    document_hash = hashlib.sha256(document).hexdigest()
+    document_relative = stage_dir / stage_file_name(
+        stage=stage,
+        kind="review",
+        revision=revision,
+        content_hash=document_hash,
+    )
+
+    outputs = project_outputs_dir(root)
+    for relative, content in ((data_relative, encoded), (document_relative, document)):
+        _atomic_write(outputs / relative, content)
+
+    uri = f"/mnt/user-data/outputs/{document_relative.as_posix()}"
+    digest = render_stage_digest(payload, document_path=f"outputs/{document_relative.as_posix()}")
+    return uri, document_hash, digest
+
+
+def _atomic_write(destination: Path, content: bytes) -> None:
+    """Write via a temp file in the same directory, then rename."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
     temp_path: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -236,7 +283,7 @@ def _write_stage_package(
             delete=False,
         ) as handle:
             temp_path = handle.name
-            handle.write(encoded)
+            handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, destination)
@@ -244,9 +291,6 @@ def _write_stage_package(
     finally:
         if temp_path is not None:
             Path(temp_path).unlink(missing_ok=True)
-
-    uri = f"/mnt/user-data/outputs/{relative.as_posix()}"
-    return uri, content_hash
 
 
 class LiveStageAdapter:
@@ -679,10 +723,11 @@ class LiveStageAdapter:
         artifact_uri = None
         artifact_hash = None
         artifact_type = None
+        artifact_digest = ""
         design_ready = stage != "design" or (chair_result is not None and chair_result.is_trustworthy and chair_result.status is WorkerStatus.COMPLETED)
         produced_usable_evidence = outcome.produced_usable_evidence and design_ready
         if produced_usable_evidence:
-            artifact_uri, artifact_hash = await asyncio.to_thread(
+            artifact_uri, artifact_hash, artifact_digest = await asyncio.to_thread(
                 _write_stage_package,
                 project_root=project_root,
                 cycle=cycle,
@@ -751,7 +796,9 @@ class LiveStageAdapter:
         if clarification_question:
             note = f"Ran {len(results) - 1} independent Design council position(s) and a chair synthesis. The council paused before creating a review package because one human decision is required."
         elif artifact_uri:
-            note = f"Ran {len(results)} bounded {stage} worker(s) and recorded their structured results. A review package was attached at {artifact_uri}. The stage remains open until a person submits and reviews it."
+            # The digest carries what the council concluded. A reply that is only
+            # a file path makes the reader open a file to learn anything at all.
+            note = artifact_digest or f"Ran {len(results)} bounded {stage} worker(s) and attached a review package at {artifact_uri}."
         else:
             note = f"Ran {len(results)} bounded {stage} worker(s) and recorded every outcome, but none produced usable evidence, so no review artifact was attached."
         return LiveStageResult(

@@ -158,7 +158,15 @@ async def test_selected_cycle_runs_workers_and_persists_review_evidence(
     assert workers[0]["status"] == "completed"
     assert cycle is not None
     assert cycle["artifacts"][0]["artifact_type"] == "design_brief"
-    assert "recorded their structured results" in final["messages"][-2].content
+    # The reply carries what the council concluded, then where to review it — a
+    # reply that is only a file path makes the reader open a file to learn
+    # anything at all.
+    reply = final["messages"][-2].content
+    assert "Prepared the operational Design evidence." in reply
+    assert "Full review package:" in reply
+    # Meaningful path, not a hash token: the cycle's own title leads the
+    # directory and the file says which stage, kind, and revision it is.
+    assert "outputs/dbtl/drought-tolerance-1/design/design-review-rev1-" in reply
     assert final["messages"][-2].tool_calls[0]["name"] == "present_files"
     assert final["artifacts"][-1] == cycle["artifacts"][0]["uri"]
     assert "cannot satisfy a review gate" in final["messages"][-2].content

@@ -1,22 +1,28 @@
 "use client";
 
 import { FlaskConical, Loader2, X } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  ASSUMPTION_NOTE,
+  DRAFTED_NOTE,
   PROPOSAL_ACTIONS,
   type ClarificationState,
   type EvaluationResponse,
   type ProposalAction,
   type ProposalPayload,
+  type SetupDraftResponse,
   advanceClarification,
+  applySetupDraft,
+  assumedFieldLabel,
   canConfirmSetup,
   clarificationPrompts,
   confirmationLines,
   hasProposalToShow,
   initialClarification,
+  isDraftUseful,
   proposalHeadline,
   resolvedObjective,
 } from "@/core/dbtl";
@@ -43,6 +49,7 @@ export function UpgradeProposalCard({
   evaluation,
   onAction,
   onConfirm,
+  onDraftSetup,
   isConfirming = false,
   error,
   parentCycleTitle,
@@ -51,6 +58,14 @@ export function UpgradeProposalCard({
   evaluation: EvaluationResponse | null;
   onAction: (action: ProposalAction) => void;
   onConfirm: (submission: UpgradeProposalSubmission) => void;
+  /**
+   * Draft the form from the user's own request. Called once, when setup opens,
+   * rather than on mount — a card the user dismisses should cost no model call.
+   * Resolving to `null` (or throwing) leaves the blank form intact.
+   */
+  onDraftSetup?: (
+    fields: readonly string[],
+  ) => Promise<SetupDraftResponse | null>;
   isConfirming?: boolean;
   error?: string | null;
   parentCycleTitle?: string | null;
@@ -58,17 +73,51 @@ export function UpgradeProposalCard({
 }) {
   const proposal = evaluation?.proposal ?? null;
   const [step, setStep] = useState<Step>("offer");
-  const [title, setTitle] = useState("");
-  const [clarification, setClarification] = useState<ClarificationState>({});
+  // Title and answers move together so an arriving draft can be merged into
+  // both in one pass against a single consistent snapshot.
+  const [form, setForm] = useState<{
+    title: string;
+    clarification: ClarificationState;
+  }>({ title: "", clarification: {} });
+  const [assumed, setAssumed] = useState<readonly string[]>([]);
+  const [isDrafting, setIsDrafting] = useState(false);
+  // Mirrors the latest form so a slow draft merges into what the user has typed
+  // meanwhile, not into the snapshot captured when the request went out.
+  const formRef = useRef(form);
+  formRef.current = form;
 
   if (!hasProposalToShow(evaluation) || !proposal) {
     return null;
   }
 
+  const setTitle = (value: string) =>
+    setForm((prev) => ({ ...prev, title: value }));
+
   function begin() {
-    setClarification(initialClarification(proposal!));
-    setTitle(proposal!.proposed_objective.slice(0, 80));
+    const current = proposal!;
+    setForm({
+      title: current.proposed_objective.slice(0, 80),
+      clarification: initialClarification(current),
+    });
+    setAssumed([]);
     setStep("clarify");
+    if (!onDraftSetup) return;
+
+    setIsDrafting(true);
+    void onDraftSetup(current.missing_fields)
+      .then((draft) => {
+        if (!isDraftUseful(draft)) return;
+        const applied = applySetupDraft({ draft, ...formRef.current });
+        setForm({
+          title: applied.title,
+          clarification: applied.clarification,
+        });
+        setAssumed(applied.assumed);
+      })
+      // A failed draft is not an error the scientist needs to see: the blank
+      // form they already have is a correct, complete fallback.
+      .catch(() => undefined)
+      .finally(() => setIsDrafting(false));
   }
 
   return (
@@ -110,11 +159,20 @@ export function UpgradeProposalCard({
           {step === "clarify" && (
             <ClarifyStep
               proposal={proposal}
-              title={title}
+              title={form.title}
               onTitleChange={setTitle}
-              clarification={clarification}
+              clarification={form.clarification}
+              assumed={assumed}
+              isDrafting={isDrafting}
               onFieldChange={(field, value) =>
-                setClarification((prev) => advanceClarification(prev, field, value))
+                setForm((prev) => ({
+                  ...prev,
+                  clarification: advanceClarification(
+                    prev.clarification,
+                    field,
+                    value,
+                  ),
+                }))
               }
               onBack={() => setStep("offer")}
               onContinue={() => setStep("confirm")}
@@ -126,14 +184,22 @@ export function UpgradeProposalCard({
               proposal={proposal}
               isConfirming={isConfirming}
               error={error}
-              objective={resolvedObjective(proposal, clarification, title)}
+              objective={resolvedObjective(
+                proposal,
+                form.clarification,
+                form.title,
+              )}
               parentCycleTitle={parentCycleTitle}
               onBack={() => setStep("clarify")}
               onConfirm={() =>
                 onConfirm({
-                  title: title.trim(),
-                  objective: resolvedObjective(proposal, clarification, title),
-                  clarification,
+                  title: form.title.trim(),
+                  objective: resolvedObjective(
+                    proposal,
+                    form.clarification,
+                    form.title,
+                  ),
+                  clarification: form.clarification,
                 })
               }
             />
@@ -168,7 +234,10 @@ function OfferStep({
           <ul className="flex flex-wrap gap-x-4 gap-y-1">
             {proposal.missing_fields.map((field) => (
               <li key={field} className="text-sm">
-                <span aria-hidden="true" className="text-muted-foreground mr-1.5">
+                <span
+                  aria-hidden="true"
+                  className="text-muted-foreground mr-1.5"
+                >
                   •
                 </span>
                 {field}
@@ -223,6 +292,8 @@ function ClarifyStep({
   title,
   onTitleChange,
   clarification,
+  assumed,
+  isDrafting,
   onFieldChange,
   onBack,
   onContinue,
@@ -231,13 +302,34 @@ function ClarifyStep({
   title: string;
   onTitleChange: (value: string) => void;
   clarification: ClarificationState;
+  assumed: readonly string[];
+  isDrafting: boolean;
   onFieldChange: (field: string, value: string) => void;
   onBack: () => void;
   onContinue: () => void;
 }) {
   const ready = canConfirmSetup(proposal, clarification, title);
+  const assumedSet = new Set(assumed);
+  const drafted = Object.values(clarification).some((value) => value.trim());
+
   return (
     <div className="space-y-3">
+      {isDrafting && (
+        <p
+          className="text-muted-foreground flex items-center gap-1.5 text-xs"
+          role="status"
+        >
+          <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+          Drafting from your request…
+        </p>
+      )}
+      {!isDrafting && drafted && (
+        <div className="text-muted-foreground space-y-0.5 text-xs">
+          <p>{DRAFTED_NOTE}</p>
+          {assumedSet.size > 0 && <p>{ASSUMPTION_NOTE}</p>}
+        </div>
+      )}
+
       <Field label="Cycle title">
         <Input
           value={title}
@@ -248,10 +340,18 @@ function ClarifyStep({
       </Field>
 
       {clarificationPrompts(proposal).map((prompt) => (
-        <Field key={prompt.field} label={prompt.question}>
+        <Field
+          key={prompt.field}
+          label={prompt.question}
+          // Named in words, never by colour alone: the scientist has to be able
+          // to tell the model's suggestion from their own answer.
+          note={assumedSet.has(prompt.field) ? assumedFieldLabel() : undefined}
+        >
           <Input
             value={clarification[prompt.field] ?? ""}
-            onChange={(event) => onFieldChange(prompt.field, event.target.value)}
+            onChange={(event) =>
+              onFieldChange(prompt.field, event.target.value)
+            }
             placeholder={prompt.placeholder}
           />
         </Field>
@@ -320,7 +420,12 @@ function ConfirmStep({
         >
           Back
         </Button>
-        <Button type="button" size="sm" onClick={onConfirm} disabled={isConfirming}>
+        <Button
+          type="button"
+          size="sm"
+          onClick={onConfirm}
+          disabled={isConfirming}
+        >
           {isConfirming && <Loader2 className="mr-1.5 size-3.5 animate-spin" />}
           {isConfirming ? "Creating…" : "Create this cycle"}
         </Button>
@@ -331,14 +436,24 @@ function ConfirmStep({
 
 function Field({
   label,
+  note,
   children,
 }: {
   label: string;
+  /** Provenance for this field, e.g. that its value is the model's assumption. */
+  note?: string;
   children: React.ReactNode;
 }) {
   return (
     <div>
-      <p className="text-muted-foreground text-xs">{label}</p>
+      <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
+        {label}
+        {note && (
+          <span className="border-border rounded border px-1 py-px text-[10px] tracking-wide uppercase">
+            {note}
+          </span>
+        )}
+      </p>
       <div className="mt-1">{children}</div>
     </div>
   );

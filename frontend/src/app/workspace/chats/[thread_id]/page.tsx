@@ -14,8 +14,9 @@ import {
   useThreadChat,
 } from "@/components/workspace/chats";
 import {
-  DbtlContextChip,
+  DbtlScopeMenu,
   UpgradeProposalCard,
+  type UpgradeProposalSubmission,
   useDbtlUpgradeProposal,
   useProjectCycleSelection,
 } from "@/components/workspace/dbtl";
@@ -134,7 +135,7 @@ export default function ChatPage() {
 
   const { showNotification } = useNotification();
   const { feature: dbtlFeature } = useDbtlFeature();
-  const showContextChip = Boolean(
+  const showDbtlScope = Boolean(
     projectId && dbtlFeature?.graph_execution_enabled,
   );
 
@@ -150,7 +151,7 @@ export default function ChatPage() {
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
-    projectSupervisorEnabled: showContextChip,
+    projectSupervisorEnabled: showDbtlScope,
     context: settings.context,
     projectId,
     isMock,
@@ -216,43 +217,63 @@ export default function ChatPage() {
   const upgradeProposal = useDbtlUpgradeProposal(projectId);
   const {
     selectedCycleId,
+    selectCycle,
     pendingDesignKickoff,
+    requestDesignKickoff,
     consumeDesignKickoff,
+    pendingScopeRequest,
+    consumeComposerScope,
   } = useProjectCycleSelection();
-  const { evaluate: evaluateForUpgrade } = upgradeProposal;
+  const { evaluate: evaluateForUpgrade, confirm: confirmUpgrade } =
+    upgradeProposal;
 
-  // The context chip only appears where the supervisor can actually route, so
+  // The scope selector only appears where the supervisor can actually route, so
   // the control is never offered when changing it would do nothing.
   const { data: projectCycles } = useProjectCycles(projectId);
   const [requestContext, setRequestContext] = useState<RequestContext>(
     ORDINARY_REQUEST_CONTEXT,
   );
+  const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const cycleList = projectCycles?.cycles ?? [];
   // Resolve against the live list on every render: a cycle can be completed in
-  // another tab, and the chip must not keep claiming a scope that is gone.
+  // another tab, and the label must not keep claiming a scope that is gone.
   const effectiveContext = normalizeContext(requestContext, cycleList);
+
+  // A rail action arms the composer; it never sends. The human still writes the
+  // request in the chatbox, which is why the cursor moves there.
+  useEffect(() => {
+    if (!pendingScopeRequest || !showDbtlScope) return;
+    setRequestContext({ kind: pendingScopeRequest.kind, cycleId: null });
+    setComposerFocusSignal((value) => value + 1);
+    consumeComposerScope(pendingScopeRequest.nonce);
+  }, [consumeComposerScope, pendingScopeRequest, showDbtlScope]);
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
       // Travels in the run request's `context`, never `configurable`, which is
       // checkpointed and would make a one-off selection permanent.
-      const dbtlContext = showContextChip
+      const dbtlContext = showDbtlScope
         ? runContextPayload(effectiveContext)
         : undefined;
-      const proposalContext = showContextChip
+      const proposalContext = showDbtlScope
         ? proposalContextPayload(effectiveContext)
         : { selectedCycleId, explicitChoice: null };
       const sentContext = effectiveContext;
       const sendPromise = sendMessage(threadId, message, dbtlContext, {
         ...options,
-        runMetadata: showContextChip
+        runMetadata: showDbtlScope
           ? runActivityMetadata(sentContext)
           : undefined,
         onSent: () => {
           options?.onSent?.();
           // Consume the one-shot choice only when the stream hook accepts the
           // send. A click dropped by the in-flight guard must not lose it.
-          if (showContextChip) {
+          //
+          // An empty message keeps the selection: the DBTL routes read the
+          // request's *text*, so a textless send cannot start or continue
+          // anything, and silently disarming here would strand a user who
+          // armed the composer and then sent nothing.
+          if (showDbtlScope && message.text.trim()) {
             setRequestContext(nextContextAfterSend(sentContext));
           }
           // Shadow evaluation runs beside the accepted send, never in front
@@ -274,7 +295,7 @@ export default function ChatPage() {
       threadId,
       selectedCycleId,
       evaluateForUpgrade,
-      showContextChip,
+      showDbtlScope,
       effectiveContext,
     ],
   );
@@ -322,6 +343,27 @@ export default function ChatPage() {
     thread.isLoading,
     threadId,
   ]);
+
+  /**
+   * Confirming the proposal is what creates the durable cycle, so it is also
+   * where the Design council starts — the same two steps `StartCycleDialog`
+   * performs on the form path. Without this, the conversational path created a
+   * record and then stopped, because the debate is a cycle-scoped request and
+   * had no cycle id to scope itself to.
+   *
+   * The kickoff is queued only when a cycle actually came back; a failed
+   * confirmation must not start a debate about a record that does not exist.
+   */
+  const handleProposalConfirmed = useCallback(
+    async (submission: UpgradeProposalSubmission) => {
+      const cycle = await confirmUpgrade(submission);
+      if (!cycle) return;
+      selectCycle(cycle.id);
+      requestDesignKickoff(cycle.id, cycle.title);
+    },
+    [confirmUpgrade, requestDesignKickoff, selectCycle],
+  );
+
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
       let sent = false;
@@ -331,7 +373,7 @@ export default function ChatPage() {
           text: buildHumanInputResponseText(request, response),
           files: [],
         },
-        showContextChip
+        showDbtlScope
           ? request.source === "ask_clarification" &&
             request.clarification_type === "design_decision" &&
             selectedCycleId
@@ -356,7 +398,7 @@ export default function ChatPage() {
       );
       return sent;
     },
-    [selectedCycleId, sendMessage, showContextChip, threadId],
+    [selectedCycleId, sendMessage, showDbtlScope, threadId],
   );
   const handleStop = useCallback(async () => {
     await thread.stop();
@@ -538,16 +580,6 @@ export default function ChatPage() {
                       </div>
                     </div>
                   )}
-                  {showContextChip && (
-                    <div className="mb-1.5 flex w-full items-center">
-                      <DbtlContextChip
-                        context={effectiveContext}
-                        cycles={cycleList}
-                        onSelect={setRequestContext}
-                        disabled={thread.isLoading}
-                      />
-                    </div>
-                  )}
                   {upgradeProposal.evaluation && (
                     <UpgradeProposalCard
                       // Keyed so a second proposal starts clean instead of
@@ -556,8 +588,9 @@ export default function ChatPage() {
                       className="mb-2 w-full"
                       evaluation={upgradeProposal.evaluation}
                       onAction={upgradeProposal.recordOutcome}
+                      onDraftSetup={upgradeProposal.draftSetup}
                       onConfirm={(submission) => {
-                        void upgradeProposal.confirm(submission);
+                        void handleProposalConfirmed(submission);
                       }}
                       isConfirming={upgradeProposal.isConfirming}
                       error={upgradeProposal.createError}
@@ -586,6 +619,17 @@ export default function ChatPage() {
                         isWelcomeMode &&
                         !hasGoal &&
                         !hasTodos && <Welcome mode={settings.context.mode} />
+                      }
+                      focusSignal={composerFocusSignal}
+                      extraTools={
+                        showDbtlScope ? (
+                          <DbtlScopeMenu
+                            context={effectiveContext}
+                            cycles={cycleList}
+                            onSelect={setRequestContext}
+                            disabled={thread.isLoading}
+                          />
+                        ) : null
                       }
                       disabled={
                         isMock ||

@@ -1199,6 +1199,12 @@ dbtl:
   # Record what the DBTL classifier believes about each project request.
   # Observation only: an evaluation never creates or advances a cycle.
   classifier_shadow_enabled: true
+  # Model used to pre-fill the cycle setup form from the user's own request, so
+  # starting a cycle is a review-and-confirm step rather than data entry.
+  # Drafted values the request does not support come back marked as assumptions
+  # and are shown as such; a human confirmation still creates the record.
+  # null disables drafting and the form opens blank.
+  setup_draft_model_name: null
   # Show the DBTL Upgrade Proposal card to users. Off by default so shadow
   # evaluation can be measured before anyone is interrupted; turn on only
   # after reviewing the false-upgrade and missed-cycle rates in

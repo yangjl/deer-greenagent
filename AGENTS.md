@@ -98,6 +98,13 @@ Breeding-workspace note:
   through thread metadata `project_id`; legacy projectless conversations stay
   at `/workspace/chats`. Cycles/to-dos are a browser-local review projection —
   DBTL orchestration is deferred per the 2026-07-25 foundation-demo rescope.
+- **The chatbox is the primary input and interaction channel.** Both left rails
+  are navigation, summary, and review only — they contain no text inputs, and a
+  rail action that needs input arms the composer (sets its scope, moves the
+  cursor there) rather than opening a form. Structured review actions that must
+  cite evidence live in the right-side inspection sheets, not the rails. See
+  [frontend/AGENTS.md](frontend/AGENTS.md) for the `extraTools` / `focusSignal`
+  slots that keep this out of the generic composer.
 - The project folder tree appears only under the expandable project rows in
   the first sidebar rail. File selection opens the project-scoped content
   inspector and temporarily collapses that rail; the second project rail does
@@ -124,9 +131,13 @@ Breeding-workspace note:
   work, clarification, cycle setup/confirmation, existing-cycle continuation —
   and the ordinary branch *is* the existing lead agent. Stage execution remains
   behind a stub that structurally cannot write results or satisfy gates. A
-  per-request context chip above the composer shows
-  `[ Ordinary project work ▾ ]` or `[ Cycle 01 · Design ▾ ]` and applies to the
-  next request only. See [backend/AGENTS.md](backend/AGENTS.md) for the
+  per-request DBTL scope selector sits **in the composer's tool row**, beside
+  attachments and voice: it is a quiet flask icon for ordinary work and gains a
+  label (`Cycle 01 · Design`, `Start a new cycle`) only when the next request is
+  scoped, and it applies to the next request only. Cycles are opened by
+  describing them in the chatbox under the `Start a new cycle` scope, which routes
+  to the supervisor's setup branch — nothing is recorded until the human
+  confirms. See [backend/AGENTS.md](backend/AGENTS.md) for the
   reducer-idempotency and stream-contract constraints that make delegation safe.
 - DBTL Phase 6 replaces the continuation stub with a production
   `LiveStageAdapter` for Design and Data Reconciliation. It verifies the

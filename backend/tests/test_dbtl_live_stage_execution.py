@@ -183,11 +183,28 @@ async def test_a_live_design_run_persists_workers_and_a_reviewable_package(
     assert write["results"][0]["is_trustworthy"] is True
     assert write["artifact_type"] == "design_brief"
     assert write["artifact_content_hash"]
-    package = tmp_path / write["artifact_uri"].removeprefix("/mnt/user-data/")
-    assert package.exists()
+    # The attached artifact is the Markdown a human reads, so the approval binds
+    # to the reviewed document rather than to a machine record nobody opened.
+    document = tmp_path / write["artifact_uri"].removeprefix("/mnt/user-data/")
+    assert document.suffix == ".md"
+    assert document.exists()
+    rendered = document.read_text()
+    assert rendered.startswith("# Design review package")
+    assert "does not satisfy" in rendered
+    # Named for a person browsing the folder, not for a machine. This fixture's
+    # cycle has no title, so the readable fallback is the cycle id itself.
+    assert document.name == "design-review-rev3-" + document.name.split("-")[-1]
+    assert document.parent.as_posix().endswith("dbtl/cycle-1/design")
+    # The structured package sits beside it and is named from the document,
+    # keeping the audit chain intact.
+    package = next(document.parent.glob("design-package-rev3-*.json"))
     package_payload = json.loads(package.read_text())
     assert package_payload["stage_spec_key"] == "generic:design:v2"
     assert package_payload["results"][-1]["capability"] == "design_council_chair"
+    assert package.name in rendered
+    # The chat note carries the synthesis, not only a path.
+    assert "outputs/dbtl/cycle-1/design/" in result.note
+    assert result.note.index("\n") < result.note.index("outputs/")
     assert len(dispatcher.calls) == 3
     assert "red team" in dispatcher.calls[1][0][0].prompt
     assert "independent council positions" in dispatcher.calls[2][0][0].prompt

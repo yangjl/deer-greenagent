@@ -86,3 +86,34 @@ export async function fetchEvaluations(
   }
   return (await response.json()) as EvaluationListResponse;
 }
+
+export interface SetupDraftResponse {
+  enabled: boolean;
+  title: string;
+  fields: Record<string, string>;
+  assumed_fields: string[];
+}
+
+/**
+ * Ask the server to pre-fill the setup form from the user's own request.
+ *
+ * `fields` echoes the proposal's `missing_fields`; the server drops anything
+ * outside that list, so this call cannot widen the record's shape. The response
+ * separates drafted values from `assumed_fields` — the ones the request did not
+ * support — because the form becomes a durable research record on confirmation.
+ */
+export async function draftCycleSetup(input: {
+  projectId: string;
+  text: string;
+  fields: readonly string[];
+}): Promise<SetupDraftResponse> {
+  const response = await fetch(`${base(input.projectId)}/draft-setup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: input.text, fields: [...input.fields] }),
+  });
+  if (!response.ok) {
+    throw new Error(await parseError(response, "Failed to draft cycle setup"));
+  }
+  return (await response.json()) as SetupDraftResponse;
+}

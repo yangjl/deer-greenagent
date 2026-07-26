@@ -31,12 +31,10 @@ import {
   defaultSelectedCycle,
   isLive,
   openWorkItems,
-  useCreateWorkItem,
   useCycleDetail,
   useDbtlFeature,
   useProjectCycles,
 } from "@/core/dbtl";
-import { uuid } from "@/core/utils/uuid";
 import {
   pathOfNewProjectConversation,
   pathOfProjectThread,
@@ -141,45 +139,42 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
     selectedCycleId,
     selectCycle,
     requestDesignKickoff,
+    requestComposerScope,
   } = useProjectCycleSelection();
+  // Cycle setup is a conversation, so it needs the supervisor graph. Where the
+  // graph is off (audit_only / manual) chat cannot run setup at all, and the
+  // form remains the only way to open a record — see `startCycle` below.
+  const setupInChat = Boolean(dbtl.feature?.graph_execution_enabled);
   const [cyclesOverride, setCyclesOverride] = useState<boolean | null>(null);
   const [readinessOpen, setReadinessOpen] = useState(false);
   const [startOpen, setStartOpen] = useState(false);
   const [phase7DemoOpen, setPhase7DemoOpen] = useState(false);
   const [openStage, setOpenStage] = useState<DbtlStage | null>(null);
-  const [blockerDraft, setBlockerDraft] = useState("");
 
   const cycles = cycleQuery.data?.cycles ?? [];
   const selected =
     cycles.find((item) => item.id === selectedCycleId) ??
     defaultSelectedCycle(cycles);
   const detail = useCycleDetail(project?.id, selected?.id);
-  const createWorkItem = useCreateWorkItem(project?.id);
   const blockers = openWorkItems(detail.data);
 
   // Cycles minimize themselves once nothing is running; an explicit click
   // always wins over that default.
   const cyclesOpen = cyclesOverride ?? cycles.some(isLive);
 
-  function submitBlocker(event: React.FormEvent) {
-    event.preventDefault();
-    if (
-      !selected ||
-      !blockerDraft.trim() ||
-      !controls.enabled ||
-      createWorkItem.isPending
-    )
+  /**
+   * Starting a cycle arms the composer rather than opening a form: the human
+   * describes the cycle in the chatbox and the setup branch proposes the rest.
+   * The rail's job is to put them in the right scope, not to collect fields.
+   */
+  function startCycle() {
+    if (blockedByReadiness(controls)) return;
+    setCyclesOverride(true);
+    if (setupInChat) {
+      requestComposerScope("start_cycle");
       return;
-    createWorkItem.mutate(
-      {
-        cycleId: selected.id,
-        title: blockerDraft.trim(),
-        kind: "blocker",
-        expectedDbRevision: detail.data?.db_revision ?? selected.db_revision,
-        idempotencyKey: `work-${uuid()}`,
-      },
-      { onSuccess: () => setBlockerDraft("") },
-    );
+    }
+    setStartOpen(true);
   }
 
   return (
@@ -228,21 +223,28 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
               <Presentation className="size-3.5" />
             </button>
             <button
-            type="button"
-            aria-label={controlAccessibleLabel("Start a new cycle", controls)}
-            aria-disabled={controls.ariaDisabled}
-            title={controls.enabled ? "Start a new cycle" : controls.reason}
-            className={cn(
-              "text-muted-foreground transition-colors aria-disabled:cursor-not-allowed aria-disabled:opacity-40",
-              controls.enabled && "hover:text-foreground",
-            )}
-            onClick={() => {
-              if (blockedByReadiness(controls)) return;
-              setCyclesOverride(true);
-              setStartOpen(true);
-            }}
-          >
-            <Plus className="size-3.5" />
+              type="button"
+              aria-label={controlAccessibleLabel(
+                setupInChat
+                  ? "Start a new cycle in the chatbox"
+                  : "Start a new cycle",
+                controls,
+              )}
+              aria-disabled={controls.ariaDisabled}
+              title={
+                controls.enabled
+                  ? setupInChat
+                    ? "Start a new cycle — describe it in the chatbox"
+                    : "Start a new cycle"
+                  : controls.reason
+              }
+              className={cn(
+                "text-muted-foreground transition-colors aria-disabled:cursor-not-allowed aria-disabled:opacity-40",
+                controls.enabled && "hover:text-foreground",
+              )}
+              onClick={startCycle}
+            >
+              <Plus className="size-3.5" />
             </button>
           </div>
         }
@@ -361,35 +363,6 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           <div className="text-muted-foreground px-2 py-1.5 text-xs">
             Nothing is blocking this cycle.
           </div>
-        )}
-        {selected && (
-          <form onSubmit={submitBlocker} className="px-2 pt-1">
-            <input
-              value={blockerDraft}
-              onChange={(event) => setBlockerDraft(event.target.value)}
-              placeholder={
-                controls.enabled ? "Record a blocker…" : "Blockers are locked"
-              }
-              aria-label={controlAccessibleLabel(
-                `Record a blocker on ${selected.title}`,
-                controls,
-              )}
-              // readOnly rather than disabled: the field keeps focus so its
-              // locked reason is reachable and announced.
-              readOnly={!controls.enabled}
-              aria-disabled={controls.ariaDisabled}
-              title={controls.enabled ? undefined : controls.reason}
-              className={cn(
-                "border-border placeholder:text-muted-foreground/60 w-full border-b bg-transparent py-1 text-sm outline-none focus:border-emerald-600",
-                !controls.enabled && "cursor-not-allowed opacity-60",
-              )}
-            />
-            {createWorkItem.error && (
-              <p className="text-destructive mt-1 text-xs">
-                {createWorkItem.error.message}
-              </p>
-            )}
-          </form>
         )}
       </div>
 

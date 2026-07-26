@@ -51,6 +51,11 @@ rs.mock("@/core/dbtl", () => ({
     error: null,
     isPending: false,
   }),
+  useCreateWorkItem: () => ({
+    error: null,
+    isPending: false,
+    mutate: rs.fn(),
+  }),
   useCycleActivity: () => ({ data: [] }),
   useCycleDetail: () => ({
     data: {

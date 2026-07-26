@@ -160,13 +160,18 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
 - `src/components/workspace/project-rail/` owns the rail: a disclosure on the
   durable DBTL cycles (each expanding into its five stages with a status word),
   the selected cycle's open blockers, an agents placeholder, and the project's
-  conversations. `start-cycle-dialog.tsx` opens a durable research record
+  conversations. **The rail is read-only** — it holds no text inputs. Its `+`
+  beside Cycles arms the composer with the `start_cycle` scope (see
+  `composer-scope.ts` below) rather than opening a form; `start-cycle-dialog.tsx`
   (title, cycle class, optional season/program parent, research question,
-  objective, success criteria) and mints one idempotency key per opening so a
-  double-submit cannot create two records. Selecting a stage opens
-  `cycle-stage-sheet.tsx` — evidence, open blockers, the submit/review panel
-  with a required rationale, and the activity timeline with actor and revision
-  — using the existing right-side inspection pattern. The Cycles section
+  objective, success criteria; one idempotency key per opening so a
+  double-submit cannot create two records) is reached only where the supervisor
+  graph is off. Selecting a stage opens
+  `cycle-stage-sheet.tsx` — evidence, open blockers **and the form that records
+  one**, the submit/review panel with a required rationale, and the activity
+  timeline with actor and revision — using the existing right-side inspection
+  pattern. Blocker creation lives in that sheet, not the rail: a durable record
+  is written from the surface that shows the evidence it refers to. The Cycles
   auto-minimizes when no cycle is live; an explicit click on the section header
   overrides that default. Project tree listings use
   `GET /api/projects/{id}/files`, while preview/download uses
@@ -261,37 +266,110 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   mounted from Settings → DBTL readiness, provides a project selector, and
   lets the tester label an undecided classifier-ordinary row as correctly
   ordinary or cycle-worthy for missed-cycle calibration.
-- `src/core/dbtl/context-chip.ts` is the Phase 5 request-context chip's pure
-  logic, and it exists so the two promises the chip makes are unit-testable
-  without rendering anything. `nextContextAfterSend` returns ordinary
-  **unconditionally** — that is the whole mechanism behind "affects the next
-  request only"; it is neither the user's job to switch back nor a cleanup step
-  a component can forget. `normalizeContext` resolves a stored selection
-  against the live cycle list on every render, because a cycle can be completed
-  or abandoned in another tab between the click and the send and the chip must
-  not keep claiming a scope that is gone. Terminal cycles are omitted from the
-  menu (a completed cycle cannot be continued, so offering it would produce a
-  refusal instead of an action), but numbering still comes from the **full**
-  list so the chip and the project rail agree about which cycle is "Cycle 02".
-  `runContextPayload` emits the one-run `dbtl_supervisor_enabled` flag plus the
-  backend's routing keys (`dbtl_explicit_choice`,
-  `dbtl_selected_cycle_id`). "Ask the AI to recommend" keeps the supervisor
-  flag but omits an explicit choice — precisely the one case where the backend
-  precedence ladder consults the classifier. A "cycle" selection with no id
-  degrades to ordinary rather than claiming a continuation it cannot name.
-- `src/components/workspace/dbtl/context-chip.tsx` renders it above the
-  composer, gated on `useDbtlFeature().graph_execution_enabled` **and** a
-  project, so the control never appears where changing it would do nothing.
-  The payload travels through `sendMessage`'s `extraContext` into the run
-  request's `context`, never `config.configurable`, which is checkpointed.
-  Interactive threads stay pinned to `lead_agent`; the Gateway selects the
-  supervisor for this run only after validating the durable project scope, so
-  disabling DBTL cannot strand an existing conversation. The chip stays
-  visually quiet for ordinary work — the overwhelmingly common case
-  — and gains weight only when a cycle is selected, which is the state worth
-  noticing because it changes what the next request means. The scope note lives
-  inside the menu rather than beside the chip: it answers a question the user
-  only has while choosing, and repeating it above every composer would be noise.
+- **The composer is the only input surface.** The two left rails navigate,
+  summarize, and review; they never collect a request. A rail action that needs
+  input *arms the composer* (sets its scope, moves the cursor there) instead of
+  opening a form, and the human types the request in the chatbox. `InputBox`
+  supports this with two generic slots so it stays feature-agnostic:
+  `extraTools` (extra controls appended to the tool row beside attachments,
+  voice, polish, and mode) and `focusSignal` (a monotonic counter; each change
+  focuses the textarea, so an outside surface can hand the user back to typing
+  without reaching in with a ref). The `focusSignal` effect deliberately skips
+  the first render — an unsolicited mount focus would steal the cursor on every
+  conversation merely opened.
+- `src/core/dbtl/composer-scope.ts` is the pure logic for the composer's DBTL
+  scope selector, and it exists so the three promises the selector makes are
+  unit-testable without rendering anything. `nextContextAfterSend` returns
+  ordinary **unconditionally** — that is the whole mechanism behind "affects the
+  next request only"; it is neither the user's job to switch back nor a cleanup
+  step a component can forget. It matters most for `start_cycle`, because setup
+  continues through the assistant's own follow-up questions and a sticky scope
+  would re-enter the setup branch on every later message. `normalizeContext`
+  resolves a stored selection against the live cycle list on every render,
+  because a cycle can be completed or abandoned in another tab between the click
+  and the send and the label must not keep claiming a scope that is gone.
+  Terminal cycles are omitted from the menu (a completed cycle cannot be
+  continued, so offering it would produce a refusal instead of an action), but
+  numbering still comes from the **full** list so the menu and the project rail
+  agree about which cycle is "Cycle 02". `runContextPayload` emits the one-run
+  `dbtl_supervisor_enabled` flag plus the backend's routing keys
+  (`dbtl_explicit_choice`, `dbtl_selected_cycle_id`). "Ask the AI to recommend"
+  keeps the supervisor flag but omits an explicit choice — precisely the one case
+  where the backend precedence ladder consults the classifier. A "cycle"
+  selection with no id degrades to ordinary rather than claiming a continuation
+  it cannot name, and `start_cycle` never carries a cycle id at all, so a stale
+  id cannot make setup read as a continuation.
+- `src/components/workspace/dbtl/scope-menu.tsx` renders that selector **inside
+  the composer's tool row**, gated on `useDbtlFeature().graph_execution_enabled`
+  **and** a project, so the control never appears where changing it would do
+  nothing. It is not a chip above the composer: choosing a scope is part of
+  composing the request, not a mode entered beforehand. The payload travels
+  through `sendMessage`'s `extraContext` into the run request's `context`, never
+  `config.configurable`, which is checkpointed. Interactive threads stay pinned
+  to `lead_agent`; the Gateway selects the supervisor for this run only after
+  validating the durable project scope, so disabling DBTL cannot strand an
+  existing conversation. The trigger stays **wordless** for ordinary work — the
+  overwhelmingly common case, and a permanent label would make the quiet default
+  look like an active mode — and gains a text label only when the next request is
+  scoped to a cycle or about to start one. The scope note lives inside the menu:
+  it answers a question the user only has while choosing.
+- The `start_cycle` scope is how a cycle is opened: the request the user types
+  becomes the setup conversation, routed to the backend supervisor's
+  `cycle_setup` branch, which proposes an objective, names the missing fields,
+  states the required human gates, and asks for confirmation. **Nothing is
+  recorded until that confirmation**, and the menu copy says so.
+  `build_proposal` treats `CYCLE_SETUP` as proposable, so an explicit start also
+  raises the `UpgradeProposalCard` — that card's confirm is the only thing that
+  creates the record. Note the split: `cycle_setup` returns *text only*, while
+  `cycle_continuation` is the branch that runs `LiveStageAdapter` and therefore
+  the Design council debate.
+- **Creating a cycle and starting its Design council are two steps, and both
+  paths must do both.** The debate is a `continue_cycle`-scoped request, so it
+  cannot be sent before a cycle id exists. `StartCycleDialog.onCreated` does
+  `selectCycle` + `requestDesignKickoff`; the conversational path does the same
+  in the chat page's `handleProposalConfirmed`, which is why
+  `useDbtlUpgradeProposal.confirm` **returns the created `CycleRecord`** instead
+  of discarding it (`null` on failure, so a failed confirmation cannot start a
+  debate about a record that does not exist). Wiring a new creation route
+  without the kickoff leaves a cycle that never gets designed — that regression
+  shipped once already.
+- **The setup form arrives drafted, not blank.** `POST .../dbtl/proposals/draft-setup`
+  asks a model to propose each missing field from the request the scientist
+  actually typed, so starting a cycle is review-and-confirm rather than data
+  entry. Three properties are structural, not stylistic:
+  1. Every drafted value carries a `grounded` flag, and **anything not explicitly
+     grounded is reported in `assumed_fields`** — the unsafe default (a silent
+     model reading as authoritative) is unreachable. The prompt also forbids
+     inventing counts, sample sizes, environments, years, or accessions.
+     Confirmation writes a durable research record, so a value the model
+     *proposed* must never be indistinguishable from one the scientist *stated*.
+  2. `core/dbtl/setup-draft-merge.ts` is pure and **only fills blanks** — a draft
+     that lands while the user is mid-sentence must not overwrite their words. It
+     merges against a ref mirror of the latest form, not the snapshot captured
+     when the request went out, and reports only the assumptions it actually
+     filled.
+  3. Every failure path resolves to the blank form. Malformed JSON, a refusal, a
+     timeout, or `setup_draft_model_name: null` all degrade to what users had
+     before drafting existed; drafting is an assist and must never block setup.
+  It is a **separate endpoint from `evaluate`** on purpose: evaluation runs beside
+  every message, so a model round trip there would tax every turn. Drafting fires
+  once, when the setup step opens, so a dismissed card costs no model call.
+- **Do not point `setup_draft_model_name` at a Claude subscription model.** The
+  Claude Code OAuth path impersonates the CLI (`claude_provider`'s billing
+  header), and the OAuth inference endpoint returns `stop_reason=refusal` with
+  empty content for backend prompts that do not look like Claude Code traffic —
+  drafting came back empty every time on `claude-fable-5`, while the same prompt
+  worked on the Codex/ChatGPT subscription and on OpenRouter. Expect the same
+  constraint for any other internal backend prompt.
+- A textless send does **not** consume the armed one-shot scope. The DBTL routes
+  read the request's text, so a textless send cannot start or continue anything,
+  and disarming on it stranded users who armed the composer and then sent
+  nothing. `start-cycle-dialog.tsx`
+  is retained only as the degraded path for installs where the supervisor graph
+  is off (`audit_only` / `manual`): chat structurally cannot run setup there, so
+  removing the form would leave no way to open a record at all. The project
+  rail picks between them on `graph_execution_enabled` — do not make the form
+  the primary path again on a graph-enabled install.
 - `src/components/workspace/dbtl/cycle-selection-context.tsx` carries an
   **explicitly clicked** cycle from the project rail to project chat. The sole
   automatic selection is a cycle returned by the user's own Start Cycle
@@ -299,6 +377,10 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   the chat stream accepts it. The rail may display a default cycle's details,
   but that default does not silently route requests as continuations. The
   provider is keyed by project slug so a selection cannot leak across projects.
+  It also carries `pendingScopeRequest` / `requestComposerScope` /
+  `consumeComposerScope`, the rail→composer handoff described above. That handoff
+  **arms and never sends**: it sets the composer's scope and bumps the focus
+  signal, leaving the request itself for the human to type.
 - `src/core/memory-scope/` owns the per-project memory scope migration
   (DBTL Phase 2). `review.ts` is **pure and React-free** — count rows, the
   four per-fact decisions, queue advance, provenance labels, and each

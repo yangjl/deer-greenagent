@@ -8,10 +8,24 @@ import {
   useState,
 } from "react";
 
+import type { RequestContextKind } from "@/core/dbtl/composer-scope";
+
 export interface PendingDesignKickoff {
   nonce: number;
   cycleId: string;
   cycleTitle: string;
+}
+
+/**
+ * A request to *arm* the composer with a DBTL scope — not to send anything.
+ *
+ * This is how a rail action reaches chat without becoming an input surface
+ * itself: the rail sets the scope and moves the cursor into the composer, and
+ * the human types the actual request there.
+ */
+export interface PendingScopeRequest {
+  nonce: number;
+  kind: RequestContextKind;
 }
 
 interface ProjectCycleSelection {
@@ -20,6 +34,9 @@ interface ProjectCycleSelection {
   pendingDesignKickoff: PendingDesignKickoff | null;
   requestDesignKickoff: (cycleId: string, cycleTitle: string) => void;
   consumeDesignKickoff: (nonce: number) => void;
+  pendingScopeRequest: PendingScopeRequest | null;
+  requestComposerScope: (kind: RequestContextKind) => void;
+  consumeComposerScope: (nonce: number) => void;
 }
 
 const ProjectCycleSelectionContext =
@@ -30,6 +47,9 @@ const NO_PROJECT_SELECTION: ProjectCycleSelection = {
   pendingDesignKickoff: null,
   requestDesignKickoff: () => undefined,
   consumeDesignKickoff: () => undefined,
+  pendingScopeRequest: null,
+  requestComposerScope: () => undefined,
+  consumeComposerScope: () => undefined,
 };
 
 /**
@@ -62,6 +82,16 @@ export function ProjectCycleSelectionProvider({
       current?.nonce === nonce ? null : current,
     );
   }, []);
+  const [pendingScopeRequest, setPendingScopeRequest] =
+    useState<PendingScopeRequest | null>(null);
+  const requestComposerScope = useCallback((kind: RequestContextKind) => {
+    setPendingScopeRequest({ nonce: Date.now(), kind });
+  }, []);
+  const consumeComposerScope = useCallback((nonce: number) => {
+    setPendingScopeRequest((current) =>
+      current?.nonce === nonce ? null : current,
+    );
+  }, []);
   const value = useMemo(
     () => ({
       selectedCycleId,
@@ -69,10 +99,16 @@ export function ProjectCycleSelectionProvider({
       pendingDesignKickoff,
       requestDesignKickoff,
       consumeDesignKickoff,
+      pendingScopeRequest,
+      requestComposerScope,
+      consumeComposerScope,
     }),
     [
+      consumeComposerScope,
       consumeDesignKickoff,
       pendingDesignKickoff,
+      pendingScopeRequest,
+      requestComposerScope,
       requestDesignKickoff,
       selectedCycleId,
     ],

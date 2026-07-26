@@ -1,12 +1,12 @@
 import { describe, expect, it } from "@rstest/core";
 
 import {
-  CHIP_ORDINARY_LABEL,
-  CHIP_RECOMMEND_LABEL,
   ORDINARY_REQUEST_CONTEXT,
   type RequestContext,
-  chipLabel,
-  contextMenuOptions,
+  SCOPE_ORDINARY_LABEL,
+  SCOPE_RECOMMEND_LABEL,
+  SCOPE_START_CYCLE_LABEL,
+  START_CYCLE_REQUEST_CONTEXT,
   cycleShortLabel,
   isContextStillValid,
   nextContextAfterSend,
@@ -14,7 +14,9 @@ import {
   proposalContextPayload,
   runActivityMetadata,
   runContextPayload,
-} from "@/core/dbtl/context-chip";
+  scopeLabel,
+  scopeMenuOptions,
+} from "@/core/dbtl/composer-scope";
 import type { CycleRecord, CycleState } from "@/core/dbtl/cycle-view";
 
 function cycle(overrides: Partial<CycleRecord> = {}): CycleRecord {
@@ -38,20 +40,20 @@ function cycle(overrides: Partial<CycleRecord> = {}): CycleRecord {
   };
 }
 
-describe("chip label", () => {
+describe("scope label", () => {
   it("names ordinary work in words, not by absence", () => {
-    expect(chipLabel(ORDINARY_REQUEST_CONTEXT, [])).toBe(CHIP_ORDINARY_LABEL);
+    expect(scopeLabel(ORDINARY_REQUEST_CONTEXT, [])).toBe(SCOPE_ORDINARY_LABEL);
   });
 
   it("shows the cycle number and its current stage", () => {
     const cycles = [cycle({ id: "cyc-1", state: "design" })];
-    const label = chipLabel({ kind: "cycle", cycleId: "cyc-1" }, cycles);
+    const label = scopeLabel({ kind: "cycle", cycleId: "cyc-1" }, cycles);
     expect(label).toBe("Cycle 01 · Design");
   });
 
   it("uses the cycle's own stage wording rather than a generic one", () => {
     const cycles = [cycle({ id: "cyc-1", state: "reconciliation" })];
-    expect(chipLabel({ kind: "cycle", cycleId: "cyc-1" }, cycles)).toBe(
+    expect(scopeLabel({ kind: "cycle", cycleId: "cyc-1" }, cycles)).toBe(
       "Cycle 01 · Data reconciliation",
     );
   });
@@ -59,14 +61,20 @@ describe("chip label", () => {
   it("falls back to ordinary when the selected cycle is gone", () => {
     // A cycle can be completed or abandoned in another tab between the click
     // and the send. Showing a stale cycle would misstate the request's scope.
-    expect(chipLabel({ kind: "cycle", cycleId: "cyc-missing" }, [])).toBe(
-      CHIP_ORDINARY_LABEL,
+    expect(scopeLabel({ kind: "cycle", cycleId: "cyc-missing" }, [])).toBe(
+      SCOPE_ORDINARY_LABEL,
     );
   });
 
   it("labels the recommend option distinctly", () => {
-    expect(chipLabel({ kind: "recommend", cycleId: null }, [])).toBe(
-      CHIP_RECOMMEND_LABEL,
+    expect(scopeLabel({ kind: "recommend", cycleId: null }, [])).toBe(
+      SCOPE_RECOMMEND_LABEL,
+    );
+  });
+
+  it("labels the start-a-cycle scope distinctly", () => {
+    expect(scopeLabel(START_CYCLE_REQUEST_CONTEXT, [])).toBe(
+      SCOPE_START_CYCLE_LABEL,
     );
   });
 });
@@ -86,46 +94,75 @@ describe("cycle numbering", () => {
   });
 });
 
-describe("context menu", () => {
+describe("scope menu", () => {
   it("always offers keeping the request ordinary, first", () => {
-    const options = contextMenuOptions([]);
-    expect(options[0]).toMatchObject({ kind: "ordinary", label: CHIP_ORDINARY_LABEL });
+    const options = scopeMenuOptions([]);
+    expect(options[0]).toMatchObject({
+      kind: "ordinary",
+      label: SCOPE_ORDINARY_LABEL,
+    });
   });
 
   it("always offers asking the AI to recommend, last", () => {
-    const options = contextMenuOptions([cycle()]);
+    const options = scopeMenuOptions([cycle()]);
     expect(options[options.length - 1]).toMatchObject({ kind: "recommend" });
   });
 
   it("offers each live cycle", () => {
-    const options = contextMenuOptions([
+    const options = scopeMenuOptions([
       cycle({ id: "cyc-1", state: "design" }),
       cycle({ id: "cyc-2", state: "build" }),
     ]);
-    expect(options.filter((o) => o.kind === "cycle").map((o) => o.cycleId)).toEqual([
-      "cyc-1",
-      "cyc-2",
-    ]);
+    expect(
+      options.filter((o) => o.kind === "cycle").map((o) => o.cycleId),
+    ).toEqual(["cyc-1", "cyc-2"]);
   });
 
   it.each<CycleState>(["completed", "abandoned"])(
     "never offers to continue a %s cycle",
     (state) => {
-      const options = contextMenuOptions([cycle({ id: "cyc-done", state })]);
+      const options = scopeMenuOptions([cycle({ id: "cyc-done", state })]);
       expect(options.some((o) => o.kind === "cycle")).toBe(false);
     },
   );
 
   it("keeps numbering aligned with the full list, not the live subset", () => {
     // Cycle 01 completed; the second cycle must still read "Cycle 02", or the
-    // chip and the project rail would disagree about which cycle is which.
-    const options = contextMenuOptions([
+    // menu and the project rail would disagree about which cycle is which.
+    const options = scopeMenuOptions([
       cycle({ id: "cyc-1", state: "completed" }),
       cycle({ id: "cyc-2", state: "build" }),
     ]);
     const live = options.filter((o) => o.kind === "cycle");
     expect(live).toHaveLength(1);
     expect(live[0]?.label).toBe("Cycle 02 · Build");
+  });
+
+  it("offers starting a cycle from the composer, after the continuable ones", () => {
+    // Starting a cycle is a composer scope, not a form: the request the user
+    // types becomes the setup conversation. It sits after the cycles so the
+    // cycle-related choices read as one group.
+    const options = scopeMenuOptions([cycle({ id: "cyc-1", state: "design" })]);
+    expect(options.map((option) => option.kind)).toEqual([
+      "ordinary",
+      "cycle",
+      "start_cycle",
+      "recommend",
+    ]);
+  });
+
+  it("still offers starting a cycle when the project has none", () => {
+    const options = scopeMenuOptions([]);
+    expect(options.some((option) => option.kind === "start_cycle")).toBe(true);
+  });
+
+  it("says that starting a cycle creates no record yet", () => {
+    // The backend's setup branch proposes and asks for confirmation without
+    // writing. The menu must not imply the click itself creates the record.
+    const option = scopeMenuOptions([]).find((o) => o.kind === "start_cycle");
+    expect(option?.description).toMatch(
+      /nothing is recorded until you confirm/i,
+    );
   });
 });
 
@@ -142,6 +179,24 @@ describe("run context payload", () => {
       dbtl_supervisor_enabled: true,
       dbtl_explicit_choice: "continue_cycle",
       dbtl_selected_cycle_id: "cyc-9",
+    });
+  });
+
+  it("routes the start-a-cycle scope into the backend's setup branch", () => {
+    expect(runContextPayload(START_CYCLE_REQUEST_CONTEXT)).toEqual({
+      dbtl_supervisor_enabled: true,
+      dbtl_explicit_choice: "start_cycle",
+    });
+  });
+
+  it("never sends a cycle id alongside a start request", () => {
+    // Setup has no cycle yet. Sending a stale id would let the backend read the
+    // request as a continuation of something the user is not continuing.
+    expect(
+      runContextPayload({ kind: "start_cycle", cycleId: "cyc-9" }),
+    ).toEqual({
+      dbtl_supervisor_enabled: true,
+      dbtl_explicit_choice: "start_cycle",
     });
   });
 
@@ -170,11 +225,20 @@ describe("shared routing context", () => {
   });
 
   it("sends the same cycle continuation to both routing paths", () => {
-    expect(
-      proposalContextPayload({ kind: "cycle", cycleId: "cyc-9" }),
-    ).toEqual({
-      selectedCycleId: "cyc-9",
-      explicitChoice: "continue_cycle",
+    expect(proposalContextPayload({ kind: "cycle", cycleId: "cyc-9" })).toEqual(
+      {
+        selectedCycleId: "cyc-9",
+        explicitChoice: "continue_cycle",
+      },
+    );
+  });
+
+  it("sends the same start-a-cycle intent to both routing paths", () => {
+    // Phase 4's visible proposal and Phase 5's graph route must agree, or a
+    // card could recommend starting a cycle while the run reads as ordinary.
+    expect(proposalContextPayload(START_CYCLE_REQUEST_CONTEXT)).toEqual({
+      selectedCycleId: null,
+      explicitChoice: "start_cycle",
     });
   });
 
@@ -188,12 +252,19 @@ describe("shared routing context", () => {
   });
 
   it("persists an inspectable run-scope echo without steering execution", () => {
-    expect(
-      runActivityMetadata({ kind: "cycle", cycleId: "cyc-9" }),
-    ).toEqual({
+    expect(runActivityMetadata({ kind: "cycle", cycleId: "cyc-9" })).toEqual({
       dbtl_request_context: {
         kind: "cycle",
         cycle_id: "cyc-9",
+      },
+    });
+  });
+
+  it("echoes a start request without inventing a cycle id", () => {
+    expect(runActivityMetadata(START_CYCLE_REQUEST_CONTEXT)).toEqual({
+      dbtl_request_context: {
+        kind: "start_cycle",
+        cycle_id: null,
       },
     });
   });
@@ -201,7 +272,7 @@ describe("shared routing context", () => {
 
 describe("per-request scope", () => {
   it("resets to ordinary after a send", () => {
-    // The chip promises the selection affects the next request only. That has
+    // The menu promises the selection affects the next request only. That has
     // to be enforced here, not remembered by the user.
     expect(nextContextAfterSend({ kind: "cycle", cycleId: "cyc-1" })).toEqual(
       ORDINARY_REQUEST_CONTEXT,
@@ -211,14 +282,29 @@ describe("per-request scope", () => {
     );
   });
 
-  it("treats a selection whose cycle went terminal as no longer valid", () => {
-    const cycles = [cycle({ id: "cyc-1", state: "completed" })];
-    expect(isContextStillValid({ kind: "cycle", cycleId: "cyc-1" }, cycles)).toBe(false);
+  it("resets after a start request too, so setup cannot capture later turns", () => {
+    // The setup conversation continues through the assistant's own follow-up
+    // questions; a sticky "start" scope would re-enter setup on every message.
+    expect(nextContextAfterSend(START_CYCLE_REQUEST_CONTEXT)).toEqual(
+      ORDINARY_REQUEST_CONTEXT,
+    );
   });
 
-  it("treats ordinary and recommend as always valid", () => {
+  it("treats a selection whose cycle went terminal as no longer valid", () => {
+    const cycles = [cycle({ id: "cyc-1", state: "completed" })];
+    expect(
+      isContextStillValid({ kind: "cycle", cycleId: "cyc-1" }, cycles),
+    ).toBe(false);
+  });
+
+  it("treats ordinary, recommend, and start as always valid", () => {
     expect(isContextStillValid(ORDINARY_REQUEST_CONTEXT, [])).toBe(true);
-    expect(isContextStillValid({ kind: "recommend", cycleId: null }, [])).toBe(true);
+    expect(isContextStillValid({ kind: "recommend", cycleId: null }, [])).toBe(
+      true,
+    );
+    // Starting a cycle depends on no existing record, so no cycle list can
+    // invalidate it.
+    expect(isContextStillValid(START_CYCLE_REQUEST_CONTEXT, [])).toBe(true);
   });
 
   it("normalizes an invalid selection back to ordinary", () => {

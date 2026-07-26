@@ -32,6 +32,7 @@ import {
   canSubmitStage,
   decisionConsequence,
   describeActivity,
+  isReviewDocumentUri,
   latestArtifactsForStage,
   openWorkItems,
   reviewSubmissionReadiness,
@@ -42,6 +43,7 @@ import {
   useCycleDetail,
   useAttachArtifact,
   useBuildTest,
+  useCreateWorkItem,
   useResolveWorkItem,
   useReviewStage,
   useSubmitStage,
@@ -50,6 +52,7 @@ import { uuid } from "@/core/utils/uuid";
 import { cn } from "@/lib/utils";
 
 import { BuildTestReview } from "./build-test-review";
+import { DesignReviewDocument } from "./design-review";
 import { ReconciliationMatrix } from "./reconciliation-matrix";
 
 const DECISIONS: ReviewDecision[] = ["approve", "request_changes", "reject"];
@@ -98,6 +101,7 @@ export function CycleStageSheet({
   const submit = useSubmitStage(projectId);
   const review = useReviewStage(projectId);
   const resolve = useResolveWorkItem(projectId);
+  const createWorkItem = useCreateWorkItem(projectId);
   const attach = useAttachArtifact(projectId);
   const buildTest = useBuildTest(
     projectId,
@@ -107,6 +111,7 @@ export function CycleStageSheet({
   const [rationale, setRationale] = useState("");
   const [resolutionFor, setResolutionFor] = useState<string | null>(null);
   const [resolution, setResolution] = useState("");
+  const [blockerDraft, setBlockerDraft] = useState("");
   const [artifactType, setArtifactType] = useState("stage_package");
   const [artifactUri, setArtifactUri] = useState("");
   const [artifactHash, setArtifactHash] = useState("");
@@ -119,6 +124,13 @@ export function CycleStageSheet({
     [cycle, stage],
   );
   const blockers = useMemo(() => openWorkItems(cycle), [cycle]);
+  // The most recent artifact that is a readable document. Derived from the same
+  // durable list as the evidence rows, so the two can never disagree about what
+  // is attached.
+  const reviewDocument = useMemo(
+    () => artifacts.filter((item) => isReviewDocumentUri(item.uri)).at(-1) ?? null,
+    [artifacts],
+  );
 
   function act(decision: ReviewDecision) {
     if (!cycle || !stage || !canSubmitReview(rationale) || review.isPending)
@@ -232,7 +244,9 @@ export function CycleStageSheet({
             {(stage === "build" || stage === "test") && cycleId && (
               <Section
                 icon={stage === "build" ? GitCompare : AlertTriangle}
-                title={stage === "build" ? "Reproducibility" : "Scientific validity"}
+                title={
+                  stage === "build" ? "Reproducibility" : "Scientific validity"
+                }
               >
                 <BuildTestReview
                   projectId={projectId}
@@ -242,6 +256,18 @@ export function CycleStageSheet({
                   view={buildTest.data ?? null}
                   isPending={buildTest.isPending}
                   error={buildTest.error}
+                />
+              </Section>
+            )}
+
+            {/* The reviewed document itself, above the evidence references: on
+                a stage awaiting review, reading the package *is* the task, and
+                a list of hashes is not a reading surface. */}
+            {reviewDocument && (
+              <Section icon={FileText} title="Review package">
+                <DesignReviewDocument
+                  projectId={projectId}
+                  artifactUri={reviewDocument.uri}
                 />
               </Section>
             )}
@@ -378,8 +404,17 @@ export function CycleStageSheet({
               )}
             </Section>
 
-            {blockers.length > 0 && (
-              <Section icon={AlertTriangle} title="Open blockers">
+            {/* Recording a blocker lives here, in the review surface, rather
+                than in the project rail: the rails navigate and summarize, and
+                a durable record is written from the surface that shows the
+                evidence it refers to. */}
+            <Section icon={AlertTriangle} title="Open blockers">
+              {blockers.length === 0 && (
+                <p className="text-muted-foreground text-sm">
+                  Nothing is blocking this cycle.
+                </p>
+              )}
+              {blockers.length > 0 && (
                 <ul className="space-y-2">
                   {blockers.map((item) => (
                     <li
@@ -449,8 +484,51 @@ export function CycleStageSheet({
                     </li>
                   ))}
                 </ul>
-              </Section>
-            )}
+              )}
+              <form
+                className="space-y-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!blockerDraft.trim() || createWorkItem.isPending) return;
+                  createWorkItem.mutate(
+                    {
+                      cycleId: cycle.id,
+                      title: blockerDraft.trim(),
+                      kind: "blocker",
+                      expectedDbRevision: cycle.db_revision,
+                      idempotencyKey: `work-${uuid()}`,
+                    },
+                    { onSuccess: () => setBlockerDraft("") },
+                  );
+                }}
+              >
+                <label
+                  className="text-muted-foreground block text-xs"
+                  htmlFor="stage-blocker-title"
+                >
+                  Record a blocker
+                </label>
+                <Input
+                  id="stage-blocker-title"
+                  value={blockerDraft}
+                  onChange={(event) => setBlockerDraft(event.target.value)}
+                  placeholder="What is blocking this cycle?"
+                />
+                <Button
+                  size="sm"
+                  type="submit"
+                  variant="outline"
+                  disabled={!blockerDraft.trim() || createWorkItem.isPending}
+                >
+                  {createWorkItem.isPending ? "Recording…" : "Record blocker"}
+                </Button>
+                {createWorkItem.error && (
+                  <p className="text-destructive text-sm" role="alert">
+                    {createWorkItem.error.message}
+                  </p>
+                )}
+              </form>
+            </Section>
 
             <Section icon={History} title="Review">
               {canSubmitStage(record.status) ? (

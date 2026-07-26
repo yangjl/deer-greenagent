@@ -1,5 +1,6 @@
 export * from "./api";
-export * from "./context-chip";
+export * from "./artifact-path";
+export * from "./composer-scope";
 export * from "./controls";
 export * from "./cycle-hooks";
 export * from "./cycle-view";
@@ -12,6 +13,7 @@ export * from "./readiness";
 export * from "./reconciliation-api";
 export * from "./reconciliation-hooks";
 export * from "./reconciliation-view";
+export * from "./setup-draft-merge";
 export * from "./validity-api";
 export * from "./validity-hooks";
 export * from "./validity-view";

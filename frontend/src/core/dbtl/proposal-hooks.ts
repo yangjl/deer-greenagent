@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  draftCycleSetup,
   evaluateRequest,
   fetchEvaluations,
   recordProposalOutcome,
@@ -19,8 +20,9 @@ const ROOT = "dbtl-proposals";
  */
 export function useEvaluateRequest(projectId: string | null | undefined) {
   return useMutation({
-    mutationFn: (input: Omit<Parameters<typeof evaluateRequest>[0], "projectId">) =>
-      evaluateRequest({ projectId: projectId!, ...input }),
+    mutationFn: (
+      input: Omit<Parameters<typeof evaluateRequest>[0], "projectId">,
+    ) => evaluateRequest({ projectId: projectId!, ...input }),
   });
 }
 
@@ -54,5 +56,20 @@ export function useProposalEvaluations(
     enabled: Boolean(projectId) && (options.enabled ?? false),
     staleTime: 0,
     retry: false,
+  });
+}
+
+/**
+ * Draft the setup form's contents.
+ *
+ * A mutation, not a query: it is fired once when the setup step opens, against
+ * the specific message the user just sent. Caching it under the project would
+ * let a later, unrelated request inherit an earlier draft.
+ */
+export function useDraftCycleSetup(projectId: string | null | undefined) {
+  return useMutation({
+    mutationFn: (
+      input: Omit<Parameters<typeof draftCycleSetup>[0], "projectId">,
+    ) => draftCycleSetup({ projectId: projectId!, ...input }),
   });
 }

@@ -42,6 +42,8 @@ from deerflow.dbtl.proposal import (
     build_proposal,
 )
 from deerflow.dbtl.routing import ExplicitChoice, RouteKind, RoutingRequest, route_request
+from deerflow.dbtl.setup_draft import SetupDraft, build_draft_prompt, empty_draft, parse_draft_response
+from deerflow.models import create_chat_model
 from deerflow.persistence.telemetry import ClassifierEvaluationConflict
 
 router = APIRouter(prefix="/api", tags=["dbtl-proposals"])
@@ -62,6 +64,27 @@ class EvaluateRequest(BaseModel):
     selected_cycle_id: str | None = Field(default=None, max_length=64)
     explicit_choice: Literal["ordinary", "start_cycle", "continue_cycle"] | None = None
     idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("text")
+    @classmethod
+    def text_must_have_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must contain text")
+        return value
+
+
+class DraftSetupRequest(BaseModel):
+    """A request to pre-fill the setup form.
+
+    ``fields`` is echoed from the proposal the client is showing rather than
+    chosen by the client freely: the server drops anything outside it when
+    parsing, so a client cannot widen the record's shape through this call.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=MAX_REQUEST_TEXT)
+    fields: list[str] = Field(default_factory=list, max_length=24)
 
     @field_validator("text")
     @classmethod
@@ -146,6 +169,33 @@ def _serialize_proposal(proposal: UpgradeProposal) -> dict:
     }
 
 
+def _serialize_draft(draft: SetupDraft, *, enabled: bool) -> dict:
+    """The wire shape.
+
+    ``assumed`` travels as its own list rather than being folded into the values
+    so the UI cannot lose the distinction between what the scientist said and
+    what the model proposed.
+    """
+    return {
+        "enabled": enabled,
+        "title": draft.title,
+        "fields": dict(draft.fields),
+        "assumed_fields": sorted(draft.assumed),
+    }
+
+
+def _response_text(response: object) -> str:
+    """Pull plain text out of a chat response, tolerating block content."""
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        # Reasoning models interleave thinking blocks; only text blocks count.
+        parts = [block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"]
+        return "\n".join(part for part in parts if part)
+    return ""
+
+
 @router.post("/projects/{project_id}/dbtl/proposals/evaluate")
 @require_permission("threads", "write")
 async def evaluate_request(
@@ -206,6 +256,56 @@ async def evaluate_request(
         "proposals_visible": proposals_visible,
         "proposal": _serialize_proposal(proposal) if (proposal and proposals_visible) else None,
     }
+
+
+@router.post("/projects/{project_id}/dbtl/proposals/draft-setup")
+@require_permission("threads", "write")
+async def draft_setup(
+    project_id: str,
+    body: DraftSetupRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+):
+    """Pre-fill the setup form from the user's request. Creates no record.
+
+    Deliberately a separate call from ``evaluate``: evaluation runs beside every
+    message the user sends, so putting a model round trip there would tax every
+    turn. Drafting is needed only once, when the setup step actually opens.
+
+    Every failure path returns an empty draft rather than an error. The setup
+    form must remain usable when the model is slow, misconfigured, or down —
+    degrading to the blank form users had before drafting existed.
+    """
+    project, _user_id = await _require_project(project_id, request)
+    dbtl_config = _dbtl_config(request, config)
+
+    fields = [f for f in (body.fields or []) if isinstance(f, str) and f.strip()]
+    if not dbtl_config.setup_draft_enabled or not body.text.strip() or not fields:
+        return _serialize_draft(empty_draft(), enabled=dbtl_config.setup_draft_enabled)
+
+    prompt = build_draft_prompt(
+        request_text=body.text,
+        project_name=str(project.get("name") or ""),
+        fields=fields,
+    )
+    try:
+        model = create_chat_model(
+            name=dbtl_config.setup_draft_model_name,
+            thinking_enabled=False,
+            attach_tracing=False,
+            app_config=config,
+        )
+        response = await model.ainvoke(prompt)
+        draft = parse_draft_response(_response_text(response), fields=fields)
+    except Exception:
+        logger.warning(
+            "DBTL setup drafting failed for project %s; returning a blank form",
+            project_id,
+            exc_info=True,
+        )
+        draft = empty_draft()
+
+    return _serialize_draft(draft, enabled=True)
 
 
 @router.post("/projects/{project_id}/dbtl/proposals/{evaluation_id}/outcome")

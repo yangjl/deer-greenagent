@@ -116,15 +116,6 @@ import {
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
-import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from "../ai-elements/model-selector";
 import { Suggestion, Suggestions } from "../ai-elements/suggestion";
 import {
   DropdownMenu,
@@ -154,6 +145,7 @@ import {
 } from "./input-box-helpers";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
+import { ModelPicker } from "./model-picker";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
 import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
@@ -288,6 +280,8 @@ export function InputBox({
   status = "ready",
   context,
   extraHeader,
+  extraTools,
+  focusSignal,
   isWelcomeMode,
   threadId,
   draftThreadId = threadId,
@@ -312,6 +306,20 @@ export function InputBox({
     reasoning_effort?: "minimal" | "low" | "medium" | "high";
   };
   extraHeader?: React.ReactNode;
+  /**
+   * Extra controls appended to the composer's tool row, beside attachments,
+   * voice, and mode. The slot keeps route-specific controls (such as the DBTL
+   * scope selector on project conversations) out of this generic composer while
+   * still putting them where the user composes, rather than on a separate
+   * surface above it.
+   */
+  extraTools?: React.ReactNode;
+  /**
+   * Monotonic counter; every change moves the cursor into the composer. Lets a
+   * surface outside the composer (such as a project rail action) hand the user
+   * back to typing without reaching in with a ref.
+   */
+  focusSignal?: number;
   /**
    * Whether to render the input in welcome layout (vertically centered,
    * with hero + quick action suggestions).  This is purely a visual flag,
@@ -349,7 +357,6 @@ export function InputBox({
   const { locale, t } = useI18n();
   const queryClient = useQueryClient();
   const searchParams = useSearchParams();
-  const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
   const { user } = useAuth();
   const { thread, isMock } = useThread();
@@ -393,6 +400,15 @@ export function InputBox({
   } | null>(null);
   const draftSaveTimerRef = useRef<number | null>(null);
   const draftSaveGenerationRef = useRef(0);
+
+  // Skip the initial render: an unsolicited focus on mount would steal the
+  // cursor (and scroll the page) on every conversation the user merely opens.
+  const focusSignalSeenRef = useRef(focusSignal);
+  useEffect(() => {
+    if (focusSignal === focusSignalSeenRef.current) return;
+    focusSignalSeenRef.current = focusSignal;
+    textareaRef.current?.focus();
+  }, [focusSignal]);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const { data: suggestionsConfig } = useSuggestionsConfig();
@@ -832,7 +848,6 @@ export function InputBox({
         mode: getResolvedMode(context.mode, model.supports_thinking ?? false),
         reasoning_effort: context.reasoning_effort,
       });
-      setModelDialogOpen(false);
     },
     [disabled, onContextChange, context, models, polishingInput],
   );
@@ -2306,6 +2321,7 @@ export function InputBox({
                 )}
               </PromptInputButton>
             </Tooltip>
+            {extraTools}
             <PromptInputActionMenu>
               <ModeHoverGuide
                 mode={
@@ -2620,47 +2636,13 @@ export function InputBox({
                 {goalObjectiveCounter.length}/{goalObjectiveCounter.max}
               </span>
             )}
-            <ModelSelector
-              open={modelDialogOpen}
-              onOpenChange={setModelDialogOpen}
-            >
-              <ModelSelectorTrigger asChild>
-                <PromptInputButton
-                  className="max-w-40 min-w-0 sm:max-w-56"
-                  disabled={composerLocked}
-                >
-                  <div className="flex min-w-0 flex-col items-start text-left">
-                    <ModelSelectorName className="text-xs font-normal">
-                      {selectedModel?.display_name}
-                    </ModelSelectorName>
-                  </div>
-                </PromptInputButton>
-              </ModelSelectorTrigger>
-              <ModelSelectorContent>
-                <ModelSelectorInput placeholder={t.inputBox.searchModels} />
-                <ModelSelectorList>
-                  {models.map((m) => (
-                    <ModelSelectorItem
-                      key={m.name}
-                      value={m.name}
-                      onSelect={() => handleModelSelect(m.name)}
-                    >
-                      <div className="flex min-w-0 flex-1 flex-col">
-                        <ModelSelectorName>{m.display_name}</ModelSelectorName>
-                        <span className="text-muted-foreground truncate text-[10px]">
-                          {m.model}
-                        </span>
-                      </div>
-                      {m.name === context.model_name ? (
-                        <CheckIcon className="ml-auto size-4" />
-                      ) : (
-                        <div className="ml-auto size-4" />
-                      )}
-                    </ModelSelectorItem>
-                  ))}
-                </ModelSelectorList>
-              </ModelSelectorContent>
-            </ModelSelector>
+            <ModelPicker
+              models={models}
+              selectedModel={selectedModel}
+              onSelect={handleModelSelect}
+              disabled={composerLocked}
+              searchPlaceholder={t.inputBox.searchModels}
+            />
             <PromptInputSubmit
               className="rounded-full"
               disabled={composerLocked}

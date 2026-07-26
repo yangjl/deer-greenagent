@@ -1,19 +1,24 @@
 /**
- * The composer's request-context chip (Phase 5).
+ * The composer's DBTL scope selector — pure logic.
  *
- *     [ Ordinary project work ▾ ]   or   [ Cycle 01 · Design ▾ ]
+ * The composer is the only input surface: a request's DBTL scope is chosen
+ * beside the attachment and voice controls, and the request the user *types* is
+ * what starts, continues, or stays out of a cycle. There is no separate form.
  *
- * Pure, so the two claims the chip makes to the user are testable without
- * rendering anything:
+ * Kept pure so the three promises the selector makes to the user are testable
+ * without rendering anything:
  *
  * 1. **The selection affects the next request only.** Enforced by
  *    {@link nextContextAfterSend}, which returns ordinary unconditionally. It is
  *    not the user's job to remember to switch back, and it is not a cleanup step
  *    a component can forget.
- * 2. **The chip states the request's scope truthfully.** A cycle can be
+ * 2. **The label states the request's scope truthfully.** A cycle can be
  *    completed or abandoned in another tab between the click and the send, so
  *    {@link normalizeContext} resolves the selection against the live cycle list
  *    rather than trusting the stored id.
+ * 3. **Choosing "start a cycle" records nothing by itself.** It routes the
+ *    request into the backend's setup branch, which proposes and asks for
+ *    confirmation; only that confirmation writes a durable record.
  *
  * The payload keys here are the backend's runtime-context keys
  * (`deerflow.agents.dbtl.supervisor`). They travel in the run request's
@@ -21,37 +26,40 @@
  * and a per-request selection stored there would keep steering later turns.
  */
 
-import {
-  CYCLE_STATE_LABELS,
-  type CycleRecord,
-  isLive,
-} from "./cycle-view";
+import { CYCLE_STATE_LABELS, type CycleRecord, isLive } from "./cycle-view";
 
-export const CHIP_ORDINARY_LABEL = "Ordinary project work";
-export const CHIP_RECOMMEND_LABEL = "Ask the AI to recommend";
+export const SCOPE_ORDINARY_LABEL = "Ordinary project work";
+export const SCOPE_RECOMMEND_LABEL = "Ask the AI to recommend";
+export const SCOPE_START_CYCLE_LABEL = "Start a new cycle";
 
-/** Explanatory line shown in the menu; the promise the chip is making. */
-export const CHIP_SCOPE_NOTE =
+/** Explanatory line shown in the menu; the promise the selector is making. */
+export const SCOPE_NOTE =
   "Applies to your next request only, and is echoed in the run activity.";
 
-export type RequestContextKind = "ordinary" | "cycle" | "recommend";
+export type RequestContextKind =
+  | "ordinary"
+  | "cycle"
+  | "recommend"
+  | "start_cycle";
 
 export interface RequestContext {
   kind: RequestContextKind;
   cycleId: string | null;
 }
 
-export type DbtlExplicitChoice =
-  | "ordinary"
-  | "start_cycle"
-  | "continue_cycle";
+export type DbtlExplicitChoice = "ordinary" | "start_cycle" | "continue_cycle";
 
 export const ORDINARY_REQUEST_CONTEXT: RequestContext = Object.freeze({
   kind: "ordinary",
   cycleId: null,
 });
 
-export interface ContextMenuOption {
+export const START_CYCLE_REQUEST_CONTEXT: RequestContext = Object.freeze({
+  kind: "start_cycle",
+  cycleId: null,
+});
+
+export interface ScopeMenuOption {
   kind: RequestContextKind;
   cycleId: string | null;
   label: string;
@@ -95,39 +103,45 @@ export function normalizeContext(
   context: RequestContext,
   cycles: readonly CycleRecord[],
 ): RequestContext {
-  return isContextStillValid(context, cycles) ? context : ORDINARY_REQUEST_CONTEXT;
+  return isContextStillValid(context, cycles)
+    ? context
+    : ORDINARY_REQUEST_CONTEXT;
 }
 
-export function chipLabel(
+export function scopeLabel(
   context: RequestContext,
   cycles: readonly CycleRecord[],
 ): string {
-  if (context.kind === "recommend") return CHIP_RECOMMEND_LABEL;
+  if (context.kind === "recommend") return SCOPE_RECOMMEND_LABEL;
+  if (context.kind === "start_cycle") return SCOPE_START_CYCLE_LABEL;
   if (context.kind === "cycle") {
     const found = findCycle(context.cycleId, cycles);
     if (found) return cycleShortLabel(found.cycle, found.index);
   }
-  return CHIP_ORDINARY_LABEL;
+  return SCOPE_ORDINARY_LABEL;
 }
 
 /**
- * The menu: keep it ordinary, continue one visible cycle, or ask for a
- * recommendation. Ordinary is first because it is the default and the safe
- * choice; recommendation is last because it is the only one that hands the
+ * The menu: keep it ordinary, continue one visible cycle, start a new one, or
+ * ask for a recommendation.
+ *
+ * Ordinary is first because it is the default and the safe choice. Starting a
+ * cycle follows the continuable ones so every cycle-related choice reads as one
+ * group. Recommendation is last because it is the only one that hands the
  * decision to the classifier.
  *
  * Terminal cycles are omitted — a completed cycle cannot be continued, and
  * offering it would produce a refusal instead of an action. Numbering is still
- * taken from the full list so the chip and the project rail agree.
+ * taken from the full list so the menu and the project rail agree.
  */
-export function contextMenuOptions(
+export function scopeMenuOptions(
   cycles: readonly CycleRecord[],
-): ContextMenuOption[] {
-  const options: ContextMenuOption[] = [
+): ScopeMenuOption[] {
+  const options: ScopeMenuOption[] = [
     {
       kind: "ordinary",
       cycleId: null,
-      label: CHIP_ORDINARY_LABEL,
+      label: SCOPE_ORDINARY_LABEL,
       description: "Nothing is recorded against a cycle.",
     },
   ];
@@ -143,9 +157,19 @@ export function contextMenuOptions(
   });
 
   options.push({
+    kind: "start_cycle",
+    cycleId: null,
+    label: SCOPE_START_CYCLE_LABEL,
+    // States what the choice does *not* do. The backend proposes an objective
+    // and names the missing fields first; only a confirmation writes a record.
+    description:
+      "Describe it in your message. Nothing is recorded until you confirm.",
+  });
+
+  options.push({
     kind: "recommend",
     cycleId: null,
-    label: CHIP_RECOMMEND_LABEL,
+    label: SCOPE_RECOMMEND_LABEL,
     description: "Let the assistant suggest whether this belongs in a cycle.",
   });
 
@@ -166,6 +190,11 @@ export function runContextPayload(
   // assistant_id. That keeps checkpoint/state access compatible with rollback.
   const supervisor = { dbtl_supervisor_enabled: true };
   if (context.kind === "recommend") return supervisor;
+  if (context.kind === "start_cycle") {
+    // No cycle id: setup has nothing to continue yet, and sending a stale one
+    // would let the backend read this as a continuation.
+    return { ...supervisor, dbtl_explicit_choice: "start_cycle" };
+  }
   if (context.kind === "cycle" && context.cycleId) {
     return {
       ...supervisor,
@@ -190,6 +219,9 @@ export function proposalContextPayload(context: RequestContext): {
 } {
   if (context.kind === "recommend") {
     return { selectedCycleId: null, explicitChoice: null };
+  }
+  if (context.kind === "start_cycle") {
+    return { selectedCycleId: null, explicitChoice: "start_cycle" };
   }
   if (context.kind === "cycle" && context.cycleId) {
     return {
@@ -217,7 +249,9 @@ export function runActivityMetadata(
  *
  * Always ordinary. This is the mechanism behind "affects the next request
  * only" — a sticky selection would silently scope later turns to a cycle the
- * user believes they have left.
+ * user believes they have left. It matters most for `start_cycle`: setup
+ * continues through the assistant's own follow-up questions, so re-entering the
+ * setup branch on every subsequent message would trap the conversation.
  */
 export function nextContextAfterSend(_sent: RequestContext): RequestContext {
   return ORDINARY_REQUEST_CONTEXT;

@@ -35,9 +35,23 @@ class DbtlConfig(BaseModel):
         ),
     )
 
+    setup_draft_model_name: str | None = Field(
+        default=None,
+        description=(
+            "Model used to pre-fill the cycle setup form from the user's request. "
+            "null disables drafting and the form opens blank — the behaviour before drafting existed. "
+            "Drafted values are proposals only: values the request does not support are marked as assumptions, "
+            "and a human confirmation is still what creates the durable record."
+        ),
+    )
+
     @property
     def mutations_enabled(self) -> bool:
         return self.mode in {"manual", "graph_enabled"}
+
+    @property
+    def setup_draft_enabled(self) -> bool:
+        return bool(self.setup_draft_model_name)
 
     @property
     def graph_execution_enabled(self) -> bool:

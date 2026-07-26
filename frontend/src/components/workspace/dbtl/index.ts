@@ -1,5 +1,5 @@
-export { DbtlContextChip } from "./context-chip";
 export { DbtlEvaluationDrawer } from "./evaluation-drawer";
+export { DbtlScopeMenu } from "./scope-menu";
 export {
   ProjectCycleSelectionProvider,
   useProjectCycleSelection,
