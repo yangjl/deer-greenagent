@@ -968,7 +968,10 @@ guards, projection mismatches, legacy-data blockers, validation age, evidence
 download, and rollback posture. SQLite installations intentionally show
 PostgreSQL cutover as blocked. “Approve cutover” appears only after a
 PostgreSQL validation passes every technical check, and approval still does
-not enable DBTL classification or LangGraph execution.
+not enable DBTL classification or LangGraph execution. Human reviews are
+accepted only by the authenticated project governance API; serialized
+`dbtl_orchestrator` resume values remain blocked until a later phase connects
+the graph to those single-use durable review records.
 
 `LocalSandboxProvider` keeps host Bash disabled by default. If you explicitly
 enable `sandbox.allow_host_bash: true`, do so only on a fully trusted local

@@ -532,13 +532,19 @@ class DbtlExecutionDisabledError(RuntimeError):
     """Raised before a run is created when DBTL graph execution is disabled."""
 
 
-def ensure_dbtl_execution_allowed(assistant_id: str | None) -> None:
+def ensure_dbtl_execution_allowed(assistant_id: str | None, command: Mapping[str, Any] | None = None) -> None:
+    """Enforce DBTL run and resume safety before creating a run record."""
     if assistant_id != "dbtl_orchestrator":
         return
     try:
         resolve_agent_factory(assistant_id)
     except DbtlExecutionDisabledError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if command and command.get("resume") is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=("DBTL graph review resumption is disabled until resume values are resolved to single-use durable reviews. Submit reviews through the project DBTL governance API instead."),
+        )
 
 
 # Lead-agent recursion budget bounds. The Gateway must NOT trust a
@@ -1039,7 +1045,7 @@ async def start_run(
     """
     # Phase 0 fail-closed boundary: reject the experimental orchestrator before
     # creating a run row, thread metadata, checkpoints, or project artifacts.
-    ensure_dbtl_execution_allowed(body.assistant_id)
+    ensure_dbtl_execution_allowed(body.assistant_id, getattr(body, "command", None))
 
     stream_modes = normalize_stream_modes(body.stream_mode)
     bridge = get_stream_bridge(request)

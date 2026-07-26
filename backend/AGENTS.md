@@ -1226,6 +1226,11 @@ knowledge claims/promotions/links, plus validation and cutover evidence.
 single-use idempotency. The Gateway captures reviewer identity and project
 role from the authenticated membership; client actor fields, internal
 principals, stale revisions, replays, and cross-project access fail closed.
+Serialized LangGraph resume payloads are not review records: the Gateway
+rejects `dbtl_orchestrator` resume commands before run creation, and the
+experimental graph refuses every client-shaped human decision until a later
+phase connects a server-side durable-review resolver. Never copy reviewer
+identity or authorization from a resume payload into graph authority.
 `GET /api/dbtl/governance/readiness` and the validation/cutover endpoints are
 administrator-only. A cutover can be approved only from a successful
 PostgreSQL validation; SQLite remains useful for local inspection but can

@@ -7,8 +7,9 @@ A thin LangGraph state machine that drives one greenagent DBTL cycle:
 - ``advance``      : stub-produces the artifacts the next state requires, then
                      runs ``greenagent dbtl validate``.
 - ``human_review`` : ``interrupt()`` for greenagent's three human-gated
-                     transitions (approved-for-build / learning / completed),
-                     collecting the human's authorization reference.
+                     transitions (approved-for-build / learning / completed).
+                     Phase 1 deliberately rejects serialized resume payloads
+                     until they can be resolved to a durable SQL review.
 - ``transition``   : runs ``greenagent dbtl check-transition`` and, if allowed,
                      advances the cycle state.
 
@@ -66,13 +67,20 @@ def _stub_produce_artifacts(state: DBTLState, target: str) -> dict[str, str]:
     return artifacts
 
 
-def _parse_human_decision(decision: object) -> tuple[bool, str]:
-    """Normalize a resumed human-review payload to (approved, authorization)."""
-    if isinstance(decision, dict):
-        return bool(decision.get("approved", False)), str(decision.get("authorization") or "")
-    if isinstance(decision, str):
-        return bool(decision), decision
-    return bool(decision), ""
+def _parse_human_decision(_decision: object) -> tuple[bool, str]:
+    """Fail closed until a resume is resolved to a durable SQL review.
+
+    LangGraph resume values are serialized client input. Even a mapping with a
+    plausible decision, reviewer id, and authorization reference can be forged
+    or replayed, and this harness layer cannot verify its project membership,
+    artifact revision, policy version, or single-use database record.
+
+    Phase 1 therefore accepts no client-shaped decision here. The Gateway's
+    authenticated review endpoint remains the authority; a later graph phase
+    must inject a server-side resolver for those durable review records before
+    this gate can advance.
+    """
+    return False, ""
 
 
 def build_dbtl_graph(gate: GreenAgentGate) -> StateGraph:
@@ -123,8 +131,9 @@ def build_dbtl_graph(gate: GreenAgentGate) -> StateGraph:
         approved, authorization = _parse_human_decision(decision)
         if not approved or not authorization:
             return {
-                "dbtl_error": f"human review declined or missing authorization for {target}",
-                "messages": [AIMessage(content=f"DBTL human gate not satisfied for {target}")],
+                "dbtl_authorization": None,
+                "dbtl_error": f"durable human review resumption is not connected for {target}",
+                "messages": [AIMessage(content=f"DBTL human gate is fail-closed for {target} until durable review binding is connected")],
             }
         return {"dbtl_authorization": authorization}
 
@@ -133,9 +142,12 @@ def build_dbtl_graph(gate: GreenAgentGate) -> StateGraph:
 
     def transition(state: DBTLState) -> dict:
         target = state.get("dbtl_pending_target")
-        human = target in HUMAN_GATED_TARGETS
-        actor = "human" if human else "coordinator"
-        authorization = (state.get("dbtl_authorization") or "") if human else ""
+        # Until a durable review resolver exists, this graph never claims human
+        # authority. Human-gated targets route through ``human_review`` and stop
+        # there; this coordinator identity is also a second fail-closed layer
+        # for a manually constructed or legacy checkpoint.
+        actor = "coordinator"
+        authorization = ""
         result = gate.check_transition(
             state["dbtl_project_path"],
             state["dbtl_cycle_id"],
@@ -145,12 +157,17 @@ def build_dbtl_graph(gate: GreenAgentGate) -> StateGraph:
         )
         if not result.ok:
             return {
+                # Authorization is single-attempt state. Clear legacy/stale
+                # values even when the transition fails so a checkpoint retry
+                # cannot reuse them.
+                "dbtl_authorization": None,
                 "dbtl_error": f"transition to {target} blocked: {'; '.join(result.errors)}",
                 "messages": [AIMessage(content=f"DBTL transition blocked -> {target}: {list(result.errors)}")],
             }
         update = {
             "dbtl_state": target,
             "dbtl_pending_target": None,
+            # Consume any legacy authorization on every transition attempt.
             "dbtl_authorization": None,
             "dbtl_history": [f"{state['dbtl_state']} -> {target}"],
             "messages": [AIMessage(content=f"DBTL advanced to {target}")],
