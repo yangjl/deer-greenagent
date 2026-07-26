@@ -23,6 +23,7 @@ from app.gateway.routers import (
     console,
     dbtl,
     dbtl_cycles,
+    dbtl_proposals,
     features,
     feedback,
     files,
@@ -548,6 +549,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(memory_scope.router)
     # Durable DBTL cycle workflow (Phase 3).
     app.include_router(dbtl_cycles.router)
+    app.include_router(dbtl_proposals.router)
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)

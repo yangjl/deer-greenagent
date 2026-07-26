@@ -4,4 +4,7 @@ export * from "./cycle-hooks";
 export * from "./cycle-view";
 export * from "./cycles-api";
 export * from "./hooks";
+export * from "./proposal-hooks";
+export * from "./proposal-view";
+export * from "./proposals-api";
 export * from "./readiness";

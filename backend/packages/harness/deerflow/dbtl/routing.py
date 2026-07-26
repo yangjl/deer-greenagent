@@ -1,0 +1,130 @@
+"""Deterministic-first routing for DBTL requests (Phase 4).
+
+Five things are consulted, in this order, and the first one that answers wins:
+
+1. **An explicit user choice.** Someone clicked "Keep as ordinary chat" or
+   "Start DBTL setup". That is final.
+2. **A typed request to start a cycle.** "start a DBTL cycle" is a request,
+   not a hint to be scored.
+3. **The selected cycle.** Work inside an open cycle continues it; proposing a
+   second cycle over a live one is never the right answer.
+4. **The current project.** A cycle belongs to a project, so a projectless
+   conversation has nothing to propose.
+5. **The classifier**, last, and only for what the first four left open.
+
+The ordering is the point. A classifier consulted first would occasionally be
+confident enough to overrule a person who had already said what they wanted,
+and that is precisely the failure the phase's no-go names.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from enum import StrEnum
+
+from deerflow.dbtl.classifier import ClassifierDecision, ClassifierResult, classify_request
+
+
+class RouteKind(StrEnum):
+    """Where one request should go."""
+
+    ORDINARY = "ordinary"
+    CYCLE_SETUP = "cycle_setup"
+    CYCLE_CONTINUATION = "cycle_continuation"
+    PROPOSAL = "proposal"
+
+
+class RouteSource(StrEnum):
+    """Which rung of the precedence ladder answered.
+
+    Recorded in telemetry so the exit review can tell a deterministic route
+    from a classified one without re-deriving it.
+    """
+
+    EXPLICIT_CHOICE = "explicit_choice"
+    EXPLICIT_REQUEST = "explicit_request"
+    SELECTED_CYCLE = "selected_cycle"
+    NO_PROJECT = "no_project"
+    CLASSIFIER = "classifier"
+
+
+class ExplicitChoice(StrEnum):
+    """What the user pressed on a previous card, if anything."""
+
+    ORDINARY = "ordinary"
+    START_CYCLE = "start_cycle"
+    CONTINUE_CYCLE = "continue_cycle"
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingRequest:
+    """Everything routing is allowed to look at."""
+
+    text: str
+    project_id: str | None
+    selected_cycle_id: str | None
+    explicit_choice: ExplicitChoice | None
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingDecision:
+    """The routing result. Carries no authority to create anything."""
+
+    kind: RouteKind
+    source: RouteSource
+    classifier: ClassifierResult | None = None
+    cycle_id: str | None = None
+
+
+# A typed request to start. Deliberately narrow: it must name DBTL or a
+# research cycle explicitly, so "start the analysis" does not trip it.
+_EXPLICIT_START_PATTERN = re.compile(
+    r"\b(?:start|open|begin|create)\s+(?:a\s+|the\s+|new\s+)*(?:dbtl\s+cycle|dbtl\s+workflow|research\s+cycle|dbtl)\b",
+    re.IGNORECASE,
+)
+
+
+def is_explicit_start_request(text: str) -> bool:
+    """Whether the user asked, in words, to start a cycle."""
+    return bool(_EXPLICIT_START_PATTERN.search(text or ""))
+
+
+def route_request(request: RoutingRequest) -> RoutingDecision:
+    """Route one request. Pure, deterministic, and side-effect free."""
+
+    # 1. An explicit choice is final and short-circuits classification.
+    if request.explicit_choice is ExplicitChoice.ORDINARY:
+        return RoutingDecision(kind=RouteKind.ORDINARY, source=RouteSource.EXPLICIT_CHOICE)
+    if request.explicit_choice is ExplicitChoice.START_CYCLE:
+        return RoutingDecision(kind=RouteKind.CYCLE_SETUP, source=RouteSource.EXPLICIT_CHOICE)
+    if request.explicit_choice is ExplicitChoice.CONTINUE_CYCLE:
+        if request.selected_cycle_id:
+            return RoutingDecision(
+                kind=RouteKind.CYCLE_CONTINUATION,
+                source=RouteSource.EXPLICIT_CHOICE,
+                cycle_id=request.selected_cycle_id,
+            )
+        # Continuing nothing is not a reason to invent a cycle.
+        return RoutingDecision(kind=RouteKind.ORDINARY, source=RouteSource.EXPLICIT_CHOICE)
+
+    # 2. A typed request to start, still deterministic.
+    if is_explicit_start_request(request.text):
+        return RoutingDecision(kind=RouteKind.CYCLE_SETUP, source=RouteSource.EXPLICIT_REQUEST)
+
+    # 3. An open cycle continues; it is never a reason to propose another.
+    if request.selected_cycle_id:
+        return RoutingDecision(
+            kind=RouteKind.CYCLE_CONTINUATION,
+            source=RouteSource.SELECTED_CYCLE,
+            cycle_id=request.selected_cycle_id,
+        )
+
+    # 4. No project, nothing to propose against.
+    if not request.project_id:
+        return RoutingDecision(kind=RouteKind.ORDINARY, source=RouteSource.NO_PROJECT)
+
+    # 5. Only now does the classifier get a say.
+    result = classify_request(request.text)
+    kind = RouteKind.PROPOSAL if result.decision is ClassifierDecision.PROPOSE_CYCLE else RouteKind.ORDINARY
+    return RoutingDecision(kind=kind, source=RouteSource.CLASSIFIER, classifier=result)

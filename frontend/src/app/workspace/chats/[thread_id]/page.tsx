@@ -13,6 +13,11 @@ import {
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
+import {
+  UpgradeProposalCard,
+  useDbtlUpgradeProposal,
+  useProjectCycleSelection,
+} from "@/components/workspace/dbtl";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { FilesTrigger } from "@/components/workspace/files";
 import { GoalStatus } from "@/components/workspace/goal-status";
@@ -190,15 +195,23 @@ export default function ChatPage() {
     threadMetadata.isLoading,
   ]);
 
+  // A DBTL cycle belongs to a project, so the proposal only exists inside one.
+  const upgradeProposal = useDbtlUpgradeProposal(projectId);
+  const { selectedCycleId } = useProjectCycleSelection();
+  const { evaluate: evaluateForUpgrade } = upgradeProposal;
+
   const handleSubmit = useCallback(
     (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
       const sendPromise = sendMessage(threadId, message, undefined, options);
+      // Shadow evaluation runs beside the send, never in front of it: chat
+      // must stay intact whether or not the classifier has an opinion.
+      void evaluateForUpgrade({ text: message.text, threadId, selectedCycleId });
       if (message.files.length > 0) {
         return sendPromise;
       }
       void sendPromise;
     },
-    [sendMessage, threadId],
+    [sendMessage, threadId, selectedCycleId, evaluateForUpgrade],
   );
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
@@ -403,6 +416,22 @@ export default function ChatPage() {
                         )}
                       </div>
                     </div>
+                  )}
+                  {upgradeProposal.evaluation && (
+                    <UpgradeProposalCard
+                      // Keyed so a second proposal starts clean instead of
+                      // inheriting the previous card's half-filled setup form.
+                      key={upgradeProposal.evaluation.evaluation_id}
+                      className="mb-2 w-full"
+                      evaluation={upgradeProposal.evaluation}
+                      onAction={upgradeProposal.recordOutcome}
+                      onConfirm={(submission) => {
+                        void upgradeProposal.confirm(submission);
+                      }}
+                      isConfirming={upgradeProposal.isConfirming}
+                      error={upgradeProposal.createError}
+                      parentCycleTitle={upgradeProposal.parentCycleTitle}
+                    />
                   )}
                   {mountedRef.current ? (
                     <InputBox

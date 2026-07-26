@@ -191,6 +191,40 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   Action buttons use native `disabled` state while incomplete or pending so a
   keyboard activation cannot bypass the same duplicate-submit protection as a
   pointer click.
+  Phase 4 adds the Upgrade Proposal to the same module: `proposal-view.ts` is
+  **pure and React-free** (the three actions and each one's stated
+  consequence, clarification prompts and completion, the confirmation lines,
+  and the two exit-review rates), `proposals-api.ts` owns
+  `/api/projects/{id}/dbtl/proposals/*`, and `proposal-hooks.ts` the TanStack
+  hooks. `hasProposalToShow` keys on the server's payload rather than the
+  route kind, so a client-side heuristic has no way to manufacture a card the
+  server withheld — the client has no classifier and must not appear to.
+  `PROPOSAL_ACTIONS` is a fixed list, not a derived one, so adding a
+  confirmation-skipping shortcut has to be a conscious edit. Reviewed wording
+  (the notice, the required gates, the record effect) is rendered from the
+  server payload rather than re-typed here. False-upgrade and missed-cycle
+  rates use **different denominators** on purpose: one measures what was
+  proposed, the other only classifier-sourced ordinary decisions; explicit
+  setup routes are not classifier misses. A shared denominator would hide the
+  trade-off between them.
+- `src/components/workspace/dbtl/` owns the Phase 4 surfaces.
+  `upgrade-proposal-card.tsx` is the inline card above the composer: it walks
+  offer → clarify → confirm, keeps "No cycle has been created yet." visible
+  through the first two steps, and only the final confirm calls the durable
+  create endpoint. `use-upgrade-proposal.ts` runs the shadow evaluation
+  *beside* the send, never in front of it, and every failure path resolves to
+  "no card" so a classifier outage degrades to ordinary chat instead of
+  blocking a message. `evaluation-drawer.tsx` is the internal tester view and
+  is opt-in (`enabled`), because the endpoint behind it is administrator-only
+  and an ordinary member opening settings should not generate a 403. It is
+  mounted from Settings → DBTL readiness, provides a project selector, and
+  lets the tester label an undecided classifier-ordinary row as correctly
+  ordinary or cycle-worthy for missed-cycle calibration.
+- `src/components/workspace/dbtl/cycle-selection-context.tsx` carries only an
+  **explicitly clicked** cycle from the project rail to project chat. The rail
+  may display a default cycle's details, but that default does not silently
+  route every request as a continuation. The provider is keyed by project slug
+  so a selection cannot leak across projects.
 - `src/core/memory-scope/` owns the per-project memory scope migration
   (DBTL Phase 2). `review.ts` is **pure and React-free** — count rows, the
   four per-fact decisions, queue advance, provenance labels, and each

@@ -12,9 +12,11 @@ import {
   ShieldCheck,
   XCircle,
 } from "lucide-react";
+import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { DbtlEvaluationDrawer } from "@/components/workspace/dbtl";
 import {
   buildReadinessExport,
   groupReadinessItems,
@@ -24,6 +26,7 @@ import {
   useDbtlReadiness,
   useValidateDbtlGovernance,
 } from "@/core/dbtl";
+import { useActiveWorkspaceProjects } from "@/core/workspaces";
 import { cn } from "@/lib/utils";
 
 const GROUP_LABELS = {
@@ -49,6 +52,16 @@ export function DbtlReadinessSettingsPage() {
   const governance = useDbtlGovernance();
   const validation = useValidateDbtlGovernance();
   const cutover = useApproveDbtlCutover();
+  const { projects } = useActiveWorkspaceProjects();
+  const [showEvaluations, setShowEvaluations] = useState(false);
+  const [evaluationProjectId, setEvaluationProjectId] = useState<string | null>(
+    null,
+  );
+  const evaluationProjects = projects.data ?? [];
+  const evaluationProject =
+    evaluationProjects.find((project) => project.id === evaluationProjectId) ??
+    evaluationProjects[0] ??
+    null;
 
   if (readiness.isPending) {
     return (
@@ -356,6 +369,65 @@ export function DbtlReadinessSettingsPage() {
             </div>
           ))}
         </div>
+      </section>
+
+      {/* Phase 4: the internal evaluation drawer. Opt-in rather than always
+          loaded, because the endpoint behind it is administrator-only and an
+          ordinary member opening settings should not generate a 403. */}
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold">
+              Classifier shadow evaluations
+            </h3>
+            <p className="text-muted-foreground mt-1 max-w-2xl text-sm">
+              What the DBTL classifier believed about recent requests, and what
+              the person chose. Review the false-upgrade and missed-cycle rates
+              here before enabling proposals for general users.
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setShowEvaluations((open) => !open)}
+            aria-expanded={showEvaluations}
+          >
+            {showEvaluations ? "Hide evaluations" : "Show evaluations"}
+          </Button>
+        </div>
+
+        {showEvaluations &&
+          (evaluationProject ? (
+            <div className="space-y-3">
+              <label className="block max-w-sm">
+                <span className="text-muted-foreground text-xs">
+                  Project to review
+                </span>
+                <select
+                  className="border-input bg-background mt-1 h-9 w-full rounded-md border px-3 text-sm"
+                  value={evaluationProject.id}
+                  onChange={(event) =>
+                    setEvaluationProjectId(event.target.value)
+                  }
+                >
+                  {evaluationProjects.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <DbtlEvaluationDrawer
+                key={evaluationProject.id}
+                projectId={evaluationProject.id}
+                enabled
+              />
+            </div>
+          ) : (
+            <p className="text-muted-foreground text-sm">
+              Evaluations are recorded per project; this workspace has none yet.
+            </p>
+          ))}
       </section>
 
       <section>

@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 30
+config_version: 31
 
 # ============================================================================
 # Logging
@@ -1196,6 +1196,14 @@ projects:
 dbtl:
   mode: audit_only # disabled | audit_only | manual | graph_enabled
   policy_version: greenagent-dbtl-v2-draft
+  # Record what the DBTL classifier believes about each project request.
+  # Observation only: an evaluation never creates or advances a cycle.
+  classifier_shadow_enabled: true
+  # Show the DBTL Upgrade Proposal card to users. Off by default so shadow
+  # evaluation can be measured before anyone is interrupted; turn on only
+  # after reviewing the false-upgrade and missed-cycle rates in
+  # Settings -> DBTL readiness. Also requires mode=manual or graph_enabled.
+  proposals_visible: false
 
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider

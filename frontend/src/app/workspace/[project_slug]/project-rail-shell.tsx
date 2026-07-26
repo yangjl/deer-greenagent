@@ -2,6 +2,7 @@
 
 import { useParams } from "next/navigation";
 
+import { ProjectCycleSelectionProvider } from "@/components/workspace/dbtl";
 import { ProjectRail } from "@/components/workspace/project-rail";
 
 /**
@@ -11,9 +12,11 @@ import { ProjectRail } from "@/components/workspace/project-rail";
 export function ProjectRailShell({ children }: { children: React.ReactNode }) {
   const { project_slug: projectSlug } = useParams<{ project_slug: string }>();
   return (
-    <div className="flex h-screen min-w-0 flex-1">
-      <ProjectRail projectSlug={projectSlug} />
-      <div className="flex min-w-0 flex-1 flex-col">{children}</div>
-    </div>
+    <ProjectCycleSelectionProvider key={projectSlug}>
+      <div className="flex h-screen min-w-0 flex-1">
+        <ProjectRail projectSlug={projectSlug} />
+        <div className="flex min-w-0 flex-1 flex-col">{children}</div>
+      </div>
+    </ProjectCycleSelectionProvider>
   );
 }

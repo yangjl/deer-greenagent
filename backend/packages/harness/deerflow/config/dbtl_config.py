@@ -23,6 +23,17 @@ class DbtlConfig(BaseModel):
         default="greenagent-dbtl-v2-draft",
         description="Vocabulary/policy contract shown in the readiness report.",
     )
+    classifier_shadow_enabled: bool = Field(
+        default=True,
+        description="Record classifier shadow evaluations. Observation only: an evaluation never creates or advances a cycle.",
+    )
+    proposals_visible: bool = Field(
+        default=False,
+        description=(
+            "Show the DBTL Upgrade Proposal card to users. Defaults to off so shadow evaluation can run and be measured "
+            "before anyone is interrupted by a card — the human exit review approves thresholds and wording before this is turned on."
+        ),
+    )
 
     @property
     def mutations_enabled(self) -> bool:
@@ -31,3 +42,15 @@ class DbtlConfig(BaseModel):
     @property
     def graph_execution_enabled(self) -> bool:
         return self.mode == "graph_enabled"
+
+    @property
+    def proposals_enabled(self) -> bool:
+        """Whether a card may be shown.
+
+        Two switches, because they answer different questions. Shadow
+        evaluation is measurement and is safe to leave on; showing a card
+        interrupts someone's work and is gated on both the DBTL mode being at
+        least ``manual`` (a proposal the user accepts must be able to become a
+        cycle) and an explicit operator opt-in after the exit review.
+        """
+        return self.proposals_visible and self.mutations_enabled

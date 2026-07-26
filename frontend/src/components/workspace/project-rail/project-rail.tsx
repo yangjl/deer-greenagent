@@ -15,6 +15,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 
+import { useProjectCycleSelection } from "@/components/workspace/dbtl";
 import { SettingsDialog } from "@/components/workspace/settings";
 import {
   CYCLE_STATE_LABELS,
@@ -134,7 +135,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const controls = dbtlControlState(dbtl.feature, dbtl.isLoading);
   const cycleQuery = useProjectCycles(project?.id);
 
-  const [selectedCycleId, setSelectedCycleId] = useState<string | null>(null);
+  const { selectedCycleId, selectCycle } = useProjectCycleSelection();
   const [cyclesOverride, setCyclesOverride] = useState<boolean | null>(null);
   const [readinessOpen, setReadinessOpen] = useState(false);
   const [startOpen, setStartOpen] = useState(false);
@@ -275,7 +276,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                 <div key={entry.id} className="mb-1">
                   <button
                     type="button"
-                    onClick={() => setSelectedCycleId(entry.id)}
+                    onClick={() => selectCycle(entry.id)}
                     className={cn(
                       "hover:bg-muted/60 flex w-full items-center gap-1.5 rounded px-2 py-2 text-left text-sm transition-colors",
                       active && "bg-muted/80 font-medium",

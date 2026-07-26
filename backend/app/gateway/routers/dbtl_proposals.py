@@ -1,0 +1,251 @@
+"""Classifier shadow evaluation and the DBTL Upgrade Proposal (Phase 4).
+
+Three endpoints, and the boundary between them is the phase's whole point:
+
+``POST .../evaluate``
+    Runs deterministic-first routing over one request and records what it
+    concluded. It **creates no DBTL record** — it cannot, because it holds a
+    telemetry repository and nothing else. Whether the caller is shown a card
+    is a separate question answered by ``dbtl.proposals_visible``.
+
+``POST .../{evaluation_id}/outcome``
+    Attaches what the human did. Dismissal is recorded like any other choice,
+    because a card that gets ignored is exactly the false-upgrade signal.
+
+``GET .../evaluations``
+    The internal evaluation drawer. Admin-only, since it is a review surface
+    for people calibrating thresholds rather than a product feature.
+
+Creating an actual cycle stays where it already was: the Phase 3 endpoint,
+behind its own confirmation. Nothing here can shortcut it.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.gateway.authz import require_permission
+from app.gateway.deps import get_classifier_evaluation_repo, get_config, get_workspace_repo, require_admin_user
+from deerflow.config.app_config import AppConfig
+from deerflow.dbtl.proposal import (
+    CONFIRMATION_REQUIRED_NOTICE,
+    RECORD_EFFECT,
+    REQUIRED_GATES,
+    ProposalOutcome,
+    UpgradeProposal,
+    build_proposal,
+)
+from deerflow.dbtl.routing import ExplicitChoice, RouteKind, RoutingRequest, route_request
+from deerflow.persistence.telemetry import ClassifierEvaluationConflict
+
+router = APIRouter(prefix="/api", tags=["dbtl-proposals"])
+logger = logging.getLogger(__name__)
+
+MAX_REQUEST_TEXT = 20_000
+DEFAULT_DRAWER_LIMIT = 100
+
+
+class EvaluateRequest(BaseModel):
+    """One request to classify. ``extra="forbid"`` so a client cannot smuggle
+    a decision, a confidence, or a record flag into a shadow evaluation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=MAX_REQUEST_TEXT)
+    thread_id: str | None = Field(default=None, max_length=128)
+    selected_cycle_id: str | None = Field(default=None, max_length=64)
+    explicit_choice: Literal["ordinary", "start_cycle", "continue_cycle"] | None = None
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("text")
+    @classmethod
+    def text_must_have_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must contain text")
+        return value
+
+
+class OutcomeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal[
+        "start_setup",
+        "keep_ordinary",
+        "not_sure",
+        "dismissed",
+        "continue_cycle",
+    ]
+
+
+async def _require_project(project_id: str, request: Request) -> tuple[dict, str]:
+    user = getattr(request.state, "user", None)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    user_id = str(user.id)
+    project = await get_workspace_repo(request).get_project(project_id, user_id=user_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    return project, user_id
+
+
+def _dbtl_config(request: Request, config: AppConfig):
+    return getattr(request.app.state, "dbtl_config_override", config.dbtl)
+
+
+def _evaluation_id(project_id: str, user_id: str, idempotency_key: str) -> str:
+    """A stable id from the caller's key, scoped so keys cannot collide across
+    projects or users."""
+    digest = hashlib.sha256(f"{project_id}\x00{user_id}\x00{idempotency_key}".encode()).hexdigest()
+    return f"eval_{digest[:32]}"
+
+
+def _request_fingerprint(body: EvaluateRequest) -> str:
+    """Bind an idempotency key without retaining the raw request separately."""
+    canonical = json.dumps(
+        {
+            "text": body.text,
+            "thread_id": body.thread_id,
+            "selected_cycle_id": body.selected_cycle_id,
+            "explicit_choice": body.explicit_choice,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _serialize_proposal(proposal: UpgradeProposal) -> dict:
+    # The cycle class is the user's choice on the card, so it is not decided
+    # here; only the class-independent parts of the confirmation are sent.
+    return {
+        "kind": str(proposal.kind),
+        "proposed_objective": proposal.proposed_objective,
+        "missing_fields": list(proposal.missing_fields),
+        "band": str(proposal.band),
+        "confidence": proposal.confidence,
+        "project_name": proposal.project_name,
+        "cycle_id": proposal.cycle_id,
+        # Constants, echoed so the client renders the reviewed wording rather
+        # than its own paraphrase of it.
+        "creates_record": proposal.creates_record,
+        "requires_confirmation": proposal.requires_confirmation,
+        "notice": proposal.notice,
+        "confirmation": {
+            "project_name": proposal.project_name,
+            "required_gates": list(REQUIRED_GATES),
+            "record_effect": RECORD_EFFECT,
+            "notice": CONFIRMATION_REQUIRED_NOTICE,
+        },
+    }
+
+
+@router.post("/projects/{project_id}/dbtl/proposals/evaluate")
+@require_permission("threads", "write")
+async def evaluate_request(
+    project_id: str,
+    body: EvaluateRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_classifier_evaluation_repo),
+):
+    """Classify one request in shadow mode. Creates no DBTL record, ever."""
+    project, user_id = await _require_project(project_id, request)
+    dbtl_config = _dbtl_config(request, config)
+
+    decision = route_request(
+        RoutingRequest(
+            text=body.text,
+            project_id=project_id,
+            selected_cycle_id=body.selected_cycle_id,
+            explicit_choice=ExplicitChoice(body.explicit_choice) if body.explicit_choice else None,
+        )
+    )
+    proposal = build_proposal(decision, project_name=str(project.get("name") or ""))
+
+    evaluation_id = _evaluation_id(project_id, user_id, body.idempotency_key)
+    if dbtl_config.classifier_shadow_enabled:
+        classifier = decision.classifier
+        try:
+            await repo.record_evaluation(
+                evaluation_id=evaluation_id,
+                project_id=project_id,
+                thread_id=body.thread_id,
+                user_id=user_id,
+                route_kind=str(decision.kind),
+                route_source=str(decision.source),
+                request_fingerprint=_request_fingerprint(body),
+                band=str(classifier.band) if classifier else "low",
+                confidence=classifier.confidence if classifier else 0.0,
+                rule_hits=[{"rule_id": hit.rule_id, "weight": hit.weight, "evidence": hit.evidence} for hit in (classifier.rule_hits if classifier else ())],
+                missing_fields=list(classifier.missing_fields) if classifier else [],
+                proposed_objective=proposal.proposed_objective if proposal else "",
+                policy_version=dbtl_config.policy_version,
+            )
+        except ClassifierEvaluationConflict as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except Exception:
+            # Telemetry is observation. Losing a row must not break the user's
+            # request — that would let a measurement surface degrade the
+            # product it is measuring.
+            logger.warning("Failed to record DBTL classifier evaluation for project %s", project_id, exc_info=True)
+
+    # Routing is reported honestly even when the card is hidden, so the drawer
+    # and the stored row agree; visibility only governs what the user sees.
+    proposals_visible = bool(dbtl_config.proposals_enabled)
+    return {
+        "evaluation_id": evaluation_id,
+        "route_kind": str(decision.kind),
+        "route_source": str(decision.source),
+        "proposals_visible": proposals_visible,
+        "proposal": _serialize_proposal(proposal) if (proposal and proposals_visible) else None,
+    }
+
+
+@router.post("/projects/{project_id}/dbtl/proposals/{evaluation_id}/outcome")
+@require_permission("threads", "write")
+async def record_outcome(
+    project_id: str,
+    evaluation_id: str,
+    body: OutcomeRequest,
+    request: Request,
+    repo=Depends(get_classifier_evaluation_repo),
+):
+    """Record what the human did with a card."""
+    _project, user_id = await _require_project(project_id, request)
+    stored = await repo.record_outcome(
+        evaluation_id=evaluation_id,
+        project_id=project_id,
+        user_id=user_id,
+        outcome=str(ProposalOutcome(body.outcome)),
+    )
+    if stored is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evaluation not found")
+    return stored
+
+
+@router.get("/projects/{project_id}/dbtl/proposals/evaluations")
+@require_permission("threads", "read")
+async def list_evaluations(
+    project_id: str,
+    request: Request,
+    limit: int = DEFAULT_DRAWER_LIMIT,
+    repo=Depends(get_classifier_evaluation_repo),
+):
+    """The internal evaluation drawer: shadow decisions and their outcomes."""
+    await _require_project(project_id, request)
+    await require_admin_user(request, detail="DBTL classifier evaluations are available to administrators only.")
+    return {
+        "project_id": project_id,
+        "evaluations": await repo.list_evaluations(project_id, limit=limit),
+        "stats": await repo.evaluation_stats(project_id),
+    }
+
+
+__all__ = ["RouteKind", "router"]

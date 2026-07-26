@@ -990,6 +990,25 @@ actions, non-human approvals, cross-project access, and mismatched durable
 projections fail closed. This manual mode does not classify chat requests or
 run the DBTL LangGraph; those remain later phases.
 
+Phase 4 adds deterministic, shadow-mode request classification. Ordinary chat
+still starts immediately, while an eligible research request may show a
+no-record DBTL Upgrade Proposal above the composer. The proposal gathers
+missing scientific intent and shows the project, objective, parent program
+cycle (when applicable), human gates, and durable-record effect before final
+confirmation. Dismiss, “Keep as ordinary chat,” and “Not sure” create no
+cycle. Clicking a cycle in the project rail marks subsequent requests as
+continuations of that cycle rather than proposals for a new one.
+
+Classifier telemetry is project-scoped and separate from DBTL research
+records. Settings → DBTL readiness includes an administrator-only evaluation
+view with a project selector, rule hits, confidence, human outcomes, and
+calibration controls for ordinary decisions. The false-upgrade denominator is
+classifier proposals; the missed-cycle denominator is classifier-ordinary
+decisions, so explicit requests to start a cycle do not inflate the missed
+rate. Upgrade cards remain off by default: enable
+`dbtl.proposals_visible: true` only after the shadow results and wording are
+approved, and only while `dbtl.mode` is `manual` or `graph_enabled`.
+
 `LocalSandboxProvider` keeps host Bash disabled by default. If you explicitly
 enable `sandbox.allow_host_bash: true`, do so only on a fully trusted local
 machine: commands execute on the host, with the selected project folder as

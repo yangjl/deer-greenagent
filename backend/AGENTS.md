@@ -1347,6 +1347,68 @@ Gateway's internal/service principal even when it carries an owner's identity.
 The review row binds the pre-decision projection hash and revision the human
 actually saw, not the projection produced after applying their verdict.
 
+DBTL Phase 4 adds classifier shadow mode and the Upgrade Proposal. The rule it
+implements is "AI may recommend DBTL, but only a human can turn ordinary work
+into a durable cycle", and the code is arranged so that rule has no
+expressible violation.
+
+`deerflow.dbtl.routing` is **deterministic-first**: an explicit user choice, a
+typed "start a DBTL cycle", the selected cycle, and the current project are all
+consulted — in that order — *before* `deerflow.dbtl.classifier` is called at
+all. A classifier consulted first would occasionally be confident enough to
+overrule someone who had already said what they wanted. `RouteSource` records
+which rung answered, so telemetry can tell a deterministic route from a
+classified one without re-deriving it.
+
+`deerflow.dbtl.classifier` is rule-based and pure, and deliberately so: shadow
+telemetry is only comparable across runs if the same text classifies the same
+way every time, and the exit review has to judge *why* a request was flagged,
+which means inspectable rule hits rather than a model's account of its own
+reasoning. The errors are asymmetric — a false upgrade interrupts ordinary work
+in a project where the user will see it constantly, a missed cycle costs one
+manual click — so ordinary is the default and the negative shape rules veto a
+positive score outright. A model classifier can be layered in later; routing
+already evaluates every deterministic signal ahead of where it would sit.
+
+`deerflow.dbtl.proposal` is the no-record contract: a frozen value object whose
+`creates_record` is a constant `False`, with no repository import — pinned by a
+test that reads the module's own source. The reviewed wording (the
+"No cycle has been created yet." notice, the required gates, the record
+effect) lives here rather than in the frontend, so approving the backend copy
+approves what users actually read.
+
+Telemetry is stored **outside** the DBTL domain, in
+`deerflow.persistence.telemetry` (`dbtl_classifier_evaluations`, migration
+`0013_classifier_evaluations`). That package imports no DBTL model, which is
+what makes "a shadow event cannot mutate cycle state" a property of the code
+rather than a promise about it; the table's only foreign key is to `projects`.
+The row stores rule hits and the derived objective but **not** the user's
+message — chat content in a telemetry table would outlive the conversation and
+sit outside the memory-scope controls Phase 2 built for exactly that data. Both
+writes are first-writer-wins: a replayed evaluation must not overwrite the
+evidence a reviewer saw, and a late second click must not rewrite the choice
+actually made first, or the false-upgrade and missed-cycle rates stop meaning
+anything. Evaluation idempotency is content-bound by a request fingerprint,
+so reusing one key for different text or routing context returns 409 instead
+of replaying unrelated evidence. Outcome writes use one conditional SQL
+update rather than a select-then-update race. Missed-cycle statistics include
+only classifier-sourced ordinary decisions; deterministic explicit setup
+routes are not classifier misses.
+
+`app/gateway/routers/dbtl_proposals.py` mounts
+`/api/projects/{id}/dbtl/proposals`. `evaluate` classifies and records but
+holds only the telemetry repository, so it has nothing to create a cycle with;
+`{id}/outcome` attaches the human's choice, dismissal included, because an
+ignored card *is* the false-upgrade signal; `evaluations` is the internal
+drawer and is administrator-only. Two config switches, answering different
+questions: `dbtl.classifier_shadow_enabled` (default on) is measurement and is
+safe to leave running, while `dbtl.proposals_visible` (default **off**) governs
+whether anyone is interrupted by a card and additionally requires
+`mutations_enabled` — offering an upgrade that cannot be accepted would be a
+dead end. Routing is reported honestly even when the card is withheld, so the
+drawer and the stored row agree. A telemetry write failure is logged and
+swallowed: a measurement surface must not degrade the product it measures.
+
 `threads_meta` carries nullable `workspace_id` and `project_id` plus explicit
 `scope_type` and `visibility`. Existing and newly projectless conversations
 default to `inbox` / `private-owner`; never infer workspace sharing from a

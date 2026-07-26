@@ -411,16 +411,19 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 ScheduledTaskRunRepository,
             )
             from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+            from deerflow.persistence.telemetry import ClassifierEvaluationRepository
             from deerflow.persistence.workspaces import WorkspaceRepository
 
             app.state.dbtl_governance_repo = DbtlGovernanceRepository(sf)
             app.state.dbtl_cycle_repo = DbtlCycleRepository(sf)
+            app.state.classifier_evaluation_repo = ClassifierEvaluationRepository(sf)
             app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
             app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
             app.state.workspace_repo = WorkspaceRepository(sf)
         else:
             app.state.dbtl_governance_repo = None
             app.state.dbtl_cycle_repo = None
+            app.state.classifier_evaluation_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
             app.state.workspace_repo = None
@@ -585,6 +588,13 @@ def get_dbtl_cycle_repo(request: Request):
     val = getattr(request.app.state, "dbtl_cycle_repo", None)
     if val is None:
         raise HTTPException(status_code=503, detail="DBTL cycle repository not available")
+    return val
+
+
+def get_classifier_evaluation_repo(request: Request):
+    val = getattr(request.app.state, "classifier_evaluation_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Classifier evaluation repository not available")
     return val
 
 
