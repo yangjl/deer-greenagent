@@ -1462,6 +1462,29 @@ enough is known to show a confirmation at all: an explicit start request that
 names no trait, season, population, or validation criterion becomes a
 clarification instead of a dialog with blanks in it.
 
+**Both clarifications are cards, and a card is only half the feature.** The
+setup clarification uses the same `ask_clarification` AI-tool / ToolMessage pair
+as the Design council's `needs_input`, distinguished by request-id prefix
+(`dbtl-setup:` vs `dbtl-design:`) because the two resume differently: a design
+answer feeds a running stage, a setup answer re-routes a request that has
+started nothing. Emitting the card without handling its answer is the failure
+mode to watch for — routing reads the newest *visible* user message, so a hidden
+card reply would be skipped and the request re-derived from the original prompt,
+looping straight back into the same question. `_routing_input` closes that: it
+combines the originating request with the answer (the answer supplies the
+fields, the request is what still says a cycle was being started) and restores
+the `START_CYCLE` intent, which is otherwise gone because the composer scope
+applies to one request by design. The recovered intent **outranks** the request's
+own `dbtl_explicit_choice`: the client sends a scope with every request and
+falls back to `ordinary` for a card it has no special handling for, so honouring
+that filled-in default would drop the answer into the lead agent on exactly the
+turn the server knows what the user is doing. The originating request is read
+back from the card the server itself emitted (`source_request` on the
+`human_input` artifact), never from the reply, so a forged `request_id` matches
+no card and routes as ordinary text — and summarization compacting the original
+turn cannot strand the reply. Pinned by
+`tests/test_dbtl_supervisor_graph.py::TestSetupClarificationIsACard`.
+
 **Delegation depends on idempotent reducers, and that is a framework fact, not a
 convention.** A compiled child used as a parent node returns its *entire final
 state* as its update, which the parent re-applies through its own reducers. This

@@ -45,6 +45,7 @@ import { Welcome } from "@/components/workspace/welcome";
 import {
   ORDINARY_REQUEST_CONTEXT,
   type RequestContext,
+  humanInputRunContext,
   nextContextAfterSend,
   normalizeContext,
   proposalContextPayload,
@@ -374,17 +375,7 @@ export default function ChatPage() {
           files: [],
         },
         showDbtlScope
-          ? request.source === "ask_clarification" &&
-            request.clarification_type === "design_decision" &&
-            selectedCycleId
-            ? runContextPayload({
-                kind: "cycle",
-                cycleId: selectedCycleId,
-              })
-            : {
-                dbtl_supervisor_enabled: true,
-                dbtl_explicit_choice: "ordinary",
-              }
+          ? humanInputRunContext(request, selectedCycleId)
           : undefined,
         {
           additionalKwargs: {

@@ -208,6 +208,33 @@ export function runContextPayload(
 }
 
 /**
+ * The run context for answering a Human Input Card.
+ *
+ * Answering a card is a reply, not a scope choice — but a scope still has to be
+ * sent, so the fallback decides where the reply lands. Defaulting to ordinary
+ * strands it: the user's answer reaches the lead agent instead of the branch
+ * that asked the question. Each clarification therefore names the scope that
+ * continues it, keyed off the request's own `clarification_type`.
+ */
+export function humanInputRunContext(
+  request: { source: string; clarification_type?: string },
+  selectedCycleId: string | null,
+): Record<string, string | boolean> {
+  if (request.source === "ask_clarification") {
+    // A design question belongs to the cycle whose council raised it.
+    if (request.clarification_type === "design_decision" && selectedCycleId) {
+      return runContextPayload({ kind: "cycle", cycleId: selectedCycleId });
+    }
+    // Setup is not yet a cycle, so there is nothing to continue — the answer
+    // returns to the setup branch that asked for the missing fields.
+    if (request.clarification_type === "cycle_setup") {
+      return runContextPayload(START_CYCLE_REQUEST_CONTEXT);
+    }
+  }
+  return runContextPayload(ORDINARY_REQUEST_CONTEXT);
+}
+
+/**
  * Keep Phase 4's visible proposal and Phase 5's graph route on the same
  * precedence inputs. A disagreement here would let the transcript say
  * "ordinary" while a proposal card recommends starting a cycle (or vice

@@ -13,6 +13,7 @@ import {
   normalizeContext,
   proposalContextPayload,
   runActivityMetadata,
+  humanInputRunContext,
   runContextPayload,
   scopeLabel,
   scopeMenuOptions,
@@ -317,5 +318,61 @@ describe("per-request scope", () => {
     const cycles = [cycle({ id: "cyc-1", state: "build" })];
     const context: RequestContext = { kind: "cycle", cycleId: "cyc-1" };
     expect(normalizeContext(context, cycles)).toBe(context);
+  });
+});
+
+describe("humanInputRunContext", () => {
+  it("returns a design question to the cycle whose council raised it", () => {
+    expect(
+      humanInputRunContext(
+        { source: "ask_clarification", clarification_type: "design_decision" },
+        "cyc-9",
+      ),
+    ).toEqual({
+      dbtl_supervisor_enabled: true,
+      dbtl_explicit_choice: "continue_cycle",
+      dbtl_selected_cycle_id: "cyc-9",
+    });
+  });
+
+  it("returns a setup question to the setup branch, naming no cycle", () => {
+    // Setup has not created a record yet, so there is nothing to continue.
+    // Answering must not read as a continuation of some other cycle.
+    expect(
+      humanInputRunContext(
+        { source: "ask_clarification", clarification_type: "cycle_setup" },
+        "cyc-9",
+      ),
+    ).toEqual({
+      dbtl_supervisor_enabled: true,
+      dbtl_explicit_choice: "start_cycle",
+    });
+  });
+
+  it("falls back to ordinary for clarifications it does not know", () => {
+    expect(
+      humanInputRunContext({ source: "ask_clarification" }, null),
+    ).toEqual({
+      dbtl_supervisor_enabled: true,
+      dbtl_explicit_choice: "ordinary",
+    });
+    expect(humanInputRunContext({ source: "some_other_tool" }, "cyc-9")).toEqual(
+      {
+        dbtl_supervisor_enabled: true,
+        dbtl_explicit_choice: "ordinary",
+      },
+    );
+  });
+
+  it("does not claim a design continuation with no cycle selected", () => {
+    expect(
+      humanInputRunContext(
+        { source: "ask_clarification", clarification_type: "design_decision" },
+        null,
+      ),
+    ).toEqual({
+      dbtl_supervisor_enabled: true,
+      dbtl_explicit_choice: "ordinary",
+    });
   });
 });

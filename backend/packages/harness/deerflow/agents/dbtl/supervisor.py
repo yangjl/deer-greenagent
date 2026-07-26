@@ -39,6 +39,7 @@ never loops between branches, so one request cannot silently become several, and
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from hashlib import sha256
 from inspect import isawaitable
 
@@ -69,6 +70,13 @@ logger = logging.getLogger(__name__)
 SELECTED_CYCLE_CONTEXT_KEY = "dbtl_selected_cycle_id"
 EXPLICIT_CHOICE_CONTEXT_KEY = "dbtl_explicit_choice"
 
+# Request-id prefixes, one per clarification the supervisor can raise. They are
+# what a resuming turn matches on, so the two must stay distinguishable: a
+# Design-council answer feeds a running stage, a setup answer re-routes a
+# request that has not started anything yet.
+SETUP_CLARIFICATION_PREFIX = "dbtl-setup:"
+DESIGN_CLARIFICATION_PREFIX = "dbtl-design:"
+
 
 def _latest_user_text(state: dict) -> str:
     """The newest visible user message, as plain text.
@@ -97,19 +105,135 @@ def _latest_cycle_request_text(state: dict) -> str:
         if not isinstance(message, HumanMessage):
             continue
         response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
-        if response and response.get("source") == "ask_clarification" and str(response.get("request_id") or "").startswith("dbtl-design:"):
+        if response and response.get("source") == "ask_clarification" and str(response.get("request_id") or "").startswith(DESIGN_CLARIFICATION_PREFIX):
             return str(response.get("value") or "")
         break
     return _latest_user_text(state)
+
+
+def _card_answer(state: dict, prefix: str) -> tuple[str, str] | None:
+    """``(request_id, answer)`` when the newest message answers *prefix*'s card."""
+    from deerflow.agents.human_input import read_human_input_response
+
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if not response or response.get("source") != "ask_clarification":
+            return None
+        request_id = str(response.get("request_id") or "")
+        if not request_id.startswith(prefix):
+            return None
+        return (request_id, str(response.get("value") or ""))
+    return None
+
+
+def _emitted_card_request(state: dict, request_id: str) -> dict | None:
+    """The human-input request the server itself sent for *request_id*.
+
+    Resolving the card from thread state rather than trusting the reply is what
+    makes the recovered intent server-owned: a reply naming a card that was
+    never emitted matches nothing and routes as ordinary text.
+    """
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, ToolMessage) or message.tool_call_id != request_id:
+            continue
+        artifact = getattr(message, "artifact", None)
+        request = artifact.get("human_input") if isinstance(artifact, dict) else None
+        return request if isinstance(request, dict) else None
+    return None
+
+
+def _routing_input(state: dict) -> tuple[str, ExplicitChoice | None]:
+    """The text routing reads, plus any intent recovered from a card answer.
+
+    A setup clarification is only ever raised for an explicit start request, and
+    the choice that produced it applies to that one request by design — so it is
+    already gone when the answer arrives. Recovering it here is what keeps an
+    answered clarification on the branch that asked the question; routing the
+    answer on its own merits lands it in ordinary work, where the lead agent
+    absorbs the reply and the user never reaches the confirmation.
+
+    The originating request is carried too. Routing needs both halves: the
+    answer supplies the missing fields, while the original request is what
+    still says a cycle was being started at all.
+    """
+    answered = _card_answer(state, SETUP_CLARIFICATION_PREFIX)
+    if answered is None:
+        return (_latest_user_text(state), None)
+
+    request_id, answer = answered
+    request = _emitted_card_request(state, request_id)
+    if request is None:
+        return (_latest_user_text(state), None)
+
+    source_request = str(request.get("source_request") or "")
+    combined = f"{source_request}\n\n{answer}".strip()
+    return (combined, ExplicitChoice.START_CYCLE)
 
 
 def _bullets(items: tuple[str, ...] | list[str]) -> str:
     return "\n".join(f"- {item}" for item in items)
 
 
-def _render_clarification(decision: BranchDecision, context: SupervisorContext) -> str:
+def _setup_clarification_message(
+    decision: BranchDecision,
+    context: SupervisorContext,
+    *,
+    source_request: str,
+    request_nonce: str,
+) -> tuple[AIMessage, ToolMessage]:
+    """Ask for the missing fields as a Human Input Card.
+
+    The originating request is stored on the card because the answer has to be
+    routed together with it: the answer supplies the fields, the request is what
+    says a cycle was being started. Keeping it here rather than re-deriving it
+    from message order also means summarization compacting the original turn
+    cannot strand the reply.
+    """
     project = context.project_name or "this project"
-    return f"Before starting a DBTL cycle in {project}, I need a few things the request does not say yet:\n\n{_bullets(decision.missing_fields)}\n\n{NO_RECORD_NOTICE}"
+    note = f"Before starting a DBTL cycle in {project}, I need a few things the request does not say yet.\n\n{NO_RECORD_NOTICE}"
+    question = f"Please provide:\n{_bullets(decision.missing_fields)}"
+    digest = sha256(f"{context.project_id}:{request_nonce}:{source_request}".encode()).hexdigest()[:16]
+    request_id = f"{SETUP_CLARIFICATION_PREFIX}{digest}"
+    tool_call = {
+        "name": "ask_clarification",
+        "args": {
+            "question": question,
+            "context": note,
+            "clarification_type": "cycle_setup",
+        },
+        "id": request_id,
+        "type": "tool_call",
+    }
+    return (
+        AIMessage(
+            id=f"{request_id}:call",
+            content="",
+            tool_calls=[tool_call],
+        ),
+        ToolMessage(
+            id=request_id,
+            name="ask_clarification",
+            tool_call_id=request_id,
+            content=f"{note}\n\n{question}",
+            artifact={
+                "human_input": {
+                    "version": 1,
+                    "kind": "human_input_request",
+                    "source": "ask_clarification",
+                    "request_id": request_id,
+                    "clarification_type": "cycle_setup",
+                    "title": "Before starting a DBTL cycle",
+                    "question": question,
+                    "context": note,
+                    "input_mode": "free_text",
+                    "source_request": source_request,
+                    "missing_fields": list(decision.missing_fields),
+                }
+            },
+        ),
+    )
 
 
 def _render_cycle_setup(decision: BranchDecision, context: SupervisorContext) -> str:
@@ -234,7 +358,16 @@ def build_supervisor_graph(
     """
 
     def decide(state: dict) -> BranchDecision:
-        return resolve_branch(_latest_user_text(state), context)
+        text, recovered_choice = _routing_input(state)
+        # The recovered choice wins over the request's own. Answering a card is
+        # not choosing a scope: the client sends a scope with every request and
+        # falls back to "ordinary" for a card it has no special handling for, so
+        # honouring it here would route the answer to the lead agent on exactly
+        # the turn the server knows what the user is doing. The card is
+        # server-emitted and the reply is bound to it, which makes it the better
+        # evidence of intent than a field the client always fills in.
+        active = context if recovered_choice is None else replace(context, explicit_choice=recovered_choice)
+        return resolve_branch(text, active)
 
     def route(state: dict) -> str:
         decision = decide(state)
@@ -247,9 +380,21 @@ def build_supervisor_graph(
         )
         return decision.branch.value
 
-    def clarification(state: dict) -> dict:
+    def clarification(state: dict, config: RunnableConfig) -> dict:
         decision = decide(state)
-        return {"messages": [AIMessage(content=_render_clarification(decision, context))]}
+        source_request, _ = _routing_input(state)
+        raw_context = config.get("context") or {}
+        request_nonce = str(raw_context.get("run_id") or "") if isinstance(raw_context, dict) else ""
+        return {
+            "messages": list(
+                _setup_clarification_message(
+                    decision,
+                    context,
+                    source_request=source_request,
+                    request_nonce=request_nonce,
+                )
+            )
+        }
 
     def cycle_setup(state: dict) -> dict:
         decision = decide(state)

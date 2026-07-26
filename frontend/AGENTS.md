@@ -419,6 +419,17 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   and retain that cycle scope instead of falling back to ordinary chat.
   Completed packages use the existing `present_files` group,
   `ArtifactFileList`, thread artifact reducer, and artifact inspector.
+- **Answering a card must return to the branch that asked.** A card reply is a
+  reply, not a scope choice, but a scope is still sent with it — so the fallback
+  decides where the answer lands, and defaulting to ordinary strands it in the
+  lead agent. `humanInputRunContext` in `composer-scope.ts` keys the scope off
+  the request's own `clarification_type`: `design_decision` continues the
+  selected cycle, `cycle_setup` returns to the setup branch (naming **no** cycle
+  id — setup has not created a record, and claiming a continuation of some other
+  cycle would misroute it), and anything unrecognized stays ordinary. Adding a
+  new `clarification_type` on the backend means adding its case here too; the
+  backend also recovers the intent from the card it emitted, so a stale frontend
+  degrades rather than breaking, but the two should agree.
 - `src/app/workspace/[project_slug]/[thread_id]/page.tsx` re-exports the
   canonical chat page. `src/app/workspace/chats/[thread_id]/page.tsx` derives
   its project scope from `useParams().project_slug` (falling back to

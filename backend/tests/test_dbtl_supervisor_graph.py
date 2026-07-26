@@ -160,8 +160,15 @@ class TestCompleteThreadStateOnEveryBranch:
         # The user's own message is never dropped or rewritten.
         assert final["messages"][0].id == "human-1"
         assert final["messages"][0].content == text
-        # Every branch answers exactly once.
-        assert len(final["messages"]) == 2
+        # Every branch answers exactly once. A branch that answers with a Human
+        # Input Card still answers once — the call/result pair is the single
+        # turn its renderer restores from, not two replies.
+        replies = final["messages"][1:]
+        if isinstance(replies[-1], ToolMessage):
+            assert len(replies) == 2
+            assert replies[0].tool_calls[0]["id"] == replies[-1].tool_call_id
+        else:
+            assert len(replies) == 1
 
     @pytest.mark.asyncio
     async def test_ordinary_branch_delegates_to_the_real_lead_agent(self):
@@ -213,6 +220,226 @@ class TestCompleteThreadStateOnEveryBranch:
                 ],
             },
             config={"configurable": {"thread_id": "explicit-ordinary"}},
+        )
+
+        assert marker == ["lead_agent"]
+
+
+class TestSetupClarificationIsACard:
+    """An explicit start request missing fields must ask through the card.
+
+    Two halves, and the feature is broken unless both hold: the question has to
+    render as a Human Input Card, and the answer has to come back to the branch
+    that asked it. The second half is the easy one to miss — the explicit choice
+    that produced the clarification is per-request by design, so it is gone by
+    the time the answer arrives, and routing on the answer alone lands in
+    ordinary work with the user's reply silently absorbed by the lead agent.
+    """
+
+    SETUP_CONTEXT = SupervisorContext(
+        project_id="proj-1",
+        project_name="test2",
+        explicit_choice=ExplicitChoice.START_CYCLE,
+    )
+    REQUEST = "start a phenotype data curation plan. be simple"
+    ANSWER = "Target trait is plant height, seasons 2020-2023, all populations, validated on held-out sites"
+
+    @staticmethod
+    def card_reply(request_id: str, value: str) -> HumanMessage:
+        """The shape the Gateway persists when a card is answered."""
+        return HumanMessage(
+            content=value,
+            id="human-answer",
+            additional_kwargs={
+                "hide_from_ui": True,
+                "human_input_response": {
+                    "version": 1,
+                    "kind": "human_input_response",
+                    "source": "ask_clarification",
+                    "request_id": request_id,
+                    "response_kind": "text",
+                    "value": value,
+                },
+            },
+        )
+
+    async def ask(self, thread_id: str):
+        graph = compile_supervisor(self.SETUP_CONTEXT)
+        final = await graph.ainvoke(
+            {**FULL_STATE, "messages": [HumanMessage(content=self.REQUEST, id="human-1")]},
+            config={
+                "configurable": {"thread_id": thread_id},
+                "context": {"run_id": "run-1"},
+            },
+        )
+        return final["messages"]
+
+    @pytest.mark.asyncio
+    async def test_clarification_branch_emits_a_human_input_card(self):
+        messages = await self.ask("setup-card")
+
+        call, card = messages[-2], messages[-1]
+        assert isinstance(card, ToolMessage)
+        assert card.name == "ask_clarification"
+        # The call/result pair the card renderer restores from.
+        assert isinstance(call, AIMessage)
+        assert call.tool_calls[0]["name"] == "ask_clarification"
+        assert call.tool_calls[0]["id"] == card.tool_call_id
+
+        request = card.artifact["human_input"]
+        assert request["source"] == "ask_clarification"
+        assert request["input_mode"] == "free_text"
+        assert request["request_id"].startswith("dbtl-setup:")
+        # Every missing field must be in the question, or answering it once
+        # cannot clear the gate that produced it.
+        for missing in ("target trait", "season range", "validation expectation", "population scope"):
+            assert missing in request["question"].lower()
+        # The no-record promise survives the move from prose to card.
+        assert "no cycle has been created yet" in request["context"].lower()
+
+    @pytest.mark.asyncio
+    async def test_answering_the_card_reaches_the_confirmation_not_the_lead_agent(self):
+        asked = await self.ask("setup-answer")
+        request_id = asked[-1].artifact["human_input"]["request_id"]
+
+        marker: list[str] = []
+        # No explicit choice: the chip applies to one request, so the answer
+        # arrives without it. Recovering the intent is the point of the test.
+        graph = compile_supervisor(SupervisorContext(project_id="proj-1", project_name="test2"), marker)
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [*asked, self.card_reply(request_id, self.ANSWER)],
+            },
+            config={"configurable": {"thread_id": "setup-answer-2"}},
+        )
+
+        assert marker == [], "an answered clarification must not fall through to ordinary work"
+        answer = final["messages"][-1].content
+        assert "Required human gates:" in answer
+        assert "Missing before start:" not in answer, "the answer already supplied every field"
+        # The confirmation still creates nothing on its own.
+        assert "no cycle has been created yet" in answer.lower()
+
+    @pytest.mark.asyncio
+    async def test_a_partial_answer_narrows_the_question_instead_of_restarting(self):
+        # Answers accumulate onto the request that raised the card, so a user
+        # who supplies two of four fields is asked only for the rest. Losing
+        # that would re-ask what they just answered.
+        asked = await self.ask("setup-partial")
+        first_id = asked[-1].artifact["human_input"]["request_id"]
+        graph = compile_supervisor(SupervisorContext(project_id="proj-1", project_name="test2"))
+
+        partial = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [*asked, self.card_reply(first_id, "Target trait is plant height, seasons 2020-2023")],
+            },
+            config={
+                "configurable": {"thread_id": "setup-partial-2"},
+                "context": {"run_id": "run-2"},
+            },
+        )
+
+        again = partial["messages"][-1].artifact["human_input"]
+        assert again["missing_fields"] == ["validation expectation", "population scope"]
+        assert again["request_id"] != first_id, "a second question needs its own id"
+
+        finished = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    *partial["messages"],
+                    self.card_reply(again["request_id"], "all populations, validated on held-out sites"),
+                ],
+            },
+            config={"configurable": {"thread_id": "setup-partial-3"}},
+        )
+
+        assert "Required human gates:" in finished["messages"][-1].content
+
+    @pytest.mark.asyncio
+    async def test_the_clients_default_scope_does_not_strand_the_answer(self):
+        # The client sends a scope with every request and falls back to
+        # "ordinary" for a card it has no special handling for. That is a
+        # filled-in default, not the user choosing ordinary work, so it must
+        # not beat the intent recovered from the card being answered.
+        asked = await self.ask("setup-default-scope")
+        request_id = asked[-1].artifact["human_input"]["request_id"]
+
+        marker: list[str] = []
+        graph = compile_supervisor(
+            SupervisorContext(
+                project_id="proj-1",
+                project_name="test2",
+                explicit_choice=ExplicitChoice.ORDINARY,
+            ),
+            marker,
+        )
+
+        final = await graph.ainvoke(
+            {**FULL_STATE, "messages": [*asked, self.card_reply(request_id, self.ANSWER)]},
+            config={"configurable": {"thread_id": "setup-default-scope-2"}},
+        )
+
+        assert marker == []
+        assert "Required human gates:" in final["messages"][-1].content
+
+    @pytest.mark.asyncio
+    async def test_a_design_answer_still_feeds_the_running_stage(self):
+        # The sibling clarification. Both prefixes resume, but to different
+        # places: a design answer is the stage's input, not a routing signal.
+        # Pinned here because the two now share the reading code.
+        received: list[str] = []
+
+        class Adapter:
+            async def execute(self, **kwargs):
+                received.append(kwargs["request_text"])
+                return SimpleNamespace(
+                    note="n",
+                    clarification_question=None,
+                    artifact_uri=None,
+                    satisfies_gate=False,
+                )
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="test2", selected_cycle_id="cyc-1"),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    HumanMessage(content="draft the design package", id="human-1"),
+                    self.card_reply("dbtl-design:cyc-1:abc123", "Hold out the 2023 sites"),
+                ],
+            },
+            config={"configurable": {"thread_id": "design-answer"}},
+        )
+
+        assert received == ["Hold out the 2023 sites"]
+
+    @pytest.mark.asyncio
+    async def test_a_forged_request_id_recovers_no_intent(self):
+        # The originating request is read back from the card the server itself
+        # emitted. A reply naming a card that was never sent must not be able
+        # to conjure cycle-setup intent out of ordinary text.
+        marker: list[str] = []
+        graph = compile_supervisor(SupervisorContext(project_id="proj-1", project_name="test2"), marker)
+
+        await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    HumanMessage(content="what is in the workspace?", id="human-1"),
+                    self.card_reply("dbtl-setup:forged", self.ANSWER),
+                ],
+            },
+            config={"configurable": {"thread_id": "setup-forged"}},
         )
 
         assert marker == ["lead_agent"]
