@@ -31,7 +31,12 @@ import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 import { addThreadToProject } from "../workspaces/project-files-api";
 import { projectConversationsQueryKey } from "../workspaces/project-threads";
 
-import { branchThreadFromTurn, fetchThreadTokenUsage } from "./api";
+import {
+  branchThreadFromTurn,
+  fetchThreadTokenUsage,
+  patchThreadMetadata,
+  type ThreadMetadataPatch,
+} from "./api";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
@@ -45,6 +50,7 @@ import type {
   RunMessage,
   ThreadTokenUsageResponse,
 } from "./types";
+import { THREAD_PINNED_METADATA_KEY } from "./utils";
 
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
@@ -2187,6 +2193,62 @@ export function filterInfiniteThreadsCache(
   };
 }
 
+function mergeThreadMetadata(
+  thread: AgentThread,
+  metadata: ThreadMetadataPatch,
+): AgentThread {
+  return {
+    ...thread,
+    metadata: {
+      ...(thread.metadata ?? {}),
+      ...metadata,
+    },
+  };
+}
+
+function setThreadMetadataInCaches(
+  queryClient: QueryClient,
+  threadId: string,
+  metadata: ThreadMetadataPatch,
+) {
+  queryClient.setQueriesData(
+    {
+      queryKey: ["threads", "search"],
+      exact: false,
+    },
+    (oldData: Array<AgentThread> | undefined) => {
+      if (!oldData) {
+        return oldData;
+      }
+      return oldData.map((thread) =>
+        thread.thread_id === threadId
+          ? mergeThreadMetadata(thread, metadata)
+          : thread,
+      );
+    },
+  );
+  queryClient.setQueriesData(
+    {
+      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      exact: false,
+    },
+    (oldData: InfiniteData<AgentThread[]> | undefined) =>
+      mapInfiniteThreadsCache(oldData, (thread) =>
+        thread.thread_id === threadId
+          ? mergeThreadMetadata(thread, metadata)
+          : thread,
+      ),
+  );
+  queryClient.setQueriesData(
+    {
+      queryKey: ["thread", "metadata", threadId],
+      exact: false,
+    },
+    (oldData: AgentThread | null | undefined) =>
+      oldData ? mergeThreadMetadata(oldData, metadata) : oldData,
+  );
+}
+
 export function useInfiniteThreads(
   params: InfiniteThreadsParams = {
     sortBy: "updated_at",
@@ -2305,6 +2367,34 @@ export function useBranchThread() {
       void queryClient.invalidateQueries({
         queryKey: ["thread", "metadata", threadId],
       });
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+      void queryClient.invalidateQueries({
+        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      });
+    },
+  });
+}
+
+export function usePinThread() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      threadId,
+      pinned,
+    }: {
+      threadId: string;
+      pinned: boolean;
+    }) =>
+      patchThreadMetadata(threadId, {
+        [THREAD_PINNED_METADATA_KEY]: pinned,
+      }),
+    onSuccess(response, { threadId, pinned }) {
+      setThreadMetadataInCaches(queryClient, threadId, {
+        ...(response.metadata ?? {}),
+        [THREAD_PINNED_METADATA_KEY]: pinned,
+      });
+    },
+    onSettled() {
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
