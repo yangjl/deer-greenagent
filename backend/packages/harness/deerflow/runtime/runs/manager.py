@@ -1137,6 +1137,51 @@ class RunManager:
             user_id=user_id,
         )
 
+    async def _close_cancelled_admission(self, record: RunRecord) -> None:
+        """Terminalize an unseen replacement and confirm its durable state."""
+        await self.cancel(record.run_id)
+        if self._store is None:
+            return
+
+        stored = await self._call_store_with_retry(
+            "verify cancelled admission",
+            record.run_id,
+            lambda: self._store.get(record.run_id, user_id=record.user_id),
+        )
+        active_statuses = (RunStatus.pending.value, RunStatus.running.value)
+        if stored is not None and stored.get("status") in active_statuses:
+            # `_persist_status` is deliberately best-effort. This compensation
+            # path needs a strict second CAS attempt because the caller never
+            # receives the record and no worker can attach after it returns.
+            # A peer terminal transition wins the CAS and is preserved below.
+            await self._call_store_with_retry(
+                "terminalize cancelled admission",
+                record.run_id,
+                lambda: self._store.update_status(record.run_id, RunStatus.interrupted.value),
+            )
+            stored = await self._call_store_with_retry(
+                "verify terminal cancelled admission",
+                record.run_id,
+                lambda: self._store.get(record.run_id, user_id=record.user_id),
+            )
+            if stored is not None and stored.get("status") in active_statuses:
+                raise RuntimeError(f"Cancelled admission {record.run_id} remains active in the run store")
+
+        if stored is None:
+            async with self._lock:
+                if self._runs.get(record.run_id) is record:
+                    self._runs.pop(record.run_id, None)
+                    self._unindex_run_locked(record.run_id, record.thread_id)
+            return
+
+        stored_status = RunStatus(stored.get("status") or RunStatus.pending.value)
+        async with self._lock:
+            if self._runs.get(record.run_id) is record:
+                record.status = stored_status
+                record.error = stored.get("error")
+                record.stop_reason = stored.get("stop_reason")
+                record.updated_at = _now_iso()
+
     async def _admit_thread_operation(
         self,
         thread_id: str,
