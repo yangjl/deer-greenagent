@@ -128,6 +128,50 @@ Breeding-workspace note:
   `[ Ordinary project work ▾ ]` or `[ Cycle 01 · Design ▾ ]` and applies to the
   next request only. See [backend/AGENTS.md](backend/AGENTS.md) for the
   reducer-idempotency and stream-contract constraints that make delegation safe.
+- DBTL Phase 6 replaces the continuation stub with a production
+  `LiveStageAdapter` for Design and Data Reconciliation. It verifies the
+  selected cycle belongs to the runtime project, fans bounded work units out
+  through `SubagentExecutor`, and atomically records structured worker results
+  plus a content-addressed review package in the project workspace. Retries
+  replay the durable stage event instead of dispatching workers again. Stages
+  are versioned `StageSpec` data, work units declare capabilities rather than
+  role names, and workers return a structured `StageWorkerResult` — free-form
+  text cannot satisfy a stage contract. Data
+  Readiness and Reconciliation is a real gate: every declared input is pinned
+  by content hash, raw data must be declared immutable, and Build stays locked
+  until every required matrix row is settled. An agent may propose a
+  resolution but may never close a *judgement* row (contradictory sources,
+  trait direction, exclusions, leakage, train/test separation) — that stays a
+  person's decision, enforced at the write boundary. An approval binds the
+  dataset fingerprint, stage-spec version, and policy version it was granted
+  against, so a later dataset change invalidates it instead of carrying it
+  into Build.
+- DBTL Phase 7 adds executable Build and Test `StageSpec` contracts while Learn
+  remains unavailable until Phase 8. Build can start only at
+  `ready_for_build`; every reviewable Build records the approved dataset
+  fingerprint, code/config revisions, environment, versioned outputs,
+  deviations, and logs. Test stores headline metrics separately from a
+  versioned validity pack. Its outcome is computed as `supported`,
+  `not_supported`, `inconclusive`, or `invalidated`; a generic stage approval
+  cannot bypass that computation. Leakage, broken folds, structure artifacts,
+  ceiling/direction failures, holdout failure, unreconciled inputs, or
+  irreproducible execution dominate strong headline metrics. A server-owned
+  human reviewer chooses only an outcome-compatible route to Learn, repeat,
+  Design, Reconciliation, Build, or cycle closure. See
+  [backend/AGENTS.md](backend/AGENTS.md) for persistence and routing contracts
+  and [frontend/AGENTS.md](frontend/AGENTS.md) for the two-column review model.
+- New cycles started from the project rail automatically queue the current
+  `generic:design:v2` Design council in project chat. Its context includes a
+  bounded project-file manifest, declared cycle inputs, prior council turns,
+  and the latest human clarification. It always produces at least an
+  independent design position and red-team position before a chair synthesis.
+  A `needs_input` chair result renders through the existing
+  `ask_clarification` human-input card and resumes in the same selected cycle.
+  A completed synthesis is emitted through the existing `present_files`
+  message shape and thread artifact inspector; it only creates review evidence
+  and never submits or approves the human gate. The
+  presentation icon beside Cycles opens a client-only Phase 7 three-case demo
+  and never mutates durable records.
 
 ## Commands: Root vs. Module
 

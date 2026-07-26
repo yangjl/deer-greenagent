@@ -38,6 +38,7 @@ class SubagentConfig:
     model: str = "inherit"
     max_turns: int = 50
     timeout_seconds: int = 900
+    dbtl_capabilities: list[str] = field(default_factory=list)
 
 
 def _default_model_name(app_config: "AppConfig") -> str:

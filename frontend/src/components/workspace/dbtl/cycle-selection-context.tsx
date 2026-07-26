@@ -1,10 +1,25 @@
 "use client";
 
-import { createContext, useContext, useMemo, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+} from "react";
+
+export interface PendingDesignKickoff {
+  nonce: number;
+  cycleId: string;
+  cycleTitle: string;
+}
 
 interface ProjectCycleSelection {
   selectedCycleId: string | null;
   selectCycle: (cycleId: string | null) => void;
+  pendingDesignKickoff: PendingDesignKickoff | null;
+  requestDesignKickoff: (cycleId: string, cycleTitle: string) => void;
+  consumeDesignKickoff: (nonce: number) => void;
 }
 
 const ProjectCycleSelectionContext =
@@ -12,6 +27,9 @@ const ProjectCycleSelectionContext =
 const NO_PROJECT_SELECTION: ProjectCycleSelection = {
   selectedCycleId: null,
   selectCycle: () => undefined,
+  pendingDesignKickoff: null,
+  requestDesignKickoff: () => undefined,
+  consumeDesignKickoff: () => undefined,
 };
 
 /**
@@ -27,9 +45,37 @@ export function ProjectCycleSelectionProvider({
   children: React.ReactNode;
 }) {
   const [selectedCycleId, selectCycle] = useState<string | null>(null);
+  const [pendingDesignKickoff, setPendingDesignKickoff] =
+    useState<PendingDesignKickoff | null>(null);
+  const requestDesignKickoff = useCallback(
+    (cycleId: string, cycleTitle: string) => {
+      setPendingDesignKickoff({
+        nonce: Date.now(),
+        cycleId,
+        cycleTitle,
+      });
+    },
+    [],
+  );
+  const consumeDesignKickoff = useCallback((nonce: number) => {
+    setPendingDesignKickoff((current) =>
+      current?.nonce === nonce ? null : current,
+    );
+  }, []);
   const value = useMemo(
-    () => ({ selectedCycleId, selectCycle }),
-    [selectedCycleId],
+    () => ({
+      selectedCycleId,
+      selectCycle,
+      pendingDesignKickoff,
+      requestDesignKickoff,
+      consumeDesignKickoff,
+    }),
+    [
+      consumeDesignKickoff,
+      pendingDesignKickoff,
+      requestDesignKickoff,
+      selectedCycleId,
+    ],
   );
   return (
     <ProjectCycleSelectionContext.Provider value={value}>

@@ -182,6 +182,65 @@ export function canSubmitReview(rationale: string): boolean {
   return rationale.trim().length > 0;
 }
 
+export interface ActionReadiness {
+  ready: boolean;
+  message: string;
+}
+
+function readableList(items: string[]): string {
+  if (items.length < 2) return items[0] ?? "";
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items.at(-1)}`;
+}
+
+/**
+ * Names the next evidence action without weakening native disabled controls.
+ * A non-empty but malformed hash is called out separately from blank fields.
+ */
+export function artifactAttachmentReadiness(
+  artifactType: string,
+  artifactUri: string,
+  artifactHash: string,
+): ActionReadiness {
+  const missing = [
+    !artifactType.trim() && "artifact type",
+    !artifactUri.trim() && "artifact URI",
+    !artifactHash && "SHA-256",
+  ].filter((item): item is string => Boolean(item));
+
+  if (missing.length > 0) {
+    return {
+      ready: false,
+      message: `Add ${readableList(missing)} to continue.`,
+    };
+  }
+  if (!/^[0-9a-f]{64}$/.test(artifactHash)) {
+    return {
+      ready: false,
+      message: "Enter a valid 64-character SHA-256 to continue.",
+    };
+  }
+  return {
+    ready: true,
+    message: "Ready to attach this evidence.",
+  };
+}
+
+export function reviewSubmissionReadiness(
+  artifactCount: number,
+): ActionReadiness {
+  return artifactCount > 0
+    ? {
+        ready: true,
+        message: "Evidence attached. Ready to submit this stage for review.",
+      }
+    : {
+        ready: false,
+        message:
+          "Attach at least one evidence file above to enable review submission.",
+      };
+}
+
 export interface StageBlockReason {
   blocked: boolean;
   reason: string;

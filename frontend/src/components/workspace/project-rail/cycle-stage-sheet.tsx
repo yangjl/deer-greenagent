@@ -1,6 +1,12 @@
 "use client";
 
-import { AlertTriangle, FileText, History, Lock } from "lucide-react";
+import {
+  AlertTriangle,
+  FileText,
+  GitCompare,
+  History,
+  Lock,
+} from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import {
   Sheet,
   SheetContent,
+  SheetDescription,
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
@@ -18,6 +25,7 @@ import {
   type DbtlStage,
   STAGE_LABELS,
   STATUS_LABELS,
+  artifactAttachmentReadiness,
   canReviewStage,
   canSubmitReview,
   activityRevision,
@@ -26,18 +34,23 @@ import {
   describeActivity,
   latestArtifactsForStage,
   openWorkItems,
+  reviewSubmissionReadiness,
   type ReviewDecision,
   stageBlockReason,
   stageOf,
   useCycleActivity,
   useCycleDetail,
   useAttachArtifact,
+  useBuildTest,
   useResolveWorkItem,
   useReviewStage,
   useSubmitStage,
 } from "@/core/dbtl";
 import { uuid } from "@/core/utils/uuid";
 import { cn } from "@/lib/utils";
+
+import { BuildTestReview } from "./build-test-review";
+import { ReconciliationMatrix } from "./reconciliation-matrix";
 
 const DECISIONS: ReviewDecision[] = ["approve", "request_changes", "reject"];
 
@@ -86,6 +99,10 @@ export function CycleStageSheet({
   const review = useReviewStage(projectId);
   const resolve = useResolveWorkItem(projectId);
   const attach = useAttachArtifact(projectId);
+  const buildTest = useBuildTest(
+    projectId,
+    open && (stage === "build" || stage === "test") ? cycleId : null,
+  );
 
   const [rationale, setRationale] = useState("");
   const [resolutionFor, setResolutionFor] = useState<string | null>(null);
@@ -119,14 +136,27 @@ export function CycleStageSheet({
     );
   }
 
-  const artifactReady =
-    artifactType.trim().length > 0 &&
-    artifactUri.trim().length > 0 &&
-    /^[0-9a-f]{64}$/.test(artifactHash);
+  const artifactReadiness = artifactAttachmentReadiness(
+    artifactType,
+    artifactUri,
+    artifactHash,
+  );
+  const submissionReadiness = reviewSubmissionReadiness(artifacts.length);
+  const effectiveSubmissionReadiness =
+    stage === "build" &&
+    submissionReadiness.ready &&
+    !buildTest.data?.build_lineage
+      ? {
+          ready: false,
+          message:
+            "Run Build in this cycle context to record reproducibility lineage before review.",
+        }
+      : submissionReadiness;
 
   function attachEvidence(event: React.FormEvent) {
     event.preventDefault();
-    if (!cycle || !stage || !artifactReady || attach.isPending) return;
+    if (!cycle || !stage || !artifactReadiness.ready || attach.isPending)
+      return;
     attach.mutate(
       {
         cycleId: cycle.id,
@@ -156,6 +186,9 @@ export function CycleStageSheet({
               <Badge variant="outline">{STATUS_LABELS[record.status]}</Badge>
             )}
           </SheetTitle>
+          <SheetDescription className="sr-only">
+            Attach evidence and manage the review state for this cycle stage.
+          </SheetDescription>
         </SheetHeader>
 
         {detail.isPending ? (
@@ -184,6 +217,33 @@ export function CycleStageSheet({
                 <Lock className="mt-0.5 size-4 shrink-0" />
                 {block.reason}
               </p>
+            )}
+
+            {/* The bridge between Design and Build gets the top of the sheet:
+                on this stage the matrix *is* the review, and burying it under
+                the generic evidence list would invert what the reviewer came
+                here to do. */}
+            {stage === "reconciliation" && cycleId && (
+              <Section icon={GitCompare} title="Data readiness">
+                <ReconciliationMatrix projectId={projectId} cycleId={cycleId} />
+              </Section>
+            )}
+
+            {(stage === "build" || stage === "test") && cycleId && (
+              <Section
+                icon={stage === "build" ? GitCompare : AlertTriangle}
+                title={stage === "build" ? "Reproducibility" : "Scientific validity"}
+              >
+                <BuildTestReview
+                  projectId={projectId}
+                  cycleId={cycleId}
+                  stage={stage}
+                  stageStatus={record.status}
+                  view={buildTest.data ?? null}
+                  isPending={buildTest.isPending}
+                  error={buildTest.error}
+                />
+              </Section>
             )}
 
             <Section icon={FileText} title="Evidence">
@@ -216,42 +276,101 @@ export function CycleStageSheet({
               {canSubmitStage(record.status) && !block?.blocked && (
                 <form
                   onSubmit={attachEvidence}
-                  className="border-border mt-3 space-y-2 rounded-md border border-dashed p-3"
+                  className="border-border mt-3 space-y-3 rounded-md border border-dashed p-3"
                 >
-                  <p className="text-sm font-medium">Attach evidence</p>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <Input
-                      value={artifactType}
-                      onChange={(event) => setArtifactType(event.target.value)}
-                      placeholder="Artifact type"
-                      aria-label="Artifact type"
-                    />
-                    <Input
-                      value={artifactUri}
-                      onChange={(event) => setArtifactUri(event.target.value)}
-                      placeholder="/mnt/user-data/workspace/design.json"
-                      aria-label="Artifact URI"
-                    />
+                  <div>
+                    <p className="text-sm font-medium">Attach evidence</p>
+                    <p className="text-muted-foreground mt-0.5 text-xs">
+                      Reference the exact workspace file that a reviewer should
+                      inspect.
+                    </p>
                   </div>
-                  <Input
-                    value={artifactHash}
-                    onChange={(event) =>
-                      setArtifactHash(event.target.value.trim().toLowerCase())
-                    }
-                    placeholder="SHA-256 (64 lowercase hexadecimal characters)"
-                    aria-label="Artifact SHA-256"
-                    className="font-mono text-xs"
-                  />
-                  <Button
-                    type="submit"
-                    size="sm"
-                    variant="outline"
-                    disabled={!artifactReady || attach.isPending}
-                  >
-                    {attach.isPending ? "Attaching…" : "Attach evidence"}
-                  </Button>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="space-y-1.5">
+                      <span className="flex items-center justify-between gap-2 text-xs font-medium">
+                        Artifact type
+                        <span className="text-muted-foreground text-[10px] font-normal uppercase">
+                          Required
+                        </span>
+                      </span>
+                      <Input
+                        value={artifactType}
+                        onChange={(event) =>
+                          setArtifactType(event.target.value)
+                        }
+                        placeholder="stage_package"
+                        required
+                      />
+                    </label>
+                    <label className="space-y-1.5">
+                      <span className="flex items-center justify-between gap-2 text-xs font-medium">
+                        Workspace file path
+                        <span className="text-muted-foreground text-[10px] font-normal uppercase">
+                          Required
+                        </span>
+                      </span>
+                      <Input
+                        value={artifactUri}
+                        onChange={(event) => setArtifactUri(event.target.value)}
+                        placeholder="/mnt/user-data/workspace/design.json"
+                        spellCheck={false}
+                        required
+                      />
+                    </label>
+                  </div>
+                  <label className="space-y-1.5">
+                    <span className="flex items-center justify-between gap-2 text-xs font-medium">
+                      SHA-256
+                      <span className="text-muted-foreground text-[10px] font-normal uppercase">
+                        Required
+                      </span>
+                    </span>
+                    <Input
+                      value={artifactHash}
+                      onChange={(event) =>
+                        setArtifactHash(event.target.value.trim().toLowerCase())
+                      }
+                      placeholder="64 lowercase hexadecimal characters"
+                      aria-invalid={
+                        artifactHash.length > 0 &&
+                        !/^[0-9a-f]{64}$/.test(artifactHash)
+                      }
+                      spellCheck={false}
+                      required
+                      className="font-mono text-xs"
+                    />
+                    <span className="text-muted-foreground block text-[11px]">
+                      macOS:{" "}
+                      <code className="font-mono">
+                        shasum -a 256 &lt;file&gt;
+                      </code>
+                    </span>
+                  </label>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <Button
+                      type="submit"
+                      size="sm"
+                      variant="outline"
+                      disabled={!artifactReadiness.ready || attach.isPending}
+                      aria-describedby="artifact-attachment-readiness"
+                    >
+                      {attach.isPending ? "Attaching…" : "Attach evidence"}
+                    </Button>
+                    <p
+                      id="artifact-attachment-readiness"
+                      className={cn(
+                        "text-xs",
+                        artifactReadiness.ready
+                          ? "text-emerald-700 dark:text-emerald-400"
+                          : "text-muted-foreground",
+                      )}
+                      aria-live="polite"
+                    >
+                      {artifactReadiness.message}
+                    </p>
+                  </div>
                   {attach.error && (
-                    <p className="text-destructive text-sm">
+                    <p className="text-destructive text-sm" role="alert">
                       {attach.error.message}
                     </p>
                   )}
@@ -340,26 +459,48 @@ export function CycleStageSheet({
                     Submit this stage so a reviewer can decide on the evidence
                     above.
                   </p>
-                  <Button
-                    size="sm"
-                    disabled={submit.isPending || artifacts.length === 0}
-                    onClick={() =>
-                      submit.mutate({
-                        cycleId: cycle.id,
-                        stage,
-                        expectedDbRevision: cycle.db_revision,
-                        idempotencyKey: `submit-${uuid()}`,
-                      })
-                    }
-                  >
-                    {submit.isPending ? "Submitting…" : "Submit for review"}
-                  </Button>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <Button
+                      size="sm"
+                      disabled={
+                        submit.isPending || !effectiveSubmissionReadiness.ready
+                      }
+                      aria-describedby="stage-submission-readiness"
+                      onClick={() =>
+                        submit.mutate({
+                          cycleId: cycle.id,
+                          stage,
+                          expectedDbRevision: cycle.db_revision,
+                          idempotencyKey: `submit-${uuid()}`,
+                        })
+                      }
+                    >
+                      {submit.isPending ? "Submitting…" : "Submit for review"}
+                    </Button>
+                    <p
+                      id="stage-submission-readiness"
+                      className={cn(
+                        "text-xs",
+                        effectiveSubmissionReadiness.ready
+                          ? "text-emerald-700 dark:text-emerald-400"
+                          : "text-muted-foreground",
+                      )}
+                      aria-live="polite"
+                    >
+                      {effectiveSubmissionReadiness.message}
+                    </p>
+                  </div>
                   {submit.error && (
-                    <p className="text-destructive text-sm">
+                    <p className="text-destructive text-sm" role="alert">
                       {submit.error.message}
                     </p>
                   )}
                 </div>
+              ) : stage === "test" && canReviewStage(record.status) ? (
+                <p className="text-muted-foreground text-sm">
+                  Complete the human validity assessment above. Test cannot use
+                  the generic approval path.
+                </p>
               ) : canReviewStage(record.status) ? (
                 <div className="space-y-3">
                   <Textarea

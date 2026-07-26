@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0013_classifier_evaluations"
+HEAD = "0016_dbtl_build_test_validity"
 BASELINE = "0001_baseline"
 
 
@@ -482,6 +482,11 @@ async def _reflect_columns(engine) -> dict[str, dict[str, dict]]:
         return await conn.run_sync(_reflect_columns_sync)
 
 
+async def _index_names(engine, table: str) -> set[str]:
+    async with engine.connect() as conn:
+        return await conn.run_sync(lambda sync_conn: {item["name"] for item in sa.inspect(sync_conn).get_indexes(table) if item.get("name")})
+
+
 @asyncio_test
 async def test_create_all_and_alembic_upgrade_produce_same_schema(tmp_path: Path) -> None:
     fresh = create_async_engine(_url(tmp_path, "fresh.db"))
@@ -520,6 +525,11 @@ async def test_create_all_and_alembic_upgrade_produce_same_schema(tmp_path: Path
                 f_default = _normalize_default(f_col.get("default"))
                 u_default = _normalize_default(u_col.get("default"))
                 assert f_default == u_default, f"{table}.{col_name}: server_default drift create_all={f_col.get('default')!r} alembic={u_col.get('default')!r}"
+
+        assert await _index_names(fresh, "dbtl_stage_worker_runs") == await _index_names(
+            upgraded,
+            "dbtl_stage_worker_runs",
+        )
     finally:
         await fresh.dispose()
         await upgraded.dispose()

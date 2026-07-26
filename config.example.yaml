@@ -1447,6 +1447,9 @@ sandbox:
 #   #     skills:                 # Skill whitelist (null = inherit all, [] = none)
 #   #       - data-analysis
 #   #       - visualization
+#   #     dbtl_capabilities:       # Explicit specialist capabilities used by DBTL AgentSelector
+#   #       - statistical_analysis
+#   #       - data_reconciliation_and_lineage
 #   #     model: inherit          # 'inherit' uses parent's model
 #   #     max_turns: 80
 #   #     timeout_seconds: 600

@@ -180,6 +180,13 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   cutover only after every PostgreSQL check passes. It must not repair data,
   promote knowledge, or start a graph. The project
   rail's “View readiness” action opens that settings section.
+  The cycle-creation dialog is a bounded viewport layout, not one long
+  scrolling modal: its header and action footer stay visible while only the
+  form body scrolls. Title, research question, and any required parent are
+  named as required, and the persistent footer explains why `Start cycle` is
+  disabled. Keep that structure when fields are added; putting actions back
+  inside the scroll region makes the dialog unusable at browser zoom or on
+  short/mobile viewports.
   Phase 3 adds the durable cycle layer in the same module: `cycle-view.ts` is
   **pure and React-free** (stage/status vocabulary, why a stage is locked,
   whether a control is available, activity phrasing), `cycles-api.ts` owns the
@@ -190,8 +197,11 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   top-level cycle exists, the dialog permits only a computational child under
   a live season/program parent. The stage sheet displays only evidence bound
   to the selected stage and includes the manual URI + SHA-256 attachment form
-  required to drive Phase 3 without a graph. Artifact, blocker, and resolution
-  calls carry the displayed durable revision plus a fresh idempotency key.
+  required to drive Phase 3 without a graph. Its evidence fields stay visibly
+  labeled and required, and both evidence attachment and stage submission name
+  the missing prerequisite beside their native disabled action. Artifact,
+  blocker, and resolution calls carry the displayed durable revision plus a
+  fresh idempotency key.
   Action buttons use native `disabled` state while incomplete or pending so a
   keyboard activation cannot bypass the same duplicate-submit protection as a
   pointer click.
@@ -211,12 +221,39 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   proposed, the other only classifier-sourced ordinary decisions; explicit
   setup routes are not classifier misses. A shared denominator would hide the
   trade-off between them.
+  Phase 6 adds the data readiness bridge: `reconciliation-view.ts` is **pure
+  and React-free** (row/gate/blocker vocabulary, ordering, what a person may
+  decide and what each decision does, the approval-invalidation notice),
+  `reconciliation-api.ts` owns the dataset/row/decision calls and the stage-spec
+  registry read, and `reconciliation-hooks.ts` the TanStack hooks. `blocksGate`
+  is not recomputed client-side — the server sends it, so the matrix cannot show
+  a settled row the gate still refuses. A **proposed** resolution renders as
+  outstanding work, matching the backend exactly; if these two disagreed the
+  reviewer would have no way to find out why the gate was stuck. Every status,
+  outcome, and blocker kind has a _word_; `rowStatusTone` is offered only
+  alongside that word, never instead of it. `gateHeadline` names the settled
+  count even when ready, because "Ready for Build" with no denominator gives a
+  reviewer nothing to check against. `orderedRows` sorts blocking rows first —
+  creation order buries the one blocked row under twelve resolved ones.
+  Decision payloads carry the row's own `db_revision` as
+  `expected_work_item_revision` plus the cycle's as `expected_db_revision`; the
+  two are different numbers. The API client has no `actor_type` field: a
+  person's decision is the only kind the endpoint accepts.
+- `src/components/workspace/project-rail/reconciliation-matrix.tsx` renders the
+  matrix inside the reconciliation stage sheet, above the generic evidence list
+  — on that stage the matrix _is_ the review. Decision controls state their
+  consequence on the control itself, because settling a contradiction is a
+  scientific call and "Resolve" alone does not say Build will proceed on it.
+  Blocking requires naming _why_ before the submit enables, which is what lets
+  the server's outcome code name the real problem. Recorded evidence references
+  render with the decision, and an unreadable durable row is explicitly shown
+  as gate-blocking rather than excluded.
 - `src/components/workspace/dbtl/` owns the Phase 4 surfaces.
   `upgrade-proposal-card.tsx` is the inline card above the composer: it walks
   offer → clarify → confirm, keeps "No cycle has been created yet." visible
   through the first two steps, and only the final confirm calls the durable
   create endpoint. `use-upgrade-proposal.ts` runs the shadow evaluation
-  *beside* the send, never in front of it, and every failure path resolves to
+  _beside_ the send, never in front of it, and every failure path resolves to
   "no card" so a classifier outage degrades to ordinary chat instead of
   blocking a message. `evaluation-drawer.tsx` is the internal tester view and
   is opt-in (`enabled`), because the endpoint behind it is administrator-only
@@ -255,11 +292,13 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   noticing because it changes what the next request means. The scope note lives
   inside the menu rather than beside the chip: it answers a question the user
   only has while choosing, and repeating it above every composer would be noise.
-- `src/components/workspace/dbtl/cycle-selection-context.tsx` carries only an
-  **explicitly clicked** cycle from the project rail to project chat. The rail
-  may display a default cycle's details, but that default does not silently
-  route every request as a continuation. The provider is keyed by project slug
-  so a selection cannot leak across projects.
+- `src/components/workspace/dbtl/cycle-selection-context.tsx` carries an
+  **explicitly clicked** cycle from the project rail to project chat. The sole
+  automatic selection is a cycle returned by the user's own Start Cycle
+  submission: it queues one Design-council kickoff and is consumed only after
+  the chat stream accepts it. The rail may display a default cycle's details,
+  but that default does not silently route requests as continuations. The
+  provider is keyed by project slug so a selection cannot leak across projects.
 - `src/core/memory-scope/` owns the per-project memory scope migration
   (DBTL Phase 2). `review.ts` is **pure and React-free** — count rows, the
   four per-fact decisions, queue advance, provenance labels, and each
@@ -276,6 +315,28 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   The backend returns only the caller's pending counts and manifest slice.
   Native `disabled` controls prevent duplicate decisions, and rollback is a
   two-click confirmation that affects only the caller's shared copies.
+- DBTL Phase 7 lives in `src/core/dbtl/validity-{view,api,hooks}.ts` and
+  `project-rail/build-test-review.tsx`. `validity-view.ts` is pure and mirrors
+  the backend validity projection: a headline metric meeting its threshold does
+  not receive positive presentation when a validity check fails. Build renders
+  one restrained provenance ledger (dataset binding, stage contract,
+  code/config, environment, versioned outputs, deviations). Test renders
+  headline metrics beside validity checks, with the computed scientific outcome
+  visually dominant. The Test stage sheet never exposes the generic review
+  controls; an authenticated human submits the versioned validity pack and only
+  outcome-compatible rework routes are offered. Status always has a text label
+  and never depends on colour alone.
+- `src/core/dbtl/phase7-demo.ts` owns the no-write Phase 7 human-demo fixtures;
+  `project-rail/phase7-demo-dialog.tsx` renders them from the presentation icon
+  beside Cycles. The three cases deliberately separate a strong-but-invalid
+  result, missing evidence, and a supported result. The dialog says that it is
+  a preview and never invokes a mutation hook.
+- A successful `StartCycleDialog` calls its `onCreated` handoff. Project chat
+  sends one visible, cycle-scoped Design-council prompt. Design questions use
+  the existing `ask_clarification` card (`clarification_type=design_decision`)
+  and retain that cycle scope instead of falling back to ordinary chat.
+  Completed packages use the existing `present_files` group,
+  `ArtifactFileList`, thread artifact reducer, and artifact inspector.
 - `src/app/workspace/[project_slug]/[thread_id]/page.tsx` re-exports the
   canonical chat page. `src/app/workspace/chats/[thread_id]/page.tsx` derives
   its project scope from `useParams().project_slug` (falling back to

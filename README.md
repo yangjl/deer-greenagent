@@ -18,9 +18,14 @@ Design–Build–Test–Learn (DBTL) governance.
 - **Scoped memory** — project conversations use project-specific memory rather
   than leaking context across unrelated projects.
 - **Durable DBTL governance** — cycle state, evidence, blockers, revisions, and
-  human reviews are stored in the application database.
+  human reviews are stored in the application database. Build captures
+  reproducibility lineage, while Test keeps headline performance separate from
+  validity checks so leakage or failed holdouts cannot be presented as success.
 - **Human-controlled automation** — AI may recommend or route DBTL work, but it
   cannot satisfy scientific gates or create authoritative results by itself.
+  Starting a cycle launches a project-grounded Design council: independent
+  specialist and red-team positions are synthesized by a chair, which either
+  asks one focused clarification or presents a Design package for human review.
 - **DeerFlow capabilities** — sandboxed execution, tools, skills, MCP,
   subagents, persistent conversations, and multiple model providers.
 
@@ -74,8 +79,10 @@ DBTL modes:
 - `audit_only` — readiness and legacy inventory are visible; mutations and
   graph execution remain blocked.
 - `manual` — authorized humans can operate durable DBTL cycles.
-- `graph_enabled` — enables the opt-in project supervisor. Scientific stage
-  execution remains behind a non-writing stub until explicitly implemented.
+- `graph_enabled` — enables the opt-in project supervisor. Design,
+  Reconciliation, Build, and Test use bounded, versioned stage contracts;
+  every scientific gate still requires a human decision. The presentation icon
+  beside **Cycles** opens a no-write, one-click Phase 7 validity demo.
 
 PostgreSQL is the intended production database. SQLite is suitable for local
 development but cannot be approved for DBTL production cutover.

@@ -39,8 +39,10 @@ never loops between branches, so one request cannot silently become several, and
 from __future__ import annotations
 
 import logging
+from hashlib import sha256
+from inspect import isawaitable
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
@@ -57,7 +59,6 @@ from deerflow.dbtl.proposal import (
     REQUIRED_GATES,
 )
 from deerflow.dbtl.routing import ExplicitChoice
-from deerflow.dbtl.stage_stub import ManualStageAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,20 @@ def _latest_user_text(state: dict) -> str:
             continue
         return message_content_to_text(message.content) or ""
     return ""
+
+
+def _latest_cycle_request_text(state: dict) -> str:
+    """Prefer a Design-council card response over the preceding visible prompt."""
+    from deerflow.agents.human_input import read_human_input_response
+
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if response and response.get("source") == "ask_clarification" and str(response.get("request_id") or "").startswith("dbtl-design:"):
+            return str(response.get("value") or "")
+        break
+    return _latest_user_text(state)
 
 
 def _bullets(items: tuple[str, ...] | list[str]) -> str:
@@ -121,7 +136,87 @@ def _render_cycle_setup(decision: BranchDecision, context: SupervisorContext) ->
 
 def _render_continuation(decision: BranchDecision, note: str) -> str:
     cycle = decision.cycle_id or "the selected cycle"
-    return f"This request is scoped to {cycle}.\n\n{note}\n\nNo results have been recorded against {cycle}. Stage work advances through the project's Design and Data reconciliation reviews, which a person completes."
+    return f"This request is scoped to {cycle}.\n\n{note}\n\nThis run cannot satisfy a review gate. Design and Data reconciliation advance only through the project's human review records."
+
+
+def _design_clarification_message(
+    decision: BranchDecision,
+    *,
+    note: str,
+    question: str,
+    request_nonce: str,
+) -> tuple[AIMessage, ToolMessage]:
+    cycle = decision.cycle_id or "selected-cycle"
+    digest = sha256(f"{cycle}:{request_nonce}:{question}".encode()).hexdigest()[:16]
+    request_id = f"dbtl-design:{cycle}:{digest}"
+    tool_call = {
+        "name": "ask_clarification",
+        "args": {
+            "question": question,
+            "context": note,
+            "clarification_type": "design_decision",
+        },
+        "id": request_id,
+        "type": "tool_call",
+    }
+    return (
+        AIMessage(
+            id=f"{request_id}:call",
+            content="",
+            tool_calls=[tool_call],
+        ),
+        ToolMessage(
+            id=request_id,
+            name="ask_clarification",
+            tool_call_id=request_id,
+            content=f"{note}\n\n{question}",
+            artifact={
+                "human_input": {
+                    "version": 1,
+                    "kind": "human_input_request",
+                    "source": "ask_clarification",
+                    "request_id": request_id,
+                    "clarification_type": "design_decision",
+                    "title": "Design council needs your input",
+                    "question": question,
+                    "context": note,
+                    "input_mode": "free_text",
+                }
+            },
+        ),
+    )
+
+
+def _present_artifact_messages(
+    decision: BranchDecision,
+    *,
+    note: str,
+    artifact_uri: str,
+    request_nonce: str,
+) -> tuple[AIMessage, ToolMessage]:
+    """Use the same present-files turn shape as the lead agent."""
+    cycle = decision.cycle_id or "selected-cycle"
+    digest = sha256(f"{cycle}:{request_nonce}:{artifact_uri}".encode()).hexdigest()[:16]
+    tool_call_id = f"dbtl-present:{cycle}:{digest}"
+    tool_call = {
+        "name": "present_files",
+        "args": {"filepaths": [artifact_uri]},
+        "id": tool_call_id,
+        "type": "tool_call",
+    }
+    return (
+        AIMessage(
+            id=f"{tool_call_id}:call",
+            content=_render_continuation(decision, note),
+            tool_calls=[tool_call],
+        ),
+        ToolMessage(
+            id=tool_call_id,
+            name="present_files",
+            tool_call_id=tool_call_id,
+            content="Successfully presented files",
+        ),
+    )
 
 
 def build_supervisor_graph(
@@ -129,7 +224,7 @@ def build_supervisor_graph(
     lead_agent,
     context: SupervisorContext,
     state_schema,
-    stage_adapter: ManualStageAdapter | None = None,
+    stage_adapter,
 ) -> StateGraph:
     """Build (but do not compile) the supervisor graph.
 
@@ -137,7 +232,6 @@ def build_supervisor_graph(
     resolved project/cycle selection; both are injected so tests can drive every
     branch without an LLM and without a checkpointed thread.
     """
-    adapter = stage_adapter or ManualStageAdapter()
 
     def decide(state: dict) -> BranchDecision:
         return resolve_branch(_latest_user_text(state), context)
@@ -161,9 +255,49 @@ def build_supervisor_graph(
         decision = decide(state)
         return {"messages": [AIMessage(content=_render_cycle_setup(decision, context))]}
 
-    def cycle_continuation(state: dict) -> dict:
+    async def cycle_continuation(
+        state: dict,
+        config: RunnableConfig,
+    ) -> dict:
         decision = decide(state)
-        result = adapter.execute(stage="design", cycle_id=decision.cycle_id)
+        result = stage_adapter.execute(
+            project_id=context.project_id,
+            cycle_id=decision.cycle_id,
+            request_text=_latest_cycle_request_text(state),
+            state=state,
+            config=config,
+        )
+        if isawaitable(result):
+            result = await result
+        clarification_question = getattr(result, "clarification_question", None)
+        if isinstance(clarification_question, str) and clarification_question:
+            raw_context = config.get("context") or {}
+            request_nonce = str(raw_context.get("run_id") or "") if isinstance(raw_context, dict) else ""
+            return {
+                "messages": list(
+                    _design_clarification_message(
+                        decision,
+                        note=result.note,
+                        question=clarification_question,
+                        request_nonce=request_nonce,
+                    )
+                )
+            }
+        artifact_uri = getattr(result, "artifact_uri", None)
+        if isinstance(artifact_uri, str) and artifact_uri:
+            raw_context = config.get("context") or {}
+            request_nonce = str(raw_context.get("run_id") or "") if isinstance(raw_context, dict) else ""
+            return {
+                "messages": list(
+                    _present_artifact_messages(
+                        decision,
+                        note=result.note,
+                        artifact_uri=artifact_uri,
+                        request_nonce=request_nonce,
+                    )
+                ),
+                "artifacts": [artifact_uri],
+            }
         return {"messages": [AIMessage(content=_render_continuation(decision, result.note))]}
 
     builder = StateGraph(state_schema)
@@ -208,11 +342,9 @@ def supervisor_context_from_config(config: RunnableConfig) -> SupervisorContext:
     exactly the "affects the next request only" guarantee the context chip
     makes to the user. Reading one key from one place is what enforces it.
 
-    ``selected_cycle_id`` is a client preference and is deliberately *not*
-    verified here — Phase 5 writes nothing, so the worst a forged value can do
-    is route to the stub adapter, which records nothing. Any phase that gives
-    the continuation branch real authority must verify it against project
-    membership first.
+    ``selected_cycle_id`` is a client preference. The live Phase 6 adapter
+    verifies it by loading ``(cycle_id, project_id)`` through the durable
+    repository before dispatching any worker or writing any evidence.
     """
     from deerflow.agents.lead_agent.agent import _get_runtime_config
 
@@ -267,10 +399,22 @@ def make_project_supervisor(config: RunnableConfig):
     # ``make_lead_agent`` re-freezes the same mode (idempotent) and builds the
     # full middleware chain, so the ordinary branch is the production agent.
     lead_agent = make_lead_agent(config)
+    from deerflow.agents.dbtl.stage_execution import LiveStageAdapter
+    from deerflow.persistence.dbtl import DbtlCycleRepository
+    from deerflow.persistence.engine import get_session_factory
+
+    session_factory = get_session_factory()
+    if session_factory is None:
+        raise RuntimeError("DBTL stage execution requires an initialized SQL persistence layer.")
 
     graph = build_supervisor_graph(
         lead_agent=lead_agent,
         context=supervisor_context_from_config(config),
         state_schema=get_thread_state_schema(mode),
+        stage_adapter=LiveStageAdapter(
+            repo=DbtlCycleRepository(session_factory),
+            app_config=runtime_app_config,
+            runtime_config=config,
+        ),
     )
     return graph.compile()

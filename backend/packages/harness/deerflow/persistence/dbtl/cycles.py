@@ -38,6 +38,7 @@ from deerflow.dbtl.cycle_state import (
     next_cycle_state,
     validate_cycle_class,
 )
+from deerflow.persistence.dbtl.build_test_ops import BuildTestOpsMixin
 from deerflow.persistence.dbtl.model import (
     DbtlArtifactRow,
     DbtlCycleRow,
@@ -46,6 +47,7 @@ from deerflow.persistence.dbtl.model import (
     DbtlStageAttemptRow,
     WorkItemRow,
 )
+from deerflow.persistence.dbtl.reconciliation_ops import RECONCILIATION_KIND, ReconciliationOpsMixin
 from deerflow.persistence.dbtl.sql import projection_hash
 from deerflow.utils.time import coerce_iso
 
@@ -79,8 +81,17 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-class DbtlCycleRepository:
-    """Read and mutate durable DBTL cycles for one deployment."""
+class DbtlCycleRepository(BuildTestOpsMixin, ReconciliationOpsMixin):
+    """Read and mutate durable DBTL cycles for one deployment.
+
+    Phase 6's data-readiness operations live in
+    :class:`~deerflow.persistence.dbtl.reconciliation_ops.ReconciliationOpsMixin`
+    rather than a sibling repository: declared datasets, matrix rows, and worker
+    runs belong to the same cycle aggregate and are guarded by the same
+    ``db_revision`` and the same activity-event idempotency ledger. Splitting
+    them across two repositories would mean two copies of that machinery, and
+    the first divergence between them would show up as a lost review.
+    """
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
@@ -538,6 +549,19 @@ class DbtlCycleRepository:
             # the durable review record exists to prevent.
             if await self._latest_artifact(session, row.id) is None:
                 raise DbtlWorkflowRefused(f"Stage {stage!r} has no artifact to review; attach evidence first.")
+            if stage == "reconciliation":
+                # The readiness gate is checked *before* a reviewer is asked, not
+                # only when they click approve. Sending an unresolved matrix to
+                # review invites an approval on a contradiction nobody settled,
+                # and the reviewer would have to notice the blocker themselves.
+                gate = await self._reconciliation_gate(session, cycle_id, project_id, stages)
+                if not gate.ready:
+                    reasons = "; ".join(gate.reasons) or "required rows are unresolved"
+                    raise DbtlWorkflowRefused(f"Data reconciliation is not ready for review ({gate.outcome.value}): {reasons}")
+            if stage == "build" and await self._latest_build_lineage(session, cycle_id) is None:
+                raise DbtlWorkflowRefused("Build has no reproducibility lineage to review.")
+            if stage == "test" and await self._latest_build_lineage(session, cycle_id) is None:
+                raise DbtlWorkflowRefused("Test cannot be reviewed without Build lineage.")
             row.status = str(StageStatus.AWAITING_REVIEW)
             statuses[stage] = StageStatus.AWAITING_REVIEW
             if stage == "build" and cycle.state == "ready_for_build":
@@ -575,6 +599,8 @@ class DbtlCycleRepository:
         """Apply one human verdict, advancing the cycle only when legal."""
         if not rationale.strip():
             raise ValueError("A review decision requires a rationale.")
+        if stage == "test":
+            raise DbtlWorkflowRefused("Test requires a typed validity assessment; the generic review path is disabled.")
         verdict = ReviewDecision(decision)
 
         async with self._sf() as session:
@@ -624,6 +650,13 @@ class DbtlCycleRepository:
                 row.db_revision = cycle.db_revision
 
             stage_attempt_id = next(row.id for row in stages if row.stage == stage)
+            attempt_row = next(row for row in stages if row.stage == stage)
+            if verdict is ReviewDecision.APPROVE:
+                # Bind the approval to the world it was granted against. Without
+                # this, a dataset that changes afterwards carries the old
+                # approval into Build, and nothing can tell that it did.
+                await self._bind_stage_approval(session, cycle, attempt_row, stages)
+
             evidence = await self._latest_artifact(session, stage_attempt_id)
             if evidence is None:
                 raise DbtlWorkflowRefused(f"Stage {stage!r} has no artifact to review.")
@@ -878,6 +911,12 @@ class DbtlCycleRepository:
                 raise DbtlWorkflowRefused("Work item not found.")
             if not row.cycle_id:
                 raise DbtlWorkflowRefused("Work item is not attached to a DBTL cycle.")
+            if dict(row.payload or {}).get("kind") == RECONCILIATION_KIND:
+                # This path takes no actor type, so it cannot apply the rule that
+                # an agent may not close a judgement row. Refusing here is what
+                # stops it from being the way around that rule; the reconciliation
+                # decision endpoint is the only writer for these.
+                raise DbtlWorkflowRefused("This is a reconciliation row; decide it through the reconciliation endpoint so the reviewer is recorded.")
             loaded = await self._load(session, row.cycle_id, project_id, for_update=True)
             if loaded is None:
                 raise DbtlWorkflowRefused("Cycle not found.")

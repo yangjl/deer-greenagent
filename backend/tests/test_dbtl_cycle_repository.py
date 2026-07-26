@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.dbtl import StageStatus
+from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK
 from deerflow.persistence.dbtl import (
     DbtlCycleRepository,
     DbtlReviewRow,
@@ -230,8 +231,50 @@ async def _attach(repo, project_id, cycle, stage, *, key):
     )
 
 
+async def _declare_dataset(repo, project_id, cycle, *, key, content_hash=None):
+    """Phase 6: reconciliation cannot be reviewed with nothing declared."""
+    current = await repo.get_cycle(cycle["id"], project_id=project_id)
+    assert current is not None
+    return await repo.declare_dataset(
+        cycle_id=cycle["id"],
+        project_id=project_id,
+        source_key="yield_trial",
+        uri="/mnt/user-data/workspace/yield.csv",
+        content_hash=content_hash or "a" * 64,
+        recorded_by="user-1",
+        expected_db_revision=current["db_revision"],
+        idempotency_key=f"dataset-{key}",
+    )
+
+
 async def _approve(repo, project_id, cycle, stage, *, key):
     await _attach(repo, project_id, cycle, stage, key=key)
+    if stage == "reconciliation":
+        await _declare_dataset(repo, project_id, cycle, key=key)
+        current = await repo.get_cycle(cycle["id"], project_id=project_id)
+        assert current is not None
+        row = await repo.open_reconciliation_row(
+            cycle_id=cycle["id"],
+            project_id=project_id,
+            check="units_and_encoding",
+            field_name="Yield units",
+            created_by="user-1",
+            expected_db_revision=current["db_revision"],
+            idempotency_key=f"row-{key}",
+        )
+        current = await repo.get_cycle(cycle["id"], project_id=project_id)
+        assert current is not None
+        await repo.decide_reconciliation_row(
+            row_id=row["id"],
+            project_id=project_id,
+            status="resolved",
+            resolution="Verified as Mg/ha.",
+            actor_type="human",
+            actor_user_id="user-2",
+            expected_db_revision=current["db_revision"],
+            expected_work_item_revision=row["db_revision"],
+            idempotency_key=f"decide-row-{key}",
+        )
     current = await repo.get_cycle(cycle["id"], project_id=project_id)
     assert current is not None
     submitted = await repo.submit_stage_for_review(
@@ -280,20 +323,87 @@ async def test_build_readiness_requires_both_approvals(tmp_path: Path) -> None:
 
 
 async def test_the_full_manual_cycle_reaches_completed_without_state_lag(tmp_path: Path) -> None:
-    """Submitting Build consumes ready_for_build; later approvals advance normally."""
+    """Phase 7 uses lineage and typed Test validity without introducing state lag."""
     repo, project_id = await _repos(tmp_path)
     current = await _cycle(repo, project_id)
 
-    expected_states = {
-        "design": "reconciliation",
-        "reconciliation": "ready_for_build",
-        "build": "test",
-        "test": "learn",
-        "learn": "completed",
-    }
-    for stage, expected_state in expected_states.items():
-        current = await _approve(repo, project_id, current, stage, key=stage)
-        assert current["state"] == expected_state
+    current = await _approve(repo, project_id, current, "design", key="design")
+    assert current["state"] == "reconciliation"
+    current = await _approve(
+        repo,
+        project_id,
+        current,
+        "reconciliation",
+        key="reconciliation",
+    )
+    assert current["state"] == "ready_for_build"
+
+    current = await repo.get_cycle(current["id"], project_id=project_id)
+    assert current is not None
+    await repo.record_build_lineage(
+        cycle_id=current["id"],
+        project_id=project_id,
+        code_revision="git:1234567",
+        config_revision="config:abc",
+        environment={"python": "3.12"},
+        input_artifacts=["artifact://reconciliation"],
+        output_artifacts=[
+            {
+                "uri": "/mnt/user-data/outputs/model.bin",
+                "content_hash": "b" * 64,
+                "revision": 1,
+            }
+        ],
+        deviations=[],
+        logs_uri="/mnt/user-data/outputs/build.log",
+        recorded_by="user-1",
+        expected_db_revision=current["db_revision"],
+        idempotency_key="lineage-build",
+    )
+    current = await _approve(repo, project_id, current, "build", key="build")
+    assert current["state"] == "test"
+
+    artifact = await _attach(repo, project_id, current, "test", key="test")
+    current = await repo.submit_stage_for_review(
+        cycle_id=current["id"],
+        project_id=project_id,
+        stage="test",
+        expected_db_revision=artifact["db_revision"],
+        actor_user_id="user-1",
+        idempotency_key="submit-test",
+    )
+    assessed = await repo.record_validity_assessment(
+        cycle_id=current["id"],
+        project_id=project_id,
+        metrics=[
+            {
+                "name": "accuracy",
+                "value": 0.51,
+                "threshold": 0.70,
+                "criterion": "gte",
+            }
+        ],
+        checks=[
+            {
+                "check": check.value,
+                "status": "passed",
+                "detail": f"{check.value} evidence",
+                "evidence_refs": [f"artifact://{check.value}"],
+            }
+            for check in DEFAULT_VALIDITY_PACK.required_checks
+        ],
+        recommendation="advance_to_learn",
+        limitations=[],
+        rationale="A valid negative should proceed to synthesis.",
+        reviewer_user_id="user-2",
+        reviewer_project_role="owner",
+        expected_db_revision=current["db_revision"],
+        idempotency_key="validity-test",
+    )
+    current = assessed["cycle"]
+    assert current["state"] == "learn"
+    current = await _approve(repo, project_id, current, "learn", key="learn")
+    assert current["state"] == "completed"
 
 
 async def test_one_idempotency_key_cannot_mean_submit_and_review(tmp_path: Path) -> None:

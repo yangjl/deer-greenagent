@@ -14,9 +14,10 @@ by itself.
 from __future__ import annotations
 
 import inspect
+from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
@@ -266,4 +267,122 @@ class TestStageStubCannotDoScience:
         answer = final["messages"][-1].content
         assert "cyc-1" in answer
         # The user must not be able to read this as work having been done.
-        assert "not been recorded" in answer.lower() or "no results" in answer.lower()
+        assert "nothing has been recorded" in answer.lower()
+
+
+class TestLiveStageBranch:
+    @pytest.mark.asyncio
+    async def test_continuation_awaits_the_live_adapter_with_project_scope(self):
+        calls = []
+
+        class Adapter:
+            async def execute(self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(
+                    note="Recorded one bounded Design worker and its review package.",
+                    satisfies_gate=False,
+                )
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id="cyc-1",
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [HumanMessage(content="run the design stage", id="human-1")],
+            },
+            config={
+                "configurable": {"thread_id": "live-stage"},
+                "context": {"run_id": "run-1"},
+            },
+        )
+
+        assert calls[0]["project_id"] == "proj-1"
+        assert calls[0]["cycle_id"] == "cyc-1"
+        assert calls[0]["request_text"] == "run the design stage"
+        answer = final["messages"][-1].content
+        assert "Recorded one bounded Design worker" in answer
+        assert "cannot satisfy a review gate" in answer
+
+    @pytest.mark.asyncio
+    async def test_design_council_clarification_is_a_human_input_card(self):
+        class Adapter:
+            async def execute(self, **kwargs):
+                return SimpleNamespace(
+                    note="The Design council needs one project decision.",
+                    clarification_question=("Which environments should be held out for validation?"),
+                    satisfies_gate=False,
+                )
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id="cyc-1",
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [HumanMessage(content="start the design council", id="human-1")],
+            },
+            config={"configurable": {"thread_id": "design-clarification"}},
+        )
+
+        message = final["messages"][-1]
+        assert isinstance(message, ToolMessage)
+        request = message.artifact["human_input"]
+        assert message.name == "ask_clarification"
+        assert request["source"] == "ask_clarification"
+        assert request["question"] == ("Which environments should be held out for validation?")
+        assert request["input_mode"] == "free_text"
+
+    @pytest.mark.asyncio
+    async def test_design_package_uses_the_existing_present_files_artifact_flow(self):
+        class Adapter:
+            async def execute(self, **kwargs):
+                return SimpleNamespace(
+                    note="The Design package is ready for human review.",
+                    artifact_uri="/mnt/user-data/outputs/dbtl/design.json",
+                    clarification_question=None,
+                    satisfies_gate=False,
+                )
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id="cyc-1",
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [HumanMessage(content="start the design council", id="human-1")],
+            },
+            config={
+                "configurable": {"thread_id": "design-artifact"},
+                "context": {"run_id": "run-artifact"},
+            },
+        )
+
+        presented = final["messages"][-2]
+        assert isinstance(presented, AIMessage)
+        assert presented.tool_calls[0]["name"] == "present_files"
+        assert presented.tool_calls[0]["args"]["filepaths"] == ["/mnt/user-data/outputs/dbtl/design.json"]
+        assert final["artifacts"][-1] == "/mnt/user-data/outputs/dbtl/design.json"

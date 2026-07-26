@@ -214,7 +214,11 @@ export default function ChatPage() {
 
   // A DBTL cycle belongs to a project, so the proposal only exists inside one.
   const upgradeProposal = useDbtlUpgradeProposal(projectId);
-  const { selectedCycleId } = useProjectCycleSelection();
+  const {
+    selectedCycleId,
+    pendingDesignKickoff,
+    consumeDesignKickoff,
+  } = useProjectCycleSelection();
   const { evaluate: evaluateForUpgrade } = upgradeProposal;
 
   // The context chip only appears where the supervisor can actually route, so
@@ -274,6 +278,50 @@ export default function ChatPage() {
       effectiveContext,
     ],
   );
+  const designKickoffInFlight = useRef<number | null>(null);
+  useEffect(() => {
+    if (
+      !pendingDesignKickoff ||
+      designKickoffInFlight.current === pendingDesignKickoff.nonce ||
+      thread.isLoading ||
+      isMock
+    ) {
+      return;
+    }
+    const kickoff = pendingDesignKickoff;
+    const cycleContext: RequestContext = {
+      kind: "cycle",
+      cycleId: kickoff.cycleId,
+    };
+    designKickoffInFlight.current = kickoff.nonce;
+    setRequestContext(cycleContext);
+    void Promise.resolve(
+      sendMessage(
+        threadId,
+        {
+          text: `Start the Design council for “${kickoff.cycleTitle}”. Ground the design in this project's files and cycle context. Have independent specialists debate assumptions, evidence, risks, success criteria, and rejection criteria. If a project-owner decision is missing, ask me one focused clarification; otherwise synthesize a Design package for human review. Do not advance the gate.`,
+          files: [],
+        },
+        runContextPayload(cycleContext),
+        {
+          runMetadata: runActivityMetadata(cycleContext),
+          onSent: () => {
+            consumeDesignKickoff(kickoff.nonce);
+            setRequestContext(ORDINARY_REQUEST_CONTEXT);
+          },
+        },
+      ),
+    ).catch(() => {
+      designKickoffInFlight.current = null;
+    });
+  }, [
+    consumeDesignKickoff,
+    isMock,
+    pendingDesignKickoff,
+    sendMessage,
+    thread.isLoading,
+    threadId,
+  ]);
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
       let sent = false;
@@ -284,10 +332,17 @@ export default function ChatPage() {
           files: [],
         },
         showContextChip
-          ? {
-              dbtl_supervisor_enabled: true,
-              dbtl_explicit_choice: "ordinary",
-            }
+          ? request.source === "ask_clarification" &&
+            request.clarification_type === "design_decision" &&
+            selectedCycleId
+            ? runContextPayload({
+                kind: "cycle",
+                cycleId: selectedCycleId,
+              })
+            : {
+                dbtl_supervisor_enabled: true,
+                dbtl_explicit_choice: "ordinary",
+              }
           : undefined,
         {
           additionalKwargs: {
@@ -301,7 +356,7 @@ export default function ChatPage() {
       );
       return sent;
     },
-    [sendMessage, showContextChip, threadId],
+    [selectedCycleId, sendMessage, showContextChip, threadId],
   );
   const handleStop = useCallback(async () => {
     await thread.stop();

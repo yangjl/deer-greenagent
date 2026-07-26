@@ -414,6 +414,9 @@ class SubagentExecutor:
         is_internal: bool = False,
         authz_attributes: Mapping[str, Any] | None = None,
         deerflow_trace_id: str | None = None,
+        project_id: str | None = None,
+        project_root: str | None = None,
+        token_budget_max_tokens: int | None = None,
     ):
         """Initialize the executor.
 
@@ -470,6 +473,9 @@ class SubagentExecutor:
         self.is_internal = is_internal
         self.authz_attributes = normalize_authz_attributes(authz_attributes)
         self.deerflow_trace_id = deerflow_trace_id
+        self.project_id = project_id
+        self.project_root = project_root
+        self.token_budget_max_tokens = token_budget_max_tokens
 
         self._base_tools = _filter_tools(
             tools,
@@ -520,6 +526,8 @@ class SubagentExecutor:
             "deferred_setup": deferred_setup,
             "agent_name": self.config.name,
         }
+        if self.token_budget_max_tokens is not None:
+            middleware_kwargs["token_budget_max_tokens"] = self.token_budget_max_tokens
         authz_provider = getattr(self, "_authz_provider", None)
         if authz_provider is not None:
             middleware_kwargs["authorization_provider"] = authz_provider
@@ -828,6 +836,10 @@ class SubagentExecutor:
             context["authz_attributes"] = dict(self.authz_attributes)
             if self.deerflow_trace_id:
                 context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
+            if self.project_id:
+                context["project_id"] = self.project_id
+            if self.project_root:
+                context["project_root"] = self.project_root
             context["is_subagent"] = True
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")

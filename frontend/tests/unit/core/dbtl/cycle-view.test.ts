@@ -6,6 +6,7 @@ import {
   DBTL_STAGES,
   STAGE_LABELS,
   STATUS_LABELS,
+  artifactAttachmentReadiness,
   canReviewStage,
   canSubmitReview,
   canSubmitStage,
@@ -17,6 +18,7 @@ import {
   latestArtifacts,
   latestArtifactsForStage,
   openWorkItems,
+  reviewSubmissionReadiness,
   stageBlockReason,
   stageOf,
 } from "@/core/dbtl/cycle-view";
@@ -166,6 +168,45 @@ describe("why a stage is locked", () => {
 });
 
 describe("evidence and blockers", () => {
+  test("attachment readiness names missing and invalid evidence fields", () => {
+    expect(artifactAttachmentReadiness("stage_package", "", "")).toEqual({
+      ready: false,
+      message: "Add artifact URI and SHA-256 to continue.",
+    });
+    expect(
+      artifactAttachmentReadiness(
+        "stage_package",
+        "/mnt/user-data/workspace/design.json",
+        "not-a-hash",
+      ),
+    ).toEqual({
+      ready: false,
+      message: "Enter a valid 64-character SHA-256 to continue.",
+    });
+  });
+
+  test("attachment and review readiness announce the next available action", () => {
+    expect(
+      artifactAttachmentReadiness(
+        "stage_package",
+        "/mnt/user-data/workspace/design.json",
+        "a".repeat(64),
+      ),
+    ).toEqual({
+      ready: true,
+      message: "Ready to attach this evidence.",
+    });
+    expect(reviewSubmissionReadiness(0)).toEqual({
+      ready: false,
+      message:
+        "Attach at least one evidence file above to enable review submission.",
+    });
+    expect(reviewSubmissionReadiness(1)).toEqual({
+      ready: true,
+      message: "Evidence attached. Ready to submit this stage for review.",
+    });
+  });
+
   test("only the newest revision per artifact type is offered", () => {
     const record = cycle(
       {},

@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -33,15 +35,24 @@ const CYCLE_WEIGHTS: CycleWeight[] = ["full", "light", "retroactive"];
 function Field({
   label,
   hint,
+  required = false,
   children,
 }: {
   label: string;
   hint?: string;
+  required?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <label className="block">
-      <span className="text-sm font-medium">{label}</span>
+      <span className="flex items-baseline justify-between gap-3 text-sm font-medium">
+        {label}
+        {required && (
+          <span className="text-muted-foreground text-[11px] font-normal">
+            Required
+          </span>
+        )}
+      </span>
       {hint && (
         <span className="text-muted-foreground mt-0.5 block text-xs">
           {hint}
@@ -58,12 +69,14 @@ export function StartCycleDialog({
   cycles,
   open,
   onOpenChange,
+  onCreated,
 }: {
   projectId: string;
   projectName: string;
   cycles: readonly CycleRecord[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onCreated?: (cycle: CycleRecord) => void;
 }) {
   const create = useCreateCycle(projectId);
   const [title, setTitle] = useState("");
@@ -95,6 +108,17 @@ export function StartCycleDialog({
     title.trim().length > 0 &&
     researchQuestion.trim().length > 0 &&
     (!parentRequired || (canCreateChild && parentCycleId.length > 0));
+  const missingRequirements = [
+    title.trim().length === 0 ? "title" : null,
+    researchQuestion.trim().length === 0 ? "research question" : null,
+    parentRequired && (!canCreateChild || parentCycleId.length === 0)
+      ? "parent cycle"
+      : null,
+  ].filter((item): item is string => item !== null);
+  const readinessMessage =
+    missingRequirements.length > 0
+      ? `Add ${missingRequirements.join(" and ")} to continue.`
+      : "Ready to create the durable cycle record.";
 
   function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -111,13 +135,14 @@ export function StartCycleDialog({
         idempotencyKey,
       },
       {
-        onSuccess: () => {
+        onSuccess: (cycle) => {
           setTitle("");
           setResearchQuestion("");
           setObjective("");
           setSuccessCriteria("");
           setParentCycleId("");
           onOpenChange(false);
+          onCreated?.(cycle);
         },
       },
     );
@@ -125,154 +150,186 @@ export function StartCycleDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg" aria-describedby={undefined}>
-        <DialogHeader>
+      <DialogContent className="flex max-h-[calc(100svh-1rem)] flex-col gap-0 overflow-hidden p-0 sm:max-h-[min(90svh,52rem)] sm:max-w-xl">
+        <DialogHeader className="border-border/70 shrink-0 border-b px-5 py-4 pr-12 sm:px-6 sm:py-5">
           <DialogTitle>Start a cycle · {projectName}</DialogTitle>
+          <DialogDescription>
+            Define the research record. Title and research question are
+            required.
+          </DialogDescription>
         </DialogHeader>
-        <form onSubmit={submit} className="space-y-4">
-          <Field label="Title">
-            <Input
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder="Drought tolerance screen"
-              autoFocus
-            />
-          </Field>
-
-          <Field label="Cycle class">
-            <div className="flex flex-wrap gap-1.5">
-              {CYCLE_CLASSES.map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  onClick={() => {
-                    setCycleClass(option);
-                    if (option !== "computational") setParentCycleId("");
-                  }}
-                  aria-pressed={cycleClass === option}
-                  className={cn(
-                    "rounded-full border px-3 py-1 text-sm transition-colors",
-                    "focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none",
-                    cycleClass === option
-                      ? "border-foreground/20 bg-foreground text-background"
-                      : "border-border hover:border-foreground/30 hover:bg-muted",
-                  )}
-                >
-                  {CYCLE_CLASS_LABELS[option]}
-                </button>
-              ))}
-            </div>
-          </Field>
-
-          <Field
-            label="Workflow weight"
-            hint="Controls how much evidence and review ceremony this cycle expects."
+        <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col">
+          <div
+            className="min-h-0 flex-1 space-y-5 overflow-y-auto overscroll-contain px-5 py-5 sm:px-6"
+            data-testid="cycle-form-scroll-region"
           >
-            <div className="flex flex-wrap gap-1.5">
-              {CYCLE_WEIGHTS.map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  onClick={() => setCycleWeight(option)}
-                  aria-pressed={cycleWeight === option}
-                  className={cn(
-                    "rounded-full border px-3 py-1 text-sm transition-colors",
-                    "focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none",
-                    cycleWeight === option
-                      ? "border-foreground/20 bg-foreground text-background"
-                      : "border-border hover:border-foreground/30 hover:bg-muted",
-                  )}
-                >
-                  {CYCLE_WEIGHT_LABELS[option]}
-                </button>
-              ))}
-            </div>
-          </Field>
-
-          {cycleClass === "computational" && parents.length > 0 && (
-            <Field
-              label="Parent cycle"
-              hint={
-                parentRequired
-                  ? "Required because this project already has a live top-level cycle."
-                  : "Optional. A computational cycle can hang off a season or program."
-              }
-            >
-              <select
-                value={parentCycleId}
-                onChange={(event) => setParentCycleId(event.target.value)}
-                className="border-border bg-background focus:border-foreground/40 w-full rounded-md border px-3 py-2 text-sm outline-none"
-              >
-                <option value="" disabled={parentRequired}>
-                  {parentRequired
-                    ? "Select the active season / program"
-                    : "No parent — top-level cycle"}
-                </option>
-                {parents.map((parent) => (
-                  <option key={parent.id} value={parent.id}>
-                    {parent.title}
-                  </option>
-                ))}
-              </select>
+            <Field label="Title" required>
+              <Input
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="Drought tolerance screen"
+                autoFocus
+                required
+              />
             </Field>
-          )}
-          {parentRequired && !canCreateChild && (
-            <p className="border-border text-muted-foreground rounded-md border border-dashed px-3 py-2 text-xs">
-              This project already has a live top-level cycle. Finish or abandon
-              it before starting another, or create a computational child under
-              a live season/program cycle.
-            </p>
-          )}
 
-          <Field label="Research question">
-            <Textarea
-              value={researchQuestion}
-              onChange={(event) => setResearchQuestion(event.target.value)}
-              rows={2}
-              placeholder="Which lines hold yield under late-season drought?"
-            />
-          </Field>
+            <Field label="Cycle class">
+              <div className="flex flex-wrap gap-1.5">
+                {CYCLE_CLASSES.map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    onClick={() => {
+                      setCycleClass(option);
+                      if (option !== "computational") setParentCycleId("");
+                    }}
+                    aria-pressed={cycleClass === option}
+                    className={cn(
+                      "rounded-full border px-3 py-1 text-sm transition-colors",
+                      "focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none",
+                      cycleClass === option
+                        ? "border-foreground/20 bg-foreground text-background"
+                        : "border-border hover:border-foreground/30 hover:bg-muted",
+                    )}
+                  >
+                    {CYCLE_CLASS_LABELS[option]}
+                  </button>
+                ))}
+              </div>
+            </Field>
 
-          <Field label="Objective">
-            <Textarea
-              value={objective}
-              onChange={(event) => setObjective(event.target.value)}
-              rows={2}
-              placeholder="Rank 200 candidate lines by drought index."
-            />
-          </Field>
-
-          <Field label="Success criteria">
-            <Textarea
-              value={successCriteria}
-              onChange={(event) => setSuccessCriteria(event.target.value)}
-              rows={2}
-              placeholder="Top decile reproducible across two sites."
-            />
-          </Field>
-
-          <p className="border-border text-muted-foreground rounded-md border border-dashed px-3 py-2 text-xs leading-relaxed">
-            This creates a{" "}
-            <strong className="font-medium">durable research record</strong>. It
-            is stored in the project database, appears in the activity log with
-            your name, and is retired rather than deleted.
-          </p>
-
-          {create.error && (
-            <p className="text-destructive text-sm">{create.error.message}</p>
-          )}
-
-          <div className="flex justify-end gap-2">
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => onOpenChange(false)}
+            <Field
+              label="Workflow weight"
+              hint="Controls how much evidence and review ceremony this cycle expects."
             >
-              Cancel
-            </Button>
-            <Button type="submit" disabled={!ready || create.isPending}>
-              {create.isPending ? "Starting…" : "Start cycle"}
-            </Button>
+              <div className="flex flex-wrap gap-1.5">
+                {CYCLE_WEIGHTS.map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    onClick={() => setCycleWeight(option)}
+                    aria-pressed={cycleWeight === option}
+                    className={cn(
+                      "rounded-full border px-3 py-1 text-sm transition-colors",
+                      "focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none",
+                      cycleWeight === option
+                        ? "border-foreground/20 bg-foreground text-background"
+                        : "border-border hover:border-foreground/30 hover:bg-muted",
+                    )}
+                  >
+                    {CYCLE_WEIGHT_LABELS[option]}
+                  </button>
+                ))}
+              </div>
+            </Field>
+
+            {cycleClass === "computational" && parents.length > 0 && (
+              <Field
+                label="Parent cycle"
+                required={parentRequired}
+                hint={
+                  parentRequired
+                    ? "Required because this project already has a live top-level cycle."
+                    : "Optional. A computational cycle can hang off a season or program."
+                }
+              >
+                <select
+                  value={parentCycleId}
+                  onChange={(event) => setParentCycleId(event.target.value)}
+                  className="border-border bg-background focus:border-foreground/40 w-full rounded-md border px-3 py-2 text-sm outline-none"
+                  required={parentRequired}
+                >
+                  <option value="" disabled={parentRequired}>
+                    {parentRequired
+                      ? "Select the active season / program"
+                      : "No parent — top-level cycle"}
+                  </option>
+                  {parents.map((parent) => (
+                    <option key={parent.id} value={parent.id}>
+                      {parent.title}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
+            {parentRequired && !canCreateChild && (
+              <p className="border-border text-muted-foreground rounded-md border border-dashed px-3 py-2 text-xs">
+                This project already has a live top-level cycle. Finish or
+                abandon it before starting another, or create a computational
+                child under a live season/program cycle.
+              </p>
+            )}
+
+            <Field label="Research question" required>
+              <Textarea
+                value={researchQuestion}
+                onChange={(event) => setResearchQuestion(event.target.value)}
+                rows={2}
+                placeholder="Which lines hold yield under late-season drought?"
+                required
+              />
+            </Field>
+
+            <Field label="Objective">
+              <Textarea
+                value={objective}
+                onChange={(event) => setObjective(event.target.value)}
+                rows={2}
+                placeholder="Rank 200 candidate lines by drought index."
+              />
+            </Field>
+
+            <Field label="Success criteria">
+              <Textarea
+                value={successCriteria}
+                onChange={(event) => setSuccessCriteria(event.target.value)}
+                rows={2}
+                placeholder="Top decile reproducible across two sites."
+              />
+            </Field>
+
+            <p className="border-border text-muted-foreground rounded-md border border-dashed px-3 py-2 text-xs leading-relaxed">
+              This creates a{" "}
+              <strong className="font-medium">durable research record</strong>.
+              It is stored in the project database, appears in the activity log
+              with your name, and is retired rather than deleted.
+            </p>
+          </div>
+
+          <div
+            className="border-border/70 bg-background/95 supports-[backdrop-filter]:bg-background/85 shrink-0 border-t px-5 py-3 backdrop-blur-sm sm:px-6 sm:py-4"
+            data-testid="cycle-form-actions"
+          >
+            {create.error && (
+              <p className="text-destructive mb-2 text-sm" role="alert">
+                {create.error.message}
+              </p>
+            )}
+            <DialogFooter className="items-center sm:justify-between">
+              <p
+                className={cn(
+                  "text-left text-xs",
+                  ready
+                    ? "text-emerald-700 dark:text-emerald-400"
+                    : "text-muted-foreground",
+                )}
+                aria-live="polite"
+              >
+                {readinessMessage}
+              </p>
+              <div className="flex shrink-0 justify-end gap-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => onOpenChange(false)}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={!ready || create.isPending}>
+                  {create.isPending ? "Starting…" : "Start cycle"}
+                </Button>
+              </div>
+            </DialogFooter>
           </div>
         </form>
       </DialogContent>

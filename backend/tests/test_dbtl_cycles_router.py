@@ -43,6 +43,32 @@ def _other_user() -> User:
     return User(id=_OTHER_USER_ID, email="stranger@example.com", password_hash="x", system_role="user")
 
 
+def test_reconciliation_evidence_references_are_individually_bounded() -> None:
+    with pytest.raises(ValueError, match="at most 1000 characters"):
+        dbtl_cycles.ReconciliationDecisionRequest(
+            status="resolved",
+            resolution="Verified.",
+            evidence_refs=["x" * 1001],
+            expected_db_revision=1,
+            expected_work_item_revision=1,
+            idempotency_key="decision-1",
+        )
+
+
+def test_validity_request_cannot_claim_reviewer_identity() -> None:
+    with pytest.raises(ValueError, match="reviewer_user_id"):
+        dbtl_cycles.ValidityAssessmentRequest(
+            metrics=[],
+            checks=[],
+            recommendation="close_cycle",
+            limitations=[],
+            rationale="No claim can be made.",
+            expected_db_revision=1,
+            idempotency_key="validity-1",
+            reviewer_user_id="someone-else",
+        )
+
+
 def _internal_user():
     return SimpleNamespace(id=_USER_ID, system_role="internal")
 
@@ -97,8 +123,46 @@ def _attach(client, project_id: str, cycle_id: str, stage: str, *, seed: str = "
     ).json()
 
 
+def _declare_dataset(client, project_id: str, cycle_id: str, *, key: str, content_hash: str | None = None) -> dict:
+    """Phase 6: the readiness gate refuses a reconciliation review with no inputs."""
+    current = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle_id}").json()
+    return client.post(
+        f"/api/projects/{project_id}/dbtl/cycles/{cycle_id}/datasets",
+        json={
+            "source_key": "yield_trial",
+            "uri": "/mnt/user-data/workspace/yield.csv",
+            "content_hash": content_hash or "a" * 64,
+            "expected_db_revision": current["db_revision"],
+            "idempotency_key": f"dataset-{key}",
+        },
+    ).json()
+
+
 def _approve(client, project_id: str, cycle_id: str, stage: str, revision: int, *, key: str) -> dict:
     del revision
+    if stage == "reconciliation":
+        _declare_dataset(client, project_id, cycle_id, key=key)
+        current = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle_id}").json()
+        row = client.post(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle_id}/reconciliation/rows",
+            json={
+                "check": "units_and_encoding",
+                "field_name": "Yield units",
+                "expected_db_revision": current["db_revision"],
+                "idempotency_key": f"row-{key}",
+            },
+        ).json()
+        current = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle_id}").json()
+        client.post(
+            f"/api/projects/{project_id}/dbtl/reconciliation/rows/{row['id']}/decide",
+            json={
+                "status": "resolved",
+                "resolution": "Verified as Mg/ha.",
+                "expected_db_revision": current["db_revision"],
+                "expected_work_item_revision": row["db_revision"],
+                "idempotency_key": f"decide-row-{key}",
+            },
+        ).raise_for_status()
     current = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle_id}").json()
     submitted = client.post(
         f"/api/projects/{project_id}/dbtl/cycles/{cycle_id}/stages/{stage}/submit",
@@ -251,6 +315,34 @@ def test_an_internal_principal_cannot_approve_a_stage(tmp_path: Path) -> None:
                 "rationale": "Automated approval must not count.",
                 "expected_db_revision": submitted["db_revision"],
                 "idempotency_key": "review-1",
+            },
+        )
+
+    assert response.status_code == 403
+    assert "human" in response.json()["detail"]
+
+
+def test_an_internal_principal_cannot_record_validity(tmp_path: Path) -> None:
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    with TestClient(
+        _make_app(
+            workspace_repo,
+            cycle_repo,
+            user_factory=_internal_user,
+        )
+    ) as client:
+        project_id = _seed_project(client)
+        cycle = _create_cycle(client, project_id)
+        response = client.post(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/test/assessment",
+            json={
+                "metrics": [],
+                "checks": [],
+                "recommendation": "close_cycle",
+                "limitations": ["No independent holdout."],
+                "rationale": "An internal principal must not decide this.",
+                "expected_db_revision": cycle["db_revision"],
+                "idempotency_key": "validity-1",
             },
         )
 

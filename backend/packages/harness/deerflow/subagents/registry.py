@@ -44,6 +44,7 @@ def _build_custom_subagent_config(name: str, *, app_config: Any | None = None) -
         model=custom.model,
         max_turns=custom.max_turns,
         timeout_seconds=custom.timeout_seconds,
+        dbtl_capabilities=list(custom.dbtl_capabilities),
     )
 
 

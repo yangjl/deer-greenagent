@@ -6,20 +6,28 @@ from deerflow.persistence.dbtl.cycles import (
 )
 from deerflow.persistence.dbtl.model import (
     DbtlArtifactRow,
+    DbtlBuildLineageRow,
     DbtlCutoverDecisionRow,
     DbtlCycleRow,
+    DbtlDatasetRow,
     DbtlEventRow,
     DbtlGateEvaluationRow,
     DbtlReviewRow,
     DbtlStageAttemptRow,
+    DbtlStageWorkerRunRow,
     DbtlTransitionIntentRow,
     DbtlTransitionRow,
     DbtlValidationRow,
+    DbtlValidityAssessmentRow,
     KnowledgeClaimRow,
     KnowledgeLinkRow,
     KnowledgePromotionRow,
     MemoryCandidateRow,
     WorkItemRow,
+)
+from deerflow.persistence.dbtl.reconciliation_ops import (
+    RECONCILIATION_KIND,
+    ReconciliationOpsMixin,
 )
 from deerflow.persistence.dbtl.sql import (
     DbtlCutoverBlocked,
@@ -30,11 +38,14 @@ from deerflow.persistence.dbtl.sql import (
 )
 
 __all__ = [
+    "RECONCILIATION_KIND",
     "DbtlArtifactRow",
+    "DbtlBuildLineageRow",
     "DbtlCutoverBlocked",
     "DbtlCutoverDecisionRow",
     "DbtlCycleRepository",
     "DbtlCycleRow",
+    "DbtlDatasetRow",
     "DbtlEventRow",
     "DbtlGateEvaluationRow",
     "DbtlGovernanceRepository",
@@ -44,14 +55,17 @@ __all__ = [
     "DbtlReviewStale",
     "DbtlRevisionConflict",
     "DbtlStageAttemptRow",
+    "DbtlStageWorkerRunRow",
     "DbtlTopLevelCycleExists",
     "DbtlTransitionIntentRow",
     "DbtlTransitionRow",
     "DbtlValidationRow",
+    "DbtlValidityAssessmentRow",
     "DbtlWorkflowRefused",
     "KnowledgeClaimRow",
     "KnowledgeLinkRow",
     "KnowledgePromotionRow",
     "MemoryCandidateRow",
+    "ReconciliationOpsMixin",
     "WorkItemRow",
 ]

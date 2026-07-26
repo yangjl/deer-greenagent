@@ -319,6 +319,7 @@ def build_subagent_runtime_middlewares(
     mcp_routing_middleware: AgentMiddleware | None = None,
     agent_name: str | None = None,
     authorization_provider=None,
+    token_budget_max_tokens: int | None = None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     if app_config is None:
@@ -403,6 +404,16 @@ def build_subagent_runtime_middlewares(
         token_budget_config = app_config.subagents.get_token_budget_for(agent_name, summarization_enabled=summarization_enabled)
     else:
         token_budget_config = app_config.subagents.token_budget
+    if token_budget_max_tokens is not None:
+        from deerflow.config.token_budget_config import TokenBudgetConfig
+
+        token_budget_config = TokenBudgetConfig(
+            **{
+                **token_budget_config.model_dump(),
+                "enabled": True,
+                "max_tokens": token_budget_max_tokens,
+            }
+        )
     if token_budget_config.enabled:
         from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
 

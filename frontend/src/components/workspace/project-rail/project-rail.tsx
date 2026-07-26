@@ -10,6 +10,7 @@ import {
   MessageSquarePlus,
   MessagesSquare,
   Plus,
+  Presentation,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -45,6 +46,7 @@ import {
 import { cn } from "@/lib/utils";
 
 import { CycleStageSheet } from "./cycle-stage-sheet";
+import { Phase7DemoDialog } from "./phase7-demo-dialog";
 import { StartCycleDialog } from "./start-cycle-dialog";
 
 /** Agent roster placeholder until project agent assignment ships. */
@@ -135,10 +137,15 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const controls = dbtlControlState(dbtl.feature, dbtl.isLoading);
   const cycleQuery = useProjectCycles(project?.id);
 
-  const { selectedCycleId, selectCycle } = useProjectCycleSelection();
+  const {
+    selectedCycleId,
+    selectCycle,
+    requestDesignKickoff,
+  } = useProjectCycleSelection();
   const [cyclesOverride, setCyclesOverride] = useState<boolean | null>(null);
   const [readinessOpen, setReadinessOpen] = useState(false);
   const [startOpen, setStartOpen] = useState(false);
+  const [phase7DemoOpen, setPhase7DemoOpen] = useState(false);
   const [openStage, setOpenStage] = useState<DbtlStage | null>(null);
   const [blockerDraft, setBlockerDraft] = useState("");
 
@@ -190,6 +197,14 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
             cycles={cycles}
             open={startOpen}
             onOpenChange={setStartOpen}
+            onCreated={(cycle) => {
+              selectCycle(cycle.id);
+              requestDesignKickoff(cycle.id, cycle.title);
+            }}
+          />
+          <Phase7DemoDialog
+            open={phase7DemoOpen}
+            onOpenChange={setPhase7DemoOpen}
           />
           <CycleStageSheet
             projectId={project.id}
@@ -202,7 +217,17 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
       )}
       <SectionLabel
         action={
-          <button
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              aria-label="Open one-click Phase 7 human demo"
+              title="Preview Phase 7 validity outcomes"
+              className="text-muted-foreground hover:text-foreground transition-colors"
+              onClick={() => setPhase7DemoOpen(true)}
+            >
+              <Presentation className="size-3.5" />
+            </button>
+            <button
             type="button"
             aria-label={controlAccessibleLabel("Start a new cycle", controls)}
             aria-disabled={controls.ariaDisabled}
@@ -218,7 +243,8 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
             }}
           >
             <Plus className="size-3.5" />
-          </button>
+            </button>
+          </div>
         }
       >
         <button

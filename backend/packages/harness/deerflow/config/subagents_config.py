@@ -2,7 +2,7 @@
 
 import logging
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from deerflow.config.token_budget_config import TokenBudgetConfig
 
@@ -118,6 +118,18 @@ class CustomSubagentConfig(BaseModel):
         ge=1,
         description="Maximum execution time in seconds",
     )
+    dbtl_capabilities: list[str] = Field(
+        default_factory=list,
+        description="DBTL capabilities this specialist explicitly covers; undeclared specialists are not selected for stage work.",
+    )
+
+    @field_validator("dbtl_capabilities")
+    @classmethod
+    def validate_dbtl_capabilities(cls, values: list[str]) -> list[str]:
+        from deerflow.dbtl.capabilities import parse_capabilities
+
+        parse_capabilities(values)
+        return values
 
 
 class SubagentsAppConfig(BaseModel):

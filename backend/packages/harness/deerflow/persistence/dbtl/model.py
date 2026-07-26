@@ -100,6 +100,15 @@ class DbtlStageAttemptRow(Base):
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     db_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Which versioned StageSpec this attempt ran under (Phase 6). Nullable
+    # because Phase 3 cycles predate the registry; an attempt that cannot name
+    # its contract simply has no approval to invalidate.
+    stage_spec_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    # The dataset fingerprint an approval was bound to. Set when a stage is
+    # approved, compared afterwards: this is what turns "a dataset changed" from
+    # an assumption into a detection.
+    approved_dataset_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    approved_policy_version: Mapped[str | None] = mapped_column(String(96), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -111,6 +120,207 @@ class DbtlStageAttemptRow(Base):
     __table_args__ = (
         UniqueConstraint("cycle_id", "stage", "attempt_number", name="uq_dbtl_stage_attempt"),
         Index("ix_dbtl_stage_project_cycle", "project_id", "cycle_id"),
+    )
+
+
+class DbtlDatasetRow(Base):
+    """One declared input to a cycle, pinned by content hash (Phase 6).
+
+    The hash is what makes "if a dataset changes, the reconciliation gate is
+    invalidated" enforceable: an approval binds the fingerprint of this whole
+    set, and a later comparison detects the change instead of assuming none.
+
+    ``declared_immutable`` is the steward's assertion that Build must not write
+    here. It is stored rather than inferred from a filesystem mode because the
+    assertion is the thing a reviewer approves, and a permission bit can change
+    without anyone having decided anything.
+    """
+
+    __tablename__ = "dbtl_datasets"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    cycle_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dbtl_cycles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    uri: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    declared_immutable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    role: Mapped[str] = mapped_column(String(24), nullable=False, default="raw")
+    recorded_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    db_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+    __table_args__ = (
+        # One declaration per source per cycle. A second row for the same key
+        # would make the fingerprint depend on which one a query happened to
+        # read, so redeclaring updates in place and is recorded as an event.
+        UniqueConstraint("cycle_id", "source_key", name="uq_dbtl_dataset_source"),
+    )
+
+
+class DbtlStageWorkerRunRow(Base):
+    """One worker's contribution to one stage attempt (Phase 6).
+
+    Persisted even when the worker failed. A fan-out where two of three workers
+    crashed must not read as a tidy run with one worker, and the reviewer needs
+    to tell a crash apart from a worker that ran and found nothing.
+    """
+
+    __tablename__ = "dbtl_stage_worker_runs"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    cycle_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dbtl_cycles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    stage_attempt_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("dbtl_stage_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    unit_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    stage_spec_key: Mapped[str] = mapped_column(String(96), nullable=False)
+    capability: Mapped[str] = mapped_column(String(64), nullable=False)
+    agent_name: Mapped[str] = mapped_column(String(96), nullable=False)
+    via_generalist: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    stop_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+
+    __table_args__ = (UniqueConstraint("stage_attempt_id", "unit_id", name="uq_dbtl_stage_worker_unit"),)
+
+
+class DbtlBuildLineageRow(Base):
+    """One revision of the reproducibility record for a Build attempt."""
+
+    __tablename__ = "dbtl_build_lineage"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    cycle_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dbtl_cycles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    stage_attempt_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("dbtl_stage_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    lineage_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    stage_spec_key: Mapped[str] = mapped_column(String(96), nullable=False)
+    dataset_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_revision: Mapped[str] = mapped_column(String(160), nullable=False)
+    config_revision: Mapped[str] = mapped_column(String(160), nullable=False)
+    environment: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    input_artifacts: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    output_artifacts: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    deviations: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    logs_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    recorded_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    db_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utc_now,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "stage_attempt_id",
+            "lineage_revision",
+            name="uq_dbtl_build_lineage_revision",
+        ),
+    )
+
+
+class DbtlValidityAssessmentRow(Base):
+    """A human-owned Test validity decision, separate from headline metrics."""
+
+    __tablename__ = "dbtl_validity_assessments"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    cycle_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dbtl_cycles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    test_stage_attempt_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("dbtl_stage_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    build_lineage_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("dbtl_build_lineage.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    assessment_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    validity_pack_key: Mapped[str] = mapped_column(String(96), nullable=False)
+    headline_metrics: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    checks: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    recommendation: Mapped[str] = mapped_column(String(48), nullable=False)
+    reason_codes: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    limitations: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    reviewer_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    reviewer_project_role: Mapped[str] = mapped_column(String(24), nullable=False)
+    db_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utc_now,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "test_stage_attempt_id",
+            "assessment_revision",
+            name="uq_dbtl_validity_assessment_revision",
+        ),
     )
 
 

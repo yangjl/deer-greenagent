@@ -144,7 +144,11 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     monkeypatch.setitem(
         sys.modules,
         "deerflow.agents.middlewares.input_sanitization_middleware",
-        _module("deerflow.agents.middlewares.input_sanitization_middleware", InputSanitizationMiddleware=FakeMiddleware),
+        _module(
+            "deerflow.agents.middlewares.input_sanitization_middleware",
+            InputSanitizationMiddleware=FakeMiddleware,
+            neutralize_untrusted_tags=lambda text: text,
+        ),
     )
 
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
@@ -250,7 +254,11 @@ def test_lead_runtime_middlewares_thread_app_config_to_tool_error_handling(monke
     monkeypatch.setitem(
         sys.modules,
         "deerflow.agents.middlewares.input_sanitization_middleware",
-        _module("deerflow.agents.middlewares.input_sanitization_middleware", InputSanitizationMiddleware=object),
+        _module(
+            "deerflow.agents.middlewares.input_sanitization_middleware",
+            InputSanitizationMiddleware=object,
+            neutralize_untrusted_tags=lambda text: text,
+        ),
     )
     app_config = _make_app_config()
     _stub_runtime_middleware_imports(monkeypatch)
@@ -642,6 +650,25 @@ def test_subagent_runtime_middlewares_omit_loop_detection_when_disabled(monkeypa
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
 
     assert not any(isinstance(m, LoopDetectionMiddleware) for m in middlewares)
+
+
+def test_subagent_runtime_middlewares_honor_a_stage_token_budget(monkeypatch):
+    from deerflow.agents.middlewares.token_budget_middleware import (
+        TokenBudgetMiddleware,
+    )
+
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(
+        app_config=app_config,
+        model_name="test-model",
+        token_budget_max_tokens=400_000,
+    )
+
+    token_budget = next(item for item in middlewares if isinstance(item, TokenBudgetMiddleware))
+    assert token_budget._config.enabled is True
+    assert token_budget._config.max_tokens == 400_000
 
 
 def test_subagent_runtime_middlewares_place_loop_detection_before_safety_finish(monkeypatch):

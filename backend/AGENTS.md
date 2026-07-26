@@ -1489,15 +1489,14 @@ the turn. This is a known framework cost confined to graph-enabled project
 runs; projectless, custom-agent, scheduled, and rollback-mode runs remain on
 the root lead-agent graph.
 
-Stage execution stays behind `deerflow.dbtl.stage_stub.ManualStageAdapter`, whose
-guarantee is structural: the module imports nothing that can persist anything and
-nothing from greenagent's transition gate (pinned by a source-reading test), and
-`writes_scientific_result` / `satisfies_gate` are constants on a frozen value
-object rather than fields. A stub that produced plausible-looking output would be
-the worst outcome — a reviewer could not tell whether the science happened — so
-the rendered note says plainly that nothing was recorded. When Phase 6 replaces
-this, the thing to preserve is that gate satisfaction stays a typed human-review
-record in Phase 1's governance tables, never a graph output.
+Phase 5 introduced `deerflow.dbtl.stage_stub.ManualStageAdapter` as a
+structurally non-writing seam. Phase 6 keeps it only for explicit compatibility
+tests; production continuation requests receive
+`deerflow.agents.dbtl.stage_execution.LiveStageAdapter` from
+`make_project_supervisor`. Both adapters preserve the critical Phase 5
+invariant: `satisfies_gate` is a constant-false property, and gate satisfaction
+stays a typed human-review record in Phase 1's governance tables rather than a
+graph output.
 
 The selected project and cycle arrive as **explicit runtime context**.
 `supervisor_context_from_config` reads `project_id` from the merged runtime view
@@ -1508,11 +1507,198 @@ durable membership record), but reads `dbtl_selected_cycle_id` and
 into later turns and keep steering them — reading one key from one place is what
 enforces the chip's "affects the next request only" promise. An unrecognized
 choice falls through to normal routing rather than raising, so a stale frontend
-loses a preference instead of breaking a conversation. `selected_cycle_id` is
-deliberately *not* verified: Phase 5 writes nothing, so a forged value can at
-worst reach the stub adapter, which records nothing. **Any phase that gives the
-continuation branch real authority must verify it against project membership
-first.** The resume gate is already in place for both ids for the same reason.
+loses a preference instead of breaking a conversation. Before live work is
+dispatched, `LiveStageAdapter` loads the cycle by the pair
+`(selected_cycle_id, project_id)` from the durable repository. A forged or
+foreign cycle therefore produces no worker call and no write. The resume gate
+applies the same project/cycle scope check.
+
+DBTL Phase 6 defines the executable contracts and durable reconciliation gate
+for Design and Data Reconciliation. Its pure contracts live in
+`deerflow.dbtl` and own no storage, so the same functions answer "is this
+legal?" for a person clicking a button and for the repository about to commit.
+The supervisor's continuation branch is asynchronous and invokes the production
+`LiveStageAdapter`; the manual adapter is never selected by the production graph.
+
+`stage_spec.py` is the versioned registry. A stage is *data*, and the version
+is the load-bearing part: a human approves an attempt that ran under one
+contract, so `resolve_stage_spec` always returns a **pinned** version and an
+attempt records `StageSpec.spec_key`. `EXECUTABLE_STAGES` is
+`("design", "reconciliation", "build", "test")`; resolving `learn` raises
+`StageSpecNotFound` — that refusal, not a caller's restraint, keeps knowledge
+promotion unavailable until Phase 8.
+`HumanGatePolicy.allows_agent_approval` is a constant `False` **property**, not
+a field, so the design's "revisit only through a separately reviewed policy
+change" has no configuration value anyone could flip.
+
+`capabilities.py` + `agent_selector.py` implement "each work unit declares
+capabilities, not a fixed role name". Selection is constrained and refusal is a
+real outcome (`SelectionResult.unmet_capabilities`); a generalist may cover a
+capability but the fallback is recorded in `used_generalist_for` and surfaced,
+because a reviewer reading "quantitative genetics: general-purpose" knows what
+they are looking at and a reviewer reading nothing does not. Selection is
+deterministic — an attempt that cannot be reproduced from its record is not
+evidence. An **undeclared** agent covers nothing; treating it as capable of
+everything would make the selection record meaningless.
+
+`worker_result.py` is the structured contract. A claim with no `evidence_refs`
+is rejected, a non-boolean `quality_checks[].passed` is refused rather than
+coerced (a truthy string would turn an unanswered check into a passing one),
+and `capability`/`agent_name` come from the **dispatcher**, never the payload —
+accepting the worker's own account of what it exercised would let a selection
+failure look like a satisfied requirement. `is_trustworthy` folds `status`
+together with `stop_reason`: `SubagentExecutor` reports a token/turn/loop cap as
+a *completed* run carrying a partial answer, so reading status alone would file
+a truncated investigation as finished work.
+
+`stage_runner.py` plans, dispatches, and folds results. Its synchronous and
+asynchronous injected dispatcher seams receive the complete `WorkerBudget`
+(worker, turn, token, and timeout caps), so the plan, each worker's prompt, and
+partial-failure handling are testable without a model or a sandbox. An
+unsatisfiable plan is never dispatched — partial evidence that looks complete
+is worse than none — and a crashed or unparseable worker is kept as a `failed`
+result rather than dropped. `StageExecutionOutcome.satisfies_gate` is the Phase
+5 stub's constant `False` property, carried over unchanged.
+
+`agents/dbtl/stage_execution.py` is the production bridge. It derives the active
+stage from durable cycle state, refuses locked/awaiting-review stages, and
+builds candidates from currently available subagents. Custom specialists opt in
+with `subagents.custom_agents.<name>.dbtl_capabilities`; undeclared specialists
+cover nothing, while `general-purpose` remains the explicit recorded fallback.
+Each work unit gets its own `SubagentExecutor`, but its `max_turns`,
+`timeout_seconds`, and token-budget middleware are clamped by the stage spec.
+The child context carries the authenticated user/run identity and the verified
+project id/root, so its sandbox mounts the same human-visible project workspace.
+Units run concurrently and emit the normal task-started/completed/failed stream
+events.
+
+Only trustworthy structured outcomes produce a review package. The package is
+written atomically under
+`<project_root>/outputs/dbtl/<cycle-hash>/<stage>/` with a content-addressed
+filename, then `record_worker_runs` commits every success/failure and the
+artifact row in one cycle revision. The event idempotency key is bound to the
+server run and cycle. A retry reads that completed event before dispatch and
+returns the recorded counts/artifact; a conflicting replay is refused at the
+repository boundary.
+
+`reconciliation.py` is the bridge. `HUMAN_RESOLVED_CHECKS` draws the line the
+phase's no-go depends on: a unit conversion is arithmetic and an agent may close
+it, but a contradiction about what a treatment code *means* is a judgement the
+evidence underdetermines, so an agent may only reach `RowStatus.PROPOSED` there.
+A proposed row still **blocks** the gate. Reporting a blocker is deliberately
+open to agents — it only makes the gate stricter. `evaluate_gate` picks the
+outcome code from the worst blocker present (conflicting sources > missing data
+> indeterminate) so the code names what has to be fixed first.
+`dataset_fingerprint` is order-independent and binds source key, URI, content
+hash, role, and immutability, so a reordering is not a data change while a
+swapped or reclassified source is.
+
+Migration `0014_dbtl_stage_execution` adds `dbtl_datasets` (one row per
+`(cycle, source_key)`, so the fingerprint cannot depend on which duplicate a
+query read), `dbtl_stage_worker_runs`, and three nullable columns on
+`dbtl_stage_runs` (`stage_spec_key`, `approved_dataset_fingerprint`,
+`approved_policy_version`). All three are nullable on purpose: Phase 3 attempts
+predate the registry, and backfilling a guess would manufacture the false
+reassurance the binding exists to prevent.
+
+Migration `0015_repair_dbtl_schema_drift` is a forward-only shape repair for
+databases whose Alembic ledger was already at 0012/0013 while
+`dbtl_cycles.create_idempotency_key` or
+`dbtl_classifier_evaluations.request_fingerprint` was physically absent. It
+restores the nullable cycle idempotency column/index, gives unrecoverable legacy
+telemetry rows a stable ID-derived fingerprint, and restores the telemetry
+column's non-null contract. Its downgrade is intentionally a no-op because
+0012/0013 already promise those columns; dropping them when moving back to 0014
+would recreate the drift.
+
+`ReconciliationOpsMixin` is mixed into `DbtlCycleRepository` rather than given
+its own repository, because datasets, matrix rows, and worker runs belong to the
+**same cycle aggregate** — same `db_revision`, same activity-event idempotency
+ledger. A sibling repository would need its own copy of that machinery and the
+first divergence would show up as a lost review. Three enforcement points:
+`submit_stage_for_review` evaluates the gate for `reconciliation` *before* a
+reviewer is asked (sending an unresolved matrix to review invites an approval on
+a contradiction nobody settled); `resolve_work_item` **refuses** reconciliation
+rows, because that path takes no actor type and so cannot apply the human-
+decision rule — refusing is what stops it being the way around the rule; and
+`review_stage` binds the approval via `_bind_stage_approval`; a later material
+dataset change moves a `ready_for_build` cycle back to reconciliation, marks
+that stage changes-requested, and locks downstream stages. Identical
+redeclarations are idempotent and do not reopen the approval.
+
+Matrix rows are stored as `work_items` with `payload.kind = "reconciliation"`,
+which is what the plan's "Data Readiness/Reconciliation work items and gate"
+asks for and reuses Phase 3's tested revision/idempotency machinery. A row whose
+payload no longer parses is reported in
+`reconciliation_view.unreadable_row_ids` and **blocks** the gate; excluding it
+would make corruption fail open. An empty matrix also blocks even when datasets
+are declared. Approved matrix rows are immutable until a material dataset
+change explicitly invalidates and reopens reconciliation.
+Row dicts carry the row's **own** `db_revision`, not the cycle's; conflating the
+two would make every second decision in a session fail its optimistic check.
+
+`app/gateway/routers/dbtl_cycles.py` adds `GET .../dbtl/stage-specs`,
+`GET .../cycles/{id}/reconciliation`, `GET .../cycles/{id}/stages/{stage}/workers`,
+`POST .../cycles/{id}/datasets`, `POST .../cycles/{id}/reconciliation/rows`, and
+`POST .../reconciliation/rows/{row_id}/decide`. The decide endpoint hardcodes
+`actor_type="human"` and passes `_require_human_reviewer`: there is deliberately
+no way to submit an agent decision over HTTP, because letting a browser assert
+`actor_type="agent"` would make the human-decision rule a matter of what the
+client chose to send. Reviewer identity stays server-owned as elsewhere.
+
+Tests: `tests/test_dbtl_reconciliation.py` (pure rules),
+`tests/test_dbtl_stage_contracts.py` (specs, selection, worker contract,
+fan-out), `tests/test_dbtl_reconciliation_repository.py` (every write path goes
+through the rules, including the ones that could route around them),
+`tests/test_dbtl_live_stage_execution.py` (scope, stage lifecycle, partial
+failure, artifacts, replay), and
+`tests/test_dbtl_live_stage_graph_integration.py` (compiled supervisor graph to
+real SQLite repository). Note that Phase 6 changes existing behaviour:
+reconciliation can no longer be submitted for review with no declared inputs or
+no readable matrix rows, so the Phase 3 manual-path tests now declare a dataset
+and settle one matrix row first.
+
+DBTL Phase 7 extends the same execution seam through Build and Test.
+`deerflow/dbtl/validity.py` is the pure authority for the provisional
+`generic-predictive:v1` pack. It keeps `HeadlineMetric` separate from
+`ValidityCheck` and computes `supported`, `not_supported`, `inconclusive`, or
+`invalidated` fail-closed; high performance cannot override a failed validity
+check or an explicit plausible ceiling. Only supported and valid-negative
+results may recommend `advance_to_learn`.
+
+`persistence/dbtl/build_test_ops.py` is mixed into `DbtlCycleRepository` because
+Build lineage and Test decisions share the cycle revision and activity ledger.
+`dbtl_build_lineage` binds a Build revision to the reconciled dataset
+fingerprint, stage spec, code/config, environment, inputs, versioned outputs,
+deviations, and logs. `dbtl_validity_assessments` binds a human reviewer and
+typed recommendation to the exact Test attempt and latest Build lineage.
+Migration `0016_dbtl_build_test_validity` owns both tables. A Build submission
+without lineage is refused. The generic Test review path is also refused:
+`POST .../test/assessment` computes the outcome server-side and permits only a
+route legal for that outcome. Internal principals cannot call this human review
+endpoint, and reviewer identity/role are taken from authenticated project
+membership rather than request data.
+
+`LiveStageAdapter` maps `ready_for_build` to Build, runs Build/Test through the
+same bounded fan-out, and creates Build lineage after the content-addressed
+Build package is committed. It records `workspace:unversioned` plus a deviation
+when the runtime provides no source-control revision rather than manufacturing
+one. Tests: `test_dbtl_validity.py`, `test_dbtl_build_test_repository.py`,
+`test_dbtl_stage_contracts.py`, and the existing live/router/bootstrap suites.
+
+Current Design attempts resolve to `generic:design:v2`. The adapter supplies a
+bounded metadata-only project workspace manifest and prior Design worker runs,
+then records at least two independent positions (a required design specialist
+and an adversarial red team) before dispatching a chair synthesis. Only the
+chair counts toward Design-stage output. A `needs_input` chair must return one
+`clarification_question`; no artifact is attached, replay preserves the
+question, and the supervisor emits the standard `ask_clarification` AI-tool /
+ToolMessage pair so the existing chat card owns the interaction. The card
+response is routed back to the same selected cycle and appears in the next
+council context. A completed chair emits the standard `present_files` message
+pair and adds the package to the thread's existing artifact reducer/inspector.
+It may create a `design_brief.v2` package, but `satisfies_gate` remains
+structurally false.
 
 `threads_meta` carries nullable `workspace_id` and `project_id` plus explicit
 `scope_type` and `visibility`. Existing and newly projectless conversations

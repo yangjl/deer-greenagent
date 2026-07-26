@@ -120,12 +120,20 @@ class TestCustomSubagentConfig:
             model="qwen3:32b",
             max_turns=80,
             timeout_seconds=600,
+            dbtl_capabilities=[
+                "statistical_analysis",
+                "data_reconciliation_and_lineage",
+            ],
         )
         assert config.tools == ["bash", "read_file", "write_file"]
         assert config.skills == ["data-analysis", "visualization"]
         assert config.model == "qwen3:32b"
         assert config.max_turns == 80
         assert config.timeout_seconds == 600
+        assert config.dbtl_capabilities == [
+            "statistical_analysis",
+            "data_reconciliation_and_lineage",
+        ]
 
     def test_skills_empty_list_no_skills(self):
         config = CustomSubagentConfig(
@@ -149,6 +157,14 @@ class TestCustomSubagentConfig:
                 description="test",
                 system_prompt="test",
                 timeout_seconds=0,
+            )
+
+    def test_rejects_unknown_dbtl_capability(self):
+        with pytest.raises(ValueError, match="Unknown capability"):
+            CustomSubagentConfig(
+                description="test",
+                system_prompt="test",
+                dbtl_capabilities=["data_reconciliation"],
             )
 
 
@@ -277,6 +293,10 @@ class TestLoadSubagentsConfigWithSkills:
                         "tools": ["bash", "read_file"],
                         "max_turns": 80,
                         "timeout_seconds": 600,
+                        "dbtl_capabilities": [
+                            "statistical_analysis",
+                            "data_reconciliation_and_lineage",
+                        ],
                     },
                 },
             }
@@ -288,6 +308,10 @@ class TestLoadSubagentsConfigWithSkills:
         assert custom.tools == ["bash", "read_file"]
         assert custom.max_turns == 80
         assert custom.timeout_seconds == 600
+        assert custom.dbtl_capabilities == [
+            "statistical_analysis",
+            "data_reconciliation_and_lineage",
+        ]
 
     def test_load_with_both_overrides_and_custom(self):
         load_subagents_config_from_dict(
@@ -332,6 +356,10 @@ class TestRegistryCustomAgentLookup:
                         "tools": ["bash", "read_file"],
                         "max_turns": 80,
                         "timeout_seconds": 600,
+                        "dbtl_capabilities": [
+                            "statistical_analysis",
+                            "data_reconciliation_and_lineage",
+                        ],
                     },
                 },
             }
@@ -344,6 +372,10 @@ class TestRegistryCustomAgentLookup:
         assert config.max_turns == 80
         assert config.timeout_seconds == 600
         assert config.model == "inherit"
+        assert config.dbtl_capabilities == [
+            "statistical_analysis",
+            "data_reconciliation_and_lineage",
+        ]
 
     def test_custom_agent_found_from_explicit_app_config_without_global_config(self, monkeypatch):
         from deerflow.subagents.registry import get_subagent_config

@@ -66,7 +66,13 @@ class ManualStageAdapter:
     something honest to say instead of improvising.
     """
 
-    def execute(self, *, stage: str, cycle_id: str | None) -> StageStubResult:
+    def execute(
+        self,
+        *,
+        stage: str = "design",
+        cycle_id: str | None,
+        **_runtime_context,
+    ) -> StageStubResult:
         """Report what would happen, without doing any of it."""
         normalized = (stage or "").strip().lower()
         resolved = normalized if normalized in KNOWN_STAGES else "unknown"

@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0013_classifier_evaluations"
+HEAD = "0016_dbtl_build_test_validity"
 
 
 def _url(tmp_path: Path) -> str:

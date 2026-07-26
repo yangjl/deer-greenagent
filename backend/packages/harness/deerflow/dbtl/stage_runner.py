@@ -1,0 +1,329 @@
+"""Planning and collecting one stage's worker fan-out (Phase 6).
+
+This module replaces what :mod:`deerflow.dbtl.stage_stub` stood in for, and it
+keeps that module's central guarantee intact: **a stage run produces evidence, it
+never satisfies a gate.** :class:`StageExecutionOutcome` has no approval field,
+``satisfies_gate`` is a constant ``False`` property exactly as the stub's was,
+and nothing here imports the review path. Approval remains a typed human-review
+record bound to the evidence revision the reviewer saw.
+
+Dispatch is injected rather than imported. ``SubagentExecutor`` owns
+cancellation, tracing, task events, and the child runtime; the production
+adapter clamps it to this module's stage budget. Taking dispatch as a parameter
+means the plan, each worker prompt, and partial-failure folding are testable
+without a model, sandbox, or thread. The executor is wired in at the call site
+in ``deerflow.agents.dbtl``.
+
+A worker that fails is *kept*, as a ``failed`` result. A fan-out where two of
+three workers crashed must not read as a tidy run with one worker.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Awaitable, Sequence
+from dataclasses import dataclass, field
+from typing import Protocol
+
+from deerflow.dbtl.agent_selector import Assignment, SelectionResult, capability_brief, select_agents
+from deerflow.dbtl.stage_spec import StageSpec, WorkerBudget
+from deerflow.dbtl.worker_result import (
+    StageWorkerResult,
+    WorkerResultRejected,
+    extract_result_payload,
+    failed_result,
+    parse_worker_result,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkUnit:
+    """One dispatchable piece of a stage."""
+
+    unit_id: str
+    capability: str
+    agent_name: str
+    prompt: str
+    via_generalist: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DispatchOutcome:
+    """What a dispatcher reports back for one work unit.
+
+    Deliberately shaped like ``SubagentResult`` rather than like the structured
+    contract: the dispatcher's job is to run the worker and hand back its text
+    and stop reason, and *parsing* is this module's job so every caller gets the
+    same validation.
+    """
+
+    unit_id: str
+    text: str | None
+    stop_reason: str | None = None
+    error: str | None = None
+
+
+class WorkerDispatcher(Protocol):
+    """How a stage runs its work units. Implemented over ``SubagentExecutor``."""
+
+    def __call__(self, units: Sequence[WorkUnit], *, budget: WorkerBudget) -> Sequence[DispatchOutcome]: ...
+
+
+class AsyncWorkerDispatcher(Protocol):
+    """Async sibling used by graph nodes that fan out real subagents."""
+
+    def __call__(
+        self,
+        units: Sequence[WorkUnit],
+        *,
+        budget: WorkerBudget,
+    ) -> Awaitable[Sequence[DispatchOutcome]]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class StageExecutionPlan:
+    """What a stage intends to do, before it does any of it."""
+
+    spec: StageSpec
+    selection: SelectionResult
+    units: tuple[WorkUnit, ...] = ()
+
+    @property
+    def dispatchable(self) -> bool:
+        return self.selection.satisfied and bool(self.units)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "spec_key": self.spec.spec_key,
+            "stage": self.spec.stage,
+            "dispatchable": self.dispatchable,
+            "selection": self.selection.as_dict(),
+            "units": [
+                {
+                    "unit_id": unit.unit_id,
+                    "capability": unit.capability,
+                    "agent_name": unit.agent_name,
+                    "via_generalist": unit.via_generalist,
+                }
+                for unit in self.units
+            ],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class StageExecutionOutcome:
+    """Everything one stage run produced, and nothing it decided."""
+
+    plan: StageExecutionPlan
+    results: tuple[StageWorkerResult, ...] = ()
+    rejected: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def satisfies_gate(self) -> bool:
+        """Always ``False``.
+
+        A property rather than a field, carried over from the Phase 5 stub for
+        the same reason it existed there: a gate is closed by a typed human
+        review bound to an evidence revision, and a graph node is not a
+        reviewer. There is no call that sets this to ``True``.
+        """
+        return False
+
+    @property
+    def trustworthy_results(self) -> tuple[StageWorkerResult, ...]:
+        """Results that may count toward the stage's required output."""
+        return tuple(item for item in self.results if item.is_trustworthy)
+
+    @property
+    def produced_usable_evidence(self) -> bool:
+        return bool(self.trustworthy_results)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "plan": self.plan.as_dict(),
+            "results": [item.as_dict() for item in self.results],
+            "rejected": list(self.rejected),
+            "produced_usable_evidence": self.produced_usable_evidence,
+            "satisfies_gate": self.satisfies_gate,
+        }
+
+
+_RESULT_CONTRACT = """
+Answer with a single JSON object and nothing else:
+
+{
+  "status": "completed" | "needs_input" | "blocked" | "failed",
+  "summary": "what you did and what you found",
+  "artifact_refs": ["workspace/output paths you created"],
+  "claims": ["each specific finding, one per entry"],
+  "evidence_refs": [{"kind": "workspace_file" | "dataset" | "artifact" | "external",
+                     "reference": "path or id", "description": "what it shows"}],
+  "limitations": ["what this does not establish"],
+  "quality_checks": [{"name": "check you ran on your own work", "passed": true, "detail": ""}],
+  "recommended_next_actions": ["what a person should do next"],
+  "clarification_question": "required only when status is needs_input; ask one focused question",
+  "provenance": {"inputs_examined": [], "tools_used": []}
+}
+
+Every claim must be traceable to an entry in evidence_refs. If you could not
+verify something, say so in limitations rather than asserting it. Report
+status "blocked" when the data or the design prevents the work, not when you
+merely found a negative answer.
+""".strip()
+
+
+def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> str:
+    """The task one worker receives.
+
+    The stage's purpose, the worker's own angle, the project context, and the
+    result contract — in that order, so the worker knows what it is contributing
+    to before it is told how to format the answer.
+    """
+    lines = [
+        f"You are contributing to the {spec.title} stage of a DBTL research cycle.",
+        "",
+        f"Stage purpose: {spec.purpose}",
+        f"Your contribution: {capability_brief_for(assignment.capability)}",
+        "",
+        "Project context:",
+        context.strip() or "(none supplied)",
+        "",
+        "Constraints:",
+        "- Do not modify any file declared as raw data. Write derived output to a separate path.",
+        "- You cannot approve this stage. A person reviews your output before the cycle advances.",
+        "- If two sources disagree, report the disagreement; do not pick a winner on your own.",
+        "",
+        _RESULT_CONTRACT,
+    ]
+    return "\n".join(lines)
+
+
+def capability_brief_for(capability: str) -> str:
+    """Look up a capability's brief by its string value, tolerating unknowns."""
+    from deerflow.dbtl.capabilities import Capability
+
+    try:
+        return capability_brief(Capability(capability))
+    except ValueError:
+        return f"Contribute {capability.replace('_', ' ')} expertise."
+
+
+def plan_stage(
+    spec: StageSpec,
+    candidates: Sequence,
+    *,
+    attempt_id: str,
+    context: str = "",
+) -> StageExecutionPlan:
+    """Decide who does what, without dispatching anything."""
+    selection = select_agents(spec, candidates)
+    units = tuple(
+        WorkUnit(
+            unit_id=f"{attempt_id}-{index + 1}-{assignment.capability.value}",
+            capability=assignment.capability.value,
+            agent_name=assignment.agent_name,
+            prompt=build_prompt(spec, assignment, context=context),
+            via_generalist=assignment.via_generalist,
+        )
+        for index, assignment in enumerate(selection.assignments)
+    )
+    return StageExecutionPlan(spec=spec, selection=selection, units=units)
+
+
+def collect_results(plan: StageExecutionPlan, outcomes: Sequence[DispatchOutcome]) -> StageExecutionOutcome:
+    """Fold dispatch outcomes into validated, structured results.
+
+    Every unit in the plan produces exactly one result. A unit with no outcome,
+    an outcome carrying an error, and an outcome whose text does not satisfy the
+    structured contract all become ``failed`` results carrying the reason —
+    three different ways to end up with nothing usable, all of which the
+    reviewer needs to be able to tell apart from success.
+    """
+    by_unit = {item.unit_id: item for item in outcomes}
+    results: list[StageWorkerResult] = []
+    rejected: list[str] = []
+
+    for unit in plan.units:
+        outcome = by_unit.get(unit.unit_id)
+        if outcome is None:
+            results.append(failed_result(capability=unit.capability, agent_name=unit.agent_name, reason="The worker never reported a result."))
+            continue
+        if outcome.error or not outcome.text:
+            results.append(
+                failed_result(
+                    capability=unit.capability,
+                    agent_name=unit.agent_name,
+                    reason=outcome.error or "The worker returned no output.",
+                    stop_reason=outcome.stop_reason,
+                )
+            )
+            continue
+        try:
+            payload = extract_result_payload(outcome.text)
+            results.append(
+                parse_worker_result(
+                    payload,
+                    capability=unit.capability,
+                    agent_name=unit.agent_name,
+                    stop_reason=outcome.stop_reason,
+                )
+            )
+        except WorkerResultRejected as exc:
+            logger.info("dbtl stage worker %s returned an unusable result: %s", unit.unit_id, exc)
+            rejected.append(f"{unit.unit_id}: {exc}")
+            results.append(
+                failed_result(
+                    capability=unit.capability,
+                    agent_name=unit.agent_name,
+                    reason=f"The worker's result did not satisfy the stage contract: {exc}",
+                    stop_reason=outcome.stop_reason,
+                )
+            )
+
+    return StageExecutionOutcome(plan=plan, results=tuple(results), rejected=tuple(rejected))
+
+
+def run_stage(
+    spec: StageSpec,
+    candidates: Sequence,
+    dispatcher: WorkerDispatcher,
+    *,
+    attempt_id: str,
+    context: str = "",
+) -> StageExecutionOutcome:
+    """Plan, dispatch, and collect one stage's fan-out.
+
+    An unsatisfiable plan is *not* dispatched. Running the workers that could be
+    matched while a required capability went uncovered would produce partial
+    evidence that looks complete, so the outcome comes back empty with the
+    selection's own explanation attached.
+    """
+    plan = plan_stage(spec, candidates, attempt_id=attempt_id, context=context)
+    if not plan.dispatchable:
+        logger.info("dbtl stage %s not dispatchable: %s", spec.spec_key, "; ".join(plan.selection.notes) or "no work units")
+        return StageExecutionOutcome(plan=plan)
+    outcomes = dispatcher(plan.units, budget=spec.budget)
+    return collect_results(plan, outcomes)
+
+
+async def arun_stage(
+    spec: StageSpec,
+    candidates: Sequence,
+    dispatcher: AsyncWorkerDispatcher,
+    *,
+    attempt_id: str,
+    context: str = "",
+) -> StageExecutionOutcome:
+    """Async production path for a stage's real ``SubagentExecutor`` fan-out."""
+    plan = plan_stage(spec, candidates, attempt_id=attempt_id, context=context)
+    if not plan.dispatchable:
+        logger.info(
+            "dbtl stage %s not dispatchable: %s",
+            spec.spec_key,
+            "; ".join(plan.selection.notes) or "no work units",
+        )
+        return StageExecutionOutcome(plan=plan)
+    outcomes = await dispatcher(plan.units, budget=spec.budget)
+    return collect_results(plan, outcomes)

@@ -314,6 +314,7 @@ class TestAgentConstruction:
             tools=[],
             app_config=app_config,
             parent_model="parent-model",
+            token_budget_max_tokens=123_456,
         )
         provider = object()
         executor._authz_provider = provider
@@ -338,6 +339,7 @@ class TestAgentConstruction:
             "lazy_init": True,
             "deferred_setup": None,
             "agent_name": "test-agent",
+            "token_budget_max_tokens": 123_456,
             "authorization_provider": provider,
         }
         assert captured["agent"]["model"] is model
@@ -3127,6 +3129,8 @@ class TestSubagentGuardrailAttribution:
         oauth_provider=None,
         oauth_id=None,
         run_id=None,
+        project_id=None,
+        project_root=None,
         name="general-purpose",
         parent_model="test-model",
     ):
@@ -3150,6 +3154,8 @@ class TestSubagentGuardrailAttribution:
             oauth_provider=oauth_provider,
             oauth_id=oauth_id,
             run_id=run_id,
+            project_id=project_id,
+            project_root=project_root,
         )
 
     @pytest.mark.anyio
@@ -3170,6 +3176,8 @@ class TestSubagentGuardrailAttribution:
             oauth_provider="keycloak",
             oauth_id="subj-123",
             run_id="run-42",
+            project_id="project-17",
+            project_root="/srv/projects/project-17",
         )
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
@@ -3184,6 +3192,8 @@ class TestSubagentGuardrailAttribution:
         assert context.get("oauth_provider") == "keycloak"
         assert context.get("oauth_id") == "subj-123"
         assert context.get("run_id") == "run-42"
+        assert context.get("project_id") == "project-17"
+        assert context.get("project_root") == "/srv/projects/project-17"
         assert context.get("is_subagent") is True
 
     @pytest.mark.anyio

@@ -378,3 +378,377 @@ async def resolve_work_item(
         )
     except Exception as exc:  # noqa: BLE001
         raise _translate(exc) from exc
+
+
+# ── Phase 6: data readiness and reconciliation ───────────────────────────
+#
+# Reviewer identity stays server-owned here exactly as it is for stage reviews:
+# these request models forbid extra fields, so a client-supplied actor is a 422
+# rather than a trusted claim, and the decision endpoint records the
+# authenticated caller. There is deliberately **no** way to submit an agent
+# decision over HTTP — an agent's proposal reaches the matrix through the stage
+# runner, and letting a browser assert `actor_type="agent"` would make the
+# human-decision rule a matter of what the client chose to send.
+
+
+class DatasetDeclareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_key: str = Field(min_length=1, max_length=120)
+    uri: str = Field(min_length=1, max_length=2000)
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    declared_immutable: bool = True
+    role: Literal["raw", "derived", "reference"] = "raw"
+    expected_db_revision: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("source_key", "uri")
+    @classmethod
+    def dataset_text_must_have_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must contain text")
+        return value.strip()
+
+
+class ReconciliationRowRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    check: str = Field(min_length=1, max_length=64)
+    field_name: str = Field(min_length=1, max_length=240)
+    source_a_label: str = Field(default="", max_length=120)
+    source_a_value: str = Field(default="", max_length=1000)
+    source_b_label: str = Field(default="", max_length=120)
+    source_b_value: str = Field(default="", max_length=1000)
+    required: bool = True
+    expected_db_revision: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("field_name")
+    @classmethod
+    def field_name_must_have_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must contain text")
+        return value.strip()
+
+
+class ReconciliationDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # "proposed" is absent on purpose: a person's decision is a decision, and
+    # the pure layer refuses a human proposal anyway.
+    status: Literal["resolved", "blocked", "waived"]
+    resolution: str = Field(min_length=1, max_length=4000)
+    blocker_kind: Literal["missing_data", "conflicting_sources", "indeterminate"] | None = None
+    evidence_refs: list[str] = Field(default_factory=list, max_length=50)
+    expected_db_revision: int = Field(ge=1)
+    expected_work_item_revision: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("resolution")
+    @classmethod
+    def resolution_must_have_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("A reconciliation decision requires a rationale.")
+        return value.strip()
+
+    @field_validator("evidence_refs")
+    @classmethod
+    def evidence_refs_must_be_bounded(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in value if item.strip()]
+        if any(len(item) > 1000 for item in cleaned):
+            raise ValueError("Each evidence reference must be at most 1000 characters.")
+        return list(dict.fromkeys(cleaned))
+
+
+class BuildLineageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code_revision: str = Field(min_length=1, max_length=160)
+    config_revision: str = Field(min_length=1, max_length=160)
+    environment: dict[str, object]
+    input_artifacts: list[str] = Field(min_length=1, max_length=100)
+    output_artifacts: list[dict[str, object]] = Field(min_length=1, max_length=100)
+    deviations: list[str] = Field(default_factory=list, max_length=100)
+    logs_uri: str = Field(default="", max_length=2000)
+    expected_db_revision: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("code_revision", "config_revision")
+    @classmethod
+    def revision_must_have_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must contain text")
+        return value.strip()
+
+
+class HeadlineMetricRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=120)
+    value: float
+    threshold: float
+    criterion: Literal["gte", "lte"] = "gte"
+    plausible_max: float | None = None
+    unit: str = Field(default="", max_length=40)
+
+
+class ValidityCheckRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    check: str = Field(min_length=1, max_length=64)
+    status: Literal["passed", "failed", "missing", "not_applicable"]
+    detail: str = Field(default="", max_length=4000)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=50)
+
+
+class ValidityAssessmentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    metrics: list[HeadlineMetricRequest] = Field(max_length=100)
+    checks: list[ValidityCheckRequest] = Field(max_length=100)
+    recommendation: Literal[
+        "advance_to_learn",
+        "repeat_test",
+        "return_to_build",
+        "return_to_reconciliation",
+        "return_to_design",
+        "close_cycle",
+    ]
+    limitations: list[str] = Field(default_factory=list, max_length=100)
+    rationale: str = Field(min_length=1, max_length=10_000)
+    expected_db_revision: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("rationale")
+    @classmethod
+    def validity_rationale_must_have_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("A validity assessment requires a rationale.")
+        return value.strip()
+
+
+@router.get("/projects/{project_id}/dbtl/stage-specs")
+@require_permission("threads", "read")
+async def list_stage_specs(project_id: str, request: Request):
+    """The versioned contracts a new stage attempt would run under."""
+    from deerflow.dbtl.reconciliation import CHECK_LABELS
+    from deerflow.dbtl.stage_spec import (
+        EXECUTABLE_STAGES,
+        describe_specs,
+        resolve_stage_spec,
+    )
+
+    await _require_project(project_id, request)
+    return {
+        "project_id": project_id,
+        "executable_stages": list(EXECUTABLE_STAGES),
+        "specs": list(describe_specs(resolve_stage_spec(stage) for stage in EXECUTABLE_STAGES)),
+        "reconciliation_checks": [{"id": key.value, "label": label} for key, label in CHECK_LABELS.items()],
+    }
+
+
+@router.get("/projects/{project_id}/dbtl/cycles/{cycle_id}/reconciliation")
+@require_permission("threads", "read")
+async def get_reconciliation(project_id: str, cycle_id: str, request: Request, repo=Depends(get_dbtl_cycle_repo)):
+    """The matrix, the declared inputs, and the gate — in one read."""
+    await _require_project(project_id, request)
+    view = await repo.reconciliation_view(cycle_id, project_id=project_id)
+    if not view:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cycle not found")
+    return view
+
+
+@router.get("/projects/{project_id}/dbtl/cycles/{cycle_id}/build-test")
+@require_permission("threads", "read")
+async def get_build_test(
+    project_id: str,
+    cycle_id: str,
+    request: Request,
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    """Build reproducibility and Test validity in one review projection."""
+    await _require_project(project_id, request)
+    view = await repo.build_test_view(cycle_id, project_id=project_id)
+    if not view:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cycle not found",
+        )
+    return view
+
+
+@router.get("/projects/{project_id}/dbtl/cycles/{cycle_id}/stages/{stage}/workers")
+@require_permission("threads", "read")
+async def list_stage_workers(project_id: str, cycle_id: str, stage: StageName, request: Request, repo=Depends(get_dbtl_cycle_repo)):
+    await _require_project(project_id, request)
+    return {"cycle_id": cycle_id, "stage": stage, "workers": await repo.list_worker_runs(cycle_id, project_id=project_id, stage=stage)}
+
+
+@router.post("/projects/{project_id}/dbtl/cycles/{cycle_id}/datasets", status_code=status.HTTP_201_CREATED)
+@require_permission("threads", "write")
+async def declare_dataset(
+    project_id: str,
+    cycle_id: str,
+    body: DatasetDeclareRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    _project, user_id = await _require_project(project_id, request)
+    _require_mutations_enabled(request, config)
+    try:
+        return await repo.declare_dataset(
+            cycle_id=cycle_id,
+            project_id=project_id,
+            source_key=body.source_key,
+            uri=body.uri,
+            content_hash=body.content_hash,
+            recorded_by=user_id,
+            declared_immutable=body.declared_immutable,
+            role=body.role,
+            expected_db_revision=body.expected_db_revision,
+            idempotency_key=body.idempotency_key,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _translate(exc) from exc
+
+
+@router.post("/projects/{project_id}/dbtl/cycles/{cycle_id}/reconciliation/rows", status_code=status.HTTP_201_CREATED)
+@require_permission("threads", "write")
+async def open_reconciliation_row(
+    project_id: str,
+    cycle_id: str,
+    body: ReconciliationRowRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    _project, user_id = await _require_project(project_id, request)
+    _require_mutations_enabled(request, config)
+    try:
+        return await repo.open_reconciliation_row(
+            cycle_id=cycle_id,
+            project_id=project_id,
+            check=body.check,
+            field_name=body.field_name,
+            created_by=user_id,
+            source_a_label=body.source_a_label,
+            source_a_value=body.source_a_value,
+            source_b_label=body.source_b_label,
+            source_b_value=body.source_b_value,
+            required=body.required,
+            expected_db_revision=body.expected_db_revision,
+            idempotency_key=body.idempotency_key,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _translate(exc) from exc
+
+
+@router.post("/projects/{project_id}/dbtl/reconciliation/rows/{row_id}/decide")
+@require_permission("threads", "write")
+async def decide_reconciliation_row(
+    project_id: str,
+    row_id: str,
+    body: ReconciliationDecisionRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    """Record a person's decision on one matrix row.
+
+    Gated by ``_require_human_reviewer`` for the same reason stage review is:
+    settling a contradiction is a review act, and the Gateway's own internal or
+    scheduled principal must not be able to perform one even while carrying a
+    member's identity.
+    """
+    _project, user_id = await _require_project(project_id, request)
+    _require_mutations_enabled(request, config)
+    _require_human_reviewer(request)
+    try:
+        return await repo.decide_reconciliation_row(
+            row_id=row_id,
+            project_id=project_id,
+            status=body.status,
+            resolution=body.resolution,
+            actor_type="human",
+            actor_user_id=user_id,
+            blocker_kind=body.blocker_kind,
+            evidence_refs=body.evidence_refs,
+            expected_db_revision=body.expected_db_revision,
+            expected_work_item_revision=body.expected_work_item_revision,
+            idempotency_key=body.idempotency_key,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _translate(exc) from exc
+
+
+# ── Phase 7: Build lineage and Test validity ─────────────────────────────
+
+
+@router.post(
+    "/projects/{project_id}/dbtl/cycles/{cycle_id}/build/lineage",
+    status_code=status.HTTP_201_CREATED,
+)
+@require_permission("threads", "write")
+async def record_build_lineage(
+    project_id: str,
+    cycle_id: str,
+    body: BuildLineageRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    _project, user_id = await _require_project(project_id, request)
+    _require_mutations_enabled(request, config)
+    try:
+        return await repo.record_build_lineage(
+            cycle_id=cycle_id,
+            project_id=project_id,
+            code_revision=body.code_revision,
+            config_revision=body.config_revision,
+            environment=body.environment,
+            input_artifacts=body.input_artifacts,
+            output_artifacts=body.output_artifacts,
+            deviations=body.deviations,
+            logs_uri=body.logs_uri,
+            recorded_by=user_id,
+            expected_db_revision=body.expected_db_revision,
+            idempotency_key=body.idempotency_key,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _translate(exc) from exc
+
+
+@router.post(
+    "/projects/{project_id}/dbtl/cycles/{cycle_id}/test/assessment",
+    status_code=status.HTTP_201_CREATED,
+)
+@require_permission("threads", "write")
+async def record_validity_assessment(
+    project_id: str,
+    cycle_id: str,
+    body: ValidityAssessmentRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    """Compute and route a Test outcome. Reviewer identity is server-owned."""
+    project, user_id = await _require_project(project_id, request)
+    _require_mutations_enabled(request, config)
+    _require_human_reviewer(request)
+    try:
+        return await repo.record_validity_assessment(
+            cycle_id=cycle_id,
+            project_id=project_id,
+            metrics=[item.model_dump() for item in body.metrics],
+            checks=[item.model_dump() for item in body.checks],
+            recommendation=body.recommendation,
+            limitations=body.limitations,
+            rationale=body.rationale,
+            reviewer_user_id=user_id,
+            reviewer_project_role=str(project["current_user_role"]),
+            expected_db_revision=body.expected_db_revision,
+            idempotency_key=body.idempotency_key,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _translate(exc) from exc
