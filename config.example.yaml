@@ -1194,7 +1194,7 @@ projects:
 # blocked. PostgreSQL cutover approval and graph_enabled are separate explicit
 # operator decisions; neither is inferred from a successful validation.
 dbtl:
-  mode: audit_only # disabled | audit_only | manual | graph_enabled
+  mode: graph_enabled # disabled | audit_only | manual | graph_enabled
   policy_version: greenagent-dbtl-v2-draft
   # Record what the DBTL classifier believes about each project request.
   # Observation only: an evaluation never creates or advances a cycle.
@@ -1203,7 +1203,7 @@ dbtl:
   # evaluation can be measured before anyone is interrupted; turn on only
   # after reviewing the false-upgrade and missed-cycle rates in
   # Settings -> DBTL readiness. Also requires mode=manual or graph_enabled.
-  proposals_visible: false
+  proposals_visible: true
 
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
