@@ -225,6 +225,28 @@ def _proposed_objective(original: str, normalized: str) -> str:
     return sentence[: MAX_OBJECTIVE_LENGTH - 1].rstrip() + "…"
 
 
+def missing_clarification_fields(text: str) -> tuple[str, ...]:
+    """Which Design fields *text* still leaves unanswered.
+
+    Public because the supervisor's clarification branch needs this for a
+    deterministically-routed request, where the classifier never ran and so
+    produced no ``missing_fields``. Sharing one field list is the point: two
+    copies would drift into asking for different things.
+    """
+    return _missing_fields(_normalize(text or ""))
+
+
+def derive_objective(text: str) -> str:
+    """The objective a confirmation card should show for *text*.
+
+    Same reasoning as :func:`missing_clarification_fields` — a deterministic
+    route still has to show the user an objective, and it must be the one the
+    classifier path would have shown.
+    """
+    original = text or ""
+    return _proposed_objective(original, _normalize(original))
+
+
 def classify_request(text: str) -> ClassifierResult:
     """Classify one request. Pure, deterministic, and side-effect free."""
     normalized = _normalize(text or "")

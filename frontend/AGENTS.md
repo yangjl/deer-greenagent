@@ -220,6 +220,37 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   mounted from Settings → DBTL readiness, provides a project selector, and
   lets the tester label an undecided classifier-ordinary row as correctly
   ordinary or cycle-worthy for missed-cycle calibration.
+- `src/core/dbtl/context-chip.ts` is the Phase 5 request-context chip's pure
+  logic, and it exists so the two promises the chip makes are unit-testable
+  without rendering anything. `nextContextAfterSend` returns ordinary
+  **unconditionally** — that is the whole mechanism behind "affects the next
+  request only"; it is neither the user's job to switch back nor a cleanup step
+  a component can forget. `normalizeContext` resolves a stored selection
+  against the live cycle list on every render, because a cycle can be completed
+  or abandoned in another tab between the click and the send and the chip must
+  not keep claiming a scope that is gone. Terminal cycles are omitted from the
+  menu (a completed cycle cannot be continued, so offering it would produce a
+  refusal instead of an action), but numbering still comes from the **full**
+  list so the chip and the project rail agree about which cycle is "Cycle 02".
+  `runContextPayload` emits the one-run `dbtl_supervisor_enabled` flag plus the
+  backend's routing keys (`dbtl_explicit_choice`,
+  `dbtl_selected_cycle_id`). "Ask the AI to recommend" keeps the supervisor
+  flag but omits an explicit choice — precisely the one case where the backend
+  precedence ladder consults the classifier. A "cycle" selection with no id
+  degrades to ordinary rather than claiming a continuation it cannot name.
+- `src/components/workspace/dbtl/context-chip.tsx` renders it above the
+  composer, gated on `useDbtlFeature().graph_execution_enabled` **and** a
+  project, so the control never appears where changing it would do nothing.
+  The payload travels through `sendMessage`'s `extraContext` into the run
+  request's `context`, never `config.configurable`, which is checkpointed.
+  Interactive threads stay pinned to `lead_agent`; the Gateway selects the
+  supervisor for this run only after validating the durable project scope, so
+  disabling DBTL cannot strand an existing conversation. The chip stays
+  visually quiet for ordinary work — the overwhelmingly common case
+  — and gains weight only when a cycle is selected, which is the state worth
+  noticing because it changes what the next request means. The scope note lives
+  inside the menu rather than beside the chip: it answers a question the user
+  only has while choosing, and repeating it above every composer would be noise.
 - `src/components/workspace/dbtl/cycle-selection-context.tsx` carries only an
   **explicitly clicked** cycle from the project rail to project chat. The rail
   may display a default cycle's details, but that default does not silently

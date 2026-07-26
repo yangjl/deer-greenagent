@@ -255,7 +255,19 @@ _SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset({"is_internal", "au
 #   ``disable_clarification`` — set for non-interactive channels (GitHub
 #                              webhooks) so ClarificationMiddleware proceeds
 #                              instead of dead-ending the run.
-_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification"})
+#   ``dbtl_*``               — Phase 5's one-request supervisor selection.
+#                              These must not enter ``configurable`` because
+#                              that section is checkpointed and would make a
+#                              cycle choice sticky across later requests.
+_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset(
+    {
+        "github_token",
+        "disable_clarification",
+        "dbtl_supervisor_enabled",
+        "dbtl_explicit_choice",
+        "dbtl_selected_cycle_id",
+    }
+)
 
 
 async def file_thread_into_requested_project(
@@ -311,9 +323,11 @@ async def apply_project_scope_context(config: dict, thread_id: str, thread_store
     context = config.setdefault("context", {})
     context.pop("project_id", None)
     context.pop("project_root", None)
+    context.pop("project_name", None)
     configurable = config.get("configurable", {})
     configurable.pop("project_id", None)
     configurable.pop("project_root", None)
+    configurable.pop("project_name", None)
 
     if thread_store is None:
         return
@@ -334,6 +348,9 @@ async def apply_project_scope_context(config: dict, thread_id: str, thread_store
 
         project = await workspace_repo.get_project_record(project_id)
         if project is not None:
+            project_name = project.get("name")
+            if isinstance(project_name, str) and project_name.strip():
+                context["project_name"] = project_name.strip()
             root = await ensure_project_root(workspace_repo, project, request)
             if root:
                 context["project_root"] = root
@@ -502,6 +519,13 @@ def resolve_run_owner_user_id(request: Request) -> str | None:
     return str(user_id) if user_id is not None else None
 
 
+# Reserved assistant_ids that resolve to a DBTL LangGraph target instead of the
+# lead agent. Kept as one set so the resolve path and the pre-run safety gate
+# cannot disagree about which ids are gated — a gated id missing from the gate
+# would create a run record before failing.
+_DBTL_GRAPH_ASSISTANT_IDS: frozenset[str] = frozenset({"dbtl_orchestrator", "project_supervisor"})
+
+
 def resolve_agent_factory(assistant_id: str | None):
     """Resolve the agent factory callable from config.
 
@@ -511,14 +535,24 @@ def resolve_agent_factory(assistant_id: str | None):
     same factory; the routing happens inside ``make_lead_agent`` when it reads
     ``cfg["agent_name"]``.
 
-    Exception: the reserved ``dbtl_orchestrator`` assistant_id resolves to the
-    greenagent-gated DBTL orchestrator graph instead of the lead agent. This is
-    an opt-in run target; every other assistant_id keeps the untouched
-    lead-agent path.
+    Exceptions: two reserved assistant_ids resolve to greenagent-gated DBTL
+    graphs instead of the lead agent, and both are fail-closed until an operator
+    sets ``dbtl.mode=graph_enabled``.
+
+    - ``dbtl_orchestrator`` — the stage-machine orchestrator (Phase 1).
+    - ``project_supervisor`` — the thin routing supervisor (Phase 5), which
+      delegates ordinary work to this same lead agent.
+
+    These are opt-in run targets; every other assistant_id keeps the untouched
+    lead-agent path, so ordinary chat is unaffected by their existence.
     """
-    if assistant_id == "dbtl_orchestrator":
+    if assistant_id in _DBTL_GRAPH_ASSISTANT_IDS:
         if not get_app_config().dbtl.graph_execution_enabled:
             raise DbtlExecutionDisabledError("DBTL LangGraph execution is disabled. Review Settings → DBTL readiness; an operator must explicitly set dbtl.mode=graph_enabled before this assistant can run.")
+        if assistant_id == "project_supervisor":
+            from deerflow.agents.dbtl import make_project_supervisor
+
+            return make_project_supervisor
         from deerflow.agents.dbtl import make_dbtl_orchestrator
 
         return make_dbtl_orchestrator
@@ -528,13 +562,40 @@ def resolve_agent_factory(assistant_id: str | None):
     return make_lead_agent
 
 
+def resolve_run_agent_factory(assistant_id: str | None, config: Mapping[str, Any]):
+    """Resolve the graph for one run without changing the thread's assistant.
+
+    Interactive project conversations remain durably pinned to ``lead_agent``.
+    When the graph feature is enabled, the frontend may opt one project-scoped
+    run into the thin supervisor through runtime context. Keeping this separate
+    from ``assistant_id`` preserves checkpoint/state access if an operator later
+    rolls DBTL back to audit/manual mode.
+    """
+    default_factory = resolve_agent_factory(assistant_id)
+    if assistant_id not in (None, _DEFAULT_ASSISTANT_ID):
+        return default_factory
+    if not get_app_config().dbtl.graph_execution_enabled:
+        return default_factory
+    runtime_context = config.get("context")
+    if not isinstance(runtime_context, Mapping):
+        return default_factory
+    if runtime_context.get("dbtl_supervisor_enabled") is not True:
+        return default_factory
+    if not runtime_context.get("project_id"):
+        return default_factory
+
+    from deerflow.agents.dbtl import make_project_supervisor
+
+    return make_project_supervisor
+
+
 class DbtlExecutionDisabledError(RuntimeError):
     """Raised before a run is created when DBTL graph execution is disabled."""
 
 
 def ensure_dbtl_execution_allowed(assistant_id: str | None, command: Mapping[str, Any] | None = None) -> None:
     """Enforce DBTL run and resume safety before creating a run record."""
-    if assistant_id != "dbtl_orchestrator":
+    if assistant_id not in _DBTL_GRAPH_ASSISTANT_IDS:
         return
     try:
         resolve_agent_factory(assistant_id)
@@ -1140,7 +1201,6 @@ async def start_run(
         except Exception:
             logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
 
-        agent_factory = resolve_agent_factory(body.assistant_id)
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
         command = getattr(body, "command", None)
         if command and command.get("resume") is not None:
@@ -1183,6 +1243,7 @@ async def start_run(
             internal_owner_user=internal_owner_user,
             request_context=getattr(body, "context", None),
         )
+        agent_factory = resolve_run_agent_factory(body.assistant_id, config)
 
         task = asyncio.create_task(
             run_agent(

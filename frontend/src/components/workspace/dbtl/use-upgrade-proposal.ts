@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  type DbtlExplicitChoice,
   type EvaluationResponse,
   type ProposalAction,
   outcomeForAction,
@@ -55,7 +56,12 @@ export function useDbtlUpgradeProposal(projectId: string | null | undefined) {
   }, [projectId]);
 
   const evaluate = useCallback(
-    async (input: { text: string; threadId?: string | null; selectedCycleId?: string | null }) => {
+    async (input: {
+      text: string;
+      threadId?: string | null;
+      selectedCycleId?: string | null;
+      explicitChoice?: DbtlExplicitChoice | null;
+    }) => {
       if (!projectId || !input.text.trim()) {
         return;
       }
@@ -65,6 +71,7 @@ export function useDbtlUpgradeProposal(projectId: string | null | undefined) {
           text: input.text,
           threadId: input.threadId ?? null,
           selectedCycleId: input.selectedCycleId ?? null,
+          explicitChoice: input.explicitChoice ?? null,
           idempotencyKey: `eval-${uuid()}`,
         });
         if (sequence === evaluationSequence.current) {

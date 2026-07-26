@@ -14,6 +14,7 @@ import {
   useThreadChat,
 } from "@/components/workspace/chats";
 import {
+  DbtlContextChip,
   UpgradeProposalCard,
   useDbtlUpgradeProposal,
   useProjectCycleSelection,
@@ -40,6 +41,17 @@ import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { Welcome } from "@/components/workspace/welcome";
+import {
+  ORDINARY_REQUEST_CONTEXT,
+  type RequestContext,
+  nextContextAfterSend,
+  normalizeContext,
+  proposalContextPayload,
+  runActivityMetadata,
+  runContextPayload,
+  useDbtlFeature,
+  useProjectCycles,
+} from "@/core/dbtl";
 import { useBrowserControlEnabled } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -121,6 +133,10 @@ export default function ChatPage() {
   }, [isNewThread]);
 
   const { showNotification } = useNotification();
+  const { feature: dbtlFeature } = useDbtlFeature();
+  const showContextChip = Boolean(
+    projectId && dbtlFeature?.graph_execution_enabled,
+  );
 
   const {
     thread,
@@ -134,6 +150,7 @@ export default function ChatPage() {
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
+    projectSupervisorEnabled: showContextChip,
     context: settings.context,
     projectId,
     isMock,
@@ -200,18 +217,62 @@ export default function ChatPage() {
   const { selectedCycleId } = useProjectCycleSelection();
   const { evaluate: evaluateForUpgrade } = upgradeProposal;
 
+  // The context chip only appears where the supervisor can actually route, so
+  // the control is never offered when changing it would do nothing.
+  const { data: projectCycles } = useProjectCycles(projectId);
+  const [requestContext, setRequestContext] = useState<RequestContext>(
+    ORDINARY_REQUEST_CONTEXT,
+  );
+  const cycleList = projectCycles?.cycles ?? [];
+  // Resolve against the live list on every render: a cycle can be completed in
+  // another tab, and the chip must not keep claiming a scope that is gone.
+  const effectiveContext = normalizeContext(requestContext, cycleList);
+
   const handleSubmit = useCallback(
     (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
-      const sendPromise = sendMessage(threadId, message, undefined, options);
-      // Shadow evaluation runs beside the send, never in front of it: chat
-      // must stay intact whether or not the classifier has an opinion.
-      void evaluateForUpgrade({ text: message.text, threadId, selectedCycleId });
+      // Travels in the run request's `context`, never `configurable`, which is
+      // checkpointed and would make a one-off selection permanent.
+      const dbtlContext = showContextChip
+        ? runContextPayload(effectiveContext)
+        : undefined;
+      const proposalContext = showContextChip
+        ? proposalContextPayload(effectiveContext)
+        : { selectedCycleId, explicitChoice: null };
+      const sentContext = effectiveContext;
+      const sendPromise = sendMessage(threadId, message, dbtlContext, {
+        ...options,
+        runMetadata: showContextChip
+          ? runActivityMetadata(sentContext)
+          : undefined,
+        onSent: () => {
+          options?.onSent?.();
+          // Consume the one-shot choice only when the stream hook accepts the
+          // send. A click dropped by the in-flight guard must not lose it.
+          if (showContextChip) {
+            setRequestContext(nextContextAfterSend(sentContext));
+          }
+          // Shadow evaluation runs beside the accepted send, never in front
+          // of it, and uses the exact same routing inputs as the supervisor.
+          void evaluateForUpgrade({
+            text: message.text,
+            threadId,
+            ...proposalContext,
+          });
+        },
+      });
       if (message.files.length > 0) {
         return sendPromise;
       }
       void sendPromise;
     },
-    [sendMessage, threadId, selectedCycleId, evaluateForUpgrade],
+    [
+      sendMessage,
+      threadId,
+      selectedCycleId,
+      evaluateForUpgrade,
+      showContextChip,
+      effectiveContext,
+    ],
   );
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
@@ -222,7 +283,12 @@ export default function ChatPage() {
           text: buildHumanInputResponseText(request, response),
           files: [],
         },
-        undefined,
+        showContextChip
+          ? {
+              dbtl_supervisor_enabled: true,
+              dbtl_explicit_choice: "ordinary",
+            }
+          : undefined,
         {
           additionalKwargs: {
             hide_from_ui: true,
@@ -235,7 +301,7 @@ export default function ChatPage() {
       );
       return sent;
     },
-    [sendMessage, threadId],
+    [sendMessage, showContextChip, threadId],
   );
   const handleStop = useCallback(async () => {
     await thread.stop();
@@ -415,6 +481,16 @@ export default function ChatPage() {
                           />
                         )}
                       </div>
+                    </div>
+                  )}
+                  {showContextChip && (
+                    <div className="mb-1.5 flex w-full items-center">
+                      <DbtlContextChip
+                        context={effectiveContext}
+                        cycles={cycleList}
+                        onSelect={setRequestContext}
+                        disabled={thread.isLoading}
+                      />
                     </div>
                   )}
                   {upgradeProposal.evaluation && (

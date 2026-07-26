@@ -1,4 +1,5 @@
 export * from "./api";
+export * from "./context-chip";
 export * from "./controls";
 export * from "./cycle-hooks";
 export * from "./cycle-view";

@@ -1409,6 +1409,83 @@ dead end. Routing is reported honestly even when the card is withheld, so the
 drawer and the stored row agree. A telemetry write failure is logged and
 swallowed: a measurement surface must not degrade the product it measures.
 
+DBTL Phase 5 adds the thin project supervisor graph. Interactive project
+threads remain durably pinned to `lead_agent`; after the Gateway has re-derived
+project scope, `resolve_run_agent_factory` accepts the runtime-only
+`dbtl_supervisor_enabled=true` opt-in for that run. This preserves the normal
+state/checkpoint graph and makes rollback to audit/manual mode degrade to the
+lead agent instead of stranding threads pinned to a disabled assistant.
+`project_supervisor` remains a reserved direct/headless target beside
+`dbtl_orchestrator` in `services.py::_DBTL_GRAPH_ASSISTANT_IDS` (one set, so the
+resolve path and pre-run safety gate cannot disagree), and both direct targets
+stay fail-closed until `dbtl.mode=graph_enabled`.
+
+`deerflow.agents.dbtl.supervisor` routes one request to one of four **terminal**
+branches and ends; it never loops between them, so a request cannot silently
+become several. The ordinary branch **is** the compiled lead agent, added
+directly as a node sharing this graph's `ThreadState` schema — not a wrapper that
+copies fields across — so middleware, tools, sandbox mounts, and artifact paths
+behave identically because they are the same graph. Branch selection comes from
+`deerflow.dbtl.branches`, a pure layer over Phase 4's `deerflow.dbtl.routing`;
+re-deriving that precedence ladder would give the graph a second opinion about
+the same question, and the first symptom would be a proposal card offering one
+thing while the graph did another. The one decision `branches` adds is whether
+enough is known to show a confirmation at all: an explicit start request that
+names no trait, season, population, or validation criterion becomes a
+clarification instead of a dialog with blanks in it.
+
+**Delegation depends on idempotent reducers, and that is a framework fact, not a
+convention.** A compiled child used as a parent node returns its *entire final
+state* as its update, which the parent re-applies through its own reducers. This
+is safe only because every `ThreadState` channel merges by id or key
+(`add_messages` dedupes by message id, `merge_artifacts` by value) rather than
+accumulating. A channel added later with a naive `operator.add` reducer would
+duplicate the whole conversation on the first delegated turn, so
+`tests/test_dbtl_supervisor.py` pins both the per-channel reducer check and an
+end-to-end idempotency test in **both** checkpoint channel modes.
+
+**Stream contract.** Delegation moves the lead agent off the root namespace, with
+three consequences pinned by `tests/test_dbtl_supervisor_stream_contract.py`:
+model token frames still reach a `subgraphs=False` consumer (otherwise every
+ordinary answer would stop streaming); child `values` frames stay namespaced and
+never impersonate a root frame (#4399); and those token frames now carry
+`langgraph_checkpoint_ns="ordinary:<id>"` in their *metadata*. The run worker
+uses that value only as part of the large-file-tool batching identity key, never
+as a root-vs-subagent gate — anything that later treats a non-empty metadata
+namespace as "not the main thread" would misclassify every ordinary answer.
+**Known cost:** per-super-step `values` snapshots from inside the ordinary branch
+become namespaced, so a root-only consumer sees state at the branch boundary
+rather than during it. Nothing is lost (the final snapshot is complete, tokens
+are unaffected), but progressive artifact/todo/title updates arrive at the end of
+the turn. This is a known framework cost confined to graph-enabled project
+runs; projectless, custom-agent, scheduled, and rollback-mode runs remain on
+the root lead-agent graph.
+
+Stage execution stays behind `deerflow.dbtl.stage_stub.ManualStageAdapter`, whose
+guarantee is structural: the module imports nothing that can persist anything and
+nothing from greenagent's transition gate (pinned by a source-reading test), and
+`writes_scientific_result` / `satisfies_gate` are constants on a frozen value
+object rather than fields. A stub that produced plausible-looking output would be
+the worst outcome — a reviewer could not tell whether the science happened — so
+the rendered note says plainly that nothing was recorded. When Phase 6 replaces
+this, the thing to preserve is that gate satisfaction stays a typed human-review
+record in Phase 1's governance tables, never a graph output.
+
+The selected project and cycle arrive as **explicit runtime context**.
+`supervisor_context_from_config` reads `project_id` from the merged runtime view
+(the Gateway owns it: caller-supplied values are dropped and re-stamped from the
+durable membership record), but reads `dbtl_selected_cycle_id` and
+`dbtl_explicit_choice` from `context` **only, never the merged view**.
+`configurable` is checkpointed, so a selection accepted from there would survive
+into later turns and keep steering them — reading one key from one place is what
+enforces the chip's "affects the next request only" promise. An unrecognized
+choice falls through to normal routing rather than raising, so a stale frontend
+loses a preference instead of breaking a conversation. `selected_cycle_id` is
+deliberately *not* verified: Phase 5 writes nothing, so a forged value can at
+worst reach the stub adapter, which records nothing. **Any phase that gives the
+continuation branch real authority must verify it against project membership
+first.** The resume gate is already in place for both ids for the same reason.
+
 `threads_meta` carries nullable `workspace_id` and `project_id` plus explicit
 `scope_type` and `visibility`. Existing and newly projectless conversations
 default to `inbox` / `private-owner`; never infer workspace sharing from a

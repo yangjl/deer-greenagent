@@ -923,6 +923,28 @@ def test_merge_run_context_overrides_forwards_context_only_keys():
     assert "disable_clarification" not in config.get("configurable", {})
 
 
+def test_merge_run_context_overrides_forwards_dbtl_selection_runtime_only():
+    """The context chip must reach the supervisor without becoming sticky."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(
+        config,
+        {
+            "dbtl_supervisor_enabled": True,
+            "dbtl_explicit_choice": "continue_cycle",
+            "dbtl_selected_cycle_id": "cycle-7",
+        },
+    )
+
+    assert config["context"]["dbtl_supervisor_enabled"] is True
+    assert config["context"]["dbtl_explicit_choice"] == "continue_cycle"
+    assert config["context"]["dbtl_selected_cycle_id"] == "cycle-7"
+    assert "dbtl_supervisor_enabled" not in config["configurable"]
+    assert "dbtl_explicit_choice" not in config["configurable"]
+    assert "dbtl_selected_cycle_id" not in config["configurable"]
+
+
 def test_merge_run_context_overrides_context_only_keys_do_not_override_existing():
     """A token already in ``config['context']`` must not be clobbered by a
     client-supplied one (defense in depth — the manager is the only legitimate

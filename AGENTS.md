@@ -116,6 +116,18 @@ Breeding-workspace note:
   readiness exposes the administrator validation/evidence/cutover checklist;
   SQLite is always cutover-blocked and PostgreSQL approval remains distinct
   from enabling the future Supervisor Graph.
+- DBTL Phase 5 adds that Supervisor Graph as a thin, per-run project router,
+  fail-closed until `dbtl.mode=graph_enabled`. Interactive threads remain
+  durably pinned to `lead_agent`; a runtime-only opt-in selects the supervisor
+  for one project request, preserving normal checkpoint access and safe
+  rollback. It routes one request to one of four terminal branches — ordinary
+  work, clarification, cycle setup/confirmation, existing-cycle continuation —
+  and the ordinary branch *is* the existing lead agent. Stage execution remains
+  behind a stub that structurally cannot write results or satisfy gates. A
+  per-request context chip above the composer shows
+  `[ Ordinary project work ▾ ]` or `[ Cycle 01 · Design ▾ ]` and applies to the
+  next request only. See [backend/AGENTS.md](backend/AGENTS.md) for the
+  reducer-idempotency and stream-contract constraints that make delegation safe.
 
 ## Commands: Root vs. Module
 

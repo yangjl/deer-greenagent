@@ -51,6 +51,7 @@ class TestProjectScopeContext:
             workspace_repo=_RootRepo({"project-abc": str(root)}),
         )
         assert config["context"]["project_id"] == "project-abc"
+        assert config["context"]["project_name"] == "project-abc"
         assert config["context"]["project_root"] == str(root)
         # ensure_project_root materializes the human folder
         assert root.is_dir()
@@ -63,8 +64,16 @@ class TestProjectScopeContext:
     async def test_client_supplied_project_and_root_are_overwritten(self, tmp_path):
         """A caller must not be able to point a run at another folder."""
         config: dict = {
-            "context": {"project_id": "project-victim", "project_root": "/etc"},
-            "configurable": {"project_id": "project-victim", "project_root": "/etc"},
+            "context": {
+                "project_id": "project-victim",
+                "project_name": "Victim",
+                "project_root": "/etc",
+            },
+            "configurable": {
+                "project_id": "project-victim",
+                "project_name": "Victim",
+                "project_root": "/etc",
+            },
         }
         await apply_project_scope_context(
             config,
@@ -73,19 +82,30 @@ class TestProjectScopeContext:
             workspace_repo=_RootRepo({"project-abc": str(tmp_path / "G2F")}),
         )
         assert config["context"]["project_id"] == "project-abc"
+        assert config["context"]["project_name"] == "project-abc"
         assert config["context"]["project_root"] == str(tmp_path / "G2F")
         assert "project_id" not in config["configurable"]
+        assert "project_name" not in config["configurable"]
         assert "project_root" not in config["configurable"]
 
     async def test_client_supplied_project_is_dropped_for_unfiled_conversations(self):
         config: dict = {
-            "context": {"project_id": "project-victim", "project_root": "/etc"},
-            "configurable": {"project_id": "project-victim"},
+            "context": {
+                "project_id": "project-victim",
+                "project_name": "Victim",
+                "project_root": "/etc",
+            },
+            "configurable": {
+                "project_id": "project-victim",
+                "project_name": "Victim",
+            },
         }
         await apply_project_scope_context(config, "thread-1", _Store({"project_id": None}))
         assert "project_id" not in config["context"]
+        assert "project_name" not in config["context"]
         assert "project_root" not in config["context"]
         assert "project_id" not in config["configurable"]
+        assert "project_name" not in config["configurable"]
 
     async def test_missing_repo_still_stamps_the_id_but_no_root(self):
         config: dict = {"context": {}, "configurable": {}}

@@ -49,6 +49,8 @@ import type {
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
   displayThreadId?: string | null | undefined;
+  /** Route this project's runs through the DBTL supervisor without re-pinning the thread. */
+  projectSupervisorEnabled?: boolean;
   context: LocalSettings["context"];
   /**
    * Project this conversation belongs to. On lazy thread creation the thread
@@ -65,6 +67,8 @@ export type ThreadStreamOptions = {
 type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
+  /** Inspectable run metadata; unlike context, it never steers execution. */
+  runMetadata?: Record<string, unknown>;
   /**
    * Invoked exactly once when the send passes the in-flight guard and is
    * genuinely dispatched. It never fires on the early-return path, so callers
@@ -977,6 +981,7 @@ function isThreadMissingError(error: unknown): boolean {
 export function useThreadStream({
   threadId,
   displayThreadId,
+  projectSupervisorEnabled = false,
   context,
   projectId,
   isMock,
@@ -1564,6 +1569,7 @@ export function useThreadStream({
           },
           {
             threadId: threadId,
+            metadata: options?.runMetadata,
             // No streamSubgraphs: subtask progress arrives via root-namespace
             // custom events, while subgraph frames would leak a delegated
             // subagent's values/messages into the thread view (#4399).
@@ -1683,7 +1689,15 @@ export function useThreadStream({
             recursion_limit: 1000,
           },
           context: {
+            // A regenerated answer is ordinary by default. The original
+            // request's one-shot cycle selection is intentionally not replayed.
             ...context,
+            ...(projectSupervisorEnabled
+              ? {
+                  dbtl_supervisor_enabled: true,
+                  dbtl_explicit_choice: "ordinary",
+                }
+              : {}),
             ...(projectId ? { project_id: projectId } : {}),
             thinking_enabled: context.mode !== "flash",
             is_plan_mode: context.mode === "pro" || context.mode === "ultra",
@@ -1724,7 +1738,15 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [context, humanMessageCount, persistedMessages, projectId, queryClient, thread],
+    [
+      context,
+      humanMessageCount,
+      persistedMessages,
+      projectId,
+      projectSupervisorEnabled,
+      queryClient,
+      thread,
+    ],
   );
 
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,
