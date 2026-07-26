@@ -8,6 +8,7 @@ import {
   BrainIcon,
   PaletteIcon,
   WorkflowIcon,
+  PlugZapIcon,
   UserIcon,
   WrenchIcon,
 } from "lucide-react";
@@ -25,6 +26,7 @@ import { AccountSettingsPage } from "@/components/workspace/settings/account-set
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
 import { ChannelsSettingsPage } from "@/components/workspace/settings/channels-settings-page";
 import { DbtlReadinessSettingsPage } from "@/components/workspace/settings/dbtl-readiness-settings-page";
+import { IntegrationsSettingsPage } from "@/components/workspace/settings/integrations-settings-page";
 import { MemoryScopeSettingsPage } from "@/components/workspace/settings/memory-scope-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
@@ -32,11 +34,12 @@ import { ToolSettingsPage } from "@/components/workspace/settings/tool-settings-
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
-type SettingsSection =
+export type SettingsSection =
   | "account"
   | "appearance"
   | "channels"
   | "dbtl"
+  | "integrations"
   | "memory"
   | "memory-scope"
   | "tools"
@@ -84,6 +87,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
         icon: CableIcon,
       },
       {
+        id: "integrations",
+        label: t.settings.sections.integrations,
+        icon: PlugZapIcon,
+      },
+      {
         id: "memory",
         label: t.settings.sections.memory,
         icon: BrainIcon,
@@ -105,6 +113,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.account,
       t.settings.sections.appearance,
       t.settings.sections.channels,
+      t.settings.sections.integrations,
       t.settings.sections.memory,
       t.settings.sections.memoryScope,
       t.settings.sections.dbtl,
@@ -163,6 +172,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "tools" && <ToolSettingsPage />}
               {activeSection === "notification" && <NotificationSettingsPage />}
               {activeSection === "channels" && <ChannelsSettingsPage />}
+              {activeSection === "integrations" && <IntegrationsSettingsPage />}
               {activeSection === "about" && <AboutSettingsPage />}
             </div>
           </ScrollArea>
