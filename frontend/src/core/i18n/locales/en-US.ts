@@ -719,6 +719,7 @@ export const enUS: Translations = {
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",
+      memoryScope: "Memory scope",
       dbtl: "DBTL readiness",
       memory: "Memory",
       tools: "Tools",

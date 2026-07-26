@@ -5,6 +5,7 @@ import html
 import logging
 import threading
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -732,6 +733,7 @@ def _get_memory_context(
     *,
     app_config: AppConfig | None = None,
     user_id: str | None = None,
+    shared_user_ids: Sequence[str] = (),
 ) -> str:
     """Get memory context for injection into system prompt.
 
@@ -741,6 +743,11 @@ def _get_memory_context(
             are read from this value instead of the global config singleton.
         user_id: Explicit memory bucket. When omitted, uses the current
             authenticated user's global bucket.
+        shared_user_ids: Project-wide buckets to append after the private one
+            (Phase 2). Rendered in their own labeled section so the model does
+            not present another member's approved fact as this user's private
+            context. A bucket that fails to load is skipped rather than
+            blanking the whole injection.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
@@ -759,16 +766,35 @@ def _get_memory_context(
         if not config.enabled or not config.injection_enabled:
             return ""
 
-        memory_content = get_memory_manager().get_context(
+        manager = get_memory_manager()
+        memory_content = manager.get_context(
             user_id=user_id or get_effective_user_id(),
             agent_name=agent_name,
         )
 
-        if not memory_content.strip():
+        shared_sections: list[str] = []
+        for bucket in shared_user_ids:
+            try:
+                shared = manager.get_context(user_id=bucket, agent_name=agent_name)
+            except Exception:
+                # One unavailable project bucket must not cost the user their
+                # own memory; log and continue with what did load.
+                logger.exception("Failed to load shared project memory bucket")
+                continue
+            if shared.strip():
+                shared_sections.append(shared.strip())
+
+        if not memory_content.strip() and not shared_sections:
             return ""
 
+        body = memory_content.strip()
+        if shared_sections:
+            shared_body = "\n".join(shared_sections)
+            shared_block = f"<project_shared_memory>\n{shared_body}\n</project_shared_memory>"
+            body = f"{body}\n\n{shared_block}" if body else shared_block
+
         return f"""<memory>
-{memory_content}
+{body}
 </memory>
 """
     except Exception:

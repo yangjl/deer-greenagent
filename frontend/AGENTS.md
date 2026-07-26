@@ -171,6 +171,22 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   cutover only after every PostgreSQL check passes. It must not repair data,
   create/advance a cycle, promote knowledge, or start a graph. The project
   rail's “View readiness” action opens that settings section.
+- `src/core/memory-scope/` owns the per-project memory scope migration
+  (DBTL Phase 2). `review.ts` is **pure and React-free** — count rows, the
+  four per-fact decisions, queue advance, provenance labels, and each
+  decision's stated consequence — so the privacy rules are unit-tested
+  directly rather than inferred from a rendered tree. `hooks.ts` deliberately
+  does not fetch the review queue until the user opens it: the landing view is
+  counts-only, and fact bodies must not be pulled into the client before then.
+  `DECISION_ORDER` is a fixed list, not a derived one, so adding a bulk
+  “share all” would have to be a conscious edit. Settings → Memory scope
+  (`memory-scope-settings-page.tsx`) renders the counts, the owner's own
+  review drawer, manifest download, and rollback for one selected project.
+  Decisions submit the exact agent bucket and SHA-256 shown on the card; queue
+  identity uses bucket + agent + fact + checksum rather than `fact_id` alone.
+  The backend returns only the caller's pending counts and manifest slice.
+  Native `disabled` controls prevent duplicate decisions, and rollback is a
+  two-click confirmation that affects only the caller's shared copies.
 - `src/app/workspace/[project_slug]/[thread_id]/page.tsx` re-exports the
   canonical chat page. `src/app/workspace/chats/[thread_id]/page.tsx` derives
   its project scope from `useParams().project_slug` (falling back to

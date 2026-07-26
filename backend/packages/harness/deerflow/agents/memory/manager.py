@@ -372,6 +372,19 @@ class MemoryManager(BaseModel):
         cache override."""
         raise NotImplementedError(f"reload_memory not supported by {type(self).__name__}")
 
+    def scope_bindings(self) -> tuple[str, Any]:
+        """Return ``(storage_root, fact_store)`` for the Phase 2 scope migration.
+
+        ``storage_root`` is the directory the backend's per-user buckets live
+        under; ``fact_store`` must satisfy the ``FactStore`` protocol in
+        ``deerflow.agents.memory.scopes.migration``.
+
+        Backends hand back their *own* store rather than letting callers build
+        a second one: a second instance over the same files would have its own
+        in-process locks and caches. Default: unsupported.
+        """
+        raise NotImplementedError(f"scope_bindings not supported by {type(self).__name__}")
+
     def create_fact(
         self,
         content: str,

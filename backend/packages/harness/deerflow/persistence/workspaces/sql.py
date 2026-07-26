@@ -155,6 +155,30 @@ class WorkspaceRepository:
             data["current_user_role"] = role
             return data
 
+    async def list_project_members(self, project_id: str, *, user_id: str) -> list[dict[str, Any]]:
+        """Active members who can reach *project_id*, for the calling member.
+
+        Membership is a workspace fact, so this is the authoritative set of
+        ``(user, project)`` pairs the memory scope migration recomputes legacy
+        buckets from. Requesting it requires being a member yourself.
+        """
+        async with self._sf() as session:
+            project = await session.get(ProjectRow, project_id)
+            if project is None:
+                return []
+            if await self._membership_role(session, workspace_id=project.workspace_id, user_id=user_id) is None:
+                raise WorkspaceAccessDenied(project.workspace_id)
+            stmt = (
+                select(WorkspaceMemberRow)
+                .where(
+                    WorkspaceMemberRow.workspace_id == project.workspace_id,
+                    WorkspaceMemberRow.status == "active",
+                )
+                .order_by(WorkspaceMemberRow.user_id.asc())
+            )
+            rows = await session.execute(stmt)
+            return [{"user_id": row.user_id, "role": row.role} for row in rows.scalars()]
+
     async def create_project(
         self,
         *,

@@ -1175,6 +1175,55 @@ the request-only system contract makes durable `project_id`/`project_root`
 authoritative over stale assistant replies and summaries without rewriting
 visible conversation history.
 
+DBTL Phase 2 adds the **canonical scope layer** in
+`deerflow.agents.memory.scopes`, which expresses five contexts — `personal`,
+`agent`, `project` (a member's private project memory), `shared_project`, and
+`publication` (reserved) — on DeerMem's two storage keys without moving a byte
+of existing data: `adapter.bind_scope` reproduces `scoped_memory_user_id`
+bit-identically for the `project` kind, pinned by a test. The two project-wide
+buckets occupy reserved namespaces (`--project--<digest>` and
+`--published--<digest>`). `bind_scope` rejects internally inconsistent scope
+objects and any authenticated user id containing either separator, protecting
+both shared buckets and the per-user project buckets that already existed.
+
+Retrieval spans the chain `reader.scoped_memory_bucket_chain` returns (private
+project bucket, then the project's shared bucket); writing targets only its
+head, so nothing auto-writes shared memory. `_get_memory_context` renders the
+shared buckets in their own `<project_shared_memory>` section and skips an
+unavailable bucket rather than blanking the whole injection. A project run
+never reads the user-global bucket — that is the Phase 2 no-go.
+
+Migration is recompute-only and never guesses: `classify.build_bucket_index`
+derives the bucket every authoritative `(member, project)` pair would have
+produced (including the `root:<path>` fallback) and quarantines anything
+claimed by zero or by more than one authority. `inventory.build_manifest`
+produces a deterministic, checksum-preserving manifest that deliberately
+carries **no fact bodies**, never follows symlinks, and is sliced to the
+requesting member before download so other buckets and the absolute host
+storage path are not exposed. `migration.apply_decision` copies — never moves
+— an approved fact into the shared bucket under a deterministic
+`shared_<digest>` id. A decision binds `fact_id`, agent bucket, and the exact
+source SHA-256 shown to the reviewer; stale or conflicting decisions fail
+closed. Every write is serialized by a cross-process project lock and
+bracketed with `journal.MigrationJournal` records
+(`started` before the write, `completed` after, `rollback` on undo) so the
+migration is idempotent, restartable, and reversible. Backends expose their
+own root and store through the tier-3 `MemoryManager.scope_bindings()` hook;
+never construct a second `FileMemoryStorage` over the same directory.
+
+`app/gateway/routers/memory_scope.py` mounts the per-project surface under
+`/api/projects/{id}/memory/migration`: the landing view returns counts only,
+`/suggestions` returns bodies for exactly one person (the owner), `/decisions`
+takes **one** checksum-bound `(fact_id, agent_name, source_sha256)` decision
+because bulk sharing is deliberately absent, and `/manifest` and `/rollback`
+complete the evidence/undo loop. The source bucket is resolved from the
+authenticated caller, never from the request body; rollback removes only
+copies sourced from that caller's private project buckets.
+`WorkspaceRepository.list_project_members` is the authoritative membership
+source. Tests: `tests/test_memory_scope_*.py`, with
+`tests/test_memory_scope_two_user_sharing.py` driving the real
+`FileMemoryStorage` for the two-member exit review.
+
 Project-scoped Gateway routes live in `app/gateway/routers/workspaces.py`:
 `GET /api/projects/{id}/threads`, `PUT|DELETE /api/projects/{id}/threads/{thread_id}`,
 `GET /api/projects/{id}/files`, `GET /api/projects/{id}/file`, and

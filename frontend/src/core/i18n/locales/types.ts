@@ -603,6 +603,7 @@ export interface Translations {
       account: string;
       appearance: string;
       channels: string;
+      memoryScope: string;
       dbtl: string;
       memory: string;
       tools: string;

@@ -11,6 +11,7 @@ from unittest import mock
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deerflow.agents.memory.scope import scoped_memory_user_id
+from deerflow.agents.memory.scopes.reader import shared_bucket_for_scope_value
 from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
     DynamicContextMiddleware,
@@ -144,17 +145,20 @@ def test_project_scoped_run_loads_only_its_project_memory():
             ),
         )
 
+    project_context = {
+        "project_id": "project-test2",
+        "project_root": "/Users/jyang21/Documents/projects/test2",
+    }
+    # Phase 2: a project run reads its own private bucket plus that project's
+    # shared bucket — and nothing else. The user-global bucket in particular
+    # must not appear, or switching projects would surface the prior snapshot.
     get_memory.assert_called_once_with(
         None,
         app_config=None,
-        user_id=scoped_memory_user_id(
-            "user-1",
-            {
-                "project_id": "project-test2",
-                "project_root": "/Users/jyang21/Documents/projects/test2",
-            },
-        ),
+        user_id=scoped_memory_user_id("user-1", project_context),
+        shared_user_ids=(shared_bucket_for_scope_value("project-test2"),),
     )
+    assert "user-1" not in get_memory.call_args.kwargs["shared_user_ids"]
     assert result is not None
     assert [message.id for message in result["messages"]] == ["msg-1", "msg-1__user"]
     assert all(not str(message.id or "").endswith("__memory") for message in result["messages"])

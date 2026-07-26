@@ -32,6 +32,16 @@ def _project_scope_value(context: object) -> str | None:
     return None
 
 
+def project_scope_value(context: object) -> str | None:
+    """Public view of the value a project bucket is derived from.
+
+    Exposed so the shared project bucket can be digested from the *same* value
+    as the private one — including the ``root:`` fallback, where the two would
+    otherwise disagree and split a project's memory in half.
+    """
+    return _project_scope_value(context)
+
+
 def memory_scope_label(context: object) -> str:
     """Return a non-secret label stored on hidden memory snapshot messages."""
     project_scope = _project_scope_value(context)

@@ -29,6 +29,7 @@ from app.gateway.routers import (
     input_polish,
     mcp,
     memory,
+    memory_scope,
     models,
     runs,
     scheduled_tasks,
@@ -542,6 +543,8 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Workspace/project collaboration API is mounted at /api/workspaces.
     app.include_router(workspaces.router)
+    # Per-project memory scope migration (Phase 2).
+    app.include_router(memory_scope.router)
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)

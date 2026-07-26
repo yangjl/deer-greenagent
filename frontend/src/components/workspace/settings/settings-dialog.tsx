@@ -3,6 +3,7 @@
 import {
   BellIcon,
   CableIcon,
+  FolderLockIcon,
   InfoIcon,
   BrainIcon,
   PaletteIcon,
@@ -25,6 +26,7 @@ import { AccountSettingsPage } from "@/components/workspace/settings/account-set
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
 import { ChannelsSettingsPage } from "@/components/workspace/settings/channels-settings-page";
 import { DbtlReadinessSettingsPage } from "@/components/workspace/settings/dbtl-readiness-settings-page";
+import { MemoryScopeSettingsPage } from "@/components/workspace/settings/memory-scope-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
@@ -38,6 +40,7 @@ type SettingsSection =
   | "channels"
   | "dbtl"
   | "memory"
+  | "memory-scope"
   | "tools"
   | "skills"
   | "notification"
@@ -89,6 +92,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
         icon: BrainIcon,
       },
       {
+        id: "memory-scope",
+        label: t.settings.sections.memoryScope,
+        icon: FolderLockIcon,
+      },
+      {
         id: "dbtl",
         label: t.settings.sections.dbtl,
         icon: WorkflowIcon,
@@ -102,6 +110,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.appearance,
       t.settings.sections.channels,
       t.settings.sections.memory,
+      t.settings.sections.memoryScope,
       t.settings.sections.dbtl,
       t.settings.sections.tools,
       t.settings.sections.skills,
@@ -154,6 +163,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}
+              {activeSection === "memory-scope" && <MemoryScopeSettingsPage />}
               {activeSection === "dbtl" && <DbtlReadinessSettingsPage />}
               {activeSection === "tools" && <ToolSettingsPage />}
               {activeSection === "skills" && (

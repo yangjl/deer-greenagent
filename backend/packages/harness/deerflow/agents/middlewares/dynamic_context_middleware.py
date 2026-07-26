@@ -33,6 +33,7 @@ import hashlib
 import logging
 import re
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, override
 
@@ -44,6 +45,7 @@ from deerflow.agents.memory.scope import (
     memory_scope_label,
     resolve_scoped_memory_user_id,
 )
+from deerflow.agents.memory.scopes.reader import shared_memory_buckets
 from deerflow.runtime.context_keys import (
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     is_project_scoped_context,
@@ -174,6 +176,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         *,
         include_memory: bool = True,
         memory_user_id: str | None = None,
+        shared_user_ids: Sequence[str] = (),
     ) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
 
@@ -190,6 +193,7 @@ class DynamicContextMiddleware(AgentMiddleware):
                 self._agent_name,
                 app_config=self._app_config,
                 user_id=memory_user_id,
+                shared_user_ids=shared_user_ids,
             )
             if injection_enabled
             else ""
@@ -284,6 +288,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         *,
         memory_user_id: str,
         memory_scope: str,
+        shared_user_ids: Sequence[str] = (),
     ) -> list[HumanMessage | RemoveMessage]:
         """Replace a legacy/global snapshot with the selected project's memory."""
         snapshots = [message for message in messages if is_dynamic_memory_reminder(message)]
@@ -293,6 +298,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         _, memory_block = self._build_full_reminder(
             include_memory=True,
             memory_user_id=memory_user_id,
+            shared_user_ids=shared_user_ids,
         )
         updates: list[HumanMessage | RemoveMessage] = []
         replacement_id: str | None = None
@@ -334,6 +340,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         memory_user_id: str | None = None,
         memory_scope: str = "user",
         project_scoped: bool = False,
+        shared_user_ids: Sequence[str] = (),
     ) -> dict | None:
         messages = list(state.get("messages", []))
         if not messages:
@@ -356,6 +363,7 @@ class DynamicContextMiddleware(AgentMiddleware):
             date_reminder, memory_block = self._build_full_reminder(
                 include_memory=include_memory,
                 memory_user_id=memory_user_id,
+                shared_user_ids=shared_user_ids,
             )
             logger.info(
                 "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into first HumanMessage id=%r",
@@ -376,6 +384,7 @@ class DynamicContextMiddleware(AgentMiddleware):
                 messages,
                 memory_user_id=memory_user_id,
                 memory_scope=memory_scope,
+                shared_user_ids=shared_user_ids,
             )
             if project_scoped and include_memory and memory_user_id is not None
             else []
@@ -412,6 +421,7 @@ class DynamicContextMiddleware(AgentMiddleware):
             memory_user_id=resolve_scoped_memory_user_id(runtime),
             memory_scope=memory_scope_label(context),
             project_scoped=is_project_scoped_context(context),
+            shared_user_ids=shared_memory_buckets(runtime),
         )
         self._record_effective_memory(state, result, runtime)
         return result
@@ -439,6 +449,7 @@ class DynamicContextMiddleware(AgentMiddleware):
                     memory_user_id=resolve_scoped_memory_user_id(runtime),
                     memory_scope=memory_scope_label(context),
                     project_scoped=is_project_scoped_context(context),
+                    shared_user_ids=shared_memory_buckets(runtime),
                 ),
                 timeout=_INJECT_TIMEOUT_SECONDS,
             )

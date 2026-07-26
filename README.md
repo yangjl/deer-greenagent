@@ -931,6 +931,12 @@ snapshot is replaced with the selected project's snapshot, and a current-turn
 project identity block overrides stale project claims in the visible history.
 The selected folder and durable thread scope are authoritative, so switching
 projects cannot carry an old “active project” answer with it.
+DBTL Phase 2 adds Settings → Memory scope for reviewing older project memory.
+Facts remain private unless their owner explicitly shares them one at a time.
+Each decision is bound to the exact fact version shown in the review card;
+changed facts must be reviewed again. Downloaded manifests omit fact bodies,
+unrelated buckets, and host paths, while rollback removes only shared copies
+created from the current user's private memory.
 The project file tree has one home: expand a project in the first navigation
 rail. Selecting a file opens a project-scoped content inspector without
 requiring a conversation; the first rail temporarily minimizes while the
