@@ -406,7 +406,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
         if sf is not None:
-            from deerflow.persistence.dbtl import DbtlGovernanceRepository
+            from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlGovernanceRepository
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
             )
@@ -414,11 +414,13 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             from deerflow.persistence.workspaces import WorkspaceRepository
 
             app.state.dbtl_governance_repo = DbtlGovernanceRepository(sf)
+            app.state.dbtl_cycle_repo = DbtlCycleRepository(sf)
             app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
             app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
             app.state.workspace_repo = WorkspaceRepository(sf)
         else:
             app.state.dbtl_governance_repo = None
+            app.state.dbtl_cycle_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
             app.state.workspace_repo = None
@@ -576,6 +578,13 @@ def get_dbtl_governance_repo(request: Request):
     val = getattr(request.app.state, "dbtl_governance_repo", None)
     if val is None:
         raise HTTPException(status_code=503, detail="DBTL governance repository not available")
+    return val
+
+
+def get_dbtl_cycle_repo(request: Request):
+    val = getattr(request.app.state, "dbtl_cycle_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="DBTL cycle repository not available")
     return val
 
 

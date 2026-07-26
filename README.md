@@ -958,8 +958,8 @@ an application state authority. During the DBTL foundation's audit-only Phase
 and handoff JSON files beside the active `config.yaml`; it never repairs,
 migrates, or promotes them.
 
-DBTL defaults to `dbtl.mode: audit_only`. Existing cycle projections remain
-visible in the project rail, but cycle/to-do mutations and the experimental
+DBTL defaults to `dbtl.mode: audit_only`. Durable cycles remain visible in the
+project rail, but workflow mutations and the experimental
 `dbtl_orchestrator` LangGraph are blocked. The readiness view shows preflight
 checks, groups legacy records as compatible, repairable, invalid/ambiguous, or
 explicitly safe to supersede, documents the proposed Test and knowledge
@@ -978,6 +978,17 @@ not enable DBTL classification or LangGraph execution. Human reviews are
 accepted only by the authenticated project governance API; serialized
 `dbtl_orchestrator` resume values remain blocked until a later phase connects
 the graph to those single-use durable review records.
+
+Phase 3 enables a human-driven workflow when the operator explicitly sets
+`dbtl.mode: manual`. The project rail then creates durable cycles with a class
+and workflow weight, shows Design → Data reconciliation → Build → Test → Learn
+in words, and opens a right-side stage inspector for evidence, blockers,
+review rationale, and the actor/revision activity trail. Build stays locked
+until both Design and Data reconciliation are approved. Evidence is attached
+to the selected stage with its URI and SHA-256; stale revisions, replayed
+actions, non-human approvals, cross-project access, and mismatched durable
+projections fail closed. This manual mode does not classify chat requests or
+run the DBTL LangGraph; those remain later phases.
 
 `LocalSandboxProvider` keeps host Bash disabled by default. If you explicitly
 enable `sandbox.allow_host_bash: true`, do so only on a fully trusted local

@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0011_dbtl_governance"
+HEAD = "0012_dbtl_cycle_hierarchy"
 BASELINE = "0001_baseline"
 
 

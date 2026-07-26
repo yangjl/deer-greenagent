@@ -1,49 +1,50 @@
 "use client";
 
 import {
+  AlertTriangle,
   Bot,
   CheckCircle2,
   ChevronRight,
-  Circle,
+  CircleDashed,
+  Lock,
   MessageSquarePlus,
   MessagesSquare,
   Plus,
-  RefreshCcw,
-  X,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { type FormEvent, useState } from "react";
+import { useState } from "react";
 
 import { SettingsDialog } from "@/components/workspace/settings";
 import {
-  type DbtlControlState,
+  CYCLE_STATE_LABELS,
+  DBTL_STAGES,
+  type CycleRecord,
+  type DbtlStage,
+  STAGE_LABELS,
+  STATUS_LABELS,
   blockedByReadiness,
   controlAccessibleLabel,
   dbtlControlState,
+  defaultSelectedCycle,
+  isLive,
+  openWorkItems,
+  useCreateWorkItem,
+  useCycleDetail,
   useDbtlFeature,
+  useProjectCycles,
 } from "@/core/dbtl";
 import { uuid } from "@/core/utils/uuid";
 import {
-  DBTL_PHASES,
-  type DbtlCycle,
-  addCycle,
-  addTodo,
-  hasActiveCycle,
   pathOfNewProjectConversation,
   pathOfProjectThread,
-  removeTodo,
-  selectCycle,
-  selectedCycle,
-  setCyclePhase,
-  toggleCycleStatus,
-  toggleTodo,
   useProjectBySlug,
   useProjectConversations,
 } from "@/core/workspaces";
 import { cn } from "@/lib/utils";
 
-import { useCyclePlan } from "./use-cycle-plan";
+import { CycleStageSheet } from "./cycle-stage-sheet";
+import { StartCycleDialog } from "./start-cycle-dialog";
 
 /** Agent roster placeholder until project agent assignment ships. */
 const PLACEHOLDER_AGENTS = [
@@ -67,60 +68,63 @@ function SectionLabel({
   );
 }
 
-function PhaseDots({
+const LOCKED_MARK = { icon: Lock, tone: "text-muted-foreground/50" } as const;
+
+const STATUS_MARK: Record<string, { icon: typeof Lock; tone: string }> = {
+  locked: { icon: Lock, tone: "text-muted-foreground/50" },
+  in_progress: { icon: CircleDashed, tone: "text-foreground" },
+  awaiting_review: {
+    icon: AlertTriangle,
+    tone: "text-amber-700 dark:text-amber-400",
+  },
+  changes_requested: {
+    icon: AlertTriangle,
+    tone: "text-amber-700 dark:text-amber-400",
+  },
+  approved: {
+    icon: CheckCircle2,
+    tone: "text-emerald-700 dark:text-emerald-400",
+  },
+  rejected: { icon: AlertTriangle, tone: "text-destructive" },
+};
+
+/** One stage row: an icon, a name, and its status **in words**, never colour alone. */
+function StageRow({
   cycle,
-  controls,
-  onSetPhase,
+  stage,
+  onOpen,
 }: {
-  cycle: DbtlCycle;
-  controls: DbtlControlState;
-  onSetPhase: (phase: (typeof DBTL_PHASES)[number]) => void;
+  cycle: CycleRecord;
+  stage: DbtlStage;
+  onOpen: (stage: DbtlStage) => void;
 }) {
-  const activeIndex = DBTL_PHASES.indexOf(cycle.phase);
-  const done = cycle.status === "done";
+  const record = cycle.stages.find((item) => item.stage === stage);
+  const mark = STATUS_MARK[record?.status ?? "locked"] ?? LOCKED_MARK;
+  const Icon = mark.icon;
   return (
-    <span className="flex items-center gap-1.5">
-      {DBTL_PHASES.map((phase, index) => (
-        <button
-          key={phase}
-          type="button"
-          title={
-            controls.enabled
-              ? `${cycle.name}: mark phase ${phase}`
-              : controls.reason
-          }
-          // aria-disabled, not disabled: a natively disabled control leaves the
-          // tab order, so a keyboard or screen-reader user cannot reach it to
-          // learn why DBTL is frozen. The handler enforces the freeze instead.
-          aria-disabled={controls.ariaDisabled}
-          aria-label={controlAccessibleLabel(
-            `Mark ${cycle.name} phase as ${phase}`,
-            controls,
-          )}
-          onClick={() => {
-            if (blockedByReadiness(controls)) return;
-            onSetPhase(phase);
-          }}
-          className={cn(
-            "size-2 rounded-full transition-transform aria-disabled:cursor-not-allowed",
-            controls.enabled && "hover:scale-150",
-            index < activeIndex && "bg-emerald-700 dark:bg-emerald-500",
-            index === activeIndex &&
-              !done &&
-              "scale-125 bg-emerald-600 motion-safe:animate-pulse dark:bg-emerald-400",
-            index === activeIndex && done && "bg-muted-foreground/50",
-            index > activeIndex && "bg-muted-foreground/25",
-          )}
-        />
-      ))}
-    </span>
+    <button
+      type="button"
+      onClick={() => onOpen(stage)}
+      className="hover:bg-muted/60 group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors"
+    >
+      <Icon className={cn("size-3.5 shrink-0", mark.tone)} />
+      <span className="min-w-0 flex-1 truncate">{STAGE_LABELS[stage]}</span>
+      <span className="text-muted-foreground shrink-0 text-[11px]">
+        {STATUS_LABELS[record?.status ?? "locked"]}
+      </span>
+    </button>
   );
 }
 
 /**
- * Second rail of the project workspace: DBTL cycles (the "Tasks" analog), the
- * selected cycle's to-do list (the "Drive" analog), the agents on the project,
- * and its conversations. The project tree lives only in the first rail.
+ * Second rail of the project workspace: durable DBTL cycles and their stages,
+ * the selected cycle's open work items, the agents on the project, and its
+ * conversations. The project tree lives only in the first rail.
+ *
+ * Every cycle value rendered here comes from the server. There is no
+ * browser-local cycle projection any more, which is what makes the Phase 3
+ * no-go — "localStorage can override durable cycle state" — unreachable
+ * rather than merely unlikely.
  */
 export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const pathname = usePathname();
@@ -128,24 +132,46 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const conversations = useProjectConversations(project?.id);
   const dbtl = useDbtlFeature();
   const controls = dbtlControlState(dbtl.feature, dbtl.isLoading);
-  const cycleMutationsEnabled = controls.enabled;
-  const { plan, update } = useCyclePlan(project?.id, project?.dbtl_phase, {
-    persistUpdates: cycleMutationsEnabled,
-  });
-  const [draft, setDraft] = useState("");
+  const cycleQuery = useProjectCycles(project?.id);
+
+  const [selectedCycleId, setSelectedCycleId] = useState<string | null>(null);
   const [cyclesOverride, setCyclesOverride] = useState<boolean | null>(null);
   const [readinessOpen, setReadinessOpen] = useState(false);
-  const cycle = plan ? selectedCycle(plan) : null;
+  const [startOpen, setStartOpen] = useState(false);
+  const [openStage, setOpenStage] = useState<DbtlStage | null>(null);
+  const [blockerDraft, setBlockerDraft] = useState("");
+
+  const cycles = cycleQuery.data?.cycles ?? [];
+  const selected =
+    cycles.find((item) => item.id === selectedCycleId) ??
+    defaultSelectedCycle(cycles);
+  const detail = useCycleDetail(project?.id, selected?.id);
+  const createWorkItem = useCreateWorkItem(project?.id);
+  const blockers = openWorkItems(detail.data);
+
   // Cycles minimize themselves once nothing is running; an explicit click
   // always wins over that default.
-  const cyclesOpen = cyclesOverride ?? hasActiveCycle(plan);
-  function submitTodo(event: FormEvent) {
+  const cyclesOpen = cyclesOverride ?? cycles.some(isLive);
+
+  function submitBlocker(event: React.FormEvent) {
     event.preventDefault();
-    if (!cycle || !cycleMutationsEnabled) {
+    if (
+      !selected ||
+      !blockerDraft.trim() ||
+      !controls.enabled ||
+      createWorkItem.isPending
+    )
       return;
-    }
-    update((current) => addTodo(current, cycle.id, uuid(), draft));
-    setDraft("");
+    createWorkItem.mutate(
+      {
+        cycleId: selected.id,
+        title: blockerDraft.trim(),
+        kind: "blocker",
+        expectedDbRevision: detail.data?.db_revision ?? selected.db_revision,
+        idempotencyKey: `work-${uuid()}`,
+      },
+      { onSuccess: () => setBlockerDraft("") },
+    );
   }
 
   return (
@@ -155,6 +181,24 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
         onOpenChange={setReadinessOpen}
         defaultSection="dbtl"
       />
+      {project && (
+        <>
+          <StartCycleDialog
+            projectId={project.id}
+            projectName={project.name}
+            cycles={cycles}
+            open={startOpen}
+            onOpenChange={setStartOpen}
+          />
+          <CycleStageSheet
+            projectId={project.id}
+            cycleId={selected?.id ?? null}
+            stage={openStage}
+            open={openStage !== null}
+            onOpenChange={(next) => !next && setOpenStage(null)}
+          />
+        </>
+      )}
       <SectionLabel
         action={
           <button
@@ -169,7 +213,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
             onClick={() => {
               if (blockedByReadiness(controls)) return;
               setCyclesOverride(true);
-              update((current) => addCycle(current, uuid()));
+              setStartOpen(true);
             }}
           >
             <Plus className="size-3.5" />
@@ -189,10 +233,10 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
             )}
           />
           Cycles
-          {!cyclesOpen && plan?.cycles.length ? ` · ${plan.cycles.length}` : ""}
+          {!cyclesOpen && cycles.length ? ` · ${cycles.length}` : ""}
         </button>
       </SectionLabel>
-      {!cycleMutationsEnabled && (
+      {!controls.enabled && (
         <div className="mx-3 mb-2 rounded-lg border border-amber-700/20 bg-amber-500/5 px-3 py-2">
           <p className="text-foreground text-xs font-medium">
             DBTL is {controls.statusLabel}
@@ -212,158 +256,95 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
       )}
       {cyclesOpen && (
         <div className="px-2">
-          {/* The phase and completion controls sit beside the select button,
-              never inside it: a button cannot nest in a button. */}
-          {plan?.cycles.map((entry) => {
-            const done = entry.status === "done";
-            return (
-              <div
-                key={entry.id}
-                className={cn(
-                  "hover:bg-muted/60 flex w-full items-center gap-1.5 rounded px-2 py-2 text-sm transition-colors",
-                  cycle?.id === entry.id && "bg-muted/80 font-medium",
-                )}
-              >
-                <button
-                  type="button"
-                  aria-label={controlAccessibleLabel(
-                    done
-                      ? `Reopen ${entry.name}`
-                      : `Mark ${entry.name} complete`,
-                    controls,
-                  )}
-                  aria-disabled={controls.ariaDisabled}
-                  title={
-                    controls.enabled
-                      ? done
-                        ? "Reopen cycle"
-                        : "Mark cycle complete"
-                      : controls.reason
-                  }
-                  onClick={() => {
-                    if (blockedByReadiness(controls)) return;
-                    update((current) => toggleCycleStatus(current, entry.id));
-                  }}
-                  className={cn(
-                    "text-muted-foreground shrink-0 transition-colors aria-disabled:cursor-not-allowed aria-disabled:opacity-40",
-                    controls.enabled &&
-                      "hover:text-emerald-700 dark:hover:text-emerald-400",
-                  )}
-                >
-                  {done ? (
-                    <CheckCircle2 className="size-3.5 text-emerald-700 dark:text-emerald-400" />
-                  ) : (
-                    <RefreshCcw className="size-3.5" />
-                  )}
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    update((current) => selectCycle(current, entry.id))
-                  }
-                  className="min-w-0 flex-1 text-left"
-                >
-                  <span
-                    className={cn(
-                      "truncate",
-                      done && "text-muted-foreground line-through",
-                    )}
-                  >
-                    {entry.name}
-                  </span>
-                </button>
-                <PhaseDots
-                  controls={controls}
-                  cycle={entry}
-                  onSetPhase={(phase) =>
-                    update((current) => setCyclePhase(current, entry.id, phase))
-                  }
-                />
-              </div>
-            );
-          }) ?? (
+          {cycleQuery.isPending ? (
             <div className="text-muted-foreground px-2 py-2 text-xs">
               Loading…
             </div>
+          ) : cycleQuery.error ? (
+            <div className="text-destructive px-2 py-2 text-xs">
+              {cycleQuery.error.message}
+            </div>
+          ) : cycles.length === 0 ? (
+            <div className="text-muted-foreground px-2 py-2 text-xs">
+              No cycles yet. Starting one creates a durable research record.
+            </div>
+          ) : (
+            cycles.map((entry) => {
+              const active = selected?.id === entry.id;
+              return (
+                <div key={entry.id} className="mb-1">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedCycleId(entry.id)}
+                    className={cn(
+                      "hover:bg-muted/60 flex w-full items-center gap-1.5 rounded px-2 py-2 text-left text-sm transition-colors",
+                      active && "bg-muted/80 font-medium",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "size-1.5 shrink-0 rounded-full",
+                        isLive(entry)
+                          ? "bg-emerald-600 dark:bg-emerald-400"
+                          : "bg-muted-foreground/40",
+                      )}
+                    />
+                    <span className="min-w-0 flex-1 truncate">
+                      {entry.title}
+                    </span>
+                    <span className="text-muted-foreground shrink-0 text-[11px]">
+                      {CYCLE_STATE_LABELS[entry.state]}
+                    </span>
+                  </button>
+                  {active && (
+                    <div className="border-border/70 ml-3 border-l pl-1.5">
+                      {DBTL_STAGES.map((stage) => (
+                        <StageRow
+                          key={stage}
+                          cycle={entry}
+                          stage={stage}
+                          onOpen={setOpenStage}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })
           )}
         </div>
       )}
 
-      <SectionLabel>To-Do{cycle ? ` · ${cycle.name}` : ""}</SectionLabel>
+      <SectionLabel>
+        Blockers{selected ? ` · ${selected.title}` : ""}
+      </SectionLabel>
       <div className="px-2">
-        {cycle?.todos.map((todo) => (
-          <div
-            key={todo.id}
-            className="group/todo hover:bg-muted/60 flex items-center gap-2 rounded px-2 py-1.5 text-sm transition-colors"
+        {blockers.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => setOpenStage(DBTL_STAGES[0])}
+            className="hover:bg-muted/60 flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors"
           >
-            <button
-              type="button"
-              aria-label={controlAccessibleLabel(
-                todo.done ? "Mark as open" : "Mark as done",
-                controls,
-              )}
-              aria-disabled={controls.ariaDisabled}
-              title={controls.enabled ? undefined : controls.reason}
-              onClick={() => {
-                if (blockedByReadiness(controls)) return;
-                update((current) => toggleTodo(current, cycle.id, todo.id));
-              }}
-              className={cn(
-                "text-muted-foreground shrink-0 transition-colors aria-disabled:cursor-not-allowed aria-disabled:opacity-40",
-                controls.enabled &&
-                  "hover:text-emerald-700 dark:hover:text-emerald-400",
-              )}
-            >
-              {todo.done ? (
-                <CheckCircle2 className="size-4 text-emerald-700 dark:text-emerald-400" />
-              ) : (
-                <Circle className="size-4" />
-              )}
-            </button>
-            <span
-              className={cn(
-                "min-w-0 flex-1 truncate",
-                todo.done && "text-muted-foreground line-through",
-              )}
-            >
-              {todo.text}
-            </span>
-            <button
-              type="button"
-              aria-label={controlAccessibleLabel(
-                `Remove to-do: ${todo.text}`,
-                controls,
-              )}
-              aria-disabled={controls.ariaDisabled}
-              title={controls.enabled ? undefined : controls.reason}
-              onClick={() => {
-                if (blockedByReadiness(controls)) return;
-                update((current) => removeTodo(current, cycle.id, todo.id));
-              }}
-              className={cn(
-                "text-muted-foreground/60 shrink-0 opacity-0 transition-opacity group-hover/todo:opacity-100 aria-disabled:cursor-not-allowed",
-                controls.enabled && "hover:text-destructive",
-              )}
-            >
-              <X className="size-3.5" />
-            </button>
-          </div>
+            <AlertTriangle className="size-3.5 shrink-0 text-amber-700 dark:text-amber-400" />
+            <span className="min-w-0 flex-1 truncate">{item.title}</span>
+          </button>
         ))}
-        {cycle?.todos.length === 0 && (
+        {selected && blockers.length === 0 && (
           <div className="text-muted-foreground px-2 py-1.5 text-xs">
-            Nothing planned for this cycle yet.
+            Nothing is blocking this cycle.
           </div>
         )}
-        {cycle && (
-          <form onSubmit={submitTodo} className="px-2 pt-1">
+        {selected && (
+          <form onSubmit={submitBlocker} className="px-2 pt-1">
             <input
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
+              value={blockerDraft}
+              onChange={(event) => setBlockerDraft(event.target.value)}
               placeholder={
-                controls.enabled ? "Add a to-do…" : "To-dos are locked"
+                controls.enabled ? "Record a blocker…" : "Blockers are locked"
               }
               aria-label={controlAccessibleLabel(
-                `Add a to-do to ${cycle.name}`,
+                `Record a blocker on ${selected.title}`,
                 controls,
               )}
               // readOnly rather than disabled: the field keeps focus so its
@@ -376,6 +357,11 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                 !controls.enabled && "cursor-not-allowed opacity-60",
               )}
             />
+            {createWorkItem.error && (
+              <p className="text-destructive mt-1 text-xs">
+                {createWorkItem.error.message}
+              </p>
+            )}
           </form>
         )}
       </div>

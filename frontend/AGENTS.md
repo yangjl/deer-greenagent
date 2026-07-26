@@ -135,16 +135,15 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   for `/api/workspaces`, `/api/projects`, and `/api/project-folders`, plus
   **pure, React-free**
   modules: `project-threads.ts` (route builders, slug rules, and the
-  conversation query key), `project-location.ts` (creation-location payload
-  and path preview helpers), and `cycle-planning.ts`
-  (immutable DBTL cycle + to-do model). Server components and
+  conversation query key) and `project-location.ts` (creation-location payload
+  and path preview helpers). Server components and
   `core/threads/hooks.ts` import these modules directly, never the
   `@/core/workspaces` barrel, which pulls React hooks into server bundles.
-  Cycles/to-dos are a browser-local projection persisted in `localStorage` per
-  project — a review aid, not DBTL orchestration and not a durable record.
-  During DBTL Phase 0 the projection stays visible but all mutation controls
-  fail closed unless `/api/features` reports
-  `dbtl.graph_execution_enabled=true`.
+  The former browser-local `cycle-planning.ts` projection was **deleted** in
+  DBTL Phase 3; cycles are durable server records owned by `src/core/dbtl/`.
+  Do not reintroduce a `localStorage` cycle model — the Phase 3 no-go is that
+  browser-local state must not be able to override durable cycle state, and
+  deleting the module is what makes that structural rather than a convention.
 - `src/app/workspace/[project_slug]/layout.tsx` mounts `ChatProviders` and the
   project rail beside its children, so the rail survives navigation between
   conversations.
@@ -155,10 +154,16 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   that works without a conversation, temporarily collapses the first sidebar
   rail, and restores its prior state on close.
 - `src/components/workspace/project-rail/` owns the rail: a disclosure on the
-  DBTL cycles (inline phase control plus a complete/reopen control), the
-  selected cycle's to-do list, an agents placeholder, and the project's
-  conversations. The Cycles section auto-minimizes when
-  `hasActiveCycle(plan)` is false; an explicit click on the section header
+  durable DBTL cycles (each expanding into its five stages with a status word),
+  the selected cycle's open blockers, an agents placeholder, and the project's
+  conversations. `start-cycle-dialog.tsx` opens a durable research record
+  (title, cycle class, optional season/program parent, research question,
+  objective, success criteria) and mints one idempotency key per opening so a
+  double-submit cannot create two records. Selecting a stage opens
+  `cycle-stage-sheet.tsx` — evidence, open blockers, the submit/review panel
+  with a required rationale, and the activity timeline with actor and revision
+  — using the existing right-side inspection pattern. The Cycles section
+  auto-minimizes when no cycle is live; an explicit click on the section header
   overrides that default. Project tree listings use
   `GET /api/projects/{id}/files`, while preview/download uses
   `GET /api/projects/{id}/file`; both work without a conversation. The chat
@@ -169,8 +174,23 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   durable-governance checklist. Phase 1 may run a validation, download its
   evidence, show projection mismatches and rollback posture, and approve a
   cutover only after every PostgreSQL check passes. It must not repair data,
-  create/advance a cycle, promote knowledge, or start a graph. The project
+  promote knowledge, or start a graph. The project
   rail's “View readiness” action opens that settings section.
+  Phase 3 adds the durable cycle layer in the same module: `cycle-view.ts` is
+  **pure and React-free** (stage/status vocabulary, why a stage is locked,
+  whether a control is available, activity phrasing), `cycles-api.ts` owns the
+  `/api/projects/{id}/dbtl/*` calls, and `cycle-hooks.ts` the TanStack hooks.
+  Controls are derived from the server's stage status alone — the client never
+  decides that a gate is open, it only renders what the durable record says.
+  Cycle creation records both class and workflow weight; once one live
+  top-level cycle exists, the dialog permits only a computational child under
+  a live season/program parent. The stage sheet displays only evidence bound
+  to the selected stage and includes the manual URI + SHA-256 attachment form
+  required to drive Phase 3 without a graph. Artifact, blocker, and resolution
+  calls carry the displayed durable revision plus a fresh idempotency key.
+  Action buttons use native `disabled` state while incomplete or pending so a
+  keyboard activation cannot bypass the same duplicate-submit protection as a
+  pointer click.
 - `src/core/memory-scope/` owns the per-project memory scope migration
   (DBTL Phase 2). `review.ts` is **pure and React-free** — count rows, the
   four per-fact decisions, queue advance, provenance labels, and each

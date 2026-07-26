@@ -1,3 +1,9 @@
+from deerflow.persistence.dbtl.cycles import (
+    DbtlCycleRepository,
+    DbtlRevisionConflict,
+    DbtlTopLevelCycleExists,
+    DbtlWorkflowRefused,
+)
 from deerflow.persistence.dbtl.model import (
     DbtlArtifactRow,
     DbtlCutoverDecisionRow,
@@ -27,6 +33,7 @@ __all__ = [
     "DbtlArtifactRow",
     "DbtlCutoverBlocked",
     "DbtlCutoverDecisionRow",
+    "DbtlCycleRepository",
     "DbtlCycleRow",
     "DbtlEventRow",
     "DbtlGateEvaluationRow",
@@ -35,10 +42,13 @@ __all__ = [
     "DbtlReviewReplay",
     "DbtlReviewRow",
     "DbtlReviewStale",
+    "DbtlRevisionConflict",
     "DbtlStageAttemptRow",
+    "DbtlTopLevelCycleExists",
     "DbtlTransitionIntentRow",
     "DbtlTransitionRow",
     "DbtlValidationRow",
+    "DbtlWorkflowRefused",
     "KnowledgeClaimRow",
     "KnowledgeLinkRow",
     "KnowledgePromotionRow",

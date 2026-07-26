@@ -1285,6 +1285,68 @@ administrator-only. A cutover can be approved only from a successful
 PostgreSQL validation; SQLite remains useful for local inspection but can
 never report cutover-ready. These controls do not start or advance a cycle.
 
+DBTL Phase 3 turns the workflow on for humans. `deerflow.dbtl.cycle_state` is
+the **pure** state machine both the manual UI and the later Supervisor Graph
+call, so the two cannot drift into different notions of a legal transition:
+five stages (`design → reconciliation → build → test → learn`) with
+`ready_for_build` as an explicit state rather than an inference, because that
+is the thing a reviewer approves. Its central rule is that Build requires
+**two** independent approvals — Design *and* Data Reconciliation — and
+`apply_review` opens only the immediate successor, so approving Design can
+never make Build workable while Reconciliation is outstanding. Refusals raise
+`TransitionRefused`; the machine never falls back to a default state.
+
+Migration `0012_dbtl_cycle_hierarchy` adds `dbtl_cycles.parent_cycle_id`
+(self-FK with `RESTRICT`, so deleting a parent cannot erase child records) and
+the partial unique index `uq_dbtl_active_top_level_cycle`
+(`project_id WHERE parent_cycle_id IS NULL AND state NOT IN ('completed',
+'abandoned')`). That index — not an application check — is what stops two
+concurrent "Start a cycle" clicks, the same pattern as `uq_runs_thread_active`
+and `uq_scheduled_task_run_active`, and it ships with the same
+dedupe-before-index pre-step (losers are moved to `abandoned`, never deleted:
+a cycle is a research record). A test pins the literal SQL predicate against
+`TERMINAL_CYCLE_STATES` so adding a terminal state without updating the index
+fails loudly.
+
+`deerflow.persistence.dbtl.DbtlCycleRepository` owns the durable workflow.
+Three separate mechanisms defend three different failures: `expected_db_revision`
+loses a race between two reviewers on the same screen (`DbtlRevisionConflict`),
+an idempotency key makes a replay return the prior result instead of applying
+twice, and the constraint above arbitrates concurrent creation
+(`DbtlTopLevelCycleExists`). A stage cannot be submitted without an artifact,
+and a review binds to the exact evidence revision it was shown, so a later
+revision cannot inherit an approval. Every mutation writes an
+`activity_events` row carrying actor and committed revision — that feed is
+what the human exit review inspects. Descriptive fields (research question,
+objective, success criteria) ride in `projection_json` and are carried across
+every revision explicitly; rebuilding the projection from scratch would drop
+the question the cycle exists to record.
+
+Creation idempotency is also a database invariant:
+`uq_dbtl_cycle_create_idempotency` binds a non-null create key to one project,
+including child cycles and concurrent retries. Parent links are constrained in
+both the ORM and migration by `fk_dbtl_cycles_parent_cycle_id` with
+`RESTRICT`; the repository additionally permits only a live top-level
+season/program cycle to parent a computational cycle. Evidence and work-item
+mutations carry expected revisions and idempotency keys, lock the cycle row on
+PostgreSQL, and bump the durable cycle revision. New evidence is accepted only
+while that stage is actually workable, so an approved stage cannot acquire a
+later artifact that silently inherits the old approval. Submitting Build from
+`ready_for_build` records the explicit move into Build before review; Build,
+Test, and Learn approvals therefore advance to Test, Learn, and Completed
+without the cycle state lagging a stage behind.
+
+`app/gateway/routers/dbtl_cycles.py` mounts `/api/projects/{id}/dbtl/cycles`.
+Reads stay available in any mode so the rail can say "no cycles" honestly;
+**mutations** are gated on `dbtl.mutations_enabled` (`mode=manual` or
+`graph_enabled`) and return 409 otherwise. Reviewer identity is server-owned —
+the request schema is `extra="forbid"`, so a client-supplied
+`reviewer_user_id` is a 422, not a trusted claim. The recorded project role
+comes from current workspace membership, and the review endpoint rejects the
+Gateway's internal/service principal even when it carries an owner's identity.
+The review row binds the pre-decision projection hash and revision the human
+actually saw, not the projection produced after applying their verdict.
+
 `threads_meta` carries nullable `workspace_id` and `project_id` plus explicit
 `scope_type` and `visibility`. Existing and newly projectless conversations
 default to `inbox` / `private-owner`; never infer workspace sharing from a

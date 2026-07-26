@@ -1,0 +1,439 @@
+"use client";
+
+import { AlertTriangle, FileText, History, Lock } from "lucide-react";
+import { useMemo, useState } from "react";
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  CYCLE_STATE_LABELS,
+  type DbtlStage,
+  STAGE_LABELS,
+  STATUS_LABELS,
+  canReviewStage,
+  canSubmitReview,
+  activityRevision,
+  canSubmitStage,
+  decisionConsequence,
+  describeActivity,
+  latestArtifactsForStage,
+  openWorkItems,
+  type ReviewDecision,
+  stageBlockReason,
+  stageOf,
+  useCycleActivity,
+  useCycleDetail,
+  useAttachArtifact,
+  useResolveWorkItem,
+  useReviewStage,
+  useSubmitStage,
+} from "@/core/dbtl";
+import { uuid } from "@/core/utils/uuid";
+import { cn } from "@/lib/utils";
+
+const DECISIONS: ReviewDecision[] = ["approve", "request_changes", "reject"];
+
+const DECISION_LABELS: Record<ReviewDecision, string> = {
+  approve: "Approve",
+  request_changes: "Request changes",
+  reject: "Reject",
+};
+
+function Section({
+  icon: Icon,
+  title,
+  children,
+}: {
+  icon: typeof FileText;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="space-y-2">
+      <h3 className="text-muted-foreground flex items-center gap-1.5 text-[11px] font-semibold tracking-widest uppercase">
+        <Icon className="size-3.5" />
+        {title}
+      </h3>
+      {children}
+    </section>
+  );
+}
+
+export function CycleStageSheet({
+  projectId,
+  cycleId,
+  stage,
+  open,
+  onOpenChange,
+}: {
+  projectId: string;
+  cycleId: string | null;
+  stage: DbtlStage | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const detail = useCycleDetail(projectId, open ? cycleId : null);
+  const activity = useCycleActivity(projectId, open ? cycleId : null);
+  const submit = useSubmitStage(projectId);
+  const review = useReviewStage(projectId);
+  const resolve = useResolveWorkItem(projectId);
+  const attach = useAttachArtifact(projectId);
+
+  const [rationale, setRationale] = useState("");
+  const [resolutionFor, setResolutionFor] = useState<string | null>(null);
+  const [resolution, setResolution] = useState("");
+  const [artifactType, setArtifactType] = useState("stage_package");
+  const [artifactUri, setArtifactUri] = useState("");
+  const [artifactHash, setArtifactHash] = useState("");
+
+  const cycle = detail.data ?? null;
+  const record = stage ? stageOf(cycle, stage) : null;
+  const block = stage ? stageBlockReason(cycle, stage) : null;
+  const artifacts = useMemo(
+    () => (stage ? latestArtifactsForStage(cycle, stage) : []),
+    [cycle, stage],
+  );
+  const blockers = useMemo(() => openWorkItems(cycle), [cycle]);
+
+  function act(decision: ReviewDecision) {
+    if (!cycle || !stage || !canSubmitReview(rationale) || review.isPending)
+      return;
+    review.mutate(
+      {
+        cycleId: cycle.id,
+        stage,
+        decision,
+        rationale: rationale.trim(),
+        expectedDbRevision: cycle.db_revision,
+        idempotencyKey: `review-${uuid()}`,
+      },
+      { onSuccess: () => setRationale("") },
+    );
+  }
+
+  const artifactReady =
+    artifactType.trim().length > 0 &&
+    artifactUri.trim().length > 0 &&
+    /^[0-9a-f]{64}$/.test(artifactHash);
+
+  function attachEvidence(event: React.FormEvent) {
+    event.preventDefault();
+    if (!cycle || !stage || !artifactReady || attach.isPending) return;
+    attach.mutate(
+      {
+        cycleId: cycle.id,
+        stage,
+        artifactType: artifactType.trim(),
+        uri: artifactUri.trim(),
+        contentHash: artifactHash,
+        expectedDbRevision: cycle.db_revision,
+        idempotencyKey: `artifact-${uuid()}`,
+      },
+      {
+        onSuccess: () => {
+          setArtifactUri("");
+          setArtifactHash("");
+        },
+      },
+    );
+  }
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="flex w-full flex-col gap-0 overflow-y-auto sm:max-w-xl">
+        <SheetHeader>
+          <SheetTitle className="flex items-center gap-2">
+            {stage ? STAGE_LABELS[stage] : "Stage"}
+            {record && (
+              <Badge variant="outline">{STATUS_LABELS[record.status]}</Badge>
+            )}
+          </SheetTitle>
+        </SheetHeader>
+
+        {detail.isPending ? (
+          <p className="text-muted-foreground p-6 text-sm">Loading stage…</p>
+        ) : !cycle || !stage || !record ? (
+          <p className="text-muted-foreground p-6 text-sm">
+            {detail.error?.message ?? "This stage is not available."}
+          </p>
+        ) : (
+          <div className="space-y-7 p-6 pt-2">
+            <header>
+              <p className="text-sm font-medium">{cycle.title}</p>
+              <p className="text-muted-foreground mt-0.5 text-xs">
+                {CYCLE_STATE_LABELS[cycle.state]} · revision{" "}
+                <span className="tabular-nums">{cycle.db_revision}</span>
+              </p>
+              {cycle.research_question && (
+                <p className="mt-3 text-sm leading-relaxed">
+                  {cycle.research_question}
+                </p>
+              )}
+            </header>
+
+            {block?.blocked && (
+              <p className="border-border text-muted-foreground flex items-start gap-2 rounded-md border border-dashed px-3 py-2 text-sm">
+                <Lock className="mt-0.5 size-4 shrink-0" />
+                {block.reason}
+              </p>
+            )}
+
+            <Section icon={FileText} title="Evidence">
+              {artifacts.length === 0 ? (
+                <p className="text-muted-foreground text-sm">
+                  No artifact attached yet. A stage cannot be reviewed without
+                  evidence.
+                </p>
+              ) : (
+                <ul className="space-y-1.5">
+                  {artifacts.map((artifact) => (
+                    <li
+                      key={artifact.id}
+                      className="border-border flex items-baseline justify-between gap-3 rounded-md border px-3 py-2"
+                    >
+                      <span className="min-w-0 truncate text-sm">
+                        {artifact.artifact_type}
+                        <span className="text-muted-foreground mt-0.5 block truncate text-xs">
+                          {artifact.uri}
+                        </span>
+                      </span>
+                      <span className="text-muted-foreground shrink-0 font-mono text-[11px]">
+                        rev {artifact.revision} ·{" "}
+                        {artifact.content_hash.slice(0, 10)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {canSubmitStage(record.status) && !block?.blocked && (
+                <form
+                  onSubmit={attachEvidence}
+                  className="border-border mt-3 space-y-2 rounded-md border border-dashed p-3"
+                >
+                  <p className="text-sm font-medium">Attach evidence</p>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <Input
+                      value={artifactType}
+                      onChange={(event) => setArtifactType(event.target.value)}
+                      placeholder="Artifact type"
+                      aria-label="Artifact type"
+                    />
+                    <Input
+                      value={artifactUri}
+                      onChange={(event) => setArtifactUri(event.target.value)}
+                      placeholder="/mnt/user-data/workspace/design.json"
+                      aria-label="Artifact URI"
+                    />
+                  </div>
+                  <Input
+                    value={artifactHash}
+                    onChange={(event) =>
+                      setArtifactHash(event.target.value.trim().toLowerCase())
+                    }
+                    placeholder="SHA-256 (64 lowercase hexadecimal characters)"
+                    aria-label="Artifact SHA-256"
+                    className="font-mono text-xs"
+                  />
+                  <Button
+                    type="submit"
+                    size="sm"
+                    variant="outline"
+                    disabled={!artifactReady || attach.isPending}
+                  >
+                    {attach.isPending ? "Attaching…" : "Attach evidence"}
+                  </Button>
+                  {attach.error && (
+                    <p className="text-destructive text-sm">
+                      {attach.error.message}
+                    </p>
+                  )}
+                </form>
+              )}
+            </Section>
+
+            {blockers.length > 0 && (
+              <Section icon={AlertTriangle} title="Open blockers">
+                <ul className="space-y-2">
+                  {blockers.map((item) => (
+                    <li
+                      key={item.id}
+                      className="border-border rounded-md border px-3 py-2"
+                    >
+                      <p className="text-sm">{item.title}</p>
+                      {resolutionFor === item.id ? (
+                        <div className="mt-2 space-y-2">
+                          <Textarea
+                            value={resolution}
+                            onChange={(event) =>
+                              setResolution(event.target.value)
+                            }
+                            rows={2}
+                            placeholder="How was it resolved?"
+                            aria-label={`Resolution for ${item.title}`}
+                          />
+                          <div className="flex gap-2">
+                            <Button
+                              size="sm"
+                              disabled={!resolution.trim() || resolve.isPending}
+                              onClick={() =>
+                                resolve.mutate(
+                                  {
+                                    workItemId: item.id,
+                                    resolution: resolution.trim(),
+                                    expectedDbRevision: cycle.db_revision,
+                                    expectedWorkItemRevision: item.db_revision,
+                                    idempotencyKey: `resolve-${uuid()}`,
+                                  },
+                                  {
+                                    onSuccess: () => {
+                                      setResolutionFor(null);
+                                      setResolution("");
+                                    },
+                                  },
+                                )
+                              }
+                            >
+                              Resolve
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => setResolutionFor(null)}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                          {resolve.error && (
+                            <p className="text-destructive text-sm">
+                              {resolve.error.message}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="mt-1 h-7 px-2"
+                          onClick={() => setResolutionFor(item.id)}
+                        >
+                          Resolve…
+                        </Button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </Section>
+            )}
+
+            <Section icon={History} title="Review">
+              {canSubmitStage(record.status) ? (
+                <div className="space-y-2">
+                  <p className="text-muted-foreground text-sm">
+                    Submit this stage so a reviewer can decide on the evidence
+                    above.
+                  </p>
+                  <Button
+                    size="sm"
+                    disabled={submit.isPending || artifacts.length === 0}
+                    onClick={() =>
+                      submit.mutate({
+                        cycleId: cycle.id,
+                        stage,
+                        expectedDbRevision: cycle.db_revision,
+                        idempotencyKey: `submit-${uuid()}`,
+                      })
+                    }
+                  >
+                    {submit.isPending ? "Submitting…" : "Submit for review"}
+                  </Button>
+                  {submit.error && (
+                    <p className="text-destructive text-sm">
+                      {submit.error.message}
+                    </p>
+                  )}
+                </div>
+              ) : canReviewStage(record.status) ? (
+                <div className="space-y-3">
+                  <Textarea
+                    value={rationale}
+                    onChange={(event) => setRationale(event.target.value)}
+                    rows={3}
+                    placeholder="Rationale (required for every decision)…"
+                    aria-label="Review rationale"
+                  />
+                  <div className="grid gap-2">
+                    {DECISIONS.map((decision) => {
+                      const enabled = canSubmitReview(rationale);
+                      return (
+                        <button
+                          key={decision}
+                          type="button"
+                          onClick={() => act(decision)}
+                          disabled={!enabled || review.isPending}
+                          className={cn(
+                            "border-border rounded-lg border p-3 text-left transition-all",
+                            "focus-visible:ring-ring focus-visible:ring-2 focus-visible:outline-none",
+                            enabled && !review.isPending
+                              ? "hover:border-foreground/30 hover:shadow-sm"
+                              : "cursor-not-allowed opacity-50",
+                          )}
+                        >
+                          <span className="text-sm font-medium">
+                            {DECISION_LABELS[decision]}
+                          </span>
+                          <span className="text-muted-foreground mt-0.5 block text-xs leading-snug">
+                            {decisionConsequence(decision)}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {review.error && (
+                    <p className="text-destructive text-sm">
+                      {review.error.message}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-muted-foreground text-sm">
+                  Nothing to decide here right now.
+                </p>
+              )}
+            </Section>
+
+            <Section icon={History} title="Activity">
+              <ol className="space-y-1.5">
+                {(activity.data ?? []).map((event) => (
+                  <li key={event.id} className="flex items-baseline gap-2">
+                    <span className="text-muted-foreground shrink-0 font-mono text-[11px] tabular-nums">
+                      #{event.sequence}
+                    </span>
+                    <span className="min-w-0 flex-1 text-sm">
+                      {describeActivity(event)}
+                    </span>
+                    <span className="text-muted-foreground shrink-0 font-mono text-[11px]">
+                      rev {activityRevision(event)}
+                    </span>
+                  </li>
+                ))}
+                {(activity.data ?? []).length === 0 && (
+                  <li className="text-muted-foreground text-sm">
+                    No activity recorded yet.
+                  </li>
+                )}
+              </ol>
+            </Section>
+          </div>
+        )}
+      </SheetContent>
+    </Sheet>
+  );
+}

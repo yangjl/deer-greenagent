@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -25,6 +25,20 @@ class DbtlCycleRow(Base):
         nullable=False,
         index=True,
     )
+    # A computational cycle may hang off a season/program parent. Self-FK with
+    # NO ACTION rather than CASCADE: deleting a parent must not silently erase
+    # the child research records underneath it.
+    parent_cycle_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey(
+            "dbtl_cycles.id",
+            name="fk_dbtl_cycles_parent_cycle_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+        index=True,
+    )
+    create_idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     title: Mapped[str] = mapped_column(String(240), nullable=False)
     cycle_class: Mapped[str] = mapped_column(String(32), nullable=False)
     state: Mapped[str] = mapped_column(String(48), nullable=False)
@@ -41,7 +55,29 @@ class DbtlCycleRow(Base):
         onupdate=_utc_now,
     )
 
-    __table_args__ = (Index("ix_dbtl_cycles_project_state", "project_id", "state"),)
+    __table_args__ = (
+        Index("ix_dbtl_cycles_project_state", "project_id", "state"),
+        # At most one live top-level cycle per project. Enforced by the
+        # database, not by a read-then-write check, because two concurrent
+        # "Start a cycle" clicks would both pass an application-level check.
+        # Child cycles (parent_cycle_id NOT NULL) are exempt: a season/program
+        # parent may carry several computational children at once.
+        Index(
+            "uq_dbtl_active_top_level_cycle",
+            "project_id",
+            unique=True,
+            sqlite_where=text("parent_cycle_id IS NULL AND state NOT IN ('completed', 'abandoned')"),
+            postgresql_where=text("parent_cycle_id IS NULL AND state NOT IN ('completed', 'abandoned')"),
+        ),
+        Index(
+            "uq_dbtl_cycle_create_idempotency",
+            "project_id",
+            "create_idempotency_key",
+            unique=True,
+            sqlite_where=text("create_idempotency_key IS NOT NULL"),
+            postgresql_where=text("create_idempotency_key IS NOT NULL"),
+        ),
+    )
 
 
 class DbtlStageAttemptRow(Base):
