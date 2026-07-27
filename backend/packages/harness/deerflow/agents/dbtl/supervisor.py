@@ -55,12 +55,6 @@ from deerflow.dbtl.branches import (
     SupervisorContext,
     resolve_branch,
 )
-from deerflow.dbtl.proposal import (
-    CONFIRMATION_REQUIRED_NOTICE,
-    NO_RECORD_NOTICE,
-    RECORD_EFFECT,
-    REQUIRED_GATES,
-)
 from deerflow.dbtl.routing import ExplicitChoice
 from deerflow.dbtl.setup_questions import (
     SetupQuestion,
@@ -285,13 +279,7 @@ def _setup_clarification_message(
     from message order also means summarization compacting the original turn
     cannot strand the reply.
     """
-    project = context.project_name or "this project"
-    note = "\n\n".join(
-        [
-            f"Creating the DBTL cycle in {project}. The authenticated project action writes the durable record; this supervisor turn creates nothing.",
-            "To design it, I need a few things the request does not settle. I have proposed an answer to each — correct the ones that are wrong.",
-        ]
-    )
+    note = "I proposed an answer to each — correct the ones that are wrong."
     question = render_questions(questions) or f"Please provide:\n{_bullets(decision.missing_fields)}"
     digest = sha256(f"{context.project_id}:{request_nonce}:{source_request}".encode()).hexdigest()[:16]
     request_id = f"{SETUP_CLARIFICATION_PREFIX}{digest}"
@@ -337,6 +325,15 @@ def _setup_clarification_message(
                             "id": item.id,
                             "question": item.question,
                             "why": item.why,
+                            "options": [
+                                {
+                                    "id": option.id,
+                                    "label": option.label,
+                                    "description": option.description,
+                                }
+                                for option in item.options
+                            ],
+                            "recommended_option_id": item.recommended_option_id,
                             "recommendation": item.recommendation,
                             "grounded": item.grounded,
                         }
@@ -349,25 +346,22 @@ def _setup_clarification_message(
 
 
 def _render_cycle_setup(decision: BranchDecision, context: SupervisorContext) -> str:
+    """One line: what is being offered, and where.
+
+    Everything else has been cut deliberately. The objective is the user's own
+    sentence read back to them, the gates and the record effect are the same
+    two paragraphs on every card, and the no-record notice restated a promise
+    the buttons already make — together they buried a yes/no decision under a
+    screen of boilerplate nobody rereads after the first time.
+
+    The gates and the record effect are still the reviewed wording in
+    :mod:`deerflow.dbtl.proposal`; the project rail's cycle view and the
+    stage-review surfaces remain where a person sees what a cycle commits them
+    to. If this card ever needs to carry that weight again, take the strings
+    from there rather than retyping them here.
+    """
     project = context.project_name or "this project"
-    lines = [
-        f"This looks like it could be a DBTL cycle in {project}.",
-        "",
-        f"Proposed objective: {decision.objective}" if decision.objective else "Proposed objective: (not stated)",
-    ]
-    if decision.missing_fields:
-        lines += ["", "Missing before start:", _bullets(decision.missing_fields)]
-    lines += [
-        "",
-        "Required human gates:",
-        _bullets(REQUIRED_GATES),
-        "",
-        RECORD_EFFECT,
-        "",
-        CONFIRMATION_REQUIRED_NOTICE,
-        NO_RECORD_NOTICE,
-    ]
-    return "\n".join(lines)
+    return f"This looks like it could be a DBTL cycle in {project}."
 
 
 def _setup_confirmation_message(

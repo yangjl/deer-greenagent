@@ -7,9 +7,7 @@ afterEach(cleanup);
 
 describe("Phase7DemoDialog", () => {
   it("walks through all three outcomes without changing durable records", () => {
-    render(
-      <Phase7DemoDialog open onOpenChange={() => undefined} />,
-    );
+    render(<Phase7DemoDialog open onOpenChange={() => undefined} />);
 
     expect(screen.getByText("Preview only · no records changed")).toBeTruthy();
     expect(screen.getByText("Invalidated")).toBeTruthy();

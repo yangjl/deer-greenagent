@@ -32,9 +32,7 @@ describe("DBTL cycle API", () => {
       "/projects/project%2F1/dbtl/cycles/cycle%2F1/abandon",
     );
     expect(mockedFetch.mock.calls[0]?.[1]?.method).toBe("POST");
-    expect(
-      JSON.parse(mockedFetch.mock.calls[0]?.[1]?.body as string),
-    ).toEqual({
+    expect(JSON.parse(mockedFetch.mock.calls[0]?.[1]?.body as string)).toEqual({
       rationale: "Duplicate setup test.",
       expected_db_revision: 3,
       idempotency_key: "abandon-1",

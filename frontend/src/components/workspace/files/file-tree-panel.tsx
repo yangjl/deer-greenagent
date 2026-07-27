@@ -166,7 +166,11 @@ function FileTreeNode({
       <div>
         <TreeRow
           depth={depth}
-          title={entry.is_symlink ? `${entry.name} (${t.workspaceFiles.symlink})` : entry.name}
+          title={
+            entry.is_symlink
+              ? `${entry.name} (${t.workspaceFiles.symlink})`
+              : entry.name
+          }
           onClick={() => setExpanded((value) => !value)}
         >
           <ChevronRightIcon
@@ -200,7 +204,11 @@ function FileTreeNode({
   return (
     <TreeRow
       depth={depth}
-      title={entry.is_symlink ? `${entry.name} (${t.workspaceFiles.symlink})` : entry.name}
+      title={
+        entry.is_symlink
+          ? `${entry.name} (${t.workspaceFiles.symlink})`
+          : entry.name
+      }
       onClick={() => onFileClick(entry)}
     >
       <span className="size-3.5 shrink-0" aria-hidden />

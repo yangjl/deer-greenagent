@@ -27,7 +27,9 @@ export async function fetchBuildTest(
     `${base(projectId)}/cycles/${encodeURIComponent(cycleId)}/build-test`,
   );
   if (!response.ok) {
-    throw new Error(await parseError(response, "Could not load Build and Test"));
+    throw new Error(
+      await parseError(response, "Could not load Build and Test"),
+    );
   }
   return (await response.json()) as BuildTestView;
 }

@@ -39,6 +39,14 @@ logger = logging.getLogger(__name__)
 #: asks twelve questions gets abandoned, which is worse than asking four.
 MAX_SETUP_QUESTIONS = 5
 
+#: Choices per question. Beyond a handful the reader is doing research to
+#: answer a question that exists to save them research, and "Other" — which the
+#: card always adds — covers the tail anyway.
+MAX_OPTIONS_PER_QUESTION = 4
+
+MAX_OPTION_LABEL_CHARS = 80
+MAX_OPTION_DESCRIPTION_CHARS = 160
+
 #: Caps on model-supplied text. Generous for a sentence, short enough that a
 #: runaway generation cannot push an unreviewable wall of text onto the card.
 MAX_QUESTION_CHARS = 200
@@ -51,15 +59,38 @@ ACCEPT_HINT = "Reply “accept” to take every suggestion, or answer only the o
 
 
 @dataclass(frozen=True, slots=True)
+class SetupOption:
+    """One selectable answer, with the line that makes it choosable.
+
+    ``description`` is what turns a menu into a decision: "DESeq2" alone asks
+    the reader to already know; "most widely used, robust for most designs"
+    lets them choose without leaving the card.
+    """
+
+    id: str
+    label: str
+    description: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class SetupQuestion:
-    """One question, optionally already answered by a proposal."""
+    """One question, and the answers worth offering for it.
+
+    A question may carry ``options`` (answered by picking) or a free-text
+    ``recommendation`` (answered by editing). Both are proposals; neither is
+    the scientist's word until they say so, which is what ``grounded`` and the
+    card's own "Other" field are for.
+    """
 
     id: str
     question: str
     why: str = ""
+    options: tuple[SetupOption, ...] = ()
+    #: Which option the model would pick. Empty when it declined to.
+    recommended_option_id: str = ""
     recommendation: str = ""
-    #: Whether the request itself supports :attr:`recommendation`. False means
-    #: the model proposed it, and the card must say so.
+    #: Whether the request itself supports the proposal. False means the model
+    #: proposed it, and the card must say so.
     grounded: bool = False
 
 
@@ -76,23 +107,27 @@ def build_questions_prompt(
 
 \"\"\"{request_text}\"\"\"
 
-Write the questions the Design stage needs answered before work can start, and answer each one yourself with the best proposal you can defend.
+Write the questions the Design stage needs answered before work can start, and offer the answers worth choosing between.
 
 A deterministic rule pass flagged these as unstated. Treat it as a hint, not a script — reword them, merge them, drop one that does not apply to this request, or ask something better:
 {gap_lines}
 
 Rules:
-- Ask at most {MAX_SETUP_QUESTIONS} questions, fewest that genuinely pin the design. Each must be a real question a person can answer in a phrase.
+- Ask at most {MAX_SETUP_QUESTIONS} questions, fewest that genuinely pin the design. Each must be a real question a person can answer in one step.
 - Ask only what this request actually needs. A software or data task has no "target trait"; a breeding experiment does.
-- Give every question a "recommendation": your proposed answer, so the scientist can accept rather than compose.
-- Set "grounded" to true ONLY if the request itself supports your recommendation. If you are proposing a sensible default they did not state, set it to false.
+- Give each question 2 to {MAX_OPTIONS_PER_QUESTION} concrete "options". Every option needs a short "label" and a
+  one-line "description" saying when it is the right choice, so the reader can decide without looking anything up.
+- Mark exactly one option "recommended": true — your pick. Do not mark more than one.
+- Do NOT add an "other" or "not sure" option; the card always offers one.
+- If a question genuinely has no discrete choices (a number, a name, a free description), omit "options" and give a "recommendation" string instead.
+- Set "grounded" to true ONLY if the request itself supports your pick. If you are proposing a sensible default they did not state, set it to false.
 - A wrong "grounded" flag is worse than no recommendation, because these answers become a durable research record.
-- Never invent dataset specifics — counts, sample sizes, years, locations, accession names — unless the request states them. Prefer a defensible generic proposal over a specific-sounding guess.
-- Keep each question under {MAX_QUESTION_CHARS} characters and each recommendation under {MAX_RECOMMENDATION_CHARS}.
+- Never invent dataset specifics — counts, sample sizes, years, locations, accession names — unless the request states them. Prefer a defensible generic option over a specific-sounding guess.
+- Keep each question under {MAX_QUESTION_CHARS} characters, each label under {MAX_OPTION_LABEL_CHARS}, each description under {MAX_OPTION_DESCRIPTION_CHARS}.
 - "why" is one short clause on what the answer decides. Omit it if it adds nothing.
 
 Reply with JSON only, in exactly this shape:
-{{"questions": [{{"id": "short-slug", "question": "...", "why": "...", "recommendation": "...", "grounded": false}}]}}"""
+{{"questions": [{{"id": "short-slug", "question": "...", "why": "...", "options": [{{"id": "slug", "label": "...", "description": "...", "recommended": true}}], "grounded": false}}]}}"""
 
 
 def _strip_fence(raw: str) -> str:
@@ -126,6 +161,43 @@ def fallback_questions(missing_fields: Iterable[str]) -> tuple[SetupQuestion, ..
     )
 
 
+def _parse_options(raw: object) -> tuple[tuple[SetupOption, ...], str]:
+    """Options and the single recommended id, dropping anything unusable.
+
+    A malformed option is skipped rather than rendered blank, and only the
+    first ``recommended`` flag counts — two recommendations is no
+    recommendation, and picking one arbitrarily at least keeps the card
+    honest about there being a default.
+    """
+    if not isinstance(raw, list):
+        return ((), "")
+
+    options: list[SetupOption] = []
+    recommended = ""
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            continue
+        label = _clean(entry.get("label"), MAX_OPTION_LABEL_CHARS)
+        if not label:
+            continue
+        option_id = _clean(entry.get("id"), 40) or f"o{index + 1}"
+        options.append(
+            SetupOption(
+                id=option_id,
+                label=label,
+                description=_clean(entry.get("description"), MAX_OPTION_DESCRIPTION_CHARS),
+            )
+        )
+        if not recommended and entry.get("recommended") is True:
+            recommended = option_id
+        if len(options) == MAX_OPTIONS_PER_QUESTION:
+            break
+
+    if recommended not in {option.id for option in options}:
+        recommended = ""
+    return (tuple(options), recommended)
+
+
 def parse_questions_response(raw: str, *, missing_fields: Iterable[str]) -> tuple[SetupQuestion, ...]:
     """Parse a model reply, degrading to :func:`fallback_questions`."""
     gaps = tuple(missing_fields)
@@ -152,11 +224,14 @@ def parse_questions_response(raw: str, *, missing_fields: Iterable[str]) -> tupl
             # A blank question cannot be answered, and an empty row on the card
             # reads as a bug rather than as a question nobody wrote.
             continue
+        options, recommended_option_id = _parse_options(entry.get("options"))
         questions.append(
             SetupQuestion(
                 id=_clean(entry.get("id"), 40) or f"q{index + 1}",
                 question=text,
                 why=_clean(entry.get("why"), MAX_WHY_CHARS),
+                options=options,
+                recommended_option_id=recommended_option_id,
                 recommendation=_clean(entry.get("recommendation"), MAX_RECOMMENDATION_CHARS),
                 # Anything other than an explicit true is an assumption.
                 grounded=entry.get("grounded") is True,
@@ -180,14 +255,19 @@ def render_questions(questions: Sequence[SetupQuestion]) -> str:
         lines.append(f"{index}. {item.question}")
         if item.why:
             lines.append(f"   {item.why}")
-        if item.recommendation:
-            # The label is the provenance. "Suggested" and "from your request"
-            # are the difference between a proposal and a statement, and the
-            # scientist is the one who has to tell them apart at a glance.
-            origin = "from your request" if item.grounded else "suggested"
+        # The label is the provenance. "Suggested" and "from your request" are
+        # the difference between a proposal and a statement, and the scientist
+        # is the one who has to tell them apart at a glance.
+        origin = "from your request" if item.grounded else "suggested"
+        for option in item.options:
+            marker = "→" if option.id == item.recommended_option_id else "-"
+            suffix = f" ({origin})" if option.id == item.recommended_option_id else ""
+            detail = f" — {option.description}" if option.description else ""
+            lines.append(f"   {marker} {option.label}{detail}{suffix}")
+        if item.recommendation and not item.options:
             lines.append(f"   → {item.recommendation} ({origin})")
         lines.append("")
 
-    if any(item.recommendation for item in questions):
+    if any(item.recommendation or item.options for item in questions):
         lines.append(ACCEPT_HINT)
     return "\n".join(lines).strip()

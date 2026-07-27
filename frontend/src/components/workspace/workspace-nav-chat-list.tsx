@@ -107,10 +107,7 @@ export function WorkspaceNavChatList({
       await archiveProject.mutateAsync(projectToRemove.id);
       setProjectToRemove(null);
       toast.success("Project removed");
-      if (
-        pathname === removedPath ||
-        pathname.startsWith(`${removedPath}/`)
-      ) {
+      if (pathname === removedPath || pathname.startsWith(`${removedPath}/`)) {
         router.replace("/workspace/chats");
       }
     } catch (error) {
@@ -276,9 +273,9 @@ export function WorkspaceNavChatList({
           <DialogHeader>
             <DialogTitle>Remove {projectToRemove?.name}?</DialogTitle>
             <DialogDescription>
-              The project will leave the sidebar and its conversations will
-              move to Unfiled chats. Its local folder and DBTL audit records
-              will not be deleted.
+              The project will leave the sidebar and its conversations will move
+              to Unfiled chats. Its local folder and DBTL audit records will not
+              be deleted.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

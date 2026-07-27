@@ -21,7 +21,8 @@ import {
 function payload(overrides: Partial<ProposalPayload> = {}): ProposalPayload {
   return {
     kind: "proposal",
-    proposed_objective: "Compare drought-response models across G2F environments",
+    proposed_objective:
+      "Compare drought-response models across G2F environments",
     missing_fields: ["target trait", "season range", "validation expectation"],
     band: "high",
     confidence: 0.84,
@@ -61,15 +62,15 @@ describe("showing a proposal", () => {
 
   it("shows nothing when the server withheld the proposal", () => {
     expect(
-      hasProposalToShow(evaluation({ proposal: null, proposals_visible: false })),
+      hasProposalToShow(
+        evaluation({ proposal: null, proposals_visible: false }),
+      ),
     ).toBe(false);
   });
 
   it("shows nothing for ordinary routing", () => {
     expect(
-      hasProposalToShow(
-        evaluation({ route_kind: "ordinary", proposal: null }),
-      ),
+      hasProposalToShow(evaluation({ route_kind: "ordinary", proposal: null })),
     ).toBe(false);
   });
 
@@ -88,7 +89,9 @@ describe("showing a proposal", () => {
   it("names a continuation differently from a new cycle", () => {
     expect(proposalHeadline(payload())).toMatch(/multi-step research/i);
     expect(
-      proposalHeadline(payload({ kind: "cycle_continuation", cycle_id: "c-1" })),
+      proposalHeadline(
+        payload({ kind: "cycle_continuation", cycle_id: "c-1" }),
+      ),
     ).toMatch(/continu/i);
     expect(proposalHeadline(payload({ kind: "cycle_setup" }))).toMatch(
       /set up/i,
@@ -164,7 +167,11 @@ describe("clarification", () => {
     state = advanceClarification(state, "target trait", "grain yield");
     state = advanceClarification(state, "season range", "2023-2024");
     expect(isClarificationComplete(payload(), state)).toBe(false);
-    state = advanceClarification(state, "validation expectation", "held-out sites");
+    state = advanceClarification(
+      state,
+      "validation expectation",
+      "held-out sites",
+    );
     expect(isClarificationComplete(payload(), state)).toBe(true);
   });
 
@@ -174,25 +181,28 @@ describe("clarification", () => {
       "target trait",
       "   ",
     );
-    expect(isClarificationComplete(payload({ missing_fields: ["target trait"] }), state)).toBe(
-      false,
-    );
+    expect(
+      isClarificationComplete(
+        payload({ missing_fields: ["target trait"] }),
+        state,
+      ),
+    ).toBe(false);
   });
 
   it("is complete immediately when nothing was missing", () => {
     const complete = payload({ missing_fields: [] });
-    expect(isClarificationComplete(complete, initialClarification(complete))).toBe(
-      true,
-    );
+    expect(
+      isClarificationComplete(complete, initialClarification(complete)),
+    ).toBe(true);
   });
 });
 
 describe("confirmation", () => {
   it("cannot be confirmed until clarification is answered", () => {
     const proposal = payload();
-    expect(canConfirmSetup(proposal, initialClarification(proposal), "Title")).toBe(
-      false,
-    );
+    expect(
+      canConfirmSetup(proposal, initialClarification(proposal), "Title"),
+    ).toBe(false);
   });
 
   it("cannot be confirmed without a title", () => {

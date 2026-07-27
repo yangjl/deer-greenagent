@@ -107,7 +107,9 @@ describe("DBTL control accessibility helpers", () => {
 
   test("handlers are blocked in every non-executing mode", () => {
     for (const mode of ["disabled", "audit_only", "manual"] as const) {
-      expect(blockedByReadiness(dbtlControlState(feature({ mode })))).toBe(true);
+      expect(blockedByReadiness(dbtlControlState(feature({ mode })))).toBe(
+        true,
+      );
     }
     expect(
       blockedByReadiness(

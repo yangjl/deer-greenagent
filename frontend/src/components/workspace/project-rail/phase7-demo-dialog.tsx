@@ -37,7 +37,7 @@ export function Phase7DemoDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[min(90svh,46rem)] overflow-y-auto p-0 sm:max-w-2xl">
         <DialogHeader className="border-border border-b px-6 py-5 text-left">
-          <p className="text-emerald-700 text-[11px] font-semibold tracking-[0.18em] uppercase dark:text-emerald-400">
+          <p className="text-[11px] font-semibold tracking-[0.18em] text-emerald-700 uppercase dark:text-emerald-400">
             Preview only · no records changed
           </p>
           <DialogTitle className="mt-1 text-xl">

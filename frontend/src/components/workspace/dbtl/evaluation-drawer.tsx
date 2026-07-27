@@ -186,30 +186,30 @@ function EvaluationItem({
         row.route_source === "classifier" &&
         row.route_kind === "ordinary" &&
         canLabel && (
-        <div className="flex flex-wrap items-center gap-2 pt-1">
-          <span className="text-muted-foreground text-xs">
-            Calibrate this ordinary decision:
-          </span>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={labeling}
-            onClick={() => onLabel("keep_ordinary")}
-          >
-            Correctly ordinary
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={labeling}
-            onClick={() => onLabel("start_setup")}
-          >
-            Should start a cycle
-          </Button>
-        </div>
-      )}
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <span className="text-muted-foreground text-xs">
+              Calibrate this ordinary decision:
+            </span>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={labeling}
+              onClick={() => onLabel("keep_ordinary")}
+            >
+              Correctly ordinary
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={labeling}
+              onClick={() => onLabel("start_setup")}
+            >
+              Should start a cycle
+            </Button>
+          </div>
+        )}
     </li>
   );
 }
@@ -225,7 +225,10 @@ function outcomeLabel(row: EvaluationRow): string {
     return "awaiting choice";
   }
   const proposed = row.route_kind === "proposal";
-  if (proposed && (row.human_choice === "keep_ordinary" || row.human_choice === "dismissed")) {
+  if (
+    proposed &&
+    (row.human_choice === "keep_ordinary" || row.human_choice === "dismissed")
+  ) {
     return `${row.human_choice.replace("_", " ")} — false upgrade`;
   }
   if (

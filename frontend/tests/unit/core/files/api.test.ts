@@ -86,17 +86,19 @@ test("fetchThreadProject requests the project endpoint", async () => {
 test("updateThreadProject PUTs the container path", async () => {
   let method = "";
   let body = "";
-  const fetchMock = rs.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    method = init?.method ?? "GET";
-    body = typeof init?.body === "string" ? init.body : "";
-    void input;
-    return new Response(
-      JSON.stringify({
-        project: { container_path: "/mnt/projects/uav", name: "uav" },
-      }),
-      { status: 200 },
-    );
-  });
+  const fetchMock = rs.fn(
+    async (input: RequestInfo | URL, init?: RequestInit) => {
+      method = init?.method ?? "GET";
+      body = typeof init?.body === "string" ? init.body : "";
+      void input;
+      return new Response(
+        JSON.stringify({
+          project: { container_path: "/mnt/projects/uav", name: "uav" },
+        }),
+        { status: 200 },
+      );
+    },
+  );
   rs.stubGlobal("fetch", fetchMock);
 
   const { updateThreadProject } = await import("@/core/files/api");
@@ -109,10 +111,12 @@ test("updateThreadProject PUTs the container path", async () => {
 
 test("clearThreadProject issues a DELETE", async () => {
   let method = "";
-  const fetchMock = rs.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-    method = init?.method ?? "GET";
-    return new Response(JSON.stringify({ project: null }), { status: 200 });
-  });
+  const fetchMock = rs.fn(
+    async (_input: RequestInfo | URL, init?: RequestInit) => {
+      method = init?.method ?? "GET";
+      return new Response(JSON.stringify({ project: null }), { status: 200 });
+    },
+  );
   rs.stubGlobal("fetch", fetchMock);
 
   const { clearThreadProject } = await import("@/core/files/api");

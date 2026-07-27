@@ -9,12 +9,11 @@ import {
   projectedValidity,
   recommendationOptions,
 } from "@/core/dbtl/validity-view";
-import type {
-  HeadlineMetric,
-  ValidityCheck,
-} from "@/core/dbtl/validity-view";
+import type { HeadlineMetric, ValidityCheck } from "@/core/dbtl/validity-view";
 
-function checks(overrides: Partial<Record<string, ValidityCheck["status"]>> = {}) {
+function checks(
+  overrides: Partial<Record<string, ValidityCheck["status"]>> = {},
+) {
   return Object.keys(VALIDITY_CHECK_LABELS).map((check) => ({
     check,
     status: overrides[check] ?? "passed",

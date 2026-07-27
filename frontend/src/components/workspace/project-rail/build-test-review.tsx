@@ -86,7 +86,10 @@ function BuildLineagePanel({ view }: { view: BuildTestView }) {
           <p className="text-muted-foreground text-[11px] uppercase">
             Dataset binding
           </p>
-          <p className="mt-1 font-mono text-xs" title={lineage.dataset_fingerprint}>
+          <p
+            className="mt-1 font-mono text-xs"
+            title={lineage.dataset_fingerprint}
+          >
             {shortHash(lineage.dataset_fingerprint)}
           </p>
         </div>
@@ -102,7 +105,7 @@ function BuildLineagePanel({ view }: { view: BuildTestView }) {
           <p className="text-muted-foreground text-[11px] uppercase">
             Code revision
           </p>
-          <p className="mt-1 break-all font-mono text-xs">
+          <p className="mt-1 font-mono text-xs break-all">
             {lineage.code_revision}
           </p>
         </div>
@@ -110,7 +113,7 @@ function BuildLineagePanel({ view }: { view: BuildTestView }) {
           <p className="text-muted-foreground text-[11px] uppercase">
             Config revision
           </p>
-          <p className="mt-1 break-all font-mono text-xs">
+          <p className="mt-1 font-mono text-xs break-all">
             {lineage.config_revision}
           </p>
         </div>
@@ -123,7 +126,9 @@ function BuildLineagePanel({ view }: { view: BuildTestView }) {
           {lineage.output_artifacts.map((item) => (
             <li key={`${item.uri}:${item.revision}`} className="text-xs">
               <span className="font-medium">rev {item.revision}</span>{" "}
-              <span className="text-muted-foreground break-all">{item.uri}</span>
+              <span className="text-muted-foreground break-all">
+                {item.uri}
+              </span>
               <span className="text-muted-foreground ml-2 font-mono">
                 {shortHash(item.content_hash)}
               </span>
@@ -169,7 +174,10 @@ function RecordedAssessment({ view }: { view: BuildTestView }) {
           <p className="text-sm font-semibold">Headline result</p>
           <div className="divide-border mt-2 divide-y">
             {assessment.headline_metrics.map((metric) => (
-              <div key={metric.name} className="flex justify-between gap-3 py-2 text-sm">
+              <div
+                key={metric.name}
+                className="flex justify-between gap-3 py-2 text-sm"
+              >
                 <span>{metric.name}</span>
                 <span className="font-mono">
                   {metric.value}
@@ -183,7 +191,10 @@ function RecordedAssessment({ view }: { view: BuildTestView }) {
           <p className="text-sm font-semibold">Validity assessment</p>
           <div className="divide-border mt-2 divide-y">
             {assessment.checks.map((check) => (
-              <div key={check.check} className="flex justify-between gap-3 py-2 text-sm">
+              <div
+                key={check.check}
+                className="flex justify-between gap-3 py-2 text-sm"
+              >
                 <span>{VALIDITY_CHECK_LABELS[check.check] ?? check.check}</span>
                 <span className="font-medium">
                   {CHECK_STATUS_LABELS[check.status]}
@@ -195,7 +206,8 @@ function RecordedAssessment({ view }: { view: BuildTestView }) {
       </div>
       <p className="text-muted-foreground text-xs">
         {assessment.validity_pack_key} · reviewed by{" "}
-        {assessment.reviewer_user_id} · {assessment.recommendation.replaceAll("_", " ")}
+        {assessment.reviewer_user_id} ·{" "}
+        {assessment.recommendation.replaceAll("_", " ")}
       </p>
     </div>
   );
@@ -259,15 +271,13 @@ function AssessmentForm({
     : routes[0]!.id;
   const checksComplete = checkList.every(
     (check) =>
-      (check.status !== "passed" || Boolean(check.detail.trim() && check.evidence_refs[0])) &&
+      (check.status !== "passed" ||
+        Boolean(check.detail.trim() && check.evidence_refs[0])) &&
       (check.status !== "failed" || Boolean(check.detail.trim())),
   );
   const ready = Boolean(metric && rationale.trim() && checksComplete);
 
-  function updateCheck(
-    check: string,
-    patch: Partial<ValidityCheck>,
-  ) {
+  function updateCheck(check: string, patch: Partial<ValidityCheck>) {
     setChecks((current) => ({
       ...current,
       [check]: { ...current[check]!, ...patch },
@@ -346,7 +356,10 @@ function AssessmentForm({
         </p>
         <div className="divide-border border-border mt-2 divide-y border-y">
           {checkList.map((check) => (
-            <div key={check.check} className="grid gap-2 py-3 sm:grid-cols-[1fr_9rem]">
+            <div
+              key={check.check}
+              className="grid gap-2 py-3 sm:grid-cols-[1fr_9rem]"
+            >
               <label className="text-sm font-medium">
                 {VALIDITY_CHECK_LABELS[check.check]}
               </label>
@@ -395,7 +408,10 @@ function AssessmentForm({
         </div>
       </div>
 
-      <Outcome outcome={projected.outcome} headline={assessmentHeadline(projected)} />
+      <Outcome
+        outcome={projected.outcome}
+        headline={assessmentHeadline(projected)}
+      />
 
       <label className="block space-y-1.5">
         <span className="text-xs font-medium">Workflow recommendation</span>

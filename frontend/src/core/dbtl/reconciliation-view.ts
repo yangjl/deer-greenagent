@@ -302,7 +302,8 @@ export function invalidationNotice(
   const check = view.approval_invalidation;
   if (!check?.invalidated) return null;
   return {
-    headline: "This reconciliation approval no longer matches the declared inputs.",
+    headline:
+      "This reconciliation approval no longer matches the declared inputs.",
     reasons: check.reasons,
   };
 }

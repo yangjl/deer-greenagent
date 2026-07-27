@@ -220,7 +220,9 @@ function MatrixRow({
               <dt className="text-muted-foreground text-[10px] tracking-wide uppercase">
                 {cell.label || `Source ${index + 1}`}
               </dt>
-              <dd className="truncate font-mono text-xs">{cell.value || "—"}</dd>
+              <dd className="truncate font-mono text-xs">
+                {cell.value || "—"}
+              </dd>
             </div>
           ))}
         </dl>
@@ -242,7 +244,7 @@ function MatrixRow({
             {row.evidence_refs.map((reference) => (
               <li
                 key={reference}
-                className="text-muted-foreground break-all font-mono text-[11px]"
+                className="text-muted-foreground font-mono text-[11px] break-all"
               >
                 {reference}
               </li>
@@ -366,7 +368,8 @@ export function ReconciliationMatrix({
                   <span className="text-muted-foreground">{item.uri}</span>
                 </span>
                 <span className="text-muted-foreground shrink-0 font-mono text-[10px]">
-                  {DATASET_ROLE_LABELS[item.role]} · {shortHash(item.content_hash)}
+                  {DATASET_ROLE_LABELS[item.role]} ·{" "}
+                  {shortHash(item.content_hash)}
                 </span>
               </li>
             ))}
@@ -401,8 +404,8 @@ export function ReconciliationMatrix({
 
       {view.unreadable_row_ids.length > 0 && (
         <p className="text-xs text-red-600 dark:text-red-400">
-          {view.unreadable_row_ids.length} reconciliation row(s) could not be read
-          and block the gate. This needs an operator.
+          {view.unreadable_row_ids.length} reconciliation row(s) could not be
+          read and block the gate. This needs an operator.
         </p>
       )}
     </div>

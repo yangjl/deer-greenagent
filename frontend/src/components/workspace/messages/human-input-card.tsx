@@ -22,6 +22,7 @@ import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
 import { MarkdownContent } from "./markdown-content";
+import { SetupQuestionWizard } from "./setup-question-wizard";
 
 export type HumanInputSubmitResult = boolean | void;
 
@@ -57,9 +58,15 @@ export function HumanInputCard({
   const [isComposing, setIsComposing] = useState(false);
   const titleId = useId();
   const textInputId = useId();
+  // The wizard owns the whole answer when the backend sent stepped questions,
+  // so the card's own text box would be a second, conflicting way to reply.
+  const setupQuestions = request.setup_questions?.length
+    ? request.setup_questions
+    : null;
   const allowText =
-    request.input_mode === "free_text" ||
-    request.input_mode === "choice_with_other";
+    !setupQuestions &&
+    (request.input_mode === "free_text" ||
+      request.input_mode === "choice_with_other");
   const options = request.options ?? [];
   const readOnly = !onSubmit;
   const isDisabled =
@@ -155,11 +162,26 @@ export function HumanInputCard({
             ) : null}
           </div>
 
-          <div className="text-foreground text-sm leading-6">
-            <MarkdownContent content={request.question} isLoading={false} />
-          </div>
+          {setupQuestions ? (
+            // The stepped form replaces the rendered question text: the same
+            // questions are in both, and showing the prose above the wizard
+            // asks the reader to read them twice.
+            <SetupQuestionWizard
+              disabled={isDisabled}
+              questions={setupQuestions}
+              onSubmit={(answerText) =>
+                void submitResponse(
+                  createHumanInputTextResponse(request, answerText),
+                )
+              }
+            />
+          ) : (
+            <div className="text-foreground text-sm leading-6">
+              <MarkdownContent content={request.question} isLoading={false} />
+            </div>
+          )}
 
-          {options.length > 0 ? (
+          {!setupQuestions && options.length > 0 ? (
             <div className="grid gap-2">
               {options.map((option) => (
                 <Button
@@ -232,7 +254,10 @@ export function HumanInputCard({
                 </Button>
               </div>
             </form>
-          ) : answeredResponse ? (
+          ) : answeredResponse && !setupQuestions ? (
+            // The wizard card omits this: its answer is every question and
+            // answer run together, which reads as a wall of text rather than a
+            // confirmation. The "Answered" badge already says what happened.
             <p className="text-muted-foreground text-sm" aria-live="polite">
               {t.humanInput.answeredValue(answeredResponse.value)}
             </p>

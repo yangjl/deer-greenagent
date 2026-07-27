@@ -69,3 +69,7 @@ config.yaml.bak
 
 # Monocle agent-observability trace output (local file exporter)
 .monocle/
+
+# LLM Space thread exports (scripts/export_llm_space_thread.py). Reproducible
+# from the run database, and they carry conversation content.
+/exports/
