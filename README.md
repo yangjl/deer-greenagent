@@ -18,9 +18,10 @@ Design–Build–Test–Learn (DBTL) governance.
   an icon-width navigation spine for Cycles, Blockers, Agents, and
   Conversations when the conversation needs more room.
 - **Safe workspace cleanup** — project, cycle, and conversation rails expose
-  removal actions. Project removal archives the project without deleting its
-  local folder and returns its conversations to Unfiled chats; cycle removal
-  records an audited abandonment; conversation deletion removes the thread.
+  removal actions when expanded; folded icon rails hide destructive controls.
+  Project removal archives the project without deleting its local folder and
+  returns its conversations to Unfiled chats; cycle removal records an audited
+  abandonment; conversation deletion removes the thread.
 - **Scoped memory** — project conversations use project-specific memory rather
   than leaking context across unrelated projects.
 - **Durable DBTL governance** — cycle state, evidence, blockers, revisions, and

@@ -293,7 +293,10 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   and preserves its folder, cycle removal requires a rationale and records an
   abandonment, and conversation deletion uses the shared `useDeleteThread`
   cascade before navigating an open thread back to the project's new-chat
-  route. Abandoned cycles are omitted from the active project rail. Cycle
+  route. The first rail hides each project's overflow/delete control while
+  collapsed, leaving the project icon as the row's only target; expanding the
+  rail restores those actions. Abandoned cycles are omitted from the active
+  project rail. Cycle
   titles are disclosure controls: clicking a folded row unfolds it, clicking
   the open row folds it, and opening one cycle folds the previous one.
 - `src/core/dbtl/composer-scope.ts` is the pure logic for the composer's DBTL

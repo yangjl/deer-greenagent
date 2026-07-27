@@ -87,6 +87,9 @@ test("opens a project file in an inspector and minimizes the first rail", async 
     page.getByRole("button", { name: "Show test2 files" }),
   ).toBeVisible();
   await expect(
+    page.getByRole("button", { name: "Project actions for test2" }),
+  ).toBeVisible();
+  await expect(
     page.getByText("/Users/test/Documents/projects/test2"),
   ).toHaveCount(0);
 
@@ -101,6 +104,9 @@ test("opens a project file in an inspector and minimizes the first rail", async 
   await expect(
     page.getByRole("button", { name: "Collapse test2 files" }),
   ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Project actions for test2" }),
+  ).toHaveCount(0);
 
   await page.getByRole("button", { name: "Close" }).click();
   await expect(
@@ -108,5 +114,8 @@ test("opens a project file in an inspector and minimizes the first rail", async 
   ).toHaveCount(1);
   await expect(
     page.getByRole("button", { name: "Collapse test2 files" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Project actions for test2" }),
   ).toBeVisible();
 });

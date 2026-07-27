@@ -79,7 +79,7 @@ export function WorkspaceNavChatList({
   const router = useRouter();
   const { enabled: agentsEnabled } = useAgentsApiEnabled();
   const { workspaceId, projects } = useActiveWorkspaceProjects();
-  const { state: sidebarState } = useSidebar();
+  const { isMobile, state: sidebarState } = useSidebar();
   const [projectOpen, setProjectOpen] = useState(false);
   const [projectToRemove, setProjectToRemove] = useState<Project | null>(null);
   const archiveProject = useArchiveProject(workspaceId);
@@ -221,27 +221,29 @@ export function WorkspaceNavChatList({
                     />
                   </div>
                 )}
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      type="button"
-                      aria-label={`Project actions for ${project.name}`}
-                      title={`Project actions for ${project.name}`}
-                      className="text-muted-foreground hover:text-foreground absolute top-1.5 right-1 flex size-6 items-center justify-center"
-                    >
-                      <MoreHorizontal className="size-3.5" />
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent side="right" align="start">
-                    <DropdownMenuItem
-                      className="text-destructive focus:text-destructive"
-                      onSelect={() => setProjectToRemove(project)}
-                    >
-                      <Trash2 />
-                      Remove project
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                {(isMobile || sidebarState === "expanded") && (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        aria-label={`Project actions for ${project.name}`}
+                        title={`Project actions for ${project.name}`}
+                        className="text-muted-foreground hover:text-foreground absolute top-1.5 right-1 flex size-6 items-center justify-center"
+                      >
+                        <MoreHorizontal className="size-3.5" />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent side="right" align="start">
+                      <DropdownMenuItem
+                        className="text-destructive focus:text-destructive"
+                        onSelect={() => setProjectToRemove(project)}
+                      >
+                        <Trash2 />
+                        Remove project
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
               </SidebarMenuItem>
             );
           })}
