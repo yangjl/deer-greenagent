@@ -1738,6 +1738,46 @@ remove the pointer and mark the Markdown projection while SQL and events remain
 the audit authority. Tests live in `test_dbtl_phase8_knowledge.py`, the stage
 contract/live execution suites, and `test_memory_scope_reader.py`.
 
+**Withdrawing retrieval must reach every target.** SQL commits the retraction
+(or supersession) *before* the router touches DeerMem, so a per-target loop
+that aborts on the first failure leaves the claim retrievable in every project
+after it — permanently, because the agent read path
+(`scopes/reader.py::scoped_memory_bucket_chain`) reads the publication bucket
+directly and never re-checks SQL. `_withdraw_publication_retrieval` therefore
+treats each target independently, returns the ids whose pointer removal failed,
+and the response carries them as `stale_retrieval_project_ids` rather than
+reading as "withdrawn everywhere". Pointer removal is deliberately **not** gated
+on the reviewer's membership of the target project: only the human-readable
+projection needs that project's folder, retrieval is keyed by target id alone,
+and gating it meant a membership change silently pinned a withdrawn claim in
+place. Pinned by
+`test_dbtl_cycles_router.py::test_one_failing_target_does_not_strand_retrieval_in_the_others`.
+
+**Known gaps against the Phase 8 plan** (`plan/build/2026-07-25-dbtl-human-visible-phased-implementation-plan.md`),
+carried deliberately rather than silently:
+- The plan's rollout ladder (`… → proposal → supervisor → staged_execution →
+  knowledge`) is collapsed into `DbtlMode = disabled|audit_only|manual|graph_enabled`,
+  and every knowledge endpoint gates on `mutations_enabled` (`manual` or
+  `graph_enabled`). Enabling Phase 3's manual workflow therefore also enables
+  knowledge promotion and cross-project publication, so "a mode may be raised
+  only after its phase exit review" is currently unenforceable.
+- The plan's P8 decision "which human project roles may promote, publish,
+  retract, or supersede claims" is unimplemented: `reviewer_project_role` is
+  *recorded* but never *checked*, so any `member` may do all four.
+- Knowledge idempotency keys are not payload-bound (contrast Phase 7's
+  `request_digest` in `build_test_ops.py`), so a reused key with different
+  `target_project_ids` replays the prior result and silently drops the new
+  targets.
+- The four knowledge mutations take no `expected_db_revision`, unlike every
+  other DBTL mutation.
+- `MemoryWritePolicy` and Learn's `validity_gates` are declared on the
+  `StageSpec` but read by nothing — they document intent, they do not enforce it.
+- Migration `0017` early-returns when `knowledge_claims` is absent while Alembic
+  still stamps it applied, so a database missing that precondition can never
+  acquire the publication/event tables.
+- `knowledge_view` is source-project scoped, so a project that a claim was
+  published *into* returns no claims/publications and cannot see or manage it.
+
 Current Design attempts resolve to `generic:design:v2`. The adapter supplies a
 bounded metadata-only project workspace manifest and prior Design worker runs,
 then records at least two independent positions (a required design specialist

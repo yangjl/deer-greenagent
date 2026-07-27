@@ -587,3 +587,72 @@ def test_a_review_without_a_rationale_is_rejected(tmp_path: Path) -> None:
         )
 
     assert response.status_code == 422
+
+
+def test_one_failing_target_does_not_strand_retrieval_in_the_others(
+    tmp_path: Path,
+) -> None:
+    """A withdrawal must reach every target, or say which ones it did not.
+
+    SQL has already committed the retraction by the time retrieval is removed,
+    so a loop that aborts on the first failing target leaves the claim
+    retrievable in every project after it — indefinitely, because the agent
+    read path consults the publication bucket directly and never re-checks SQL.
+    """
+
+    broken_bucket = bind_scope(publication_scope("project-broken")).user_id
+
+    class PartlyBrokenStore:
+        def __init__(self) -> None:
+            self.deleted: list[str] = []
+
+        def upsert_fact(self, fact, **scope):
+            return fact
+
+        def delete_fact(self, fact_id, **scope):
+            if scope.get("user_id") == broken_bucket:
+                raise RuntimeError("memory backend unavailable")
+            self.deleted.append(scope.get("user_id"))
+            return {"deleted": fact_id}
+
+    store = PartlyBrokenStore()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                memory_storage_root=tmp_path,
+                memory_fact_store=store,
+            )
+        )
+    )
+
+    class WorkspaceRepo:
+        async def get_project(self, project_id, *, user_id):
+            # The reviewer cannot see the target projects. Removing retrieval
+            # must not depend on that — only the readable projection does.
+            return None
+
+    async def exercise() -> list[str]:
+        return await dbtl_cycles._withdraw_publication_retrieval(
+            request,
+            claim={
+                "id": "claim-1",
+                "statement": "A selected-project finding.",
+                "grade": "supported",
+                "evidence": [],
+                "limitations": [],
+            },
+            claim_id="claim-1",
+            source_project_id="project-1",
+            target_project_ids=["project-a", "project-broken", "project-z"],
+            workspace_repo=WorkspaceRepo(),
+            reviewer_user_id="user-1",
+            status_value="retracted",
+        )
+
+    stale = anyio.run(exercise)
+
+    # The target after the failure is still reached.
+    assert bind_scope(publication_scope("project-z")).user_id in store.deleted
+    assert bind_scope(publication_scope("project-a")).user_id in store.deleted
+    # And the one that failed is reported rather than silently passing.
+    assert stale == ["project-broken"]

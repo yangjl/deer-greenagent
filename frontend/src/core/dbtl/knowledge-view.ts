@@ -72,12 +72,47 @@ export const GRADE_LABELS: Record<ClaimGrade, string> = {
   qa_lesson: "Quality-assurance lesson",
 };
 
+/**
+ * Claim status in words.
+ *
+ * The plan requires knowledge detail to distinguish validated project
+ * knowledge from superseded or retracted history, so each status carries its
+ * own label rather than the raw enum. `active` is spelled out in full because
+ * it is the only status that means "current project knowledge" — and a
+ * retracted claim sitting under that heading reads as current to anyone
+ * scanning headings.
+ */
+export const CLAIM_STATUS_LABELS: Record<KnowledgeClaim["status"], string> = {
+  active: "Validated project knowledge",
+  superseded: "Superseded",
+  retracted: "Retracted",
+};
+
 export function candidateNotice(candidate: KnowledgeCandidate): string {
   if (candidate.status === "promoted")
     return "Promoted through a recorded human review.";
   if (candidate.status === "discarded")
     return "Discarded; retained only in the audit trail.";
+  if (candidate.status === "working_memory")
+    return "Kept as provisional working memory — not validated project knowledge.";
   return "Provisional candidate — not validated project knowledge.";
+}
+
+/**
+ * Split claims into what is current and what is history.
+ *
+ * Rendering one flat list under a "Validated project knowledge" heading makes
+ * a retracted claim read as current, which is exactly what the plan's exit
+ * review checks for.
+ */
+export function partitionClaims(claims: KnowledgeClaim[]): {
+  current: KnowledgeClaim[];
+  history: KnowledgeClaim[];
+} {
+  return {
+    current: claims.filter((claim) => claim.status === "active"),
+    history: claims.filter((claim) => claim.status !== "active"),
+  };
 }
 
 export function candidateCanBeReviewed(candidate: KnowledgeCandidate): boolean {
@@ -136,4 +171,26 @@ export function retractionPreview(
   return count === 0
     ? "Retracts the source-project claim. No project publications are active."
     : `Retracts the source-project claim and removes it from ${count} published project${count === 1 ? "" : "s"}.`;
+}
+
+/**
+ * Every scope that loses current retrieval, named.
+ *
+ * The plan asks for a preview of *every selected-project scope*, not a count:
+ * retraction is destructive to retrieval, and "2 projects" does not let a
+ * reviewer check that the two are the ones they meant. Only `active`
+ * publications are listed — an already-retracted one has nothing left to lose.
+ * An unresolvable target degrades to its id rather than vanishing, so the
+ * preview can never under-report what is about to change.
+ */
+export function retractionScopePreview(
+  view: KnowledgeView,
+  claimId: string,
+  projects: { id: string; name: string }[],
+): { targets: { id: string; name: string }[]; summary: string } {
+  const targets = activePublicationTargets(view, claimId).map((id) => ({
+    id,
+    name: projects.find((project) => project.id === id)?.name ?? id,
+  }));
+  return { targets, summary: retractionPreview(view, claimId) };
 }

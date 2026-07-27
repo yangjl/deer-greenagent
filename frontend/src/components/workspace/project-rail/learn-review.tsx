@@ -8,14 +8,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  CLAIM_STATUS_LABELS,
   GRADE_LABELS,
   activePublicationTargets,
   candidateCanBeReviewed,
   candidateNotice,
   promotionReviewReady,
   publicationChoices,
+  partitionClaims,
   publicationReviewReady,
-  retractionPreview,
+  retractionScopePreview,
   type KnowledgeCandidate,
   type KnowledgeClaim,
   type KnowledgeView,
@@ -26,7 +28,7 @@ import {
   useRetractClaim,
 } from "@/core/dbtl";
 import { uuid } from "@/core/utils/uuid";
-import { type Project, useActiveWorkspaceProjects } from "@/core/workspaces";
+import { type Project, useProject, useProjects } from "@/core/workspaces";
 
 function CandidateCard({
   candidate,
@@ -198,6 +200,7 @@ function ClaimCard({
   const [publicationRationale, setPublicationRationale] = useState("");
   const [retractionRationale, setRetractionRationale] = useState("");
   const activeTargets = activePublicationTargets(view, claim.id);
+  const retractionScope = retractionScopePreview(view, claim.id, projects);
   const mutationError = publish.error ?? retract.error;
   const available = publicationChoices(projects, {
     sourceProjectId: projectId,
@@ -212,7 +215,7 @@ function ClaimCard({
       <div className="flex items-start justify-between gap-3">
         <p className="text-sm leading-relaxed font-medium">{claim.statement}</p>
         <Badge variant={claim.status === "active" ? "secondary" : "outline"}>
-          {claim.status}
+          {CLAIM_STATUS_LABELS[claim.status]}
         </Badge>
       </div>
       <p className="text-muted-foreground text-xs">
@@ -310,8 +313,20 @@ function ClaimCard({
               Retract claim
             </p>
             <p className="text-muted-foreground text-xs">
-              {retractionPreview(view, claim.id)}
+              {retractionScope.summary}
             </p>
+            {/* Name every scope, not just how many. Retraction is destructive
+                to retrieval, and a count gives the reviewer nothing to check
+                against what they meant to withdraw. */}
+            {retractionScope.targets.length > 0 && (
+              <ul className="text-muted-foreground space-y-0.5 text-xs">
+                {retractionScope.targets.map((target) => (
+                  <li key={target.id}>
+                    Loses current retrieval: {target.name}
+                  </li>
+                ))}
+              </ul>
+            )}
             <Input
               value={retractionRationale}
               onChange={(event) => setRetractionRationale(event.target.value)}
@@ -351,12 +366,19 @@ export function LearnReview({
   cycleId: string;
 }) {
   const knowledge = useKnowledge(projectId, cycleId);
-  const { projects } = useActiveWorkspaceProjects();
+  // Publication targets must come from *this* project's workspace. The
+  // active-workspace hook auto-selects the first workspace, so for anyone
+  // whose current project lives elsewhere it listed the wrong projects and
+  // every publish failed server-side (targets outside the claim's workspace
+  // are refused).
+  const project = useProject(projectId);
+  const projects = useProjects(project.data?.workspace_id ?? null);
   const view = knowledge.data;
-  const activeClaims = useMemo(
-    () => view?.claims.filter((claim) => claim.status === "active") ?? [],
+  const { current: currentClaims, history: historyClaims } = useMemo(
+    () => partitionClaims(view?.claims ?? []),
     [view],
   );
+  const activeClaims = currentClaims;
   const synthesisSummary = useMemo(() => {
     const event = [...(view?.events ?? [])]
       .reverse()
@@ -430,14 +452,14 @@ export function LearnReview({
 
       <div className="space-y-2">
         <p className="text-xs font-semibold tracking-wide uppercase">
-          Validated project knowledge
+          {CLAIM_STATUS_LABELS.active}
         </p>
-        {view.claims.length === 0 ? (
+        {currentClaims.length === 0 ? (
           <p className="text-muted-foreground text-sm">
             No candidate has been promoted.
           </p>
         ) : (
-          view.claims.map((claim) => (
+          currentClaims.map((claim) => (
             <ClaimCard
               key={claim.id}
               claim={claim}
@@ -448,6 +470,29 @@ export function LearnReview({
           ))
         )}
       </div>
+
+      {/* Withdrawn claims stay visible as history, but never under the
+          heading that means "current project knowledge" — a reader scanning
+          headings would otherwise treat a retracted claim as still in force. */}
+      {historyClaims.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-semibold tracking-wide uppercase">
+            Superseded or retracted history
+          </p>
+          <p className="text-muted-foreground text-xs">
+            No longer current project knowledge. Retained as an audit record.
+          </p>
+          {historyClaims.map((claim) => (
+            <ClaimCard
+              key={claim.id}
+              claim={claim}
+              projectId={projectId}
+              projects={projects.data ?? []}
+              view={view}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -884,6 +884,57 @@ async def _remove_publication_pointer(request: Request, *, claim_id: str, target
     )
 
 
+async def _withdraw_publication_retrieval(
+    request: Request,
+    *,
+    claim: dict,
+    claim_id: str,
+    source_project_id: str,
+    target_project_ids: list[str],
+    workspace_repo,
+    reviewer_user_id: str,
+    status_value: str,
+) -> list[str]:
+    """Stop retrieval in every target, and never stop early.
+
+    SQL is the authority and has already committed the retraction by the time
+    this runs, so a target that raises must not abandon the targets after it:
+    the loop that did would leave a withdrawn claim retrievable in every
+    project it had not reached yet, indefinitely and with no repair path. Each
+    target is therefore independent, and the ids that failed are returned so
+    the caller can report stale retrieval rather than imply success.
+
+    Removing the pointer is also deliberately not gated on the reviewer's
+    membership of the *target* project. Only the human-readable projection
+    needs that project's folder; retrieval is keyed by target id alone, and a
+    reviewer who cannot see a target project must still be able to withdraw
+    from it — otherwise a membership change silently pins the claim there.
+    """
+    failed: list[str] = []
+    for target_project_id in target_project_ids:
+        try:
+            target = await workspace_repo.get_project(target_project_id, user_id=reviewer_user_id)
+            if target is not None:
+                target_root = await ensure_project_root(workspace_repo, target, request)
+                if target_root:
+                    await run_file_io(
+                        _write_text_projection,
+                        Path(target_root) / "knowledge" / "published" / f"{claim_id}.md",
+                        _published_markdown(claim, source_project_id, status_value),
+                    )
+        except Exception:  # noqa: BLE001
+            # The projection is a convenience copy; failing to update it must
+            # not prevent the retrieval removal below, which is the part that
+            # actually withdraws the claim.
+            logger.exception("Failed to update retracted publication projection for %s in %s", claim_id, target_project_id)
+        try:
+            await _remove_publication_pointer(request, claim_id=claim_id, target_project_id=target_project_id)
+        except Exception:  # noqa: BLE001
+            failed.append(target_project_id)
+            logger.exception("Failed to remove publication pointer for %s in %s; retrieval may be stale", claim_id, target_project_id)
+    return failed
+
+
 @router.get("/projects/{project_id}/dbtl/knowledge")
 @require_permission("threads", "read")
 async def get_project_knowledge(
@@ -995,23 +1046,21 @@ async def promote_knowledge_candidate(
                     ),
                 )
             workspace_repo = get_workspace_repo(request)
-            for publication in result["publications"]:
-                if publication["claim_id"] != superseded["id"]:
-                    continue
-                target = await workspace_repo.get_project(publication["target_project_id"], user_id=user_id)
-                if target is not None:
-                    target_root = await ensure_project_root(workspace_repo, target, request)
-                    if target_root:
-                        await run_file_io(
-                            _write_text_projection,
-                            Path(target_root) / "knowledge" / "published" / f"{superseded['id']}.md",
-                            _published_markdown(superseded, project_id, "superseded"),
-                        )
-                await _remove_publication_pointer(
-                    request,
-                    claim_id=superseded["id"],
-                    target_project_id=publication["target_project_id"],
-                )
+            # Same contract as retraction: the superseded claim's retrieval is
+            # withdrawn from every target independently, so one failing target
+            # cannot leave the rest still serving an outdated claim.
+            stale = await _withdraw_publication_retrieval(
+                request,
+                claim=superseded,
+                claim_id=str(superseded["id"]),
+                source_project_id=project_id,
+                target_project_ids=[publication["target_project_id"] for publication in result["publications"] if publication["claim_id"] == superseded["id"]],
+                workspace_repo=workspace_repo,
+                reviewer_user_id=user_id,
+                status_value="superseded",
+            )
+            if stale:
+                return {**result, "stale_retrieval_project_ids": stale}
         return result
     except Exception as exc:  # noqa: BLE001
         raise _translate(exc) from exc
@@ -1107,24 +1156,19 @@ async def retract_knowledge_claim(
                     status="retracted",
                 ),
             )
-        for publication in result["publications"]:
-            if publication["claim_id"] != claim_id:
-                continue
-            target = await workspace_repo.get_project(publication["target_project_id"], user_id=user_id)
-            if target is None:
-                continue
-            target_root = await ensure_project_root(workspace_repo, target, request)
-            if target_root:
-                await run_file_io(
-                    _write_text_projection,
-                    Path(target_root) / "knowledge" / "published" / f"{claim_id}.md",
-                    _published_markdown(claim, project_id, "retracted"),
-                )
-            await _remove_publication_pointer(
-                request,
-                claim_id=claim_id,
-                target_project_id=publication["target_project_id"],
-            )
-        return result
+        stale = await _withdraw_publication_retrieval(
+            request,
+            claim=claim,
+            claim_id=claim_id,
+            source_project_id=project_id,
+            target_project_ids=[publication["target_project_id"] for publication in result["publications"] if publication["claim_id"] == claim_id],
+            workspace_repo=workspace_repo,
+            reviewer_user_id=user_id,
+            status_value="retracted",
+        )
+        # The retraction itself is committed and authoritative. Report any
+        # project whose retrieval could not be updated instead of returning a
+        # clean result that would read as "withdrawn everywhere".
+        return {**result, "stale_retrieval_project_ids": stale}
     except Exception as exc:  # noqa: BLE001
         raise _translate(exc) from exc
