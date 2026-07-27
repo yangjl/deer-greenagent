@@ -217,8 +217,9 @@ export default function ChatPage() {
     selectedCycleId,
     selectCycle,
     pendingDesignKickoff,
-    requestDesignKickoff,
     consumeDesignKickoff,
+    armDesignKickoff,
+    releaseDesignKickoff,
     pendingScopeRequest,
     consumeComposerScope,
   } = useProjectCycleSelection();
@@ -331,7 +332,12 @@ export default function ChatPage() {
       sendMessage(
         threadId,
         {
-          text: `Start the Design council for “${kickoff.cycleTitle}”. Ground the design in this project's files and cycle context. Have independent specialists debate assumptions, evidence, risks, success criteria, and rejection criteria. If a project-owner decision is missing, ask me one focused clarification; otherwise synthesize a Design package for human review. Do not advance the gate.`,
+          text: [
+            `Start the Design council for “${kickoff.cycleTitle}”. Ground the design in this project's files and cycle context. Have independent specialists debate assumptions, evidence, risks, success criteria, and rejection criteria. If a project-owner decision is missing, ask me one focused clarification; otherwise synthesize a Design package for human review. Do not advance the gate.`,
+            kickoff.designNotes?.trim()
+              ? `\nThe project owner answered the setup questions as follows. Treat these as the owner's decisions rather than as suggestions to revisit:\n\n${kickoff.designNotes.trim()}`
+              : "",
+          ].join(""),
           files: [],
         },
         runContextPayload(cycleContext),
@@ -392,19 +398,33 @@ export default function ChatPage() {
             return false;
           }
           selectCycle(cycle.id);
-          requestDesignKickoff(cycle.id, cycle.title);
+          // Armed, not sent. The supervisor answers this approval with the
+          // design questions, and a council convened before those are answered
+          // debates an objective and nothing else — which is how it produced
+          // confident syntheses of no use to anyone. The kickoff is released
+          // below, once the human has actually answered.
+          armDesignKickoff(cycle.id, cycle.title);
         } else if (response.value === "keep_ordinary") {
           recordProposalOutcome("keep_ordinary");
         } else {
           recordProposalOutcome("not_sure");
         }
       }
+      if (sent && request.clarification_type === "cycle_setup") {
+        // The design questions have been answered, so the council finally has
+        // something to ground itself in. Their answers travel with the kickoff
+        // rather than being left for it to rediscover from the transcript.
+        releaseDesignKickoff(
+          typeof response.value === "string" ? response.value : "",
+        );
+      }
       return sent;
     },
     [
+      armDesignKickoff,
       createFromNativeSetup,
       recordProposalOutcome,
-      requestDesignKickoff,
+      releaseDesignKickoff,
       selectCycle,
       selectedCycleId,
       sendMessage,

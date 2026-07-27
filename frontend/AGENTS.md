@@ -354,6 +354,19 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   Wiring a new creation route
   without the kickoff leaves a cycle that never gets designed — that regression
   shipped once already.
+- **On the conversational path the kickoff is armed, not sent.** Approving the
+  native confirmation calls `armDesignKickoff`; the supervisor answers that
+  same approval with its design questions, and `releaseDesignKickoff(answer)`
+  fires only when the human answers the `cycle_setup` card. Sending it at
+  creation raced the questions and the council convened knowing nothing but the
+  objective, which is how it produced confident syntheses of no use to anyone —
+  and it made the questions pointless, since the debate they exist to ground
+  had already happened. The answers ride along as `PendingDesignKickoff.
+designNotes` and are handed to the council as the owner's decisions rather
+  than as suggestions to revisit; re-deriving them from the transcript would
+  make the council's grounding depend on summarization. `StartCycleDialog`
+  still calls `requestDesignKickoff` directly: that form collects the same
+  facts up front, so there is nothing left to ask.
 - `POST .../dbtl/proposals/draft-setup` and its merge helpers remain available
   to the degraded form path, but graph-enabled project chat does not invoke
   them. The supervisor derives bounded setup data from the conversation and

@@ -349,14 +349,22 @@ def _setup_clarification_message(
 
 
 def _render_cycle_setup(decision: BranchDecision, context: SupervisorContext) -> str:
+    """The confirmation summary: what a cycle would commit you to, and nothing else.
+
+    The classifier's unmatched fields are deliberately absent. They are rule
+    names rather than questions, and listing them here put the form back in
+    front of the decision it was moved behind — the reader is answering "should
+    this be a cycle?", and a preview of blanks only makes that look like work.
+    They are raised after approval, as questions a model wrote.
+    """
     project = context.project_name or "this project"
     lines = [
         f"This looks like it could be a DBTL cycle in {project}.",
         "",
         f"Proposed objective: {decision.objective}" if decision.objective else "Proposed objective: (not stated)",
+        "",
+        "If you start it, I will ask a few questions to pin the design — with a suggested answer for each.",
     ]
-    if decision.missing_fields:
-        lines += ["", "Missing before start:", _bullets(decision.missing_fields)]
     lines += [
         "",
         "Required human gates:",
