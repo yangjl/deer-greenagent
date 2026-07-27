@@ -72,15 +72,32 @@ const PLACEHOLDER_AGENTS = [
   { name: "Lead agent", role: "Conversation & delegation" },
 ] as const;
 
+const RAIL_SECTION_IDS = {
+  agents: "project-rail-agents",
+  blockers: "project-rail-blockers",
+  conversations: "project-rail-conversations",
+  cycles: "project-rail-cycles",
+} as const;
+
+function scrollToRailSection(sectionId: string) {
+  window.setTimeout(() => {
+    document
+      .getElementById(sectionId)
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, 0);
+}
+
 function SectionLabel({
   children,
   action,
+  id,
 }: {
   children: React.ReactNode;
   action?: React.ReactNode;
+  id?: string;
 }) {
   return (
-    <div className="mt-6 mb-1 flex items-center justify-between px-4">
+    <div id={id} className="mt-6 mb-1 flex items-center justify-between px-4">
       <span className="text-muted-foreground/70 text-[11px] font-semibold tracking-widest uppercase">
         {children}
       </span>
@@ -243,7 +260,30 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   }
 
   return (
-    <ProjectRailFrame>
+    <ProjectRailFrame
+      collapsedItems={[
+        {
+          label: "Cycles",
+          icon: CircleDashed,
+          onSelect: () => scrollToRailSection(RAIL_SECTION_IDS.cycles),
+        },
+        {
+          label: "Blockers",
+          icon: AlertTriangle,
+          onSelect: () => scrollToRailSection(RAIL_SECTION_IDS.blockers),
+        },
+        {
+          label: "Agents",
+          icon: Bot,
+          onSelect: () => scrollToRailSection(RAIL_SECTION_IDS.agents),
+        },
+        {
+          label: "Conversations",
+          icon: MessagesSquare,
+          onSelect: () => scrollToRailSection(RAIL_SECTION_IDS.conversations),
+        },
+      ]}
+    >
       <SettingsDialog
         open={readinessOpen}
         onOpenChange={setReadinessOpen}
@@ -258,7 +298,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           onOpenChange={(next) => !next && setOpenStage(null)}
         />
       )}
-      <SectionLabel>
+      <SectionLabel id={RAIL_SECTION_IDS.cycles}>
         <button
           type="button"
           onClick={() => setCyclesOverride(!cyclesOpen)}
@@ -390,7 +430,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
         </div>
       )}
 
-      <SectionLabel>
+      <SectionLabel id={RAIL_SECTION_IDS.blockers}>
         Blockers{selected ? ` · ${selected.title}` : ""}
       </SectionLabel>
       <div className="px-2">
@@ -412,7 +452,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
         )}
       </div>
 
-      <SectionLabel>Agents</SectionLabel>
+      <SectionLabel id={RAIL_SECTION_IDS.agents}>Agents</SectionLabel>
       <div className="px-2">
         {PLACEHOLDER_AGENTS.map((agent) => (
           <div
@@ -433,6 +473,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
       </div>
 
       <SectionLabel
+        id={RAIL_SECTION_IDS.conversations}
         action={
           <Link
             href={pathOfNewProjectConversation(projectSlug)}
