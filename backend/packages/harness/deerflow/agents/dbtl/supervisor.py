@@ -55,12 +55,6 @@ from deerflow.dbtl.branches import (
     SupervisorContext,
     resolve_branch,
 )
-from deerflow.dbtl.proposal import (
-    CONFIRMATION_REQUIRED_NOTICE,
-    NO_RECORD_NOTICE,
-    RECORD_EFFECT,
-    REQUIRED_GATES,
-)
 from deerflow.dbtl.routing import ExplicitChoice
 from deerflow.dbtl.setup_questions import (
     SetupQuestion,
@@ -358,31 +352,22 @@ def _setup_clarification_message(
 
 
 def _render_cycle_setup(decision: BranchDecision, context: SupervisorContext) -> str:
-    """The confirmation summary: what a cycle would commit you to, and nothing else.
+    """One line: what is being offered, and where.
 
-    The classifier's unmatched fields are deliberately absent. They are rule
-    names rather than questions, and listing them here put the form back in
-    front of the decision it was moved behind — the reader is answering "should
-    this be a cycle?", and a preview of blanks only makes that look like work.
-    They are raised after approval, as questions a model wrote.
+    Everything else has been cut deliberately. The objective is the user's own
+    sentence read back to them, the gates and the record effect are the same
+    two paragraphs on every card, and the no-record notice restated a promise
+    the buttons already make — together they buried a yes/no decision under a
+    screen of boilerplate nobody rereads after the first time.
+
+    The gates and the record effect are still the reviewed wording in
+    :mod:`deerflow.dbtl.proposal`; the project rail's cycle view and the
+    stage-review surfaces remain where a person sees what a cycle commits them
+    to. If this card ever needs to carry that weight again, take the strings
+    from there rather than retyping them here.
     """
     project = context.project_name or "this project"
-    lines = [
-        f"This looks like it could be a DBTL cycle in {project}.",
-        "",
-        f"Proposed objective: {decision.objective}" if decision.objective else "Proposed objective: (not stated)",
-    ]
-    lines += [
-        "",
-        "Required human gates:",
-        _bullets(REQUIRED_GATES),
-        "",
-        RECORD_EFFECT,
-        "",
-        CONFIRMATION_REQUIRED_NOTICE,
-        NO_RECORD_NOTICE,
-    ]
-    return "\n".join(lines)
+    return f"This looks like it could be a DBTL cycle in {project}."
 
 
 def _setup_confirmation_message(

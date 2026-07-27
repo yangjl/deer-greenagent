@@ -346,7 +346,9 @@ class TestCompleteThreadStateOnEveryBranch:
             "not_sure",
         ]
         assert request["dbtl_cycle_setup"]["objective"]
-        assert "No cycle has been created yet." in request["context"]
+        # The card's prose is one line now; the setup payload still carries the
+        # objective, which is what creation actually needs.
+        assert request["context"].strip().count("\n") == 0
 
     @pytest.mark.asyncio
     async def test_explicit_keep_ordinary_reaches_the_lead_agent(self):
@@ -470,8 +472,11 @@ class TestSetupClarificationIsACard:
             "keep_ordinary",
             "not_sure",
         ]
-        # Nothing about the record exists yet, and the card says so.
-        assert "no cycle has been created yet" in request["context"].lower()
+        # The card is one line of framing. The gates, the record effect, and
+        # the no-record notice were cut deliberately: they were identical on
+        # every card and buried a yes/no decision under boilerplate.
+        assert request["context"].strip().count("\n") == 0
+        assert "dbtl cycle" in request["context"].lower()
 
     @pytest.mark.asyncio
     async def test_approval_opens_questions_the_model_wrote_and_already_answered(self):
