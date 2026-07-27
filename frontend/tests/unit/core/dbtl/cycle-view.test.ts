@@ -21,6 +21,7 @@ import {
   reviewSubmissionReadiness,
   stageBlockReason,
   stageOf,
+  toggleCycleDisclosure,
 } from "@/core/dbtl/cycle-view";
 import type {
   ActivityEvent,
@@ -377,5 +378,16 @@ describe("default selection", () => {
 
   test("an empty project has no selection", () => {
     expect(defaultSelectedCycle([])).toBeNull();
+  });
+});
+
+describe("cycle disclosure", () => {
+  test("clicking the open cycle folds it", () => {
+    expect(toggleCycleDisclosure("cycle-1", "cycle-1")).toBeNull();
+  });
+
+  test("clicking a folded cycle unfolds only that cycle", () => {
+    expect(toggleCycleDisclosure(null, "cycle-1")).toBe("cycle-1");
+    expect(toggleCycleDisclosure("cycle-1", "cycle-2")).toBe("cycle-2");
   });
 });

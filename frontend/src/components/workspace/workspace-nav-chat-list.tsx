@@ -7,12 +7,30 @@ import {
   FolderClosed,
   FolderOpen,
   MessagesSquare,
+  MoreHorizontal,
   Plus,
+  Trash2,
 } from "lucide-react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
+import { toast } from "sonner";
 
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   SidebarGroup,
   SidebarGroupLabel,
@@ -28,7 +46,12 @@ import {
 } from "@/components/ui/tooltip";
 import { useAgentsApiEnabled } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
-import { pathOfProject, useActiveWorkspaceProjects } from "@/core/workspaces";
+import {
+  type Project,
+  pathOfProject,
+  useActiveWorkspaceProjects,
+  useArchiveProject,
+} from "@/core/workspaces";
 import { cn } from "@/lib/utils";
 
 import { ProjectFiles } from "./project-rail/project-files";
@@ -53,10 +76,13 @@ export function WorkspaceNavChatList({
 }) {
   const { t } = useI18n();
   const pathname = usePathname();
+  const router = useRouter();
   const { enabled: agentsEnabled } = useAgentsApiEnabled();
   const { workspaceId, projects } = useActiveWorkspaceProjects();
   const { state: sidebarState } = useSidebar();
   const [projectOpen, setProjectOpen] = useState(false);
+  const [projectToRemove, setProjectToRemove] = useState<Project | null>(null);
+  const archiveProject = useArchiveProject(workspaceId);
   // Projects whose folder tree is expanded inline in the sidebar.
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -72,6 +98,26 @@ export function WorkspaceNavChatList({
       }
       return next;
     });
+  }
+
+  async function removeProject() {
+    if (!projectToRemove) return;
+    const removedPath = pathOfProject(projectToRemove.slug);
+    try {
+      await archiveProject.mutateAsync(projectToRemove.id);
+      setProjectToRemove(null);
+      toast.success("Project removed");
+      if (
+        pathname === removedPath ||
+        pathname.startsWith(`${removedPath}/`)
+      ) {
+        router.replace("/workspace/chats");
+      }
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to remove project",
+      );
+    }
   }
 
   return (
@@ -101,7 +147,7 @@ export function WorkspaceNavChatList({
             const isExpanded = expanded.has(project.id);
             const FolderIcon = active || isExpanded ? FolderOpen : FolderClosed;
             return (
-              <SidebarMenuItem key={project.id}>
+              <SidebarMenuItem key={project.id} className="group/project">
                 {sidebarState === "collapsed" ? (
                   <SidebarMenuButton
                     isActive={active}
@@ -109,7 +155,7 @@ export function WorkspaceNavChatList({
                     asChild
                   >
                     <Link
-                      className="text-muted-foreground"
+                      className="text-muted-foreground pr-7"
                       href={pathOfProject(project.slug)}
                     >
                       <FolderIcon
@@ -148,7 +194,7 @@ export function WorkspaceNavChatList({
                       asChild
                     >
                       <Link
-                        className="text-muted-foreground"
+                        className="text-muted-foreground pr-7"
                         href={pathOfProject(project.slug)}
                       >
                         <FolderIcon
@@ -178,6 +224,27 @@ export function WorkspaceNavChatList({
                     />
                   </div>
                 )}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label={`Project actions for ${project.name}`}
+                      title={`Project actions for ${project.name}`}
+                      className="text-muted-foreground hover:text-foreground absolute top-1.5 right-1 flex size-6 items-center justify-center"
+                    >
+                      <MoreHorizontal className="size-3.5" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent side="right" align="start">
+                    <DropdownMenuItem
+                      className="text-destructive focus:text-destructive"
+                      onSelect={() => setProjectToRemove(project)}
+                    >
+                      <Trash2 />
+                      Remove project
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </SidebarMenuItem>
             );
           })}
@@ -201,6 +268,37 @@ export function WorkspaceNavChatList({
           workspaceId={workspaceId}
         />
       )}
+      <Dialog
+        open={projectToRemove !== null}
+        onOpenChange={(open) => !open && setProjectToRemove(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove {projectToRemove?.name}?</DialogTitle>
+            <DialogDescription>
+              The project will leave the sidebar and its conversations will
+              move to Unfiled chats. Its local folder and DBTL audit records
+              will not be deleted.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={archiveProject.isPending}
+              onClick={() => setProjectToRemove(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={archiveProject.isPending}
+              onClick={() => void removeProject()}
+            >
+              {archiveProject.isPending ? "Removing…" : "Remove project"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <SidebarGroup>
         <SidebarMenu>
           <SidebarMenuItem>

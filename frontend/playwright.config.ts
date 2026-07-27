@@ -2,6 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000";
 const skipWebServer = process.env.PLAYWRIGHT_SKIP_WEB_SERVER === "1";
+const useInstalledChrome =
+  process.env.PLAYWRIGHT_USE_INSTALLED_CHROME === "1";
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -21,7 +23,10 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"] },
+      use: {
+        ...devices["Desktop Chrome"],
+        ...(useInstalledChrome ? { channel: "chrome" } : {}),
+      },
     },
   ],
 

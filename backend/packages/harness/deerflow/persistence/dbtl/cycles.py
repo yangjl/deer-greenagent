@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.dbtl.cycle_state import (
     STAGE_ORDER,
+    TERMINAL_CYCLE_STATES,
     ReviewDecision,
     StageStatus,
     TransitionRefused,
@@ -464,6 +465,21 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, ReconciliationOp
 
     # -- reads -----------------------------------------------------------
 
+    async def project_cycle_summary(self, project_id: str) -> dict[str, int | bool]:
+        """Return the bounded lifecycle facts used by DBTL request routing."""
+        async with self._sf() as session:
+            total = await session.scalar(select(func.count(DbtlCycleRow.id)).where(DbtlCycleRow.project_id == project_id))
+            unfinished = await session.scalar(
+                select(func.count(DbtlCycleRow.id)).where(
+                    DbtlCycleRow.project_id == project_id,
+                    DbtlCycleRow.state.not_in(TERMINAL_CYCLE_STATES),
+                )
+            )
+            return {
+                "project_cycle_count": int(total or 0),
+                "has_unfinished_cycles": bool(unfinished),
+            }
+
     async def list_cycles(self, project_id: str) -> list[dict[str, Any]]:
         async with self._sf() as session:
             cycles = list((await session.execute(select(DbtlCycleRow).where(DbtlCycleRow.project_id == project_id).order_by(DbtlCycleRow.created_at.asc(), DbtlCycleRow.id.asc()))).scalars())
@@ -499,6 +515,70 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, ReconciliationOp
                 }
                 for row in rows
             ]
+
+    async def abandon_cycle(
+        self,
+        *,
+        cycle_id: str,
+        project_id: str,
+        expected_db_revision: int,
+        actor_user_id: str,
+        idempotency_key: str,
+        rationale: str,
+    ) -> dict[str, Any]:
+        """Retire a live cycle without erasing its research record."""
+        reason = rationale.strip()
+        if not reason:
+            raise ValueError("Removing a cycle requires a rationale.")
+
+        async with self._sf() as session:
+            loaded = await self._load(session, cycle_id, project_id, for_update=True)
+            if loaded is None:
+                raise DbtlWorkflowRefused("Cycle not found.")
+            cycle, stages = loaded
+            expected_payload = {
+                "expected_db_revision": expected_db_revision,
+                "actor_user_id": actor_user_id,
+                "rationale": reason,
+            }
+            if (
+                await self._replay_event(
+                    session,
+                    cycle_id,
+                    idempotency_key,
+                    event_type="cycle.abandoned",
+                    expected_payload=expected_payload,
+                )
+                is not None
+            ):
+                return self._cycle_payload(cycle, stages)
+
+            self._require_revision(cycle, expected_db_revision)
+            if is_terminal(cycle.state):
+                raise DbtlWorkflowRefused("A completed or abandoned cycle cannot be removed.")
+            live_children = await session.scalar(
+                select(func.count(DbtlCycleRow.id)).where(
+                    DbtlCycleRow.parent_cycle_id == cycle.id,
+                    DbtlCycleRow.state.not_in(TERMINAL_CYCLE_STATES),
+                )
+            )
+            if live_children:
+                raise DbtlWorkflowRefused("Remove this cycle's active child cycles first.")
+
+            cycle.state = "abandoned"
+            self._commit_revision(cycle, self._statuses(stages))
+            await self._record_event(
+                session,
+                cycle=cycle,
+                event_type="cycle.abandoned",
+                actor_user_id=actor_user_id,
+                payload={
+                    **expected_payload,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+            await session.commit()
+            return self._cycle_payload(cycle, stages)
 
     # -- stage workflow --------------------------------------------------
 

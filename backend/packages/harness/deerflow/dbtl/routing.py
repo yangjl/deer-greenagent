@@ -23,7 +23,12 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 
-from deerflow.dbtl.classifier import ClassifierDecision, ClassifierResult, classify_request
+from deerflow.dbtl.classifier import (
+    ClassifierContext,
+    ClassifierDecision,
+    ClassifierResult,
+    classify_request,
+)
 
 
 class RouteKind(StrEnum):
@@ -65,6 +70,9 @@ class RoutingRequest:
     project_id: str | None
     selected_cycle_id: str | None
     explicit_choice: ExplicitChoice | None
+    is_new_conversation: bool = False
+    project_cycle_count: int | None = None
+    has_unfinished_cycles: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,10 +85,10 @@ class RoutingDecision:
     cycle_id: str | None = None
 
 
-# A typed request to start. Deliberately narrow: it must name DBTL or a
-# research cycle explicitly, so "start the analysis" does not trip it.
+# A typed request to start. Deliberately narrow: it must name a cycle or DBTL
+# explicitly, so "start the analysis" does not trip it.
 _EXPLICIT_START_PATTERN = re.compile(
-    r"\b(?:start|open|begin|create)\s+(?:a\s+|the\s+|new\s+)*(?:dbtl\s+cycle|dbtl\s+workflow|research\s+cycle|dbtl)\b",
+    r"\b(?:start|open|begin|create)\s+(?:a\s+|the\s+|new\s+)*(?:dbtl\s+cycle|dbtl\s+workflow|research\s+cycle|learning\s+cycle|cycle|dbtl)\b",
     re.IGNORECASE,
 )
 
@@ -125,6 +133,13 @@ def route_request(request: RoutingRequest) -> RoutingDecision:
         return RoutingDecision(kind=RouteKind.ORDINARY, source=RouteSource.NO_PROJECT)
 
     # 5. Only now does the classifier get a say.
-    result = classify_request(request.text)
+    result = classify_request(
+        request.text,
+        context=ClassifierContext(
+            is_new_conversation=request.is_new_conversation,
+            project_cycle_count=request.project_cycle_count,
+            has_unfinished_cycles=request.has_unfinished_cycles,
+        ),
+    )
     kind = RouteKind.PROPOSAL if result.decision is ClassifierDecision.PROPOSE_CYCLE else RouteKind.ORDINARY
     return RoutingDecision(kind=kind, source=RouteSource.CLASSIFIER, classifier=result)

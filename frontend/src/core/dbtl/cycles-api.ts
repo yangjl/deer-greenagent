@@ -111,6 +111,24 @@ export async function createCycle(
   );
 }
 
+export async function abandonCycle(input: {
+  projectId: string;
+  cycleId: string;
+  rationale: string;
+  expectedDbRevision: number;
+  idempotencyKey: string;
+}): Promise<CycleRecord> {
+  return post<CycleRecord>(
+    `${base(input.projectId)}/cycles/${encodeURIComponent(input.cycleId)}/abandon`,
+    {
+      rationale: input.rationale,
+      expected_db_revision: input.expectedDbRevision,
+      idempotency_key: input.idempotencyKey,
+    },
+    "Could not remove the cycle",
+  );
+}
+
 export async function submitStage(input: {
   projectId: string;
   cycleId: string;

@@ -15,6 +15,10 @@ Design–Build–Test–Learn (DBTL) governance.
   and editable outside GreenAgent.
 - **Project-first workspace** — projects organize conversations, files, DBTL
   cycles, evidence, reviews, and work items.
+- **Safe workspace cleanup** — project, cycle, and conversation rails expose
+  removal actions. Project removal archives the project without deleting its
+  local folder and returns its conversations to Unfiled chats; cycle removal
+  records an audited abandonment; conversation deletion removes the thread.
 - **Scoped memory** — project conversations use project-specific memory rather
   than leaking context across unrelated projects.
 - **Durable DBTL governance** — cycle state, evidence, blockers, revisions, and
@@ -29,6 +33,13 @@ Design–Build–Test–Learn (DBTL) governance.
   Starting a cycle launches a project-grounded Design council: independent
   specialist and red-team positions are synthesized by a chair, which either
   asks one focused clarification or presents a Design package for human review.
+  Gate decisions are recorded from the stage inspection sheet, where the
+  authenticated reviewer submits the exact artifact revision with a rationale;
+  approval language in chat does not mutate the gate or rerun the council.
+- **One native setup interaction** — DBTL setup and confirmation are emitted
+  through DeerFlow's existing `ask_clarification` Human Input Card in the chat
+  transcript. Shadow proposal evaluation records telemetry only; it does not
+  mount a second card beside the composer.
 - **DeerFlow capabilities** — sandboxed execution, tools, skills, MCP,
   subagents, persistent conversations, and multiple model providers.
 
@@ -87,16 +98,24 @@ DBTL modes:
   every scientific gate still requires a human decision. The presentation icon
   beside **Cycles** opens a no-write, one-click Phase 7 validity demo.
 
+The DBTL classifier gives borderline research-shaped requests a modestly higher
+proposal prior on the first turn of a conversation and in projects with no
+unfinished cycles, especially projects with no cycles yet. These lifecycle
+signals cannot propose a cycle without positive research language, and starting
+the durable record still requires explicit human confirmation. A typed request
+such as "start a cycle" enters native DBTL setup directly, even when the project
+already has unfinished cycles.
+
 PostgreSQL is the intended production database. SQLite is suitable for local
 development but cannot be approved for DBTL production cutover.
 
 ## Architecture
 
-| Service | Port | Purpose |
-| --- | ---: | --- |
-| Nginx | 2026 | Browser entry point |
-| Gateway | 8001 | REST API and agent runtime |
-| Frontend | 3000 | Next.js workspace |
+| Service     | Port | Purpose                                         |
+| ----------- | ---: | ----------------------------------------------- |
+| Nginx       | 2026 | Browser entry point                             |
+| Gateway     | 8001 | REST API and agent runtime                      |
+| Frontend    | 3000 | Next.js workspace                               |
 | Provisioner | 8002 | Optional remote/Kubernetes sandbox provisioning |
 
 The project folder is the canonical research workspace. Conversations are

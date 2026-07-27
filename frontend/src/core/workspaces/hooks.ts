@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import {
+  archiveProject,
   createProject,
   createWorkspace,
   fetchProjectFolders,
@@ -146,6 +147,19 @@ export function useCreateProject(workspaceId: string) {
   return useMutation({
     mutationFn: (payload: ProjectCreatePayload) =>
       createProject(workspaceId, payload),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["workspaces", workspaceId, "projects"],
+      });
+      void queryClient.invalidateQueries({ queryKey: ["workspaces"] });
+    },
+  });
+}
+
+export function useArchiveProject(workspaceId: string | null | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (projectId: string) => archiveProject(projectId),
     onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: ["workspaces", workspaceId, "projects"],

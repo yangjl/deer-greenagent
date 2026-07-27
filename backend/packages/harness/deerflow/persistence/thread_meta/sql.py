@@ -127,6 +127,21 @@ class ThreadMetaRepository(ThreadMetaStore):
             rows = (await session.execute(stmt)).scalars().all()
             return [self._row_to_dict(row) for row in rows]
 
+    async def clear_project_scope(self, project_id: str) -> None:
+        """Return every conversation in a removed project to the inbox."""
+        async with self._sf() as session:
+            await session.execute(
+                update(ThreadMetaRow)
+                .where(ThreadMetaRow.project_id == project_id)
+                .values(
+                    workspace_id=None,
+                    project_id=None,
+                    scope_type="inbox",
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+
     async def check_access(self, thread_id: str, user_id: str, *, require_existing: bool = False) -> bool:
         """Check if ``user_id`` has access to ``thread_id``.
 

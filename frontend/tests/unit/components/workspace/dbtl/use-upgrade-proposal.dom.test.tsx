@@ -10,9 +10,9 @@ const created = {
   cycle_weight: "full",
   state: "design",
   db_revision: 1,
-  research_question: "q",
+  research_question: "Rank candidate lines",
   objective: "Rank candidate lines",
-  success_criteria: "",
+  success_criteria: "Use held-out validation.",
   created_by: "user-1",
   created_at: "2026-07-26T00:00:00Z",
   updated_at: "2026-07-26T00:00:00Z",
@@ -40,103 +40,115 @@ const evaluation = {
 
 const createCycleMock = rs.fn(async () => created);
 const evaluateMock = rs.fn(async () => evaluation);
-
-const draftSetupMock = rs.fn(async () => ({
-  enabled: true,
-  title: "Genomic selection in maize",
-  fields: { "target trait": "grain yield" },
-  assumed_fields: ["target trait"],
-}));
+const outcomeMock = rs.fn();
 
 rs.mock("@/core/dbtl", () => ({
   isLive: () => true,
   outcomeForAction: (action: string) => action,
   useCreateCycle: () => ({ mutateAsync: createCycleMock, isPending: false }),
-  useDraftCycleSetup: () => ({ mutateAsync: draftSetupMock }),
   useEvaluateRequest: () => ({ mutateAsync: evaluateMock }),
   useProjectCycles: () => ({ data: { cycles: [] } }),
-  useRecordProposalOutcome: () => ({ mutate: rs.fn() }),
+  useRecordProposalOutcome: () => ({ mutate: outcomeMock }),
 }));
 
 import { useDbtlUpgradeProposal } from "@/components/workspace/dbtl/use-upgrade-proposal";
+import type { CycleRecord } from "@/core/dbtl";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  createCycleMock.mockClear();
+  evaluateMock.mockClear();
+  outcomeMock.mockClear();
+});
 
-describe("useDbtlUpgradeProposal confirm", () => {
-  it("returns the durable cycle it created so the caller can kick off Design", async () => {
-    // The Design council debate is a cycle-scoped request, so it cannot be sent
-    // until a cycle id exists. Discarding the created record here is what left
-    // the conversational path unable to start the debate at all.
+describe("useDbtlUpgradeProposal native confirmation", () => {
+  it("forwards the pre-send first-turn state to shadow telemetry", async () => {
+    const { result } = renderHook(() => useDbtlUpgradeProposal("proj-1"));
+
+    await act(async () => {
+      await result.current.evaluate({
+        text: "evaluate the trial",
+        threadId: "thread-1",
+        isNewConversation: true,
+      });
+    });
+
+    expect(evaluateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "evaluate the trial",
+        threadId: "thread-1",
+        isNewConversation: true,
+      }),
+    );
+  });
+
+  it("creates from server-owned card metadata and returns the durable cycle", async () => {
     const { result } = renderHook(() => useDbtlUpgradeProposal("proj-1"));
 
     await act(async () => {
       await result.current.evaluate({ text: "design a GS model in maize" });
     });
-    await waitFor(() => expect(result.current.evaluation).toBeTruthy());
+    await waitFor(() => expect(evaluateMock).toHaveBeenCalled());
 
-    const box: { value: { id: string; title: string } | null } = {
-      value: null,
-    };
+    let cycle: CycleRecord | null = null;
     await act(async () => {
-      box.value = await result.current.confirm({
-        title: "Genomic selection in maize",
-        objective: "Rank candidate lines",
-        clarification: {},
-      });
+      cycle = await result.current.createFromNativeSetup(
+        {
+          title: "Genomic selection in maize",
+          objective: "Rank candidate lines",
+          success_criteria: "Use held-out validation.",
+        },
+        "dbtl-setup-confirm:abc123",
+      );
     });
 
-    expect(createCycleMock).toHaveBeenCalled();
-    expect(box.value).toBeTruthy();
-    expect(box.value?.id).toBe("cyc-new");
-    expect(box.value?.title).toBe("Genomic selection in maize");
+    expect(createCycleMock).toHaveBeenCalledWith({
+      title: "Genomic selection in maize",
+      cycleClass: "computational",
+      cycleWeight: "full",
+      researchQuestion: "Rank candidate lines",
+      objective: "Rank candidate lines",
+      successCriteria: "Use held-out validation.",
+      parentCycleId: null,
+      idempotencyKey: "cycle-dbtl-setup-confirm:abc123",
+    });
+    expect(cycle).toEqual(created);
+    expect(outcomeMock).toHaveBeenCalledWith(
+      { evaluationId: "eval-1", outcome: "start_setup" },
+      expect.anything(),
+    );
   });
 
-  it("drafts from the same request text that raised the proposal", async () => {
-    const { result } = renderHook(() => useDbtlUpgradeProposal("proj-1"));
+  it("does not create a cycle outside a project", async () => {
+    const { result } = renderHook(() => useDbtlUpgradeProposal(null));
 
+    let cycle: CycleRecord | null = created as CycleRecord;
+    await act(async () => {
+      cycle = await result.current.createFromNativeSetup(
+        {
+          title: "Genomic selection",
+          objective: "Rank lines",
+          success_criteria: "",
+        },
+        "request-1",
+      );
+    });
+
+    expect(createCycleMock).not.toHaveBeenCalled();
+    expect(cycle).toBeNull();
+  });
+
+  it("records dismissal choices without rendering a custom proposal card", async () => {
+    const { result } = renderHook(() => useDbtlUpgradeProposal("proj-1"));
     await act(async () => {
       await result.current.evaluate({ text: "design a GS model in maize" });
     });
 
-    const box: { value: unknown } = { value: null };
-    await act(async () => {
-      box.value = await result.current.draftSetup(["target trait"]);
-    });
+    act(() => result.current.recordOutcome("keep_ordinary"));
 
-    expect(draftSetupMock).toHaveBeenCalledWith({
-      text: "design a GS model in maize",
-      fields: ["target trait"],
-    });
-    expect(box.value).toBeTruthy();
-  });
-
-  it("does not call the model before a request has been evaluated", async () => {
-    // Nothing to ground a draft in yet; asking anyway would invent the record.
-    draftSetupMock.mockClear();
-    const { result } = renderHook(() => useDbtlUpgradeProposal("proj-1"));
-
-    const box: { value: unknown } = { value: "unset" };
-    await act(async () => {
-      box.value = await result.current.draftSetup(["target trait"]);
-    });
-
-    expect(draftSetupMock).not.toHaveBeenCalled();
-    expect(box.value).toBe(null);
-  });
-
-  it("returns null when there is no proposal to confirm", async () => {
-    const { result } = renderHook(() => useDbtlUpgradeProposal("proj-1"));
-
-    const box: { value: unknown } = { value: created };
-    await act(async () => {
-      box.value = await result.current.confirm({
-        title: "x",
-        objective: "y",
-        clarification: {},
-      });
-    });
-
-    // No kickoff may be attempted for a cycle that was never created.
-    expect(box.value).toBe(null);
+    expect(outcomeMock).toHaveBeenCalledWith(
+      { evaluationId: "eval-1", outcome: "keep_ordinary" },
+      expect.anything(),
+    );
   });
 });

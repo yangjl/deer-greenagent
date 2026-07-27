@@ -2,15 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { MOCK_THREAD_ID, mockLangGraphAPI } from "./utils/mock-api";
 
-/**
- * Phase 4: the inline DBTL Upgrade Proposal.
- *
- * The assertions that matter are negative ones. Every path a user can take
- * away from the card — dismiss, "keep as ordinary chat", or an ordinary
- * request that never produces a card — must leave zero DBTL domain writes.
- * The spec therefore records every cycle-creating request the page makes and
- * asserts the list is empty, rather than inspecting the rendered result.
- */
+/** DBTL setup reuses DeerFlow's transcript-native Human Input Card. */
 
 const PROPOSAL_RESPONSE = {
   evaluation_id: "eval-1",
@@ -39,14 +31,6 @@ const PROPOSAL_RESPONSE = {
   },
 };
 
-const ORDINARY_RESPONSE = {
-  evaluation_id: "eval-2",
-  route_kind: "ordinary",
-  route_source: "classifier",
-  proposals_visible: true,
-  proposal: null,
-};
-
 const EXISTING_CYCLE = {
   id: "cycle-existing",
   project_id: "project-1",
@@ -70,20 +54,79 @@ const CONTINUATION_RESPONSE = {
   route_kind: "cycle_continuation",
   route_source: "selected_cycle",
   proposals_visible: true,
-  proposal: {
-    ...PROPOSAL_RESPONSE.proposal,
-    kind: "cycle_continuation",
-    cycle_id: EXISTING_CYCLE.id,
-    proposed_objective: "",
-    missing_fields: [],
-  },
+  proposal: null,
 };
+
+const SETUP_REQUEST_ID = "dbtl-setup-confirm:e2e";
+const SETUP_MESSAGES = [
+  {
+    type: "human",
+    id: "msg-human-proposal",
+    content: "Design a genomic selection experiment",
+  },
+  {
+    type: "ai",
+    id: `${SETUP_REQUEST_ID}:call`,
+    content: "",
+    tool_calls: [
+      {
+        id: SETUP_REQUEST_ID,
+        name: "ask_clarification",
+        type: "tool_call",
+        args: {
+          question: "How should this request proceed?",
+          clarification_type: "cycle_setup_confirmation",
+        },
+      },
+    ],
+  },
+  {
+    type: "tool",
+    id: SETUP_REQUEST_ID,
+    name: "ask_clarification",
+    tool_call_id: SETUP_REQUEST_ID,
+    content: "Review the proposed DBTL cycle.",
+    artifact: {
+      human_input: {
+        version: 1,
+        kind: "human_input_request",
+        source: "ask_clarification",
+        request_id: SETUP_REQUEST_ID,
+        clarification_type: "cycle_setup_confirmation",
+        title: "Review DBTL cycle setup",
+        question: "How should this request proceed?",
+        context:
+          "Proposed objective: compare genomic-selection models.\n\nNo cycle has been created yet.",
+        input_mode: "single_choice",
+        options: [
+          {
+            id: "create_cycle",
+            label: "Create this DBTL cycle",
+            value: "create_cycle",
+          },
+          {
+            id: "keep_ordinary",
+            label: "Keep as ordinary chat",
+            value: "keep_ordinary",
+          },
+          { id: "not_sure", label: "Not sure", value: "not_sure" },
+        ],
+        dbtl_cycle_setup: {
+          title: "Genomic selection experiment",
+          objective: "Compare genomic-selection models",
+          success_criteria: "Validate on held-out sites.",
+        },
+      },
+    },
+  },
+];
 
 /** Every request that would create a durable DBTL record. Must stay empty. */
 async function setupProject(
   page: Page,
   evaluation: unknown,
   cycles: unknown[] = [],
+  messages?: unknown[],
 ): Promise<{
   cycleWrites: string[];
   outcomes: string[];
@@ -99,6 +142,7 @@ async function setupProject(
         thread_id: MOCK_THREAD_ID,
         title: "Project conversation",
         updated_at: "2026-07-25T10:00:00Z",
+        messages,
       },
     ],
   });
@@ -161,7 +205,11 @@ async function setupProject(
     route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ path: "/mnt/user-data", entries: [], truncated: false }),
+      body: JSON.stringify({
+        path: "/mnt/user-data",
+        entries: [],
+        truncated: false,
+      }),
     }),
   );
 
@@ -231,173 +279,67 @@ async function send(page: Page, text: string) {
   await textarea.press("Enter");
 }
 
-test("a proposal states that no cycle exists and creates none when dismissed", async ({
+test("the supervisor setup artifact renders as DeerFlow's native inline card", async ({
   page,
 }) => {
-  const { cycleWrites, outcomes, evaluateCalls } = await setupProject(
+  const { cycleWrites } = await setupProject(
     page,
     PROPOSAL_RESPONSE,
+    [],
+    SETUP_MESSAGES,
   );
   await page.goto(`/workspace/test2/${MOCK_THREAD_ID}`);
 
-  await send(page, "Compare drought-response models across G2F environments");
-
-  // Prove the shadow evaluation actually ran before asserting on the card, so
-  // a wiring break reads differently from a rendering break.
-  await expect
-    .poll(() => evaluateCalls.length, { timeout: 10_000 })
-    .toBeGreaterThan(0);
-
-  const card = page.getByRole("region", { name: "DBTL upgrade proposal" });
+  const card = page.getByTestId("human-input-card");
   await expect(card).toBeVisible();
+  await expect(card.getByText("Review DBTL cycle setup")).toBeVisible();
   await expect(card.getByText("No cycle has been created yet.")).toBeVisible();
-
-  await card.getByRole("button", { name: "Dismiss suggestion" }).click();
-  await expect(card).toHaveCount(0);
-
-  expect(cycleWrites).toEqual([]);
-  expect(outcomes.join()).toContain("dismissed");
-});
-
-test("keeping it as ordinary chat creates no record", async ({ page }) => {
-  const { cycleWrites, outcomes, evaluateCalls } = await setupProject(
-    page,
-    PROPOSAL_RESPONSE,
-  );
-  await page.goto(`/workspace/test2/${MOCK_THREAD_ID}`);
-
-  await send(page, "Compare drought-response models across G2F environments");
-  await expect.poll(() => evaluateCalls.length).toBe(1);
-
-  const card = page.getByRole("region", { name: "DBTL upgrade proposal" });
-  await card.getByRole("button", { name: "Keep as ordinary chat" }).click();
-
-  await expect(card).toHaveCount(0);
-  expect(cycleWrites).toEqual([]);
-  expect(outcomes.join()).toContain("keep_ordinary");
-});
-
-test("an ordinary request never shows a card", async ({ page }) => {
-  const { cycleWrites, evaluateCalls } = await setupProject(
-    page,
-    ORDINARY_RESPONSE,
-  );
-  await page.goto(`/workspace/test2/${MOCK_THREAD_ID}`);
-
-  await send(page, "Explain this README");
-  await expect.poll(() => evaluateCalls.length).toBe(1);
-
   await expect(
     page.getByRole("region", { name: "DBTL upgrade proposal" }),
   ).toHaveCount(0);
   expect(cycleWrites).toEqual([]);
 });
 
-test("starting setup still creates nothing until the final confirmation", async ({
+test("the native card's explicit confirmation creates exactly one cycle", async ({
+  page,
+}) => {
+  const { cycleWrites } = await setupProject(
+    page,
+    PROPOSAL_RESPONSE,
+    [],
+    SETUP_MESSAGES,
+  );
+  await page.goto(`/workspace/test2/${MOCK_THREAD_ID}`);
+
+  const card = page.getByTestId("human-input-card");
+  await expect(
+    card.getByRole("button", { name: "Create this DBTL cycle" }),
+  ).toBeEnabled();
+  await card.getByRole("button", { name: "Create this DBTL cycle" }).click();
+
+  await expect.poll(() => cycleWrites.length).toBe(1);
+});
+
+test("a selected-cycle continuation runs without a second card", async ({
   page,
 }) => {
   const { cycleWrites, evaluateCalls } = await setupProject(
-    page,
-    PROPOSAL_RESPONSE,
-  );
-  await page.goto(`/workspace/test2/${MOCK_THREAD_ID}`);
-
-  await send(page, "Compare drought-response models across G2F environments");
-  await expect.poll(() => evaluateCalls.length).toBe(1);
-
-  const card = page.getByRole("region", { name: "DBTL upgrade proposal" });
-  await card.getByRole("button", { name: "Start DBTL setup" }).click();
-
-  // Clarification is open; nothing has been written.
-  await expect(card.getByText("No cycle has been created yet.")).toBeVisible();
-  await expect(card.getByRole("button", { name: "Review and confirm" })).toBeDisabled();
-  expect(cycleWrites).toEqual([]);
-
-  await card.getByPlaceholder("grain yield").fill("grain yield");
-  await card.getByPlaceholder("2023–2024").fill("2023-2024");
-  await card.getByRole("button", { name: "Review and confirm" }).click();
-
-  // The confirmation names every consequence — and has still written nothing.
-  await expect(card.getByText("Required human gates")).toBeVisible();
-  await expect(card.getByText("Design · Data reconciliation")).toBeVisible();
-  await expect(
-    card.getByText("Creates a durable research record in this project."),
-  ).toBeVisible();
-  expect(cycleWrites).toEqual([]);
-});
-
-test("card actions are reachable and operable by keyboard", async ({ page }) => {
-  const { evaluateCalls } = await setupProject(page, PROPOSAL_RESPONSE);
-  await page.goto(`/workspace/test2/${MOCK_THREAD_ID}`);
-
-  await send(page, "Compare drought-response models across G2F environments");
-  await expect.poll(() => evaluateCalls.length).toBe(1);
-
-  const card = page.getByRole("region", { name: "DBTL upgrade proposal" });
-  const start = card.getByRole("button", { name: "Start DBTL setup" });
-  await expect(start).toBeVisible();
-
-  // Focusable and activatable without a pointer. The disabled "Review and
-  // confirm" uses native `disabled`, so keyboard activation cannot bypass the
-  // same guard a click hits.
-  await start.focus();
-  await expect(start).toBeFocused();
-  await page.keyboard.press("Enter");
-
-  const review = card.getByRole("button", { name: "Review and confirm" });
-  await expect(review).toBeDisabled();
-  await review.focus();
-  await page.keyboard.press("Enter");
-  await expect(card.getByText("Required human gates")).toHaveCount(0);
-});
-
-test("final confirmation creates exactly one cycle and records the accepted outcome", async ({
-  page,
-}) => {
-  const { cycleWrites, outcomes, evaluateCalls } = await setupProject(
-    page,
-    PROPOSAL_RESPONSE,
-  );
-  await page.goto(`/workspace/test2/${MOCK_THREAD_ID}`);
-  await send(page, "Compare drought-response models across G2F environments");
-  await expect.poll(() => evaluateCalls.length).toBe(1);
-
-  const card = page.getByRole("region", { name: "DBTL upgrade proposal" });
-  await card.getByRole("button", { name: "Start DBTL setup" }).click();
-  await card.getByPlaceholder("grain yield").fill("grain yield");
-  await card.getByPlaceholder("2023–2024").fill("2023-2024");
-  await card.getByRole("button", { name: "Review and confirm" }).click();
-  await card.getByRole("button", { name: "Create this cycle" }).click();
-
-  await expect(card).toHaveCount(0);
-  expect(cycleWrites).toHaveLength(1);
-  expect(outcomes.join()).toContain("start_setup");
-});
-
-test("an explicitly selected cycle continues without creating another cycle", async ({
-  page,
-}) => {
-  const { cycleWrites, outcomes, evaluateCalls } = await setupProject(
     page,
     CONTINUATION_RESPONSE,
     [EXISTING_CYCLE],
   );
   await page.goto(`/workspace/test2/${MOCK_THREAD_ID}`);
 
-  await page
-    .getByRole("button", { name: EXISTING_CYCLE.title })
-    .click();
+  await page.getByRole("button", { name: EXISTING_CYCLE.title }).click();
   await send(page, "Run the next validation analysis");
   await expect.poll(() => evaluateCalls.length).toBe(1);
   expect(JSON.parse(evaluateCalls[0]!)).toMatchObject({
     selected_cycle_id: EXISTING_CYCLE.id,
   });
 
-  const card = page.getByRole("region", { name: "DBTL upgrade proposal" });
-  await card
-    .getByRole("button", { name: "Continue selected cycle" })
-    .click();
-  await expect(card).toHaveCount(0);
+  await expect(page.getByTestId("human-input-card")).toHaveCount(0);
+  await expect(
+    page.getByRole("region", { name: "DBTL upgrade proposal" }),
+  ).toHaveCount(0);
   expect(cycleWrites).toEqual([]);
-  expect(outcomes.join()).toContain("continue_cycle");
 });

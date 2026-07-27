@@ -309,7 +309,14 @@ async def file_thread_into_requested_project(
         logger.warning("Failed to file thread %s into requested project (non-fatal)", sanitize_log_param(thread_id))
 
 
-async def apply_project_scope_context(config: dict, thread_id: str, thread_store, workspace_repo=None, request=None) -> None:
+async def apply_project_scope_context(
+    config: dict,
+    thread_id: str,
+    thread_store,
+    workspace_repo=None,
+    request=None,
+    dbtl_cycle_repo=None,
+) -> None:
     """Stamp the conversation's owning project into the run context.
 
     ``context["project_id"]``/``context["project_root"]`` decide which
@@ -324,10 +331,14 @@ async def apply_project_scope_context(config: dict, thread_id: str, thread_store
     context.pop("project_id", None)
     context.pop("project_root", None)
     context.pop("project_name", None)
+    context.pop("dbtl_project_cycle_count", None)
+    context.pop("dbtl_has_unfinished_cycles", None)
     configurable = config.get("configurable", {})
     configurable.pop("project_id", None)
     configurable.pop("project_root", None)
     configurable.pop("project_name", None)
+    configurable.pop("dbtl_project_cycle_count", None)
+    configurable.pop("dbtl_has_unfinished_cycles", None)
 
     if thread_store is None:
         return
@@ -340,6 +351,21 @@ async def apply_project_scope_context(config: dict, thread_id: str, thread_store
     if not isinstance(project_id, str) or not project_id:
         return
     context["project_id"] = project_id
+
+    if dbtl_cycle_repo is not None:
+        try:
+            summary = await dbtl_cycle_repo.project_cycle_summary(project_id)
+            cycle_count = summary.get("project_cycle_count")
+            has_unfinished = summary.get("has_unfinished_cycles")
+            if isinstance(cycle_count, int) and cycle_count >= 0:
+                context["dbtl_project_cycle_count"] = cycle_count
+            if isinstance(has_unfinished, bool):
+                context["dbtl_has_unfinished_cycles"] = has_unfinished
+        except Exception:
+            logger.warning(
+                "Failed to resolve DBTL lifecycle context for project %s (non-fatal)",
+                sanitize_log_param(project_id),
+            )
 
     if workspace_repo is None:
         return
@@ -1235,6 +1261,7 @@ async def start_run(
             run_ctx.thread_store,
             workspace_repo=getattr(request.app.state, "workspace_repo", None) if request is not None else None,
             request=request,
+            dbtl_cycle_repo=getattr(request.app.state, "dbtl_cycle_repo", None) if request is not None else None,
         )
         internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
         inject_authenticated_user_context(

@@ -247,14 +247,23 @@ export function humanInputRunContext(
 ): Record<string, string | boolean> {
   if (request.source === "ask_clarification") {
     // A design question belongs to the cycle whose council raised it.
-    if (request.clarification_type === "design_decision" && selectedCycleId) {
-      return runContextPayload({ kind: "cycle", cycleId: selectedCycleId });
+    if (request.clarification_type === "design_decision") {
+      return selectedCycleId
+        ? runContextPayload({ kind: "cycle", cycleId: selectedCycleId })
+        : runContextPayload(ORDINARY_REQUEST_CONTEXT);
     }
     // Setup is not yet a cycle, so there is nothing to continue — the answer
     // returns to the setup branch that asked for the missing fields.
-    if (request.clarification_type === "cycle_setup") {
+    if (
+      request.clarification_type === "cycle_setup" ||
+      request.clarification_type === "cycle_setup_confirmation"
+    ) {
       return runContextPayload(START_CYCLE_REQUEST_CONTEXT);
     }
+    // A generic clarification may have been raised just before the lead agent
+    // learned that the work is DBTL-shaped. Preserve the supervisor decision
+    // instead of turning the absence of a subtype into an explicit opt-out.
+    return runContextPayload(AUTO_REQUEST_CONTEXT);
   }
   return runContextPayload(ORDINARY_REQUEST_CONTEXT);
 }

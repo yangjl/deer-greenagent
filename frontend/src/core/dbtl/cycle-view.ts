@@ -156,6 +156,14 @@ export function isLive(cycle: CycleRecord): boolean {
   return !isTerminal(cycle.state);
 }
 
+/** One-open-at-a-time disclosure behavior for cycle rows in the project rail. */
+export function toggleCycleDisclosure(
+  expandedCycleId: string | null,
+  clickedCycleId: string,
+): string | null {
+  return expandedCycleId === clickedCycleId ? null : clickedCycleId;
+}
+
 export function stageOf(
   cycle: CycleRecord | null | undefined,
   stage: DbtlStage,

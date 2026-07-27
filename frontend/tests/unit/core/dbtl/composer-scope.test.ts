@@ -351,13 +351,30 @@ describe("humanInputRunContext", () => {
     });
   });
 
-  it("falls back to ordinary for clarifications it does not know", () => {
+  it("returns native setup confirmation to the setup branch", () => {
+    expect(
+      humanInputRunContext(
+        {
+          source: "ask_clarification",
+          clarification_type: "cycle_setup_confirmation",
+        },
+        "cyc-9",
+      ),
+    ).toEqual({
+      dbtl_supervisor_enabled: true,
+      dbtl_explicit_choice: "start_cycle",
+    });
+  });
+
+  it("lets the supervisor route clarifications with no DBTL subtype", () => {
     expect(
       humanInputRunContext({ source: "ask_clarification" }, null),
     ).toEqual({
       dbtl_supervisor_enabled: true,
-      dbtl_explicit_choice: "ordinary",
     });
+  });
+
+  it("falls back to ordinary for other human-input tools", () => {
     expect(humanInputRunContext({ source: "some_other_tool" }, "cyc-9")).toEqual(
       {
         dbtl_supervisor_enabled: true,

@@ -11,6 +11,12 @@ export type HumanInputOption = {
   value: string;
 };
 
+export type DbtlCycleSetup = {
+  title: string;
+  objective: string;
+  success_criteria: string;
+};
+
 export type HumanInputRequest = {
   version: 1;
   kind: "human_input_request";
@@ -23,6 +29,7 @@ export type HumanInputRequest = {
   context?: string | null;
   input_mode: HumanInputMode;
   options?: HumanInputOption[];
+  dbtl_cycle_setup?: DbtlCycleSetup;
 };
 
 export type HumanInputResponse =
@@ -113,6 +120,25 @@ function parseOptions(value: unknown): HumanInputOption[] | undefined {
   return options;
 }
 
+function parseDbtlCycleSetup(value: unknown): DbtlCycleSetup | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value.title) ||
+    !isNonEmptyString(value.objective) ||
+    typeof value.success_criteria !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    title: value.title,
+    objective: value.objective,
+    success_criteria: value.success_criteria,
+  };
+}
+
 export function parseHumanInputRequest(
   value: unknown,
 ): HumanInputRequest | null {
@@ -132,6 +158,13 @@ export function parseHumanInputRequest(
 
   const options = parseOptions(value.options);
   if (value.options !== undefined && options === undefined) {
+    return null;
+  }
+  const dbtlCycleSetup = parseDbtlCycleSetup(value.dbtl_cycle_setup);
+  if (
+    value.dbtl_cycle_setup !== undefined &&
+    dbtlCycleSetup === undefined
+  ) {
     return null;
   }
   if (
@@ -169,6 +202,7 @@ export function parseHumanInputRequest(
     ...(context !== undefined ? { context } : {}),
     input_mode: value.input_mode,
     ...(options ? { options } : {}),
+    ...(dbtlCycleSetup ? { dbtl_cycle_setup: dbtlCycleSetup } : {}),
   };
 }
 

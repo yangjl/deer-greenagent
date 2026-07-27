@@ -75,6 +75,21 @@ class StageSubmitRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=128)
 
 
+class CycleAbandonRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rationale: str = Field(min_length=1, max_length=4000)
+    expected_db_revision: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @field_validator("rationale")
+    @classmethod
+    def rationale_must_have_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Removing a cycle requires a rationale.")
+        return value.strip()
+
+
 class StageReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -250,6 +265,33 @@ async def create_cycle(
             parent_cycle_id=body.parent_cycle_id,
         )
     except Exception as exc:  # noqa: BLE001 - translated to typed HTTP errors
+        raise _translate(exc) from exc
+
+
+@router.post("/projects/{project_id}/dbtl/cycles/{cycle_id}/abandon")
+@require_permission("threads", "write")
+async def abandon_cycle(
+    project_id: str,
+    cycle_id: str,
+    body: CycleAbandonRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    """Retire a live cycle while preserving its durable activity record."""
+    _project, user_id = await _require_project(project_id, request)
+    _require_mutations_enabled(request, config)
+    _require_human_reviewer(request)
+    try:
+        return await repo.abandon_cycle(
+            cycle_id=cycle_id,
+            project_id=project_id,
+            expected_db_revision=body.expected_db_revision,
+            actor_user_id=user_id,
+            idempotency_key=body.idempotency_key,
+            rationale=body.rationale,
+        )
+    except Exception as exc:  # noqa: BLE001
         raise _translate(exc) from exc
 
 

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  abandonCycle,
   attachArtifact,
   createCycle,
   createWorkItem,
@@ -74,6 +75,16 @@ export function useCreateCycle(projectId: string | null | undefined) {
   return useMutation({
     mutationFn: (input: Omit<Parameters<typeof createCycle>[0], "projectId">) =>
       createCycle({ projectId: projectId!, ...input }),
+    onSuccess: invalidate,
+  });
+}
+
+export function useAbandonCycle(projectId: string | null | undefined) {
+  const invalidate = useInvalidateProject(projectId);
+  return useMutation({
+    mutationFn: (
+      input: Omit<Parameters<typeof abandonCycle>[0], "projectId">,
+    ) => abandonCycle({ projectId: projectId!, ...input }),
     onSuccess: invalidate,
   });
 }

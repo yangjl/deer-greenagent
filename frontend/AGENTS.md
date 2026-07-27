@@ -256,13 +256,19 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   render with the decision, and an unreadable durable row is explicitly shown
   as gate-blocking rather than excluded.
 - `src/components/workspace/dbtl/` owns the Phase 4 surfaces.
-  `upgrade-proposal-card.tsx` is the inline card above the composer: it walks
-  offer → clarify → confirm, keeps "No cycle has been created yet." visible
-  through the first two steps, and only the final confirm calls the durable
-  create endpoint. `use-upgrade-proposal.ts` runs the shadow evaluation
-  _beside_ the send, never in front of it, and every failure path resolves to
-  "no card" so a classifier outage degrades to ordinary chat instead of
-  blocking a message. `evaluation-drawer.tsx` is the internal tester view and
+  `use-upgrade-proposal.ts` runs shadow evaluation _beside_ the send, never in
+  front of it, and records proposal outcomes as telemetry. It renders nothing.
+  The page passes `isNewConversation` from its pre-send welcome state so shadow
+  telemetry mirrors the supervisor's first-visible-turn prior; this value has
+  no mutation authority and the live supervisor independently derives
+  freshness from checkpoint messages. Project cycle count and unfinished-cycle
+  status are always resolved server-side.
+  Setup clarification and final confirmation arrive from the supervisor as
+  `ask_clarification` artifacts and render inline through DeerFlow's existing
+  `HumanInputCard`; there is no DBTL-specific composer card or card wrapper.
+  Selected-cycle continuation is deliberately not a proposable route because
+  the same request already runs `LiveStageAdapter`. `evaluation-drawer.tsx` is
+  the internal tester view and
   is opt-in (`enabled`), because the endpoint behind it is administrator-only
   and an ordinary member opening settings should not generate a 403. It is
   mounted from Settings → DBTL readiness, provides a project selector, and
@@ -270,7 +276,7 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   ordinary or cycle-worthy for missed-cycle calibration.
 - **The composer is the only input surface.** The two left rails navigate,
   summarize, and review; they never collect a request. A rail action that needs
-  input *arms the composer* (sets its scope, moves the cursor there) instead of
+  input _arms the composer_ (sets its scope, moves the cursor there) instead of
   opening a form, and the human types the request in the chatbox. `InputBox`
   supports this with two generic slots so it stays feature-agnostic:
   `extraTools` (extra controls appended to the tool row beside attachments,
@@ -279,6 +285,14 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   without reaching in with a ref). The `focusSignal` effect deliberately skips
   the first render — an unsolicited mount focus would steal the cursor on every
   conversation merely opened.
+- Project, cycle, and project-conversation rows expose compact icon actions
+  with native confirmation dialogs. Project removal archives the server record
+  and preserves its folder, cycle removal requires a rationale and records an
+  abandonment, and conversation deletion uses the shared `useDeleteThread`
+  cascade before navigating an open thread back to the project's new-chat
+  route. Abandoned cycles are omitted from the active project rail. Cycle
+  titles are disclosure controls: clicking a folded row unfolds it, clicking
+  the open row folds it, and opening one cycle folds the previous one.
 - `src/core/dbtl/composer-scope.ts` is the pure logic for the composer's DBTL
   scope selector, and it exists so the three promises the selector makes are
   unit-testable without rendering anything. `nextContextAfterSend` returns
@@ -300,7 +314,10 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   where the backend precedence ladder consults the classifier. A "cycle"
   selection with no id degrades to ordinary rather than claiming a continuation
   it cannot name, and `start_cycle` never carries a cycle id at all, so a stale
-  id cannot make setup read as a continuation.
+  id cannot make setup read as a continuation. `humanInputRunContext` sends an
+  untyped native `ask_clarification` reply back through the automatic supervisor
+  decision instead of manufacturing an explicit ordinary choice; typed setup
+  and Design replies retain their dedicated start/continue behavior.
 - **There is no scope selector.** The composer is the only input surface and it
   carries no mode control: the assistant judges whether a request belongs in a
   cycle. `AUTO_REQUEST_CONTEXT` is the resting state and it sends
@@ -310,7 +327,7 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   which settled routing on the ladder's first rung and meant the classifier
   never ran: every shadow-telemetry row read
   `route_source=explicit_choice, confidence=0.0`, measuring nothing. A default
-  is the *absence* of a choice, not a choice. Anything other than `auto` now
+  is the _absence_ of a choice, not a choice. Anything other than `auto` now
   comes from a deliberate act — the rail's `+` arms `start_cycle` for one
   request, and a cycle clicked in the rail rides along as
   `dbtl_selected_cycle_id` so continuation stays reachable without a menu.
@@ -320,43 +337,28 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   becomes the setup conversation, routed to the backend supervisor's
   `cycle_setup` branch, which proposes an objective, names the missing fields,
   states the required human gates, and asks for confirmation. **Nothing is
-  recorded until that confirmation**, and the menu copy says so.
-  `build_proposal` treats `CYCLE_SETUP` as proposable, so an explicit start also
-  raises the `UpgradeProposalCard` — that card's confirm is the only thing that
-  creates the record. Note the split: `cycle_setup` returns *text only*, while
-  `cycle_continuation` is the branch that runs `LiveStageAdapter` and therefore
-  the Design council debate.
+  recorded until that confirmation**. Missing fields and the final no-write
+  confirmation both use the transcript-native Human Input Card. The native
+  confirmation artifact carries the bounded server-owned cycle setup payload;
+  choosing Create invokes the existing authenticated cycle endpoint.
+  `cycle_continuation` instead runs `LiveStageAdapter` directly and never raises
+  a proposal card alongside that work.
 - **Creating a cycle and starting its Design council are two steps, and both
   paths must do both.** The debate is a `continue_cycle`-scoped request, so it
   cannot be sent before a cycle id exists. `StartCycleDialog.onCreated` does
   `selectCycle` + `requestDesignKickoff`; the conversational path does the same
-  in the chat page's `handleProposalConfirmed`, which is why
-  `useDbtlUpgradeProposal.confirm` **returns the created `CycleRecord`** instead
-  of discarding it (`null` on failure, so a failed confirmation cannot start a
-  debate about a record that does not exist). Wiring a new creation route
+  after the chat page handles the native setup confirmation, which is why
+  `useDbtlUpgradeProposal.createFromNativeSetup` **returns the created
+  `CycleRecord`** instead of discarding it (`null` on failure, so a failed
+  confirmation cannot start a debate about a record that does not exist).
+  Wiring a new creation route
   without the kickoff leaves a cycle that never gets designed — that regression
   shipped once already.
-- **The setup form arrives drafted, not blank.** `POST .../dbtl/proposals/draft-setup`
-  asks a model to propose each missing field from the request the scientist
-  actually typed, so starting a cycle is review-and-confirm rather than data
-  entry. Three properties are structural, not stylistic:
-  1. Every drafted value carries a `grounded` flag, and **anything not explicitly
-     grounded is reported in `assumed_fields`** — the unsafe default (a silent
-     model reading as authoritative) is unreachable. The prompt also forbids
-     inventing counts, sample sizes, environments, years, or accessions.
-     Confirmation writes a durable research record, so a value the model
-     *proposed* must never be indistinguishable from one the scientist *stated*.
-  2. `core/dbtl/setup-draft-merge.ts` is pure and **only fills blanks** — a draft
-     that lands while the user is mid-sentence must not overwrite their words. It
-     merges against a ref mirror of the latest form, not the snapshot captured
-     when the request went out, and reports only the assumptions it actually
-     filled.
-  3. Every failure path resolves to the blank form. Malformed JSON, a refusal, a
-     timeout, or `setup_draft_model_name: null` all degrade to what users had
-     before drafting existed; drafting is an assist and must never block setup.
-  It is a **separate endpoint from `evaluate`** on purpose: evaluation runs beside
-  every message, so a model round trip there would tax every turn. Drafting fires
-  once, when the setup step opens, so a dismissed card costs no model call.
+- `POST .../dbtl/proposals/draft-setup` and its merge helpers remain available
+  to the degraded form path, but graph-enabled project chat does not invoke
+  them. The supervisor derives bounded setup data from the conversation and
+  asks for missing facts through the native card instead of mounting a second
+  form above the composer.
 - **Do not point `setup_draft_model_name` at a Claude subscription model.** The
   Claude Code OAuth path impersonates the CLI (`claude_provider`'s billing
   header), and the OAuth inference endpoint returns `stop_reason=refusal` with

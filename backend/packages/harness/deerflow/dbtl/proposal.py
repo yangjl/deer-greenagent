@@ -29,7 +29,7 @@ REQUIRED_GATES: tuple[str, ...] = ("Design", "Data reconciliation")
 
 RECORD_EFFECT = "Creates a durable research record in this project: it appears in the activity log with your name, and is retired rather than deleted."
 
-_PROPOSABLE_KINDS = frozenset({RouteKind.PROPOSAL, RouteKind.CYCLE_SETUP, RouteKind.CYCLE_CONTINUATION})
+_PROPOSABLE_KINDS = frozenset({RouteKind.PROPOSAL, RouteKind.CYCLE_SETUP})
 _EXPLICIT_SETUP_FIELDS: tuple[str, ...] = (
     "research objective",
     "target trait",

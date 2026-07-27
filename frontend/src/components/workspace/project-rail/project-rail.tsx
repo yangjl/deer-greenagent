@@ -9,13 +9,33 @@ import {
   Lock,
   MessageSquarePlus,
   MessagesSquare,
+  MoreHorizontal,
   Plus,
   Presentation,
+  Trash2,
 } from "lucide-react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
+import { toast } from "sonner";
 
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Textarea } from "@/components/ui/textarea";
+import { resetThreadChatAfterDelete } from "@/components/workspace/chats/use-thread-chat";
 import { useProjectCycleSelection } from "@/components/workspace/dbtl";
 import { SettingsDialog } from "@/components/workspace/settings";
 import {
@@ -31,11 +51,15 @@ import {
   defaultSelectedCycle,
   isLive,
   openWorkItems,
+  toggleCycleDisclosure,
+  useAbandonCycle,
   useCycleDetail,
   useDbtlFeature,
   useProjectCycles,
 } from "@/core/dbtl";
+import { useDeleteThread } from "@/core/threads/hooks";
 import {
+  type ProjectConversation,
   pathOfNewProjectConversation,
   pathOfProjectThread,
   useProjectBySlug,
@@ -129,6 +153,7 @@ function StageRow({
  */
 export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const pathname = usePathname();
+  const router = useRouter();
   const { project } = useProjectBySlug(projectSlug);
   const conversations = useProjectConversations(project?.id);
   const dbtl = useDbtlFeature();
@@ -150,11 +175,26 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const [startOpen, setStartOpen] = useState(false);
   const [phase7DemoOpen, setPhase7DemoOpen] = useState(false);
   const [openStage, setOpenStage] = useState<DbtlStage | null>(null);
+  // `undefined` means the user has not made a disclosure choice yet, so the
+  // existing default cycle opens initially. `null` is an explicit fold-all.
+  const [expandedCycleId, setExpandedCycleId] = useState<
+    string | null | undefined
+  >(undefined);
+  const [cycleToRemove, setCycleToRemove] = useState<CycleRecord | null>(null);
+  const [cycleRemovalReason, setCycleRemovalReason] = useState("");
+  const [conversationToRemove, setConversationToRemove] =
+    useState<ProjectConversation | null>(null);
+  const abandonCycle = useAbandonCycle(project?.id);
+  const deleteConversation = useDeleteThread();
 
-  const cycles = cycleQuery.data?.cycles ?? [];
+  const cycles = (cycleQuery.data?.cycles ?? []).filter(
+    (cycle) => cycle.state !== "abandoned",
+  );
   const selected =
     cycles.find((item) => item.id === selectedCycleId) ??
     defaultSelectedCycle(cycles);
+  const disclosedCycleId =
+    expandedCycleId === undefined ? (selected?.id ?? null) : expandedCycleId;
   const detail = useCycleDetail(project?.id, selected?.id);
   const blockers = openWorkItems(detail.data);
 
@@ -177,6 +217,61 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
     setStartOpen(true);
   }
 
+  async function removeCycle() {
+    if (!cycleToRemove || !cycleRemovalReason.trim()) return;
+    try {
+      await abandonCycle.mutateAsync({
+        cycleId: cycleToRemove.id,
+        rationale: cycleRemovalReason.trim(),
+        expectedDbRevision: cycleToRemove.db_revision,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      selectCycle(null);
+      setExpandedCycleId(null);
+      setCycleToRemove(null);
+      setCycleRemovalReason("");
+      toast.success("Cycle removed");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to remove cycle",
+      );
+    }
+  }
+
+  async function removeConversation() {
+    if (!conversationToRemove) return;
+    const href = pathOfProjectThread(
+      projectSlug,
+      conversationToRemove.threadId,
+    );
+    const isCurrent = pathname === href;
+    const nextPath = pathOfNewProjectConversation(projectSlug);
+    try {
+      await deleteConversation.mutateAsync({
+        threadId: conversationToRemove.threadId,
+        onRemoteDeleted: isCurrent
+          ? () =>
+              resetThreadChatAfterDelete({
+                deletedThreadId: conversationToRemove.threadId,
+                nextPath,
+                force: true,
+              })
+          : undefined,
+      });
+      setConversationToRemove(null);
+      toast.success("Conversation deleted");
+      if (isCurrent) {
+        router.replace(nextPath);
+      }
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Failed to delete conversation",
+      );
+    }
+  }
+
   return (
     <aside className="border-border bg-muted/20 hidden w-64 shrink-0 flex-col overflow-y-auto border-r md:flex">
       <SettingsDialog
@@ -194,6 +289,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
             onOpenChange={setStartOpen}
             onCreated={(cycle) => {
               selectCycle(cycle.id);
+              setExpandedCycleId(cycle.id);
               requestDesignKickoff(cycle.id, cycle.title);
             }}
           />
@@ -299,32 +395,68 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
             </div>
           ) : (
             cycles.map((entry) => {
-              const active = selected?.id === entry.id;
+              const active = disclosedCycleId === entry.id;
               return (
                 <div key={entry.id} className="mb-1">
-                  <button
-                    type="button"
-                    onClick={() => selectCycle(entry.id)}
-                    className={cn(
-                      "hover:bg-muted/60 flex w-full items-center gap-1.5 rounded px-2 py-2 text-left text-sm transition-colors",
-                      active && "bg-muted/80 font-medium",
-                    )}
-                  >
-                    <span
+                  <div className="group/cycle flex items-center">
+                    <button
+                      type="button"
+                      aria-expanded={active}
+                      onClick={() => {
+                        const next = toggleCycleDisclosure(
+                          disclosedCycleId,
+                          entry.id,
+                        );
+                        setExpandedCycleId(next);
+                        selectCycle(next);
+                      }}
                       className={cn(
-                        "size-1.5 shrink-0 rounded-full",
-                        isLive(entry)
-                          ? "bg-emerald-600 dark:bg-emerald-400"
-                          : "bg-muted-foreground/40",
+                        "hover:bg-muted/60 flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 py-2 text-left text-sm transition-colors",
+                        active && "bg-muted/80 font-medium",
                       )}
-                    />
-                    <span className="min-w-0 flex-1 truncate">
-                      {entry.title}
-                    </span>
-                    <span className="text-muted-foreground shrink-0 text-[11px]">
-                      {CYCLE_STATE_LABELS[entry.state]}
-                    </span>
-                  </button>
+                    >
+                      <span
+                        className={cn(
+                          "size-1.5 shrink-0 rounded-full",
+                          isLive(entry)
+                            ? "bg-emerald-600 dark:bg-emerald-400"
+                            : "bg-muted-foreground/40",
+                        )}
+                      />
+                      <span className="min-w-0 flex-1 truncate">
+                        {entry.title}
+                      </span>
+                      <span className="text-muted-foreground shrink-0 text-[11px]">
+                        {CYCLE_STATE_LABELS[entry.state]}
+                      </span>
+                    </button>
+                    {isLive(entry) && (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            type="button"
+                            aria-label={`Cycle actions for ${entry.title}`}
+                            title={`Cycle actions for ${entry.title}`}
+                            className="text-muted-foreground hover:text-foreground flex size-7 shrink-0 items-center justify-center"
+                          >
+                            <MoreHorizontal className="size-3.5" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent side="right" align="start">
+                          <DropdownMenuItem
+                            className="text-destructive focus:text-destructive"
+                            onSelect={() => {
+                              setCycleRemovalReason("");
+                              setCycleToRemove(entry);
+                            }}
+                          >
+                            <Trash2 />
+                            Remove cycle
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
+                  </div>
                   {active && (
                     <div className="border-border/70 ml-3 border-l pl-1.5">
                       {DBTL_STAGES.map((stage) => (
@@ -412,19 +544,32 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
             );
             const active = pathname === href;
             return (
-              <Link
+              <div
                 key={conversation.threadId}
-                href={href}
-                className={cn(
-                  "hover:bg-muted/60 flex items-center gap-2 rounded px-2 py-1.5 text-sm transition-colors",
-                  active && "bg-muted/80 font-medium",
-                )}
+                className="group/conversation flex items-center"
               >
-                <MessagesSquare className="text-muted-foreground size-3.5 shrink-0" />
-                <span className="min-w-0 flex-1 truncate">
-                  {conversation.title ?? "Untitled conversation"}
-                </span>
-              </Link>
+                <Link
+                  href={href}
+                  className={cn(
+                    "hover:bg-muted/60 flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-sm transition-colors",
+                    active && "bg-muted/80 font-medium",
+                  )}
+                >
+                  <MessagesSquare className="text-muted-foreground size-3.5 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">
+                    {conversation.title ?? "Untitled conversation"}
+                  </span>
+                </Link>
+                <button
+                  type="button"
+                  aria-label={`Delete ${conversation.title ?? "Untitled conversation"}`}
+                  title="Delete conversation"
+                  className="text-muted-foreground hover:text-destructive flex size-7 shrink-0 items-center justify-center"
+                  onClick={() => setConversationToRemove(conversation)}
+                >
+                  <Trash2 className="size-3.5" />
+                </button>
+              </div>
             );
           })
         ) : (
@@ -433,6 +578,77 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           </div>
         )}
       </div>
+      <Dialog
+        open={cycleToRemove !== null}
+        onOpenChange={(open) => !open && setCycleToRemove(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove {cycleToRemove?.title}?</DialogTitle>
+            <DialogDescription>
+              The cycle will leave the active rail and be recorded as
+              abandoned. Its evidence and activity history remain available
+              for audit.
+            </DialogDescription>
+          </DialogHeader>
+          <Textarea
+            value={cycleRemovalReason}
+            onChange={(event) => setCycleRemovalReason(event.target.value)}
+            placeholder="Reason for removing this cycle"
+            rows={3}
+          />
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={abandonCycle.isPending}
+              onClick={() => setCycleToRemove(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={
+                abandonCycle.isPending || !cycleRemovalReason.trim()
+              }
+              onClick={() => void removeCycle()}
+            >
+              {abandonCycle.isPending ? "Removing…" : "Remove cycle"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={conversationToRemove !== null}
+        onOpenChange={(open) => !open && setConversationToRemove(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete this conversation?</DialogTitle>
+            <DialogDescription>
+              This permanently deletes the conversation and its local thread
+              data. Files in the project folder are not deleted.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={deleteConversation.isPending}
+              onClick={() => setConversationToRemove(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deleteConversation.isPending}
+              onClick={() => void removeConversation()}
+            >
+              {deleteConversation.isPending
+                ? "Deleting…"
+                : "Delete conversation"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </aside>
   );
 }

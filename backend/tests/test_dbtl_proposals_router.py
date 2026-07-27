@@ -22,6 +22,7 @@ from app.gateway.auth.models import User
 from app.gateway.routers import dbtl_proposals, workspaces
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.dbtl_config import DbtlConfig
+from deerflow.persistence.dbtl import DbtlCycleRepository
 from deerflow.persistence.dbtl.model import DbtlCycleRow
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.telemetry import ClassifierEvaluationRepository
@@ -63,6 +64,8 @@ def _make_app(workspace_repo, evaluation_repo, *, mode: str = "manual", proposal
     app = make_authed_test_app(user_factory=user_factory)
     app.state.workspace_repo = workspace_repo
     app.state.classifier_evaluation_repo = evaluation_repo
+    session_factory = get_session_factory()
+    app.state.dbtl_cycle_repo = DbtlCycleRepository(session_factory) if session_factory is not None else None
     app.state.dbtl_config_override = DbtlConfig(mode=mode, proposals_visible=proposals_visible)
     app.include_router(workspaces.router)
     app.include_router(dbtl_proposals.router)
@@ -110,6 +113,21 @@ def test_a_research_request_produces_a_no_record_proposal(tmp_path: Path) -> Non
         assert "target trait" in proposal["missing_fields"]
 
 
+def test_fresh_project_prior_is_reflected_in_shadow_evaluation(tmp_path: Path) -> None:
+    workspace_repo, evaluation_repo, _ = anyio.run(_make_repos, tmp_path)
+    with TestClient(_make_app(workspace_repo, evaluation_repo)) as client:
+        project_id = _seed_project(client)
+        body = _evaluate(
+            client,
+            project_id,
+            text="Evaluate the trial",
+            is_new_conversation=True,
+        )
+
+        assert body["route_kind"] == "proposal"
+        assert body["proposal"] is not None
+
+
 def test_an_explicit_request_routes_to_setup_without_classification(tmp_path: Path) -> None:
     workspace_repo, evaluation_repo, _ = anyio.run(_make_repos, tmp_path)
     with TestClient(_make_app(workspace_repo, evaluation_repo)) as client:
@@ -125,7 +143,7 @@ def test_a_selected_cycle_produces_a_continuation_not_a_new_cycle(tmp_path: Path
         project_id = _seed_project(client)
         body = _evaluate(client, project_id, selected_cycle_id="cycle-3")
         assert body["route_kind"] == "cycle_continuation"
-        assert body["proposal"]["cycle_id"] == "cycle-3"
+        assert body["proposal"] is None
 
 
 def test_an_explicit_choice_overrides_the_classifier(tmp_path: Path) -> None:

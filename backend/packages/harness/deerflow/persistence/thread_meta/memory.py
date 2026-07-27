@@ -134,6 +134,25 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         rows.sort(key=lambda row: row.get("updated_at") or "", reverse=True)
         return rows
 
+    async def clear_project_scope(self, project_id: str) -> None:
+        """Return every conversation in a removed project to the inbox."""
+        while True:
+            items = await self._store.asearch(
+                THREADS_NS,
+                filter={"project_id": project_id},
+                limit=100,
+                offset=0,
+            )
+            if not items:
+                return
+            for item in items:
+                record = dict(item.value)
+                record["workspace_id"] = None
+                record["project_id"] = None
+                record["scope_type"] = "inbox"
+                record["updated_at"] = now_iso()
+                await self._store.aput(THREADS_NS, item.key, record)
+
     async def check_access(self, thread_id: str, user_id: str, *, require_existing: bool = False) -> bool:
         item = await self._store.aget(THREADS_NS, thread_id)
         if item is None:

@@ -27,6 +27,9 @@ def _request(**overrides) -> RoutingRequest:
         "project_id": "proj-1",
         "selected_cycle_id": None,
         "explicit_choice": None,
+        "is_new_conversation": False,
+        "project_cycle_count": None,
+        "has_unfinished_cycles": None,
     }
     return RoutingRequest(**{**base, **overrides})
 
@@ -78,6 +81,19 @@ def test_typing_start_a_dbtl_cycle_is_deterministic_not_classified() -> None:
     assert decision.classifier is None
 
 
+def test_typing_start_a_cycle_is_deterministic_even_with_existing_cycles() -> None:
+    decision = route_request(
+        _request(
+            text="let's start a cycle to understand the simulation",
+            project_cycle_count=2,
+            has_unfinished_cycles=True,
+        )
+    )
+    assert decision.kind is RouteKind.CYCLE_SETUP
+    assert decision.source is RouteSource.EXPLICIT_REQUEST
+    assert decision.classifier is None
+
+
 # ── Precedence 3: the selected cycle ─────────────────────────────────────
 
 
@@ -117,6 +133,38 @@ def test_ordinary_text_in_a_project_stays_ordinary() -> None:
     assert decision.kind is RouteKind.ORDINARY
     assert decision.source is RouteSource.CLASSIFIER
     assert decision.classifier is not None
+
+
+def test_fresh_project_context_raises_the_proposal_prior() -> None:
+    established = route_request(_request(text="Evaluate the trial"))
+    fresh = route_request(
+        _request(
+            text="Evaluate the trial",
+            is_new_conversation=True,
+            project_cycle_count=0,
+            has_unfinished_cycles=False,
+        )
+    )
+
+    assert established.kind is RouteKind.ORDINARY
+    assert fresh.kind is RouteKind.PROPOSAL
+    assert fresh.classifier is not None
+    assert any(hit.rule_id == "context.new_project" for hit in fresh.classifier.rule_hits)
+
+
+def test_selected_cycle_still_wins_over_fresh_context() -> None:
+    decision = route_request(
+        _request(
+            text="Evaluate the trial",
+            selected_cycle_id="cycle-3",
+            is_new_conversation=True,
+            project_cycle_count=0,
+            has_unfinished_cycles=False,
+        )
+    )
+
+    assert decision.kind is RouteKind.CYCLE_CONTINUATION
+    assert decision.classifier is None
 
 
 def test_routing_never_reports_a_proposal_without_classifier_evidence() -> None:

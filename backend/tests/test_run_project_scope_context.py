@@ -39,6 +39,16 @@ class _RootRepo:
         self._roots[project_id] = root_path
 
 
+class _CycleRepo:
+    def __init__(self, summary: dict) -> None:
+        self.summary = summary
+        self.calls: list[str] = []
+
+    async def project_cycle_summary(self, project_id: str) -> dict:
+        self.calls.append(project_id)
+        return self.summary
+
+
 @pytest.mark.anyio
 class TestProjectScopeContext:
     async def test_stamps_the_conversations_project_and_root(self, tmp_path):
@@ -55,6 +65,38 @@ class TestProjectScopeContext:
         assert config["context"]["project_root"] == str(root)
         # ensure_project_root materializes the human folder
         assert root.is_dir()
+
+    async def test_stamps_server_owned_dbtl_lifecycle_context(self, tmp_path):
+        config: dict = {
+            "context": {
+                "dbtl_project_cycle_count": 99,
+                "dbtl_has_unfinished_cycles": True,
+            },
+            "configurable": {
+                "dbtl_project_cycle_count": 99,
+                "dbtl_has_unfinished_cycles": True,
+            },
+        }
+        cycles = _CycleRepo(
+            {
+                "project_cycle_count": 0,
+                "has_unfinished_cycles": False,
+            }
+        )
+
+        await apply_project_scope_context(
+            config,
+            "thread-1",
+            _Store({"project_id": "project-abc"}),
+            workspace_repo=_RootRepo({"project-abc": str(tmp_path / "G2F")}),
+            dbtl_cycle_repo=cycles,
+        )
+
+        assert config["context"]["dbtl_project_cycle_count"] == 0
+        assert config["context"]["dbtl_has_unfinished_cycles"] is False
+        assert "dbtl_project_cycle_count" not in config["configurable"]
+        assert "dbtl_has_unfinished_cycles" not in config["configurable"]
+        assert cycles.calls == ["project-abc"]
 
     async def test_unfiled_conversations_carry_no_project(self):
         config: dict = {"context": {}, "configurable": {}}

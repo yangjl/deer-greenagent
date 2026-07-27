@@ -27,6 +27,7 @@ from deerflow.dbtl.capabilities import (
     parse_capability,
 )
 from deerflow.dbtl.classifier import (
+    ClassifierContext,
     ClassifierDecision,
     ClassifierResult,
     ConfidenceBand,
@@ -187,6 +188,7 @@ __all__ = [
     "CheckStatus",
     "ClaimGrade",
     "ClassifierDecision",
+    "ClassifierContext",
     "ClassifierResult",
     "ConfidenceBand",
     "CandidateEligibility",

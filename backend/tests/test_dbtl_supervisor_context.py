@@ -39,6 +39,20 @@ class TestSelectionIsPerRequest:
         assert context.selected_cycle_id == "cyc-7"
         assert context.explicit_choice is ExplicitChoice.CONTINUE_CYCLE
 
+    def test_server_owned_project_lifecycle_context_is_read(self):
+        context = supervisor_context_from_config(
+            {
+                "context": {
+                    "project_id": "proj-1",
+                    "dbtl_project_cycle_count": 0,
+                    "dbtl_has_unfinished_cycles": False,
+                }
+            }
+        )
+
+        assert context.project_cycle_count == 0
+        assert context.has_unfinished_cycles is False
+
     def test_a_selection_in_checkpointed_configurable_is_ignored(self):
         """The load-bearing test for "next request only".
 

@@ -38,6 +38,7 @@ export async function evaluateRequest(input: {
   threadId?: string | null;
   selectedCycleId?: string | null;
   explicitChoice?: "ordinary" | "start_cycle" | "continue_cycle" | null;
+  isNewConversation?: boolean;
   idempotencyKey: string;
 }): Promise<EvaluationResponse> {
   const response = await fetch(`${base(input.projectId)}/evaluate`, {
@@ -48,6 +49,7 @@ export async function evaluateRequest(input: {
       thread_id: input.threadId ?? null,
       selected_cycle_id: input.selectedCycleId ?? null,
       explicit_choice: input.explicitChoice ?? null,
+      is_new_conversation: input.isNewConversation ?? false,
       idempotency_key: input.idempotencyKey,
     }),
   });

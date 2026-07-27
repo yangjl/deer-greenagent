@@ -14,8 +14,6 @@ import {
   useThreadChat,
 } from "@/components/workspace/chats";
 import {
-  UpgradeProposalCard,
-  type UpgradeProposalSubmission,
   useDbtlUpgradeProposal,
   useProjectCycleSelection,
 } from "@/components/workspace/dbtl";
@@ -224,8 +222,11 @@ export default function ChatPage() {
     pendingScopeRequest,
     consumeComposerScope,
   } = useProjectCycleSelection();
-  const { evaluate: evaluateForUpgrade, confirm: confirmUpgrade } =
-    upgradeProposal;
+  const {
+    evaluate: evaluateForUpgrade,
+    recordOutcome: recordProposalOutcome,
+    createFromNativeSetup,
+  } = upgradeProposal;
 
   // The scope selector only appears where the supervisor can actually route, so
   // the control is never offered when changing it would do nothing.
@@ -289,6 +290,7 @@ export default function ChatPage() {
           void evaluateForUpgrade({
             text: message.text,
             threadId,
+            isNewConversation: isWelcomeMode,
             ...proposalContext,
           });
         },
@@ -305,6 +307,7 @@ export default function ChatPage() {
       evaluateForUpgrade,
       showDbtlScope,
       effectiveContext,
+      isWelcomeMode,
     ],
   );
   const designKickoffInFlight = useRef<number | null>(null);
@@ -352,26 +355,6 @@ export default function ChatPage() {
     threadId,
   ]);
 
-  /**
-   * Confirming the proposal is what creates the durable cycle, so it is also
-   * where the Design council starts — the same two steps `StartCycleDialog`
-   * performs on the form path. Without this, the conversational path created a
-   * record and then stopped, because the debate is a cycle-scoped request and
-   * had no cycle id to scope itself to.
-   *
-   * The kickoff is queued only when a cycle actually came back; a failed
-   * confirmation must not start a debate about a record that does not exist.
-   */
-  const handleProposalConfirmed = useCallback(
-    async (submission: UpgradeProposalSubmission) => {
-      const cycle = await confirmUpgrade(submission);
-      if (!cycle) return;
-      selectCycle(cycle.id);
-      requestDesignKickoff(cycle.id, cycle.title);
-    },
-    [confirmUpgrade, requestDesignKickoff, selectCycle],
-  );
-
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
       let sent = false;
@@ -394,9 +377,40 @@ export default function ChatPage() {
           },
         },
       );
+      if (sent && request.clarification_type === "cycle_setup_confirmation") {
+        if (response.value === "create_cycle") {
+          if (!request.dbtl_cycle_setup) {
+            toast.error("The cycle setup payload is incomplete.");
+            return false;
+          }
+          const cycle = await createFromNativeSetup(
+            request.dbtl_cycle_setup,
+            request.request_id,
+          );
+          if (!cycle) {
+            toast.error("Could not start the DBTL cycle.");
+            return false;
+          }
+          selectCycle(cycle.id);
+          requestDesignKickoff(cycle.id, cycle.title);
+        } else if (response.value === "keep_ordinary") {
+          recordProposalOutcome("keep_ordinary");
+        } else {
+          recordProposalOutcome("not_sure");
+        }
+      }
       return sent;
     },
-    [selectedCycleId, sendMessage, showDbtlScope, threadId],
+    [
+      createFromNativeSetup,
+      recordProposalOutcome,
+      requestDesignKickoff,
+      selectCycle,
+      selectedCycleId,
+      sendMessage,
+      showDbtlScope,
+      threadId,
+    ],
   );
   const handleStop = useCallback(async () => {
     await thread.stop();
@@ -577,23 +591,6 @@ export default function ChatPage() {
                         )}
                       </div>
                     </div>
-                  )}
-                  {upgradeProposal.evaluation && (
-                    <UpgradeProposalCard
-                      // Keyed so a second proposal starts clean instead of
-                      // inheriting the previous card's half-filled setup form.
-                      key={upgradeProposal.evaluation.evaluation_id}
-                      className="mb-2 w-full"
-                      evaluation={upgradeProposal.evaluation}
-                      onAction={upgradeProposal.recordOutcome}
-                      onDraftSetup={upgradeProposal.draftSetup}
-                      onConfirm={(submission) => {
-                        void handleProposalConfirmed(submission);
-                      }}
-                      isConfirming={upgradeProposal.isConfirming}
-                      error={upgradeProposal.createError}
-                      parentCycleTitle={upgradeProposal.parentCycleTitle}
-                    />
                   )}
                   {mountedRef.current ? (
                     <InputBox

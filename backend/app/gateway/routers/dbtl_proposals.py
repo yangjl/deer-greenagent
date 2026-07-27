@@ -63,6 +63,9 @@ class EvaluateRequest(BaseModel):
     thread_id: str | None = Field(default=None, max_length=128)
     selected_cycle_id: str | None = Field(default=None, max_length=64)
     explicit_choice: Literal["ordinary", "start_cycle", "continue_cycle"] | None = None
+    # Telemetry mirrors the supervisor's checkpoint-derived first-turn prior.
+    # This field cannot create a record and no longer mounts a client card.
+    is_new_conversation: bool = False
     idempotency_key: str = Field(min_length=1, max_length=128)
 
     @field_validator("text")
@@ -136,6 +139,7 @@ def _request_fingerprint(body: EvaluateRequest) -> str:
             "thread_id": body.thread_id,
             "selected_cycle_id": body.selected_cycle_id,
             "explicit_choice": body.explicit_choice,
+            "is_new_conversation": body.is_new_conversation,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -208,6 +212,24 @@ async def evaluate_request(
     """Classify one request in shadow mode. Creates no DBTL record, ever."""
     project, user_id = await _require_project(project_id, request)
     dbtl_config = _dbtl_config(request, config)
+    project_cycle_count: int | None = None
+    has_unfinished_cycles: bool | None = None
+    cycle_repo = getattr(request.app.state, "dbtl_cycle_repo", None)
+    if cycle_repo is not None:
+        try:
+            summary = await cycle_repo.project_cycle_summary(project_id)
+            raw_count = summary.get("project_cycle_count")
+            raw_unfinished = summary.get("has_unfinished_cycles")
+            if isinstance(raw_count, int) and raw_count >= 0:
+                project_cycle_count = raw_count
+            if isinstance(raw_unfinished, bool):
+                has_unfinished_cycles = raw_unfinished
+        except Exception:
+            logger.warning(
+                "Failed to resolve DBTL lifecycle context for proposal evaluation in project %s",
+                project_id,
+                exc_info=True,
+            )
 
     decision = route_request(
         RoutingRequest(
@@ -215,6 +237,9 @@ async def evaluate_request(
             project_id=project_id,
             selected_cycle_id=body.selected_cycle_id,
             explicit_choice=ExplicitChoice(body.explicit_choice) if body.explicit_choice else None,
+            is_new_conversation=body.is_new_conversation,
+            project_cycle_count=project_cycle_count,
+            has_unfinished_cycles=has_unfinished_cycles,
         )
     )
     proposal = build_proposal(decision, project_name=str(project.get("name") or ""))

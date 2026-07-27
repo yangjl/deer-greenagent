@@ -304,6 +304,29 @@ def test_reads_stay_available_while_the_workflow_is_off(tmp_path: Path) -> None:
     assert response.json()["stages"] == ["design", "reconciliation", "build", "test", "learn"]
 
 
+def test_removing_a_cycle_records_an_abandonment_instead_of_deleting_it(tmp_path: Path) -> None:
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        project_id = _seed_project(client)
+        cycle = _create_cycle(client, project_id)
+
+        response = client.post(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/abandon",
+            json={
+                "rationale": "Created only to test the setup flow.",
+                "expected_db_revision": cycle["db_revision"],
+                "idempotency_key": "abandon-1",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["state"] == "abandoned"
+        detail = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}").json()
+        assert detail["state"] == "abandoned"
+        events = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/activity").json()["events"]
+        assert events[-1]["event_type"] == "cycle.abandoned"
+
+
 # --------------------------------------------------------------------------
 # The demo path
 # --------------------------------------------------------------------------

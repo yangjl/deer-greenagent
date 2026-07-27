@@ -2324,6 +2324,7 @@ export function useDeleteThread() {
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
       });
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
     },
   });
 }

@@ -92,6 +92,31 @@ def test_unfiling_returns_the_conversation_to_the_inbox(tmp_path):
         assert client.get(f"/api/projects/{project_id}/threads").json() == []
 
 
+def test_removing_a_project_archives_it_without_deleting_files_or_conversations(tmp_path):
+    repo = anyio.run(_make_repo, tmp_path)
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    anyio.run(lambda: thread_store.create("thread-1", user_id=str(_USER_ID)))
+    projects_root = tmp_path / "roots"
+
+    with TestClient(_make_app(repo, thread_store, projects_root=projects_root)) as client:
+        workspace_id, project_id = _seed_project(client)
+        project = client.get(f"/api/projects/{project_id}").json()
+        client.put(f"/api/projects/{project_id}/threads/thread-1")
+
+        removed = client.delete(f"/api/projects/{project_id}")
+
+        assert removed.status_code == 204
+        assert client.get(f"/api/projects/{project_id}").status_code == 404
+        assert client.get(f"/api/workspaces/{workspace_id}/projects").json() == []
+        assert (projects_root / "Drought Resistance").is_dir()
+        assert project["root_path"] == str(projects_root / "Drought Resistance")
+
+    thread = anyio.run(lambda: thread_store.get("thread-1", user_id=str(_USER_ID)))
+    assert thread is not None
+    assert thread["project_id"] is None
+    assert thread["scope_type"] == "inbox"
+
+
 def test_filing_into_an_unreachable_project_is_rejected(tmp_path):
     """A non-member must not be able to file a conversation into a project."""
     repo = anyio.run(_make_repo, tmp_path)

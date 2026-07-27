@@ -111,6 +111,16 @@ class ThreadMetaStore(abc.ABC):
         pass
 
     @abc.abstractmethod
+    async def clear_project_scope(self, project_id: str) -> None:
+        """Return every conversation in a removed project to the inbox.
+
+        This is an internal project-lifecycle operation and intentionally has
+        no owner filter: an authorized workspace owner removes the shared
+        project boundary for every member at once.
+        """
+        pass
+
+    @abc.abstractmethod
     async def check_access(self, thread_id: str, user_id: str, *, require_existing: bool = False) -> bool:
         """Check if ``user_id`` has access to ``thread_id``."""
         pass

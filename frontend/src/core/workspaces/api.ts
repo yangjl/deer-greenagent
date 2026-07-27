@@ -87,3 +87,13 @@ export async function fetchProject(projectId: string): Promise<Project> {
     "Failed to load project.",
   );
 }
+
+export async function archiveProject(projectId: string): Promise<void> {
+  const response = await fetch(
+    apiUrl(`/projects/${encodeURIComponent(projectId)}`),
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    await throwGatewayApiError(response, "Failed to remove project.");
+  }
+}

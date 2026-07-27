@@ -6,6 +6,7 @@ rs.mock("@/core/api/fetcher", () => ({
 
 import { fetch } from "@/core/api/fetcher";
 import {
+  archiveProject,
   createProject,
   createWorkspace,
   fetchProjectFolders,
@@ -73,6 +74,17 @@ describe("workspace api", () => {
       crop_profile: "maize-v1",
     });
     expect(mockedFetch.mock.calls[1]?.[1]?.method).toBe("POST");
+  });
+
+  it("archives a project through the encoded project endpoint", async () => {
+    mockedFetch.mockResolvedValue(jsonResponse(null));
+
+    await archiveProject("project/maize");
+
+    expect(mockedFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/projects/project%2Fmaize"),
+      { method: "DELETE" },
+    );
   });
 
   it("browses an encoded human and AI accessible local folder", async () => {

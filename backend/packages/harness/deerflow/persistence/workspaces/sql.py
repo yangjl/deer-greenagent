@@ -80,7 +80,7 @@ class WorkspaceRepository:
             return data
 
     async def list_workspaces(self, user_id: str) -> list[dict[str, Any]]:
-        project_counts = select(ProjectRow.workspace_id, func.count(ProjectRow.id).label("project_count")).group_by(ProjectRow.workspace_id).subquery()
+        project_counts = select(ProjectRow.workspace_id, func.count(ProjectRow.id).label("project_count")).where(ProjectRow.status == "active").group_by(ProjectRow.workspace_id).subquery()
         stmt = (
             select(
                 WorkspaceRow,
@@ -142,7 +142,7 @@ class WorkspaceRepository:
     async def get_project(self, project_id: str, *, user_id: str) -> dict[str, Any] | None:
         async with self._sf() as session:
             project = await session.get(ProjectRow, project_id)
-            if project is None:
+            if project is None or project.status != "active":
                 return None
             role = await self._membership_role(
                 session,
@@ -215,6 +215,26 @@ class WorkspaceRepository:
             except IntegrityError as exc:
                 await session.rollback()
                 raise ProjectSlugConflict(slug) from exc
+            await session.refresh(project)
+            return self._serialize(project)
+
+    async def archive_project(self, project_id: str, *, user_id: str) -> dict[str, Any] | None:
+        """Remove a project from active navigation without deleting its data."""
+        async with self._sf() as session:
+            project = await session.get(ProjectRow, project_id)
+            if project is None or project.status != "active":
+                return None
+            role = await self._membership_role(
+                session,
+                workspace_id=project.workspace_id,
+                user_id=user_id,
+            )
+            if role not in {"owner", "admin"}:
+                raise WorkspaceAccessDenied(project.workspace_id)
+            suffix = f"-archived-{project.id[-8:]}"
+            project.slug = f"{project.slug[: 96 - len(suffix)]}{suffix}"
+            project.status = "archived"
+            await session.commit()
             await session.refresh(project)
             return self._serialize(project)
 

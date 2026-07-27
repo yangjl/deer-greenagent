@@ -8,10 +8,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from deerflow.agents.dbtl.stage_execution import LiveStageAdapter
+from deerflow.agents.dbtl.stage_execution import (
+    LiveStageAdapter,
+    _compact_design_history,
+    _stage_worker_config,
+)
 from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_runner import DispatchOutcome
+from deerflow.dbtl.stage_spec import WorkerBudget
+from deerflow.subagents.config import SubagentConfig
 
 
 def _cycle(*, state: str = "design", status: str = "in_progress", revision: int = 3) -> dict:
@@ -160,6 +166,77 @@ def _runtime_config(project_root: Path) -> dict:
         "configurable": {"thread_id": "thread-1"},
         "metadata": {"model_name": "test-model"},
     }
+
+
+def test_stage_workers_do_not_implicitly_load_every_enabled_skill() -> None:
+    budget = WorkerBudget(
+        max_workers=3,
+        max_turns=4,
+        max_tokens=20_000,
+        timeout_seconds=60,
+    )
+    inherited = SubagentConfig(
+        name="general-purpose",
+        description="generalist",
+        skills=None,
+        max_turns=20,
+        timeout_seconds=300,
+    )
+    explicit = SubagentConfig(
+        name="quant-genetics",
+        description="specialist",
+        skills=["quantitative-genetics"],
+        max_turns=20,
+        timeout_seconds=300,
+    )
+
+    bounded_inherited = _stage_worker_config(inherited, budget)
+    bounded_explicit = _stage_worker_config(explicit, budget)
+
+    assert bounded_inherited.skills == []
+    assert bounded_explicit.skills == ["quantitative-genetics"]
+    assert bounded_inherited.max_turns == 4
+    assert bounded_inherited.timeout_seconds == 60
+
+
+def test_design_history_keeps_only_four_bounded_chair_syntheses() -> None:
+    runs = [
+        {
+            "unit_id": "specialist",
+            "capability": "experimental_design",
+            "status": "completed",
+            "result": {"summary": "must not be copied"},
+        }
+    ]
+    runs.extend(
+        {
+            "unit_id": f"chair-{index}",
+            "capability": "design_council_chair",
+            "status": "completed",
+            "created_at": f"2026-07-2{index}",
+            "result": {
+                "summary": str(index) * 4_000,
+                "claims": ["large claim payload"] * 20,
+                "evidence_refs": [{"reference": "large evidence payload"}] * 20,
+                "limitations": ["bounded limitation"] * 8,
+                "clarification_question": "q" * 1_000,
+            },
+        }
+        for index in range(6)
+    )
+
+    compact = _compact_design_history(runs)
+
+    assert [item["unit_id"] for item in compact] == [
+        "chair-2",
+        "chair-3",
+        "chair-4",
+        "chair-5",
+    ]
+    assert all(len(item["summary"]) <= 3_000 for item in compact)
+    assert all(len(item["clarification_question"]) <= 600 for item in compact)
+    assert all(len(item["limitations"]) == 4 for item in compact)
+    assert all("claims" not in item and "evidence_refs" not in item for item in compact)
 
 
 @pytest.mark.asyncio

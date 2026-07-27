@@ -108,6 +108,22 @@ async def test_creation_records_the_research_question_and_criteria(tmp_path: Pat
     assert cycle["cycle_weight"] == "full"
 
 
+async def test_project_cycle_summary_distinguishes_new_and_active_projects(tmp_path: Path) -> None:
+    repo, project_id = await _repos(tmp_path)
+
+    assert await repo.project_cycle_summary(project_id) == {
+        "project_cycle_count": 0,
+        "has_unfinished_cycles": False,
+    }
+
+    await _cycle(repo, project_id)
+
+    assert await repo.project_cycle_summary(project_id) == {
+        "project_cycle_count": 1,
+        "has_unfinished_cycles": True,
+    }
+
+
 async def test_creation_is_idempotent_under_replay(tmp_path: Path) -> None:
     """A retried "Start a cycle" must not create a second research record."""
     repo, project_id = await _repos(tmp_path)
@@ -147,6 +163,50 @@ async def test_a_project_may_run_several_top_level_cycles_at_once(tmp_path: Path
     assert second["id"] != first["id"]
     live = [item for item in await repo.list_cycles(project_id) if item["state"] not in {"completed", "abandoned"}]
     assert {item["id"] for item in live} == {first["id"], second["id"]}
+
+
+async def test_abandoning_a_cycle_retires_it_with_an_audited_revision(tmp_path: Path) -> None:
+    repo, project_id = await _repos(tmp_path)
+    cycle = await _cycle(repo, project_id)
+
+    abandoned = await repo.abandon_cycle(
+        cycle_id=cycle["id"],
+        project_id=project_id,
+        expected_db_revision=cycle["db_revision"],
+        actor_user_id="researcher-1",
+        idempotency_key="abandon-1",
+        rationale="Created for a UI routing test.",
+    )
+
+    assert abandoned["state"] == "abandoned"
+    assert abandoned["db_revision"] == cycle["db_revision"] + 1
+    assert await repo.project_cycle_summary(project_id) == {
+        "project_cycle_count": 1,
+        "has_unfinished_cycles": False,
+    }
+    events = await repo.list_activity(cycle["id"], project_id=project_id)
+    assert events[-1]["event_type"] == "cycle.abandoned"
+    assert events[-1]["payload"]["rationale"] == "Created for a UI routing test."
+
+
+async def test_abandoning_a_cycle_is_idempotent_but_cannot_rewrite_the_reason(tmp_path: Path) -> None:
+    repo, project_id = await _repos(tmp_path)
+    cycle = await _cycle(repo, project_id)
+    payload = {
+        "cycle_id": cycle["id"],
+        "project_id": project_id,
+        "expected_db_revision": cycle["db_revision"],
+        "actor_user_id": "researcher-1",
+        "idempotency_key": "abandon-1",
+        "rationale": "Duplicate test cycle.",
+    }
+
+    first = await repo.abandon_cycle(**payload)
+    replay = await repo.abandon_cycle(**payload)
+
+    assert replay == first
+    with pytest.raises(DbtlWorkflowRefused, match="different workflow action"):
+        await repo.abandon_cycle(**{**payload, "rationale": "A different reason."})
 
 
 async def test_a_child_cycle_may_start_beside_a_live_parent(tmp_path: Path) -> None:

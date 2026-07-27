@@ -57,6 +57,50 @@ test("extractHumanInputRequest rejects malformed artifacts", () => {
   expect(extractHumanInputRequest(message)).toBeNull();
 });
 
+test("extractHumanInputRequest preserves native DBTL cycle setup metadata", () => {
+  const dbtlCycleSetup = {
+    title: "Genomic selection in maize",
+    objective: "Rank maize lines by predicted plant height",
+    success_criteria: "Use a held-out validation set.",
+  };
+  const message = {
+    type: "tool",
+    name: "ask_clarification",
+    content: "fallback",
+    artifact: {
+      human_input: {
+        ...requestPayload,
+        clarification_type: "cycle_setup_confirmation",
+        dbtl_cycle_setup: dbtlCycleSetup,
+      },
+    },
+  } as unknown as Message;
+
+  expect(extractHumanInputRequest(message)?.dbtl_cycle_setup).toEqual(
+    dbtlCycleSetup,
+  );
+});
+
+test("extractHumanInputRequest rejects malformed DBTL cycle setup metadata", () => {
+  const message = {
+    type: "tool",
+    name: "ask_clarification",
+    content: "fallback",
+    artifact: {
+      human_input: {
+        ...requestPayload,
+        dbtl_cycle_setup: {
+          title: "",
+          objective: "Rank maize lines",
+          success_criteria: "Use held-out data.",
+        },
+      },
+    },
+  } as unknown as Message;
+
+  expect(extractHumanInputRequest(message)).toBeNull();
+});
+
 test("extractHumanInputResponse reads valid human message metadata", () => {
   const response = {
     version: 1,

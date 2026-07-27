@@ -263,6 +263,30 @@ async def get_project(project_id: str, request: Request):
     return project
 
 
+@router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+@require_permission("threads", "write")
+async def archive_project(project_id: str, request: Request):
+    """Remove a project from navigation while preserving its folder and audit data."""
+    user_id = await _user_id(request)
+    repo = get_workspace_repo(request)
+    project = await repo.get_project(project_id, user_id=user_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project.get("current_user_role") not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="Only a workspace owner or admin can remove a project")
+
+    # Conversations are independent records. Return every member's threads to
+    # the inbox before hiding the shared project so no chat becomes stranded.
+    await get_thread_store(request).clear_project_scope(project_id)
+    try:
+        archived = await repo.archive_project(project_id, user_id=user_id)
+    except WorkspaceAccessDenied as exc:
+        raise HTTPException(status_code=403, detail="Only a workspace owner or admin can remove a project") from exc
+    if archived is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 # ── Project-owned conversations and files ────────────────────────────────
 #
 # A project is the addressable unit: it owns its conversations and its file

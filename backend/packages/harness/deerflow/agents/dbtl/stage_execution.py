@@ -69,6 +69,10 @@ class LiveStageResult:
 
 CandidateProvider = Callable[[], Sequence[AgentCandidate]]
 
+_DESIGN_HISTORY_TURNS = 4
+_DESIGN_HISTORY_SUMMARY_CHARS = 3_000
+_DESIGN_HISTORY_DETAIL_CHARS = 600
+
 
 def _runtime_view(config: RunnableConfig) -> dict[str, Any]:
     merged = dict(config.get("configurable", {}) or {})
@@ -76,6 +80,54 @@ def _runtime_view(config: RunnableConfig) -> dict[str, Any]:
     if isinstance(context, dict):
         merged.update(context)
     return merged
+
+
+def _bounded_text(value: Any, *, max_chars: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3].rstrip() + "..."
+
+
+def _compact_design_history(prior_runs: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep bounded prior chair decisions, not every full council payload."""
+    chair_runs = [item for item in prior_runs if str(item.get("capability") or "") == "design_council_chair"]
+    selected = chair_runs[-_DESIGN_HISTORY_TURNS:]
+    compact: list[dict[str, Any]] = []
+    for item in selected:
+        result = item.get("result")
+        payload = result if isinstance(result, dict) else {}
+        compact.append(
+            {
+                "unit_id": str(item.get("unit_id") or ""),
+                "status": str(item.get("status") or payload.get("status") or ""),
+                "summary": _bounded_text(
+                    payload.get("summary"),
+                    max_chars=_DESIGN_HISTORY_SUMMARY_CHARS,
+                ),
+                "clarification_question": _bounded_text(
+                    payload.get("clarification_question"),
+                    max_chars=_DESIGN_HISTORY_DETAIL_CHARS,
+                ),
+                "limitations": [_bounded_text(value, max_chars=_DESIGN_HISTORY_DETAIL_CHARS) for value in list(payload.get("limitations") or [])[:4]],
+                "created_at": str(item.get("created_at") or ""),
+            }
+        )
+    return compact
+
+
+def _stage_worker_config(base_config, budget: WorkerBudget):
+    """Clamp a stage worker and prevent implicit inheritance of every skill."""
+    skills = [] if base_config.skills is None else list(base_config.skills)
+    return replace(
+        base_config,
+        max_turns=min(base_config.max_turns, budget.max_turns),
+        timeout_seconds=min(
+            base_config.timeout_seconds,
+            budget.timeout_seconds,
+        ),
+        skills=skills,
+    )
 
 
 def _learn_synthesis_payload(
@@ -435,14 +487,7 @@ class LiveStageAdapter:
                     text=None,
                     error=f"Selected subagent {unit.agent_name!r} is no longer registered.",
                 )
-            worker_config = replace(
-                base_config,
-                max_turns=min(base_config.max_turns, budget.max_turns),
-                timeout_seconds=min(
-                    base_config.timeout_seconds,
-                    budget.timeout_seconds,
-                ),
-            )
+            worker_config = _stage_worker_config(base_config, budget)
             parent_model = metadata.get("model_name")
             effective_model = resolve_subagent_model_name(
                 worker_config,
@@ -700,7 +745,7 @@ class LiveStageAdapter:
                     _project_manifest,
                     project_root,
                 ),
-                "prior_design_council_runs": prior_design_runs[-12:],
+                "prior_design_council_runs": _compact_design_history(prior_design_runs),
             },
             sort_keys=True,
             ensure_ascii=False,

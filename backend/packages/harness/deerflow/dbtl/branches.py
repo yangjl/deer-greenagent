@@ -11,11 +11,17 @@ Upgrade Proposal card is built from it. A supervisor that re-derived that order
 would be a second opinion about the same question, and the two would drift; the
 first symptom would be a card offering one thing while the graph did another.
 
-The mapping from a route to a branch adds exactly one decision: whether enough
-is known to show a confirmation at all. A request to start a cycle that names
-no trait, season, population, or validation criterion cannot produce an
-honest confirmation summary, so it becomes a question instead of a dialog with
-blanks in it.
+The mapping from a route to a branch is deliberately thin. Anything that could
+become a cycle goes to the confirmation branch first — the human decides
+whether a durable research record should exist *before* being asked to describe
+one. The gaps the classifier noticed ride along on the decision and are raised
+after approval, by :mod:`deerflow.dbtl.setup_questions`, as questions the model
+has already proposed answers to.
+
+``CLARIFICATION`` is therefore no longer reachable from :func:`resolve_branch`:
+it is the post-approval step, and only the graph can tell that approval has
+happened, because that fact lives in an answered card rather than in the
+request text this module sees.
 """
 
 from __future__ import annotations
@@ -64,6 +70,9 @@ class SupervisorContext:
     project_name: str = ""
     selected_cycle_id: str | None = None
     explicit_choice: ExplicitChoice | None = None
+    is_new_conversation: bool = False
+    project_cycle_count: int | None = None
+    has_unfinished_cycles: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +108,9 @@ def resolve_branch(text: str, context: SupervisorContext) -> BranchDecision:
             project_id=context.project_id,
             selected_cycle_id=context.selected_cycle_id,
             explicit_choice=context.explicit_choice,
+            is_new_conversation=context.is_new_conversation,
+            project_cycle_count=context.project_cycle_count,
+            has_unfinished_cycles=context.has_unfinished_cycles,
         )
     )
 
@@ -123,15 +135,14 @@ def resolve_branch(text: str, context: SupervisorContext) -> BranchDecision:
         missing = missing_clarification_fields(text)
         objective = derive_objective(text)
 
-    # A classifier-sourced proposal keeps its card even with gaps — Phase 4's
-    # card already opens its own clarification step, and interrupting an
-    # unasked-for suggestion with a bare question would be worse. An explicit
-    # request, by contrast, is someone waiting on an answer.
-    needs_clarification = bool(missing) and route.kind is RouteKind.CYCLE_SETUP
-    branch = SupervisorBranch.CLARIFICATION if needs_clarification else SupervisorBranch.CYCLE_SETUP
-
+    # Confirmation comes first, always. Asking for details before asking
+    # whether to start a cycle at all inverts the human gate: it makes someone
+    # fill in a research record's fields to find out they are being offered a
+    # research record. The gaps are still carried on the decision — they seed
+    # the questions raised *after* approval, which is where answering them is
+    # work the person has already agreed to do.
     return BranchDecision(
-        branch=branch,
+        branch=SupervisorBranch.CYCLE_SETUP,
         route=route,
         objective=objective,
         missing_fields=tuple(missing),

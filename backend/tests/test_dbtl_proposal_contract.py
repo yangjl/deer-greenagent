@@ -115,7 +115,7 @@ def test_the_confirmation_summary_names_every_consequence() -> None:
     assert summary.notice == CONFIRMATION_REQUIRED_NOTICE
 
 
-def test_a_continuation_proposal_points_at_the_existing_cycle() -> None:
+def test_a_continuation_does_not_open_a_second_proposal_interaction() -> None:
     decision = route_request(
         RoutingRequest(
             text="add a new model to the comparison",
@@ -125,9 +125,7 @@ def test_a_continuation_proposal_points_at_the_existing_cycle() -> None:
         )
     )
     built = build_proposal(decision, project_name="G2F")
-    assert built is not None
-    assert built.cycle_id == "cycle-9"
-    assert built.creates_record is False
+    assert built is None
 
 
 def test_every_outcome_a_human_can_record_is_enumerated() -> None:
