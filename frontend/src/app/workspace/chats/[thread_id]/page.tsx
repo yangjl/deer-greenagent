@@ -371,7 +371,7 @@ export default function ChatPage() {
           files: [],
         },
         showDbtlScope
-          ? humanInputRunContext(request, selectedCycleId)
+          ? humanInputRunContext(request, selectedCycleId, response.value)
           : undefined,
         {
           additionalKwargs: {

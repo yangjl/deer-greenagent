@@ -28,6 +28,15 @@
 
 import { CYCLE_STATE_LABELS, type CycleRecord, isLive } from "./cycle-view";
 
+/**
+ * The council depths the backend accepts, in the order the card offers them.
+ * Kept as a literal list rather than derived from the card's own options so a
+ * malformed payload cannot smuggle an unknown depth into the run context.
+ */
+export const COUNCIL_DEPTHS = ["light", "medium", "heavy"] as const;
+
+export type CouncilDepth = (typeof COUNCIL_DEPTHS)[number];
+
 export const SCOPE_ORDINARY_LABEL = "Ordinary project work";
 export const SCOPE_RECOMMEND_LABEL = "Ask the AI to recommend";
 export const SCOPE_START_CYCLE_LABEL = "Start a new cycle";
@@ -244,8 +253,24 @@ export function runContextPayload(
 export function humanInputRunContext(
   request: { source: string; clarification_type?: string },
   selectedCycleId: string | null,
+  answer?: string,
 ): Record<string, string | boolean> {
   if (request.source === "ask_clarification") {
+    // The preflight answer is the council's depth, and it has to travel with
+    // the request that convenes it: the backend reads the depth from this same
+    // per-request context, and a reply that carried only the cycle scope would
+    // re-raise the card it just answered.
+    if (request.clarification_type === "council_preflight") {
+      const depth = COUNCIL_DEPTHS.find((item) => item === answer?.trim());
+      return {
+        ...(selectedCycleId
+          ? runContextPayload({ kind: "cycle", cycleId: selectedCycleId })
+          : runContextPayload(AUTO_REQUEST_CONTEXT)),
+        // An unrecognized answer is left off rather than guessed at; the
+        // backend then falls back to its own recommendation.
+        ...(depth ? { dbtl_council_depth: depth } : {}),
+      };
+    }
     // A design question belongs to the cycle whose council raised it.
     if (request.clarification_type === "design_decision") {
       return selectedCycleId
