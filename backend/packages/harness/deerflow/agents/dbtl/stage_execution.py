@@ -25,6 +25,12 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.dbtl.agent_selector import AgentCandidate, build_candidates
+from deerflow.dbtl.council import (
+    CouncilPlan,
+    council_depth_from_config,
+    plan_council,
+    recommend_depth,
+)
 from deerflow.dbtl.cycle_state import StageStatus, stage_for_state
 from deerflow.dbtl.review_markdown import render_review_markdown, render_stage_digest
 from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
@@ -37,7 +43,7 @@ from deerflow.dbtl.stage_runner import (
     arun_stage,
     collect_results,
 )
-from deerflow.dbtl.stage_spec import WorkerBudget, resolve_stage_spec
+from deerflow.dbtl.stage_spec import StageSpec, WorkerBudget, resolve_stage_spec
 from deerflow.dbtl.worker_result import WorkerStatus
 from deerflow.projects.storage import ensure_project_dirs, project_outputs_dir
 from deerflow.trace_context import (
@@ -301,6 +307,7 @@ def _write_stage_package(
     cycle: dict[str, Any],
     outcome: StageExecutionOutcome,
     idempotency_key: str,
+    council: CouncilPlan | None = None,
 ) -> tuple[str, str, str]:
     """Write the review package and return the URI/hash of the reviewed document.
 
@@ -323,6 +330,12 @@ def _write_stage_package(
         "rejected": list(outcome.rejected),
         "satisfies_gate": False,
     }
+    if council is not None:
+        # The depth is a parameter of this attempt, not of the versioned
+        # contract, so it is recorded here rather than by forking the spec.
+        # Without it the budget a reviewer reconstructs from `stage_spec_key`
+        # would not be the budget the workers actually had.
+        payload["council"] = council.as_dict()
     encoded = (json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     data_hash = hashlib.sha256(encoded).hexdigest()
 
@@ -422,6 +435,87 @@ class LiveStageAdapter:
             available,
             declared_capabilities=declared,
         )
+
+    async def preview_council(
+        self,
+        *,
+        project_id: str | None,
+        cycle_id: str | None,
+        request_text: str,
+        config: RunnableConfig,
+    ) -> CouncilPlan | None:
+        """The roster this request would convene, without convening it.
+
+        Returns ``None`` whenever there is nothing to preview — no cycle, a
+        cycle in this project the caller does not own, or a cycle sitting at a
+        stage other than Design. The caller shows a card only when this returns
+        a plan, so a preflight can never appear in front of work it does not
+        describe.
+        """
+        if not project_id or not cycle_id:
+            return None
+        cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
+        if cycle is None:
+            return None
+        cycle_state = str(cycle.get("state") or "")
+        stage = "build" if cycle_state == "ready_for_build" else stage_for_state(cycle_state)
+        if stage != "design":
+            return None
+        attempt = _stage_attempt(cycle, stage)
+        status = str((attempt or {}).get("status") or "")
+        if status not in {StageStatus.IN_PROGRESS.value, StageStatus.CHANGES_REQUESTED.value}:
+            return None
+        return self._plan_council(
+            resolve_stage_spec(stage),
+            config=config,
+            request_text=request_text,
+            attempt_id="preview",
+        )
+
+    def _plan_council(
+        self,
+        spec: StageSpec,
+        *,
+        config: RunnableConfig,
+        request_text: str,
+        attempt_id: str,
+    ) -> CouncilPlan:
+        """The roster this Design run will use.
+
+        Depth comes from the human's confirmed choice when there is one, and
+        otherwise from the request itself. An unrecognized value degrades to the
+        recommendation rather than raising: a stale client losing a preference
+        is a much smaller failure than a cycle that cannot be designed.
+        """
+        depth = council_depth_from_config(config) or recommend_depth(request_text).depth
+        metadata = dict(config.get("metadata", {}) or {})
+        model = str(metadata.get("model_name") or "").strip() or "inherited"
+        return plan_council(
+            spec,
+            self._candidates(),
+            depth=depth,
+            model=model,
+            tools_by_agent=self._declared_tools(),
+            attempt_id=attempt_id,
+        )
+
+    def _declared_tools(self) -> dict[str, tuple[str, ...]]:
+        """Each agent's declared tool whitelist, for the roster preview.
+
+        An agent that declares none inherits the lead agent's tools, which the
+        seat reports as ``inherits_all_tools`` rather than as an empty list —
+        showing "tools: none" for the common case would be a lie a reviewer
+        would act on.
+        """
+        if self._candidate_provider is not None:
+            return {}
+        try:
+            from deerflow.subagents import list_subagents
+
+            return {item.name: tuple(item.tools) for item in list_subagents(app_config=self._app_config) if item.tools}
+        except Exception:  # pragma: no cover - registry problems must not block a run
+            logger.debug("Could not read declared subagent tools for the council roster.", exc_info=True)
+            return {}
 
     def _production_dispatcher(
         self,
@@ -757,6 +851,18 @@ class LiveStageAdapter:
         )
         spec = resolve_stage_spec(stage)
         attempt_id = f"dbtl-{_safe_token(execution_key)}"
+        council_plan: CouncilPlan | None = None
+        if stage == "design":
+            council_plan = self._plan_council(
+                spec,
+                config=config,
+                request_text=request_text,
+                attempt_id=attempt_id,
+            )
+            # Scoping the spec is what keeps the previewed roster and the
+            # dispatched one the same computation: selection reads its worker
+            # ceiling off the spec, and so does the dispatch budget.
+            spec = replace(spec, budget=council_plan.budget)
         dispatcher = self._dispatcher or self._production_dispatcher(
             config=config,
             state=state,
@@ -847,6 +953,7 @@ class LiveStageAdapter:
                 cycle=cycle,
                 outcome=outcome,
                 idempotency_key=execution_key,
+                council=council_plan,
             )
             artifact_type = spec.required_artifact_types[0]
 

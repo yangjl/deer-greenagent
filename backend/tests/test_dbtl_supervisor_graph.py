@@ -722,6 +722,120 @@ class TestStageStubCannotDoScience:
         assert "nothing has been recorded" in answer.lower()
 
 
+class TestCouncilPreflight:
+    """The roster is shown before the council convenes, not after."""
+
+    @staticmethod
+    def _adapter(plan, executed):
+        class Adapter:
+            async def preview_council(self, **kwargs):
+                return plan
+
+            async def execute(self, **kwargs):
+                executed.append(kwargs)
+                return SimpleNamespace(
+                    stage="design",
+                    cycle_id="cyc-1",
+                    note="ran",
+                    artifact_uri=None,
+                    clarification_question=None,
+                    produced_usable_evidence=True,
+                )
+
+        return Adapter()
+
+    @staticmethod
+    def _plan():
+        from deerflow.dbtl.agent_selector import AgentCandidate
+        from deerflow.dbtl.capabilities import Capability
+        from deerflow.dbtl.council import CouncilDepth, plan_council
+        from deerflow.dbtl.stage_spec import resolve_stage_spec
+
+        return plan_council(
+            resolve_stage_spec("design", domain_profile="generic"),
+            (AgentCandidate(name="designer", capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN})),),
+            depth=CouncilDepth.MEDIUM,
+            model="gpt-5.6-sol",
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_worker_is_dispatched_before_the_human_sees_the_roster(self):
+        executed: list = []
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"),
+            stage_adapter=self._adapter(self._plan(), executed),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {**FULL_STATE, "messages": [HumanMessage(content="Design the drought cycle.", id="h-1")]},
+            config={"configurable": {"thread_id": "preflight-1"}},
+        )
+
+        # The council is a real spend of time and tokens; offering a choice
+        # after dispatching would not be a choice.
+        assert executed == []
+        card = final["messages"][-1].artifact["human_input"]
+        assert card["clarification_type"] == "council_preflight"
+        assert card["request_id"].startswith("dbtl-council:")
+        assert [option["id"] for option in card["options"]] == ["light", "medium", "heavy"]
+        assert card["council_plan"]["seats"][-1]["role"] == "chair"
+        assert card["recommended_depth"] == "medium"
+        # The text stands alone for anyone who cannot see the card.
+        assert "designer" in card["context"]
+        assert "gpt-5.6-sol" in card["context"]
+
+    @pytest.mark.asyncio
+    async def test_a_confirmed_depth_runs_the_council_instead_of_asking_again(self):
+        executed: list = []
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"),
+            stage_adapter=self._adapter(self._plan(), executed),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        await graph.ainvoke(
+            {**FULL_STATE, "messages": [HumanMessage(content="Design the drought cycle.", id="h-2")]},
+            config={
+                "configurable": {"thread_id": "preflight-2"},
+                "context": {"dbtl_council_depth": "heavy", "run_id": "run-2"},
+            },
+        )
+
+        assert len(executed) == 1
+
+    @pytest.mark.asyncio
+    async def test_an_undispatchable_council_does_not_raise_a_card_it_cannot_honour(self):
+        from deerflow.dbtl.council import CouncilDepth, plan_council
+        from deerflow.dbtl.stage_spec import resolve_stage_spec
+
+        empty = plan_council(
+            resolve_stage_spec("design", domain_profile="generic"),
+            (),
+            depth=CouncilDepth.MEDIUM,
+            model="m",
+        )
+        executed: list = []
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"),
+            stage_adapter=self._adapter(empty, executed),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {**FULL_STATE, "messages": [HumanMessage(content="Design the drought cycle.", id="h-3")]},
+            config={"configurable": {"thread_id": "preflight-3"}},
+        )
+
+        # It falls through to the adapter, which reports the real problem
+        # rather than offering a depth for a council that cannot be staffed.
+        assert len(executed) == 1
+        assert getattr(final["messages"][-1], "artifact", None) is None
+
+
 class TestLiveStageBranch:
     @pytest.mark.parametrize(
         "text",

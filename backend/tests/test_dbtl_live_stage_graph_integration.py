@@ -136,12 +136,27 @@ async def test_selected_cycle_runs_workers_and_persists_review_evidence(
         stage_adapter=adapter,
     ).compile(checkpointer=InMemorySaver())
 
-    final = await graph.ainvoke(
+    # The first Design request raises the preflight card: who will sit on the
+    # council, at what depth. Nothing is dispatched until a person answers it.
+    preflight = await graph.ainvoke(
         {
             "messages": [HumanMessage(content="Run the Design stage.", id="human-1")],
             "artifacts": [],
         },
         config=run_config,
+    )
+    card = preflight["messages"][-1].artifact["human_input"]
+    assert card["clarification_type"] == "council_preflight"
+    assert await repo.list_worker_runs("cycle-1", project_id="project-1", stage="design") == []
+
+    confirmed = dict(run_config)
+    confirmed["context"] = {**dict(run_config.get("context") or {}), "dbtl_council_depth": card["recommended_depth"]}
+    final = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Run the Design stage.", id="human-2")],
+            "artifacts": [],
+        },
+        config=confirmed,
     )
 
     workers = await repo.list_worker_runs(

@@ -411,6 +411,114 @@ async def test_the_previewed_roster_matches_the_council_that_actually_runs(
 
 
 @pytest.mark.asyncio
+async def test_the_confirmed_depth_changes_the_council_that_is_dispatched(
+    tmp_path: Path,
+) -> None:
+    """Depth is the human's dial, and it has to reach the workers.
+
+    A card that offered light/medium/heavy and then ran the same council
+    regardless would be worse than not offering the choice.
+    """
+    candidates = (
+        AgentCandidate(name="designer", capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN})),
+        AgentCandidate(name="geneticist", capabilities=frozenset({Capability.QUANTITATIVE_GENETICS})),
+    )
+
+    async def _run(depth: str | None) -> FakeDispatcher:
+        dispatcher = FakeDispatcher(text=_structured_result())
+        adapter = LiveStageAdapter(
+            repo=FakeRepo(_cycle()),
+            app_config=SimpleNamespace(),
+            candidate_provider=lambda: candidates,
+            dispatcher=dispatcher,
+        )
+        config = _runtime_config(tmp_path)
+        if depth is not None:
+            config["context"]["dbtl_council_depth"] = depth
+        await adapter.execute(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            request_text="Draft the Design package.",
+            state={},
+            config=config,
+        )
+        return dispatcher
+
+    light = await _run("light")
+    heavy = await _run("heavy")
+
+    light_units = [unit for call in light.calls for unit in call[0]]
+    heavy_units = [unit for call in heavy.calls for unit in call[0]]
+    assert len(light_units) < len(heavy_units)
+    # The budget reaches the workers too, not just the headcount.
+    assert light.calls[0][1].max_turns < heavy.calls[0][1].max_turns
+    # Whatever the depth, the debate keeps its shape.
+    for units in (light_units, heavy_units):
+        assert [unit.capability for unit in units][-2:] == ["design_red_team", "design_council_chair"]
+
+
+@pytest.mark.asyncio
+async def test_an_unrecognized_depth_degrades_instead_of_failing_the_cycle(
+    tmp_path: Path,
+) -> None:
+    # A stale client losing a preference is a far smaller failure than a cycle
+    # that cannot be designed, so an unknown value falls back rather than raises.
+    dispatcher = FakeDispatcher(text=_structured_result())
+    adapter = LiveStageAdapter(
+        repo=FakeRepo(_cycle()),
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (AgentCandidate(name="designer", capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN})),),
+        dispatcher=dispatcher,
+    )
+    config = _runtime_config(tmp_path)
+    config["context"]["dbtl_council_depth"] = "exhaustive"
+
+    result = await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=config,
+    )
+
+    assert result.produced_usable_evidence
+
+
+@pytest.mark.asyncio
+async def test_the_review_package_records_who_sat_on_the_council(
+    tmp_path: Path,
+) -> None:
+    # The reviewer approves a document; if the roster is not in the record, the
+    # budget they would reconstruct from the spec key is not the one the workers
+    # actually had.
+    repo = FakeRepo(_cycle())
+    adapter = LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (AgentCandidate(name="designer", capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN})),),
+        dispatcher=FakeDispatcher(text=_structured_result()),
+    )
+    config = _runtime_config(tmp_path)
+    config["context"]["dbtl_council_depth"] = "heavy"
+
+    await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=config,
+    )
+
+    document = tmp_path / repo.recorded[0]["artifact_uri"].removeprefix("/mnt/user-data/")
+    package = json.loads(next(document.parent.glob("design-package-rev3-*.json")).read_text())
+    council = package["council"]
+    assert council["depth"] == "heavy"
+    assert council["budget"]["max_turns"] == 80
+    assert [seat["role"] for seat in council["seats"]][-1] == "chair"
+    assert council["seats"][0]["agent_name"] == "designer"
+
+
+@pytest.mark.asyncio
 async def test_design_council_pauses_for_one_human_clarification_without_artifact(
     tmp_path: Path,
 ) -> None:

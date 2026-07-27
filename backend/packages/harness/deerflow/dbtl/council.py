@@ -159,6 +159,48 @@ DEPTH_POLICIES: Mapping[CouncilDepth, DepthPolicy] = MappingProxyType(
 
 DEFAULT_DEPTH = CouncilDepth.MEDIUM
 
+#: Where a confirmed depth travels. Read from the request's ``context`` only,
+#: never the merged runtime view: ``configurable`` is checkpointed, so a depth
+#: accepted from there would keep steering every later turn in the thread
+#: instead of the one it was chosen for — the rule the selected cycle follows.
+COUNCIL_DEPTH_CONTEXT_KEY = "dbtl_council_depth"
+
+
+def request_context(config: Mapping[str, object] | None) -> Mapping[str, object]:
+    """The per-request context, wherever the caller is standing.
+
+    A run request carries ``context`` at the top level, but LangGraph relocates
+    it to ``configurable["context"]`` before a node sees it — so code that runs
+    both inside and outside the graph (this does) has to look in both places or
+    it silently reads nothing in one of them. Deliberately *not* the merged
+    `configurable` mapping: that is checkpointed, and a per-request choice read
+    from there would keep steering later turns.
+    """
+    if not isinstance(config, Mapping):
+        return {}
+    direct = config.get("context")
+    if isinstance(direct, Mapping) and direct:
+        return direct
+    configurable = config.get("configurable")
+    nested = configurable.get("context") if isinstance(configurable, Mapping) else None
+    return nested if isinstance(nested, Mapping) else {}
+
+
+def council_depth_from_config(config: Mapping[str, object] | None) -> CouncilDepth | None:
+    """The depth a human confirmed, for this request only.
+
+    An unrecognized value returns ``None`` rather than raising: a stale client
+    losing a preference is a far smaller failure than a cycle that cannot be
+    designed.
+    """
+    raw = request_context(config).get(COUNCIL_DEPTH_CONTEXT_KEY)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return CouncilDepth(raw.strip().lower())
+    except ValueError:
+        return None
+
 
 def depth_policy(depth: CouncilDepth) -> DepthPolicy:
     return DEPTH_POLICIES[CouncilDepth(depth)]
