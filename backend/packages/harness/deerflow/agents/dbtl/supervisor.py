@@ -55,13 +55,6 @@ from deerflow.dbtl.branches import (
     SupervisorContext,
     resolve_branch,
 )
-from deerflow.dbtl.setup_questions import (
-    SetupQuestion,
-    build_questions_prompt,
-    fallback_questions,
-    parse_questions_response,
-    render_questions,
-)
 from deerflow.dbtl.proposal import (
     CONFIRMATION_REQUIRED_NOTICE,
     NO_RECORD_NOTICE,
@@ -69,6 +62,13 @@ from deerflow.dbtl.proposal import (
     REQUIRED_GATES,
 )
 from deerflow.dbtl.routing import ExplicitChoice
+from deerflow.dbtl.setup_questions import (
+    SetupQuestion,
+    build_questions_prompt,
+    fallback_questions,
+    parse_questions_response,
+    render_questions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -476,18 +476,23 @@ def _has_emitted_card(state: dict, prefix: str) -> bool:
 def _design_inputs_acknowledgement(state: dict) -> str | None:
     """What to say once the post-approval design questions have been answered.
 
+    Keyed on the questions card rather than on the approval: ``_card_answer``
+    reads only the newest message, so by the time these answers arrive the
+    approval is no longer the latest reply. That costs nothing, because the
+    questions card is only ever raised after an approval — answering it already
+    implies one, and the emitted-card check keeps a forged id from faking it.
+
     Terminal on purpose. The cycle already exists — the authenticated action
-    created it at approval — so there is nothing left to confirm, and re-raising
-    the confirmation here would ask someone to approve what they just approved.
+    created it at approval — so there is nothing left to confirm, and falling
+    through would ask someone to approve what they just approved.
     """
-    if _confirmation_answer(state) != "create_cycle":
+    answered = _card_answer(state, SETUP_CLARIFICATION_PREFIX)
+    if answered is None:
         return None
-    if _card_answer(state, SETUP_CLARIFICATION_PREFIX) is None:
+    request_id, _answer = answered
+    if _emitted_card_request(state, request_id) is None:
         return None
-    return (
-        "Recorded your design inputs for this cycle. Open it in the project rail to review the Design stage "
-        "and submit it for approval — that authenticated review is what satisfies the gate, not this conversation."
-    )
+    return "Recorded your design inputs for this cycle. Open it in the project rail to review the Design stage and submit it for approval — that authenticated review is what satisfies the gate, not this conversation."
 
 
 def _setup_confirmation_acknowledgement(state: dict) -> str | None:

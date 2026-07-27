@@ -1601,15 +1601,52 @@ enough is known to show a confirmation at all: an explicit start request that
 names no trait, season, population, or validation criterion becomes a
 clarification instead of a dialog with blanks in it.
 
+**Approval comes before questions.** `resolve_branch` sends anything that could
+become a cycle straight to `CYCLE_SETUP` — the confirmation card — whether or
+not fields are missing. Asking someone to describe a research record before
+asking whether one should exist inverts the human gate: they fill in a form to
+discover they are being offered a cycle. The classifier's gaps still ride on
+`BranchDecision.missing_fields`; they seed the questions raised *after*
+approval, which is work the person has already agreed to. `CLARIFICATION` is
+therefore unreachable from `resolve_branch` and is now the post-approval step:
+only the graph can tell approval happened, because that fact lives in an
+answered card rather than in the request text. `route()` sends an approved
+confirmation there, guarded by `_has_emitted_card` — an approval stays in
+history forever, so without the guard every later turn would re-raise the card.
+Answering the questions is terminal (`_design_inputs_acknowledgement`), keyed on
+the questions card rather than the approval because `_card_answer` reads only
+the newest message; falling through would ask someone to approve what they just
+approved.
+
+**The questions are written by a model, not by the rule table.** The card used
+to list the classifier's unmatched regex fields ("target trait", "season
+range") as bullets — rule names rather than questions, identical in every
+conversation. `deerflow.dbtl.setup_questions` replaces that: one non-graph LLM
+call (`dbtl.setup_draft_model_name`, the same model
+`deerflow.dbtl.setup_draft` uses) writes at most `MAX_SETUP_QUESTIONS` real
+questions **and answers each one with a recommendation**, so the human corrects
+rather than composes. Two rules are enforced in the parser rather than the
+prompt, for the same reason `setup_draft` enforces its own: a recommendation
+carries `grounded`, and only an explicit `true` counts, so a value the model
+invented can never render as one the scientist stated (`render_questions` labels
+them "suggested" vs "from your request"); and nothing fails loudly — a
+malformed reply, a disabled model, or an outage degrades to
+`fallback_questions`, which asks the deterministic gaps plainly and invents no
+answers. `build_supervisor_graph(question_writer=...)` is the injected seam, so
+tests drive the card without a model; the production writer is fail-soft by
+construction because raising there would cost the user the cycle they just
+approved. The structured questions also ride on the card artifact as
+`setup_questions`, so a richer per-question UI needs no second emission path.
+
 **Setup and Design interactions use DeerFlow's native Human Input Card, and a
 card is only half the feature.** Setup clarification, setup confirmation, and
 the Design council's `needs_input` all use the existing `ask_clarification`
 AI-tool / ToolMessage pair. Their request-id prefixes are `dbtl-setup:`,
 `dbtl-setup-confirm:`, and `dbtl-design:` because they resume differently: a
 design answer feeds a running stage, a setup answer re-routes a request that has
-started nothing, and a confirmation answer receives a deterministic no-write
-acknowledgement while the authenticated frontend action performs any requested
-cycle creation. No DBTL-specific card is mounted by proposal evaluation, and
+started nothing, and a confirmation answer either opens the design questions
+(approval) or receives a deterministic no-write acknowledgement, while the
+authenticated frontend action performs any requested cycle creation. No DBTL-specific card is mounted by proposal evaluation, and
 continuation is not a proposable route because that request already executes
 the selected stage. Emitting a card without handling its answer is the failure
 mode to watch for — routing reads the newest _visible_ user message, so a hidden

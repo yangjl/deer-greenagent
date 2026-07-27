@@ -80,11 +80,12 @@ class TestBranchResolution:
         assert decision.branch is SupervisorBranch.ORDINARY
         assert decision.route.source is RouteSource.EXPLICIT_CHOICE
 
-    def test_typed_start_request_with_missing_fields_asks_before_creating(self):
-        # A bare "start a DBTL cycle" names no objective, so the only honest
-        # next step is to ask — not to open a confirmation for a blank cycle.
+    def test_typed_start_request_confirms_before_asking_for_details(self):
+        # Confirmation comes first even when nothing is known yet. Asking for a
+        # research record's fields before asking whether to create one inverts
+        # the human gate; the gaps ride along and are raised after approval.
         decision = resolve_branch("start a DBTL cycle", ctx())
-        assert decision.branch is SupervisorBranch.CLARIFICATION
+        assert decision.branch is SupervisorBranch.CYCLE_SETUP
         assert decision.missing_fields
 
     def test_classifier_proposal_routes_to_setup_branch(self):

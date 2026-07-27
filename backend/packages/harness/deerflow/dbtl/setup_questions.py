@@ -85,7 +85,8 @@ Rules:
 - Ask at most {MAX_SETUP_QUESTIONS} questions, fewest that genuinely pin the design. Each must be a real question a person can answer in a phrase.
 - Ask only what this request actually needs. A software or data task has no "target trait"; a breeding experiment does.
 - Give every question a "recommendation": your proposed answer, so the scientist can accept rather than compose.
-- Set "grounded" to true ONLY if the request itself supports your recommendation. If you are proposing a sensible default they did not state, set it to false. A wrong "grounded" flag is worse than no recommendation, because these answers become a durable research record.
+- Set "grounded" to true ONLY if the request itself supports your recommendation. If you are proposing a sensible default they did not state, set it to false.
+- A wrong "grounded" flag is worse than no recommendation, because these answers become a durable research record.
 - Never invent dataset specifics — counts, sample sizes, years, locations, accession names — unless the request states them. Prefer a defensible generic proposal over a specific-sounding guess.
 - Keep each question under {MAX_QUESTION_CHARS} characters and each recommendation under {MAX_RECOMMENDATION_CHARS}.
 - "why" is one short clause on what the answer decides. Omit it if it adds nothing.
