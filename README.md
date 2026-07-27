@@ -119,6 +119,21 @@ make dev
 
 Open [http://localhost:2026](http://localhost:2026).
 
+`make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`).
+
+Docker builds use the upstream `uv` registry by default. If you need faster mirrors in restricted networks, export `UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` and `NPM_REGISTRY=https://registry.npmmirror.com` before running `make docker-init` or `make docker-start`.
+
+Local AIO sandbox control traffic is always direct: loopback/private addresses,
+single-label cluster hosts, and Docker/Podman internal hostnames do not inherit
+`HTTP_PROXY` or `HTTPS_PROXY`. External sandbox FQDNs and public IPs still
+honor environment proxy settings.
+
+Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
+The checkpoint storage settings `database.checkpoint_channel_mode` and
+`database.checkpoint_delta_snapshot_frequency` are exceptions: both are frozen
+when the process first builds an agent (including through `DeerFlowClient`) and
+require a process restart to change safely.
+
 For a production-style Docker deployment:
 
 ```bash
