@@ -160,20 +160,21 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
 - `src/components/workspace/project-rail/` owns the rail: a disclosure on the
   durable DBTL cycles (each expanding into its five stages with a status word),
   the selected cycle's open blockers, an agents placeholder, and the project's
-  conversations. **The rail is read-only** — it holds no text inputs. Its `+`
-  beside Cycles arms the composer with the `start_cycle` scope (see
-  `composer-scope.ts` below) rather than opening a form; `start-cycle-dialog.tsx`
-  (title, cycle class, optional season/program parent, research question,
-  objective, success criteria; one idempotency key per opening so a
-  double-submit cannot create two records) is reached only where the supervisor
-  graph is off. Selecting a stage opens
+  conversations. **The rail is read-only** — it holds no text inputs, and the
+  Cycles header is disclosure-only with no creation or demo actions. New-cycle
+  intent is classified from normal project chat and enters the native setup
+  flow there. A dedicated top-row panel toggle collapses the second rail from
+  16rem to the same 3rem icon width as the first rail; it stays separate from
+  the Cycles header and unmounts the rail body while collapsed. Selecting a stage opens
   `cycle-stage-sheet.tsx` — evidence, open blockers **and the form that records
   one**, the submit/review panel with a required rationale, and the activity
   timeline with actor and revision — using the existing right-side inspection
   pattern. Blocker creation lives in that sheet, not the rail: a durable record
   is written from the surface that shows the evidence it refers to. The Cycles
   auto-minimizes when no cycle is live; an explicit click on the section header
-  overrides that default. Project tree listings use
+  overrides that default. The transient DBTL feature request does not render a
+  readiness notice in the rail; a settled frozen mode still does, so its reason
+  and readiness settings remain discoverable. Project tree listings use
   `GET /api/projects/{id}/files`, while preview/download uses
   `GET /api/projects/{id}/file`; both work without a conversation. The chat
   header's `FilesTrigger` remains projectless-chat-only.
@@ -423,11 +424,11 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   remain visible as superseded or retracted audit records. The client renders
   server-owned status and never infers that stage approval promoted or
   published knowledge.
-- `src/core/dbtl/phase7-demo.ts` owns the no-write Phase 7 human-demo fixtures;
-  `project-rail/phase7-demo-dialog.tsx` renders them from the presentation icon
-  beside Cycles. The three cases deliberately separate a strong-but-invalid
-  result, missing evidence, and a supported result. The dialog says that it is
-  a preview and never invokes a mutation hook.
+- `src/core/dbtl/phase7-demo.ts` owns the no-write Phase 7 human-demo fixtures,
+  and `project-rail/phase7-demo-dialog.tsx` renders them. The project rail no
+  longer exposes that preview. The three cases deliberately separate a
+  strong-but-invalid result, missing evidence, and a supported result. The
+  dialog says that it is a preview and never invokes a mutation hook.
 - A successful `StartCycleDialog` calls its `onCreated` handoff. Project chat
   sends one visible, cycle-scoped Design-council prompt. Design questions use
   the existing `ask_clarification` card (`clarification_type=design_decision`)

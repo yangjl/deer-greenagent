@@ -93,3 +93,14 @@ export function controlAccessibleLabel(
 export function blockedByReadiness(state: DbtlControlState): boolean {
   return !state.enabled;
 }
+
+/**
+ * The rail stays visually quiet during the transient feature request. Once the
+ * request settles, a frozen DBTL mode still needs its explanatory notice.
+ */
+export function shouldShowReadinessNotice(
+  state: DbtlControlState,
+  isLoading: boolean,
+): boolean {
+  return !isLoading && !state.enabled;
+}

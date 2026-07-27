@@ -14,7 +14,8 @@ Design–Build–Test–Learn (DBTL) governance.
 - **Project-owned data** — each project is a normal folder that remains visible
   and editable outside GreenAgent.
 - **Project-first workspace** — projects organize conversations, files, DBTL
-  cycles, evidence, reviews, and work items.
+  cycles, evidence, reviews, and work items. The project rail can collapse to
+  an icon-width strip when the conversation needs more room.
 - **Safe workspace cleanup** — project, cycle, and conversation rails expose
   removal actions. Project removal archives the project without deleting its
   local folder and returns its conversations to Unfiled chats; cycle removal
@@ -95,8 +96,7 @@ DBTL modes:
 - `manual` — authorized humans can operate durable DBTL cycles.
 - `graph_enabled` — enables the opt-in project supervisor. Design,
   Reconciliation, Build, Test, and Learn use bounded, versioned stage contracts;
-  every scientific gate still requires a human decision. The presentation icon
-  beside **Cycles** opens a no-write, one-click Phase 7 validity demo.
+  every scientific gate still requires a human decision.
 
 The DBTL classifier gives borderline research-shaped requests a modestly higher
 proposal prior on the first turn of a conversation and in projects with no
