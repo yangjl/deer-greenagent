@@ -7,9 +7,9 @@ import type {
  * The stepped DBTL setup card: one question at a time, each already answered.
  *
  * Pure and React-free, because the interesting rules are all decidable without
- * a DOM: which step is next, whether the reader may advance, and what the
- * assembled answer says. A wizard whose progression logic lives in component
- * state can only be checked by driving the UI.
+ * a DOM: whether the reader may advance, and what the assembled answer says. A
+ * wizard whose progression logic lives in component state can only be checked
+ * by driving the UI.
  *
  * Two design rules the tests pin:
  *
@@ -96,26 +96,6 @@ export function isAnswered(
     return answer.text.trim().length > 0;
   }
   return answer.optionId.length > 0;
-}
-
-/**
- * The next unanswered step, or `null` when the wizard is done.
- *
- * "Adaptive" in the sense that matters here: it advances past steps that are
- * already settled instead of walking the reader through a fixed list.
- */
-export function nextStepIndex(
-  questions: SetupQuestion[],
-  answers: SetupAnswers,
-  from: number,
-): number | null {
-  for (let index = from; index < questions.length; index += 1) {
-    const question = questions[index];
-    if (question && !isAnswered(question, answers[question.id])) {
-      return index;
-    }
-  }
-  return null;
 }
 
 export function isComplete(

@@ -7,7 +7,6 @@ import {
   initialAnswers,
   isAnswered,
   isComplete,
-  nextStepIndex,
   stepOptions,
 } from "@/core/dbtl/setup-wizard";
 import type { SetupQuestion } from "@/core/messages/human-input";
@@ -71,9 +70,9 @@ describe("isAnswered", () => {
     expect(isAnswered(TRAIT, { optionId: OTHER_OPTION_ID, text: "  " })).toBe(
       false,
     );
-    expect(isAnswered(TRAIT, { optionId: OTHER_OPTION_ID, text: "ear leaf" })).toBe(
-      true,
-    );
+    expect(
+      isAnswered(TRAIT, { optionId: OTHER_OPTION_ID, text: "ear leaf" }),
+    ).toBe(true);
   });
 
   it("treats an unselected step as unanswered", () => {
@@ -82,30 +81,22 @@ describe("isAnswered", () => {
   });
 });
 
-describe("nextStepIndex", () => {
+describe("isComplete", () => {
   const questions = [TRAIT, SCALE];
 
-  it("skips steps that are already settled", () => {
-    const answers = initialAnswers(questions);
-    // Both open pre-answered, so there is nothing left to stop on.
-    expect(nextStepIndex(questions, answers, 0)).toBeNull();
-    expect(isComplete(questions, answers)).toBe(true);
+  it("is already satisfied by the model's own answers", () => {
+    // Every step opens pre-answered, which is why advancing must not try to
+    // skip "settled" steps — it would skip all of them.
+    expect(isComplete(questions, initialAnswers(questions))).toBe(true);
   });
 
-  it("stops on the first step still needing the reader", () => {
-    const answers = {
-      trait: { optionId: "", text: "" },
-      scale: { optionId: OTHER_OPTION_ID, text: "100" },
-    };
-    expect(nextStepIndex(questions, answers, 0)).toBe(0);
-  });
-
-  it("does not walk backwards past the step it was given", () => {
-    const answers = {
-      trait: { optionId: "", text: "" },
-      scale: { optionId: OTHER_OPTION_ID, text: "" },
-    };
-    expect(nextStepIndex(questions, answers, 1)).toBe(1);
+  it("is not satisfied while a step still needs the reader", () => {
+    expect(
+      isComplete(questions, {
+        trait: { optionId: "", text: "" },
+        scale: { optionId: OTHER_OPTION_ID, text: "100" },
+      }),
+    ).toBe(false);
   });
 });
 
@@ -116,7 +107,9 @@ describe("composeAnswerText", () => {
       scale: { optionId: OTHER_OPTION_ID, text: "250 lines" },
     });
 
-    expect(text).toContain("Which trait should this cycle target?\nPlant height");
+    expect(text).toContain(
+      "Which trait should this cycle target?\nPlant height",
+    );
     expect(text).toContain("How many individuals?\n250 lines");
   });
 

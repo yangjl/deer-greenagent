@@ -13,7 +13,6 @@ import {
   initialAnswers,
   isAnswered,
   isComplete,
-  nextStepIndex,
   stepOptions,
 } from "@/core/dbtl/setup-wizard";
 import type { SetupQuestion } from "@/core/messages/human-input";
@@ -63,10 +62,9 @@ export function SetupQuestionWizard({
   };
 
   const advance = () => {
-    // Skip whatever is already settled rather than marching through every
-    // step; the reader only stops where they are actually needed.
-    const next = nextStepIndex(questions, answers, step + 1);
-    setStep(next ?? questions.length - 1);
+    // Strictly the next question. Every step opens pre-answered, so skipping
+    // "settled" steps would skip all of them and land on the last one.
+    setStep((current) => Math.min(questions.length - 1, current + 1));
   };
 
   const finish = () => {
