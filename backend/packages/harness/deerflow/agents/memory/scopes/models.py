@@ -8,7 +8,7 @@ product's contexts:
 ``agent``           a user's memory for one named custom agent;
 ``project``         a user's **private** memory inside one project;
 ``shared_project``  memory a human explicitly approved for the whole project;
-``publication``     memory promoted beyond the project (reserved for Phase 8).
+``publication``     governed claims explicitly published to one project.
 
 The two project-wide kinds deliberately carry no ``user_id``: a shared fact
 belongs to the project, not to whoever happened to approve it. That is what
@@ -122,7 +122,7 @@ def shared_project_scope(project_id: str, *, agent_name: str | None = None) -> M
 
 
 def publication_scope(project_id: str, *, agent_name: str | None = None) -> MemoryScope:
-    """Memory promoted beyond its project. Reserved; nothing writes here yet."""
+    """Governed knowledge explicitly published into one target project."""
     return MemoryScope(
         kind=ScopeKind.PUBLICATION,
         project_id=_require(project_id, field="project_id"),

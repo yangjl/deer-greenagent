@@ -70,7 +70,7 @@ def shared_bucket_id(project_id: str) -> str:
 
 
 def publication_bucket_id(project_id: str) -> str:
-    """The promotion bucket. Reserved for Phase 8; nothing writes here yet."""
+    """The governed-knowledge publication bucket for a target project."""
     return f"{PUBLICATION_SEPARATOR}{project_digest(project_id)}"
 
 

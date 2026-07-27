@@ -39,6 +39,7 @@ from deerflow.dbtl.cycle_state import (
     validate_cycle_class,
 )
 from deerflow.persistence.dbtl.build_test_ops import BuildTestOpsMixin
+from deerflow.persistence.dbtl.knowledge_ops import KnowledgeOpsMixin
 from deerflow.persistence.dbtl.model import (
     DbtlArtifactRow,
     DbtlCycleRow,
@@ -81,7 +82,7 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-class DbtlCycleRepository(BuildTestOpsMixin, ReconciliationOpsMixin):
+class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, ReconciliationOpsMixin):
     """Read and mutate durable DBTL cycles for one deployment.
 
     Phase 6's data-readiness operations live in

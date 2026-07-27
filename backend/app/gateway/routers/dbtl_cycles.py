@@ -12,7 +12,9 @@ resolve to one durable outcome rather than three.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
@@ -22,13 +24,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config, get_dbtl_cycle_repo, get_workspace_repo
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
+from app.gateway.memory_scope_service import resolve_scope_bindings
+from app.gateway.project_scope import ensure_project_root
+from deerflow.agents.memory.scopes import bind_scope, publication_scope
 from deerflow.config.app_config import AppConfig
-from deerflow.dbtl import STAGE_ORDER
+from deerflow.dbtl import (
+    STAGE_ORDER,
+    ClaimGrade,
+    KnowledgeLifecycleRefused,
+    render_claim_markdown,
+    validate_candidate_grade,
+)
 from deerflow.persistence.dbtl import (
     DbtlRevisionConflict,
     DbtlTopLevelCycleExists,
     DbtlWorkflowRefused,
 )
+from deerflow.utils.file_io import run_file_io
 
 router = APIRouter(prefix="/api", tags=["dbtl-cycles"])
 logger = logging.getLogger(__name__)
@@ -171,6 +183,8 @@ def _translate(exc: Exception) -> HTTPException:
     if isinstance(exc, DbtlRevisionConflict):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This cycle changed since you loaded it. Reload and try again.")
     if isinstance(exc, DbtlWorkflowRefused):
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    if isinstance(exc, KnowledgeLifecycleRefused):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     if isinstance(exc, ValueError):
         return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
@@ -750,5 +764,367 @@ async def record_validity_assessment(
             expected_db_revision=body.expected_db_revision,
             idempotency_key=body.idempotency_key,
         )
+    except Exception as exc:  # noqa: BLE001
+        raise _translate(exc) from exc
+
+
+# ── Phase 8: Learn and governed knowledge ───────────────────────────────
+
+
+class CandidateDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["keep", "discard"]
+    rationale: str = Field(min_length=1, max_length=10_000)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+class CandidatePromotionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    statement: str = Field(min_length=1, max_length=10_000)
+    grade: Literal["supported", "valid_negative", "methodological", "qa_lesson"]
+    limitations: list[str] = Field(default_factory=list, max_length=50)
+    rationale: str = Field(min_length=1, max_length=10_000)
+    supersedes_claim_id: str | None = Field(default=None, max_length=96)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+class ClaimPublicationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_project_ids: list[str] = Field(min_length=1, max_length=50)
+    rationale: str = Field(min_length=1, max_length=10_000)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+class ClaimRetractionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rationale: str = Field(min_length=1, max_length=10_000)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+def _write_text_projection(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    temporary.write_text(content, encoding="utf-8")
+    temporary.replace(path)
+
+
+def _published_markdown(claim: dict, source_project_id: str, status_value: str) -> str:
+    return "\n".join(
+        [
+            "# Published project knowledge",
+            "",
+            f"> SQL authority: `{claim['id']}` · source project: `{source_project_id}` · status: **{status_value}**",
+            "",
+            str(claim["statement"]),
+            "",
+            f"Grade: **{claim['grade']}**",
+            "",
+            "This is a selected-project publication pointer. The source claim and its audit history remain authoritative.",
+            "",
+        ]
+    )
+
+
+def _publication_fact_id(claim_id: str, target_project_id: str) -> str:
+    digest = hashlib.sha256(f"{claim_id}:{target_project_id}".encode()).hexdigest()[:24]
+    return f"knowledge-publication-{digest}"
+
+
+async def _upsert_publication_pointer(
+    request: Request,
+    *,
+    claim: dict,
+    source_project_id: str,
+    target_project_id: str,
+) -> None:
+    try:
+        _root, store = resolve_scope_bindings(request)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_501_NOT_IMPLEMENTED:
+            logger.info("Memory backend has no publication projection; SQL remains authoritative")
+            return
+        raise
+    binding = bind_scope(publication_scope(target_project_id))
+    await run_file_io(
+        store.upsert_fact,
+        {
+            "id": _publication_fact_id(claim["id"], target_project_id),
+            "content": (f"{claim['statement']}\nGrade: {claim['grade']}. Source claim: {claim['id']} in project {source_project_id}."),
+            "category": "context",
+            "confidence": 1.0,
+            "knowledgePointer": {
+                "claim_id": claim["id"],
+                "source_project_id": source_project_id,
+                "target_project_id": target_project_id,
+                "status": "active",
+            },
+        },
+        user_id=binding.user_id,
+        agent_name=binding.agent_name,
+    )
+
+
+async def _remove_publication_pointer(request: Request, *, claim_id: str, target_project_id: str) -> None:
+    try:
+        _root, store = resolve_scope_bindings(request)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_501_NOT_IMPLEMENTED:
+            return
+        raise
+    binding = bind_scope(publication_scope(target_project_id))
+    await run_file_io(
+        store.delete_fact,
+        _publication_fact_id(claim_id, target_project_id),
+        user_id=binding.user_id,
+        agent_name=binding.agent_name,
+    )
+
+
+@router.get("/projects/{project_id}/dbtl/knowledge")
+@require_permission("threads", "read")
+async def get_project_knowledge(
+    project_id: str,
+    request: Request,
+    cycle_id: str | None = None,
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    await _require_project(project_id, request)
+    return await repo.knowledge_view(project_id, cycle_id=cycle_id)
+
+
+@router.post("/projects/{project_id}/dbtl/candidates/{candidate_id}/decision")
+@require_permission("threads", "write")
+async def decide_knowledge_candidate(
+    project_id: str,
+    candidate_id: str,
+    body: CandidateDecisionRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    _project, user_id = await _require_project(project_id, request)
+    _require_mutations_enabled(request, config)
+    _require_human_reviewer(request)
+    try:
+        return await repo.decide_candidate(
+            candidate_id=candidate_id,
+            project_id=project_id,
+            decision=body.decision,
+            actor_user_id=user_id,
+            rationale=body.rationale,
+            idempotency_key=body.idempotency_key,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise _translate(exc) from exc
+
+
+@router.post("/projects/{project_id}/dbtl/candidates/{candidate_id}/promote")
+@require_permission("threads", "write")
+async def promote_knowledge_candidate(
+    project_id: str,
+    candidate_id: str,
+    body: CandidatePromotionRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    project, user_id = await _require_project(project_id, request)
+    _require_mutations_enabled(request, config)
+    _require_human_reviewer(request)
+    view = await repo.knowledge_view(project_id)
+    candidate = next(
+        (item for item in view["candidates"] if item["id"] == candidate_id),
+        None,
+    )
+    if candidate is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found")
+    try:
+        grade = validate_candidate_grade(str(candidate.get("test_outcome") or ""), body.grade)
+        claim_id = f"claim-{uuid4()}"
+        rendered_uri = f"/mnt/user-data/workspace/knowledge/{claim_id}.md"
+        result = await repo.promote_candidate(
+            candidate_id=candidate_id,
+            project_id=project_id,
+            statement=body.statement,
+            grade=grade.value,
+            limitations=body.limitations,
+            reviewer_user_id=user_id,
+            reviewer_project_role=str(project["current_user_role"]),
+            rationale=body.rationale,
+            authorization_reference=f"manual-promotion:{project_id}:{user_id}",
+            idempotency_key=body.idempotency_key,
+            rendered_uri=rendered_uri,
+            claim_id=claim_id,
+            supersedes_claim_id=body.supersedes_claim_id,
+        )
+        claim = result["claim"]
+        project_root = await ensure_project_root(get_workspace_repo(request), project, request)
+        if project_root:
+            markdown = render_claim_markdown(
+                claim_id=claim["id"],
+                statement=claim["statement"],
+                grade=ClaimGrade(claim["grade"]),
+                evidence=claim["evidence"],
+                limitations=claim["limitations"],
+                reviewer_user_id=user_id,
+                status=claim["status"],
+            )
+            await run_file_io(
+                _write_text_projection,
+                Path(project_root) / "knowledge" / f"{claim['id']}.md",
+                markdown,
+            )
+        if body.supersedes_claim_id:
+            superseded = next(item for item in result["claims"] if item["id"] == body.supersedes_claim_id)
+            if project_root:
+                await run_file_io(
+                    _write_text_projection,
+                    Path(project_root) / "knowledge" / f"{superseded['id']}.md",
+                    render_claim_markdown(
+                        claim_id=superseded["id"],
+                        statement=superseded["statement"],
+                        grade=ClaimGrade(superseded["grade"]),
+                        evidence=superseded["evidence"],
+                        limitations=superseded["limitations"],
+                        reviewer_user_id=user_id,
+                        status="superseded",
+                    ),
+                )
+            workspace_repo = get_workspace_repo(request)
+            for publication in result["publications"]:
+                if publication["claim_id"] != superseded["id"]:
+                    continue
+                target = await workspace_repo.get_project(publication["target_project_id"], user_id=user_id)
+                if target is not None:
+                    target_root = await ensure_project_root(workspace_repo, target, request)
+                    if target_root:
+                        await run_file_io(
+                            _write_text_projection,
+                            Path(target_root) / "knowledge" / "published" / f"{superseded['id']}.md",
+                            _published_markdown(superseded, project_id, "superseded"),
+                        )
+                await _remove_publication_pointer(
+                    request,
+                    claim_id=superseded["id"],
+                    target_project_id=publication["target_project_id"],
+                )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        raise _translate(exc) from exc
+
+
+@router.post("/projects/{project_id}/dbtl/claims/{claim_id}/publish")
+@require_permission("threads", "write")
+async def publish_knowledge_claim(
+    project_id: str,
+    claim_id: str,
+    body: ClaimPublicationRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    project, user_id = await _require_project(project_id, request)
+    _require_mutations_enabled(request, config)
+    _require_human_reviewer(request)
+    try:
+        result = await repo.publish_claim(
+            claim_id=claim_id,
+            source_project_id=project_id,
+            target_project_ids=body.target_project_ids,
+            publisher_user_id=user_id,
+            publisher_project_role=str(project["current_user_role"]),
+            rationale=body.rationale,
+            authorization_reference=f"manual-publication:{project_id}:{user_id}",
+            idempotency_key=body.idempotency_key,
+        )
+        claim = next(item for item in result["claims"] if item["id"] == claim_id)
+        workspace_repo = get_workspace_repo(request)
+        for publication in result["publications"]:
+            if publication["claim_id"] != claim_id or publication["target_project_id"] not in body.target_project_ids:
+                continue
+            target = await workspace_repo.get_project(publication["target_project_id"], user_id=user_id)
+            if target is None:
+                continue
+            target_root = await ensure_project_root(workspace_repo, target, request)
+            if target_root:
+                await run_file_io(
+                    _write_text_projection,
+                    Path(target_root) / "knowledge" / "published" / f"{claim_id}.md",
+                    _published_markdown(claim, project_id, "active"),
+                )
+            await _upsert_publication_pointer(
+                request,
+                claim=claim,
+                source_project_id=project_id,
+                target_project_id=publication["target_project_id"],
+            )
+        return result
+    except Exception as exc:  # noqa: BLE001
+        raise _translate(exc) from exc
+
+
+@router.post("/projects/{project_id}/dbtl/claims/{claim_id}/retract")
+@require_permission("threads", "write")
+async def retract_knowledge_claim(
+    project_id: str,
+    claim_id: str,
+    body: ClaimRetractionRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    project, user_id = await _require_project(project_id, request)
+    _require_mutations_enabled(request, config)
+    _require_human_reviewer(request)
+    try:
+        result = await repo.retract_claim(
+            claim_id=claim_id,
+            project_id=project_id,
+            reviewer_user_id=user_id,
+            reviewer_project_role=str(project["current_user_role"]),
+            rationale=body.rationale,
+            authorization_reference=f"manual-retraction:{project_id}:{user_id}",
+            idempotency_key=body.idempotency_key,
+        )
+        claim = result["claim"]
+        workspace_repo = get_workspace_repo(request)
+        source_root = await ensure_project_root(workspace_repo, project, request)
+        if source_root:
+            await run_file_io(
+                _write_text_projection,
+                Path(source_root) / "knowledge" / f"{claim_id}.md",
+                render_claim_markdown(
+                    claim_id=claim_id,
+                    statement=claim["statement"],
+                    grade=ClaimGrade(claim["grade"]),
+                    evidence=claim["evidence"],
+                    limitations=claim["limitations"],
+                    reviewer_user_id=user_id,
+                    status="retracted",
+                ),
+            )
+        for publication in result["publications"]:
+            if publication["claim_id"] != claim_id:
+                continue
+            target = await workspace_repo.get_project(publication["target_project_id"], user_id=user_id)
+            if target is None:
+                continue
+            target_root = await ensure_project_root(workspace_repo, target, request)
+            if target_root:
+                await run_file_io(
+                    _write_text_projection,
+                    Path(target_root) / "knowledge" / "published" / f"{claim_id}.md",
+                    _published_markdown(claim, project_id, "retracted"),
+                )
+            await _remove_publication_pointer(
+                request,
+                claim_id=claim_id,
+                target_project_id=publication["target_project_id"],
+            )
+        return result
     except Exception as exc:  # noqa: BLE001
         raise _translate(exc) from exc

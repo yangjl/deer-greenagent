@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
 from app.gateway.routers import dbtl_cycles, workspaces
+from deerflow.agents.memory.scopes import bind_scope, publication_scope
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.dbtl_config import DbtlConfig
 from deerflow.persistence.dbtl import DbtlCycleRepository
@@ -67,6 +68,93 @@ def test_validity_request_cannot_claim_reviewer_identity() -> None:
             idempotency_key="validity-1",
             reviewer_user_id="someone-else",
         )
+
+
+@pytest.mark.parametrize(
+    ("request_model", "payload"),
+    [
+        (
+            dbtl_cycles.CandidatePromotionRequest,
+            {
+                "statement": "Bounded claim",
+                "grade": "supported",
+                "limitations": [],
+                "rationale": "Evidence supports promotion.",
+                "idempotency_key": "promotion-1",
+            },
+        ),
+        (
+            dbtl_cycles.ClaimPublicationRequest,
+            {
+                "target_project_ids": ["project-2"],
+                "rationale": "The target uses the same protocol.",
+                "idempotency_key": "publication-1",
+            },
+        ),
+        (
+            dbtl_cycles.ClaimRetractionRequest,
+            {
+                "rationale": "The source data was corrected.",
+                "idempotency_key": "retraction-1",
+            },
+        ),
+    ],
+)
+def test_knowledge_reviews_cannot_claim_actor_identity(request_model, payload) -> None:
+    with pytest.raises(ValueError, match="reviewer_user_id"):
+        request_model(**payload, reviewer_user_id="someone-else")
+
+
+def test_publication_pointer_is_target_scoped_and_retractable(
+    tmp_path: Path,
+) -> None:
+    class FactStore:
+        def __init__(self) -> None:
+            self.upserts = []
+            self.deletes = []
+
+        def upsert_fact(self, fact, **scope):
+            self.upserts.append((fact, scope))
+            return fact
+
+        def delete_fact(self, fact_id, **scope):
+            self.deletes.append((fact_id, scope))
+            return {"deleted": fact_id}
+
+    store = FactStore()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                memory_storage_root=tmp_path,
+                memory_fact_store=store,
+            )
+        )
+    )
+
+    async def exercise() -> None:
+        await dbtl_cycles._upsert_publication_pointer(
+            request,
+            claim={
+                "id": "claim-1",
+                "statement": "A selected-project finding.",
+                "grade": "supported",
+            },
+            source_project_id="project-source",
+            target_project_id="project-selected",
+        )
+        await dbtl_cycles._remove_publication_pointer(
+            request,
+            claim_id="claim-1",
+            target_project_id="project-selected",
+        )
+
+    anyio.run(exercise)
+    selected = bind_scope(publication_scope("project-selected"))
+    unselected = bind_scope(publication_scope("project-unselected"))
+    assert store.upserts[0][1]["user_id"] == selected.user_id
+    assert store.upserts[0][1]["user_id"] != unselected.user_id
+    assert store.upserts[0][0]["knowledgePointer"]["status"] == "active"
+    assert store.deletes[0][1]["user_id"] == selected.user_id
 
 
 def _internal_user():

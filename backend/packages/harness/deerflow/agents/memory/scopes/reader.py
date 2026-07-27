@@ -1,7 +1,8 @@
 """Which buckets a run reads from, and which single bucket it writes to.
 
-Retrieval spans two buckets for a project conversation — the member's own
-private project memory, then the project's shared memory. Writing does not:
+Retrieval spans three buckets for a project conversation — the member's own
+private project memory, the project's shared memory, then explicit knowledge
+publications selected for that project. Writing does not:
 memory learned during a run always lands in the private head of the chain, and
 a fact only ever reaches the shared bucket through an explicit human decision
 in the migration review (see ``migration.py``).
@@ -14,7 +15,11 @@ whatever the user was doing before.
 from __future__ import annotations
 
 from deerflow.agents.memory.scope import project_scope_value, scoped_memory_user_id
-from deerflow.agents.memory.scopes.adapter import PROJECT_SEPARATOR, project_digest
+from deerflow.agents.memory.scopes.adapter import (
+    PROJECT_SEPARATOR,
+    project_digest,
+    publication_bucket_id,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 
 
@@ -31,6 +36,7 @@ def scoped_memory_bucket_chain(user_id: str, context: object) -> tuple[str, ...]
     return (
         scoped_memory_user_id(user_id, context),
         shared_bucket_for_scope_value(scope_value),
+        publication_bucket_id(scope_value),
     )
 
 

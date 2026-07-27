@@ -21,6 +21,9 @@ Design–Build–Test–Learn (DBTL) governance.
   human reviews are stored in the application database. Build captures
   reproducibility lineage, while Test keeps headline performance separate from
   validity checks so leakage or failed holdouts cannot be presented as success.
+  Learn creates provisional candidates from eligible outcomes; only an explicit
+  human promotion creates project knowledge, and publication to each additional
+  project is a separate, retractable decision.
 - **Human-controlled automation** — AI may recommend or route DBTL work, but it
   cannot satisfy scientific gates or create authoritative results by itself.
   Starting a cycle launches a project-grounded Design council: independent
@@ -80,7 +83,7 @@ DBTL modes:
   graph execution remain blocked.
 - `manual` — authorized humans can operate durable DBTL cycles.
 - `graph_enabled` — enables the opt-in project supervisor. Design,
-  Reconciliation, Build, and Test use bounded, versioned stage contracts;
+  Reconciliation, Build, Test, and Learn use bounded, versioned stage contracts;
   every scientific gate still requires a human decision. The presentation icon
   beside **Cycles** opens a no-write, one-click Phase 7 validity demo.
 

@@ -157,8 +157,8 @@ Breeding-workspace note:
   dataset fingerprint, stage-spec version, and policy version it was granted
   against, so a later dataset change invalidates it instead of carrying it
   into Build.
-- DBTL Phase 7 adds executable Build and Test `StageSpec` contracts while Learn
-  remains unavailable until Phase 8. Build can start only at
+- DBTL Phase 7 added executable Build and Test `StageSpec` contracts while
+  leaving Learn unavailable for Phase 8. Build can start only at
   `ready_for_build`; every reviewable Build records the approved dataset
   fingerprint, code/config revisions, environment, versioned outputs,
   deviations, and logs. Test stores headline metrics separately from a
@@ -171,6 +171,15 @@ Breeding-workspace note:
   Design, Reconciliation, Build, or cycle closure. See
   [backend/AGENTS.md](backend/AGENTS.md) for persistence and routing contracts
   and [frontend/AGENTS.md](frontend/AGENTS.md) for the two-column review model.
+- DBTL Phase 8 makes Learn executable and keeps knowledge authority deliberately
+  split. Structured Learn workers may synthesize evidence-bound candidates only
+  from a human-owned Test outcome; inconclusive and invalidated results can
+  close with no candidate. Candidates remain provisional until a human records
+  a project-scope promotion. Publication to explicitly selected projects is a
+  separate human decision that writes SQL audit records, portable Markdown
+  projections, and bounded retrieval pointers. Supersession and retraction
+  retain the old claim and event history while removing its active publication
+  pointers. No agent, stage approval, or promotion call can implicitly publish.
 - New cycles started from the project rail automatically queue the current
   `generic:design:v2` Design council in project chat. Its context includes a
   bounded project-file manifest, declared cycle inputs, prior council turns,

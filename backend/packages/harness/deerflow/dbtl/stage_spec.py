@@ -329,6 +329,26 @@ TEST_SPEC_V1 = StageSpec(
     memory_write_policy=MemoryWritePolicy.NONE,
 )
 
+LEARN_SPEC_V1 = StageSpec(
+    stage="learn",
+    domain_profile=GENERIC_PROFILE,
+    version=1,
+    title="Learn",
+    purpose=("Synthesize the reviewed outcome, its evidence, and its limitations into zero or more provisional candidates without asserting truth."),
+    cycle_classes=_ALL_CLASSES,
+    cycle_weights=_ALL_WEIGHTS,
+    required_inputs=("human_test_validity_assessment", "reviewed_cycle_evidence"),
+    required_artifact_types=("learn_summary",),
+    output_schema="learn_summary.v1",
+    required_capabilities=(Capability.KNOWLEDGE_SYNTHESIS,),
+    optional_capabilities=(
+        Capability.SCIENTIFIC_REPORTING,
+        Capability.LITERATURE_REVIEW,
+    ),
+    validity_gates=("candidate_evidence_traceability", "human_promotion_required"),
+    memory_write_policy=MemoryWritePolicy.CANDIDATE_ONLY,
+)
+
 
 _REGISTRY: dict[str, StageSpec] = {
     spec.spec_key: spec
@@ -338,6 +358,7 @@ _REGISTRY: dict[str, StageSpec] = {
         RECONCILIATION_SPEC_V1,
         BUILD_SPEC_V1,
         TEST_SPEC_V1,
+        LEARN_SPEC_V1,
     )
 }
 
@@ -350,12 +371,19 @@ _CURRENT: MappingProxyType[tuple[str, str], int] = MappingProxyType(
         (GENERIC_PROFILE, "reconciliation"): RECONCILIATION_SPEC_V1.version,
         (GENERIC_PROFILE, "build"): BUILD_SPEC_V1.version,
         (GENERIC_PROFILE, "test"): TEST_SPEC_V1.version,
+        (GENERIC_PROFILE, "learn"): LEARN_SPEC_V1.version,
     }
 )
 
-#: Stages through Phase 7. Learn remains unavailable until its promotion and
-#: publication semantics ship in Phase 8.
-EXECUTABLE_STAGES: tuple[str, ...] = ("design", "reconciliation", "build", "test")
+#: All five stages are executable. Learn emits candidates only; promotion and
+#: publication remain separate human-owned repository transitions.
+EXECUTABLE_STAGES: tuple[str, ...] = (
+    "design",
+    "reconciliation",
+    "build",
+    "test",
+    "learn",
+)
 
 
 class StageSpecNotFound(LookupError):

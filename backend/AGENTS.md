@@ -1546,10 +1546,9 @@ The supervisor's continuation branch is asynchronous and invokes the production
 `stage_spec.py` is the versioned registry. A stage is *data*, and the version
 is the load-bearing part: a human approves an attempt that ran under one
 contract, so `resolve_stage_spec` always returns a **pinned** version and an
-attempt records `StageSpec.spec_key`. `EXECUTABLE_STAGES` is
-`("design", "reconciliation", "build", "test")`; resolving `learn` raises
-`StageSpecNotFound` — that refusal, not a caller's restraint, keeps knowledge
-promotion unavailable until Phase 8.
+attempt records `StageSpec.spec_key`. `EXECUTABLE_STAGES` contains all five
+DBTL stages. Learn uses a candidate-only memory-write policy: its worker output
+cannot itself create authoritative knowledge.
 `HumanGatePolicy.allows_agent_approval` is a constant `False` **property**, not
 a field, so the design's "revisit only through a separately reviewed policy
 change" has no configuration value anyone could flip.
@@ -1708,6 +1707,36 @@ Build package is committed. It records `workspace:unversioned` plus a deviation
 when the runtime provides no source-control revision rather than manufacturing
 one. Tests: `test_dbtl_validity.py`, `test_dbtl_build_test_repository.py`,
 `test_dbtl_stage_contracts.py`, and the existing live/router/bootstrap suites.
+
+DBTL Phase 8 extends that seam through Learn and adds a governed knowledge
+lifecycle. `deerflow/dbtl/knowledge.py` is the pure fail-closed policy:
+`supported` and `not_supported` outcomes may produce bounded positive,
+valid-negative, methodological, or QA candidates as compatible with the
+outcome; `inconclusive` and `invalidated` closeouts may record a synthesis but
+cannot create a claim candidate. Learn workers still return
+`StageWorkerResult`, and only trustworthy claims with evidence references
+become `memory_candidates`.
+
+`persistence/dbtl/knowledge_ops.py` separates four durable acts: candidate
+keep/discard, human project-scope promotion, selected-project publication, and
+human supersession/retraction. Promotion never publishes. Publication validates
+that every target is an active project in the same workspace. Supersession and
+retraction retain claims, links, publication rows, and immutable
+`knowledge_events`, but close every old active publication. Migration
+`0017_dbtl_learn_knowledge` adds the publication and event tables; existing
+candidate, claim, promotion, and link tables remain the authority for the rest
+of the lifecycle.
+
+Gateway Phase 8 endpoints live under
+`/api/projects/{id}/dbtl/{knowledge,candidates,claims}`. Reviewer identity and
+project role are server-owned. A promotion writes a portable
+`knowledge/<claim>.md` projection in the source workspace; an explicit
+publication writes `knowledge/published/<claim>.md` plus a bounded DeerMem
+pointer in the target project's publication bucket. Project retrieval reads
+private, shared-project, then publication buckets. Retraction and supersession
+remove the pointer and mark the Markdown projection while SQL and events remain
+the audit authority. Tests live in `test_dbtl_phase8_knowledge.py`, the stage
+contract/live execution suites, and `test_memory_scope_reader.py`.
 
 Current Design attempts resolve to `generic:design:v2`. The adapter supplies a
 bounded metadata-only project workspace manifest and prior Design worker runs,

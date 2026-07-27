@@ -1,4 +1,4 @@
-"""Durable DBTL workflow contracts (Phases 3–7).
+"""Durable DBTL workflow contracts (Phases 3–8).
 
 This package holds the *pure* workflow rules — the state machine a human drives
 today and the Supervisor Graph drives tomorrow, plus the Phase 6 stage
@@ -48,6 +48,15 @@ from deerflow.dbtl.cycle_state import (
     next_cycle_state,
     stage_for_state,
     validate_cycle_class,
+)
+from deerflow.dbtl.knowledge import (
+    CandidateEligibility,
+    ClaimGrade,
+    KnowledgeLifecycleRefused,
+    candidate_eligibility,
+    publication_pointer,
+    render_claim_markdown,
+    validate_candidate_grade,
 )
 from deerflow.dbtl.proposal import (
     CONFIRMATION_REQUIRED_NOTICE,
@@ -103,6 +112,7 @@ from deerflow.dbtl.stage_spec import (
     DESIGN_SPEC_V2,
     EXECUTABLE_STAGES,
     GENERIC_PROFILE,
+    LEARN_SPEC_V1,
     RECONCILIATION_SPEC_V1,
     TEST_SPEC_V1,
     CycleWeight,
@@ -162,6 +172,7 @@ __all__ = [
     "GENERIC_PROFILE",
     "HUMAN_RESOLVED_CHECKS",
     "NO_RECORD_NOTICE",
+    "LEARN_SPEC_V1",
     "RECONCILIATION_SPEC_V1",
     "REQUIRED_GATES",
     "STAGE_ORDER",
@@ -174,9 +185,11 @@ __all__ = [
     "BlockerKind",
     "Capability",
     "CheckStatus",
+    "ClaimGrade",
     "ClassifierDecision",
     "ClassifierResult",
     "ConfidenceBand",
+    "CandidateEligibility",
     "ConfirmationSummary",
     "CycleClass",
     "CycleWeight",
@@ -189,6 +202,7 @@ __all__ = [
     "HumanGatePolicy",
     "HeadlineMetric",
     "InvalidationCheck",
+    "KnowledgeLifecycleRefused",
     "MemoryReadPolicy",
     "MemoryWritePolicy",
     "ProposalOutcome",
@@ -227,6 +241,7 @@ __all__ = [
     "WorkflowRecommendation",
     "apply_resolution",
     "apply_review",
+    "candidate_eligibility",
     "build_candidates",
     "build_proposal",
     "can_enter_stage",
@@ -249,11 +264,13 @@ __all__ = [
     "parse_capabilities",
     "parse_capability",
     "parse_cycle_weight",
+    "publication_pointer",
     "parse_worker_result",
     "plan_stage",
     "registered_spec_keys",
     "resolve_spec_by_key",
     "resolve_stage_spec",
+    "render_claim_markdown",
     "route_request",
     "run_stage",
     "select_agents",
@@ -261,5 +278,6 @@ __all__ = [
     "stage_for_state",
     "summarize_matrix",
     "validate_cycle_class",
+    "validate_candidate_grade",
     "validate_recommendation",
 ]

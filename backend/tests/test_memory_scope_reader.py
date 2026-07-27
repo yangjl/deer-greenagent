@@ -9,7 +9,11 @@ properties of the bucket *chain* a run reads, so they are tested here.
 from __future__ import annotations
 
 from deerflow.agents.memory.scope import scoped_memory_user_id
-from deerflow.agents.memory.scopes import bind_scope, shared_project_scope
+from deerflow.agents.memory.scopes import (
+    bind_scope,
+    publication_scope,
+    shared_project_scope,
+)
 from deerflow.agents.memory.scopes.reader import scoped_memory_bucket_chain
 
 
@@ -19,12 +23,13 @@ def test_unfiled_conversations_read_only_the_user_bucket() -> None:
     assert scoped_memory_bucket_chain("user-1", None) == ("user-1",)
 
 
-def test_project_runs_read_private_first_then_shared() -> None:
+def test_project_runs_read_private_then_shared_then_publications() -> None:
     chain = scoped_memory_bucket_chain("user-1", {"project_id": "project-a"})
 
     assert chain == (
         scoped_memory_user_id("user-1", {"project_id": "project-a"}),
         bind_scope(shared_project_scope("project-a")).user_id,
+        bind_scope(publication_scope("project-a")).user_id,
     )
 
 
@@ -33,7 +38,10 @@ def test_two_members_of_one_project_share_exactly_one_bucket() -> None:
     first = scoped_memory_bucket_chain("user-1", {"project_id": "project-a"})
     second = scoped_memory_bucket_chain("user-2", {"project_id": "project-a"})
 
-    assert set(first) & set(second) == {bind_scope(shared_project_scope("project-a")).user_id}
+    assert set(first) & set(second) == {
+        bind_scope(shared_project_scope("project-a")).user_id,
+        bind_scope(publication_scope("project-a")).user_id,
+    }
     assert first[0] != second[0]
 
 

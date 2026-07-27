@@ -32,9 +32,11 @@ from deerflow.dbtl.stage_spec import (
     DESIGN_SPEC_V1,
     DESIGN_SPEC_V2,
     EXECUTABLE_STAGES,
+    LEARN_SPEC_V1,
     RECONCILIATION_SPEC_V1,
     TEST_SPEC_V1,
     CycleWeight,
+    MemoryWritePolicy,
     StageSpec,
     StageSpecNotFound,
     WorkerBudget,
@@ -73,11 +75,14 @@ def _valid_payload(**overrides) -> dict:
 class TestStageSpecRegistry:
     """A stage is versioned data, and an attempt must be able to name its version."""
 
-    def test_design_through_test_are_executable_but_learn_is_not(self) -> None:
-        assert EXECUTABLE_STAGES == ("design", "reconciliation", "build", "test")
-        for stage in ("learn",):
-            with pytest.raises(StageSpecNotFound):
-                resolve_stage_spec(stage)
+    def test_all_five_stages_are_executable(self) -> None:
+        assert EXECUTABLE_STAGES == (
+            "design",
+            "reconciliation",
+            "build",
+            "test",
+            "learn",
+        )
 
     def test_every_executable_stage_is_a_real_cycle_stage(self) -> None:
         assert set(EXECUTABLE_STAGES) <= set(STAGE_ORDER)
@@ -110,12 +115,13 @@ class TestStageSpecRegistry:
             "generic:reconciliation:v1",
             "generic:build:v1",
             "generic:test:v1",
+            "generic:learn:v1",
         )
 
     def test_both_specs_apply_to_every_cycle_class_and_weight(self) -> None:
         for cycle_class in CycleClass:
             for weight in CycleWeight:
-                assert len(specs_for_cycle(cycle_class, weight)) == 4
+                assert len(specs_for_cycle(cycle_class, weight)) == 5
 
     def test_no_spec_permits_agent_approval(self) -> None:
         # Human reviewers approve all gates initially; the design allows
@@ -138,6 +144,11 @@ class TestStageSpecRegistry:
             "bound_dataset_fingerprint",
         )
         assert "reproducible_execution" in BUILD_SPEC_V1.validity_gates
+
+    def test_learn_can_only_create_candidates(self) -> None:
+        assert LEARN_SPEC_V1.output_schema == "learn_summary.v1"
+        assert LEARN_SPEC_V1.memory_write_policy is MemoryWritePolicy.CANDIDATE_ONLY
+        assert Capability.KNOWLEDGE_SYNTHESIS in LEARN_SPEC_V1.required_capabilities
 
     def test_test_uses_a_versioned_validity_pack(self) -> None:
         assert "generic-predictive:v1" in TEST_SPEC_V1.validity_gates

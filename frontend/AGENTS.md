@@ -408,6 +408,16 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   controls; an authenticated human submits the versioned validity pack and only
   outcome-compatible rework routes are offered. Status always has a text label
   and never depends on colour alone.
+- DBTL Phase 8 lives in `src/core/dbtl/knowledge-{view,api,hooks}.ts` and
+  `project-rail/learn-review.tsx`. The Learn sheet labels every agent-created
+  item as a provisional candidate and keeps candidate disposition, human
+  project promotion, selected-project publication, supersession, and
+  retraction as visibly distinct controls. Publication requires an explicit
+  project picker and rationale; promotion cannot infer targets. Retraction
+  previews how many active project scopes will lose retrieval, while old claims
+  remain visible as superseded or retracted audit records. The client renders
+  server-owned status and never infers that stage approval promoted or
+  published knowledge.
 - `src/core/dbtl/phase7-demo.ts` owns the no-write Phase 7 human-demo fixtures;
   `project-rail/phase7-demo-dialog.tsx` renders them from the presentation icon
   beside Cycles. The three cases deliberately separate a strong-but-invalid

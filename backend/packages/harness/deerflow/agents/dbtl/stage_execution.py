@@ -1,7 +1,7 @@
-"""Live DBTL Design/Reconciliation execution over ``SubagentExecutor``.
+"""Live DBTL stage execution over ``SubagentExecutor``.
 
 The adapter is deliberately narrower than the lead agent: one selected,
-project-owned cycle, one currently active Phase 6 stage, one bounded fan-out,
+project-owned cycle, one currently active executable stage, one bounded fan-out,
 then durable evidence. It can never approve a stage; review remains a separate
 human write bound to the evidence revision.
 """
@@ -76,6 +76,42 @@ def _runtime_view(config: RunnableConfig) -> dict[str, Any]:
     if isinstance(context, dict):
         merged.update(context)
     return merged
+
+
+def _learn_synthesis_payload(
+    results: Sequence[dict[str, Any]],
+    *,
+    test_outcome: str,
+    fallback_summary: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Derive bounded candidates only from trustworthy structured Learn output."""
+    grade = "supported" if test_outcome == "supported" else "valid_negative" if test_outcome == "not_supported" else ""
+    candidates: list[dict[str, Any]] = []
+    summaries: list[str] = []
+    if grade:
+        for result in results:
+            if not result.get("is_trustworthy"):
+                continue
+            summary = str(result.get("summary") or "").strip()
+            if summary:
+                summaries.append(summary)
+            evidence = list(result.get("evidence_refs") or [])
+            limitations = list(result.get("limitations") or [])
+            for value in list(result.get("claims") or []):
+                statement = str(value).strip()
+                if statement and evidence:
+                    candidates.append(
+                        {
+                            "statement": statement,
+                            "evidence": evidence,
+                            "limitations": limitations,
+                            "grade": grade,
+                        }
+                    )
+    return (
+        "\n\n".join(summaries) or fallback_summary or "Learn completed without a promotable candidate.",
+        candidates,
+    )
 
 
 def _stage_attempt(cycle: dict[str, Any], stage: str) -> dict[str, Any] | None:
@@ -568,6 +604,32 @@ class LiveStageAdapter:
                     if isinstance(candidate, str) and candidate.strip():
                         clarification_question = candidate.strip()
                         break
+            if replay_stage == "learn":
+                knowledge = await self._repo.knowledge_view(project_id, cycle_id=cycle_id)
+                if not any(event.get("event_type") == "learn.synthesized" for event in knowledge["events"]):
+                    prior_runs = await self._repo.list_worker_runs(
+                        cycle_id,
+                        project_id=project_id,
+                        stage="learn",
+                    )
+                    build_test = await self._repo.build_test_view(cycle_id, project_id=project_id)
+                    assessment = dict((build_test or {}).get("validity_assessment") or {})
+                    summary, candidates = _learn_synthesis_payload(
+                        [dict(item.get("result") or {}) for item in prior_runs],
+                        test_outcome=str(assessment.get("outcome") or ""),
+                        fallback_summary=str(artifact_uri or ""),
+                    )
+                    current = await self._repo.get_cycle(cycle_id, project_id=project_id)
+                    if current is not None:
+                        await self._repo.record_learn_synthesis(
+                            cycle_id=cycle_id,
+                            project_id=project_id,
+                            summary=summary,
+                            candidates=candidates,
+                            actor_user_id=f"agent:{user_id}",
+                            expected_db_revision=int(current["db_revision"]),
+                            idempotency_key=f"{execution_key}:learn",
+                        )
             return LiveStageResult(
                 stage=replay_stage,
                 cycle_id=cycle_id,
@@ -580,7 +642,7 @@ class LiveStageAdapter:
 
         cycle_state = str(cycle.get("state") or "")
         stage = "build" if cycle_state == "ready_for_build" else stage_for_state(cycle_state)
-        if stage not in {"design", "reconciliation", "build", "test"}:
+        if stage not in {"design", "reconciliation", "build", "test", "learn"}:
             return LiveStageResult(
                 stage=stage or "checkpoint",
                 cycle_id=cycle_id,
@@ -605,8 +667,8 @@ class LiveStageAdapter:
             )
 
         datasets = await self._repo.list_datasets(cycle_id, project_id=project_id)
-        reconciliation = await self._repo.reconciliation_view(cycle_id, project_id=project_id) if stage in {"reconciliation", "build", "test"} else None
-        build_test = await self._repo.build_test_view(cycle_id, project_id=project_id) if stage in {"build", "test"} else None
+        reconciliation = await self._repo.reconciliation_view(cycle_id, project_id=project_id) if stage in {"reconciliation", "build", "test", "learn"} else None
+        build_test = await self._repo.build_test_view(cycle_id, project_id=project_id) if stage in {"build", "test", "learn"} else None
         prior_design_runs = (
             await self._repo.list_worker_runs(
                 cycle_id,
@@ -749,6 +811,27 @@ class LiveStageAdapter:
             artifact_uri=artifact_uri,
             artifact_content_hash=artifact_hash,
         )
+
+        if stage == "learn":
+            assessment = dict((build_test or {}).get("validity_assessment") or {})
+            outcome_name = str(assessment.get("outcome") or "")
+            learn_summary, learn_candidates = _learn_synthesis_payload(
+                results,
+                test_outcome=outcome_name,
+                fallback_summary=artifact_digest,
+            )
+            current = await self._repo.get_cycle(cycle_id, project_id=project_id)
+            if current is None:  # pragma: no cover - verified above
+                raise RuntimeError("Cycle disappeared after Learn workers were recorded.")
+            await self._repo.record_learn_synthesis(
+                cycle_id=cycle_id,
+                project_id=project_id,
+                summary=learn_summary,
+                candidates=learn_candidates,
+                actor_user_id=f"agent:{user_id}",
+                expected_db_revision=int(current["db_revision"]),
+                idempotency_key=f"{execution_key}:learn",
+            )
 
         if stage == "build" and artifact_uri and artifact_hash:
             current = await self._repo.get_cycle(cycle_id, project_id=project_id)

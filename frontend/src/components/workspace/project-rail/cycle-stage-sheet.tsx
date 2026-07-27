@@ -53,6 +53,7 @@ import { cn } from "@/lib/utils";
 
 import { BuildTestReview } from "./build-test-review";
 import { DesignReviewDocument } from "./design-review";
+import { LearnReview } from "./learn-review";
 import { ReconciliationMatrix } from "./reconciliation-matrix";
 
 const DECISIONS: ReviewDecision[] = ["approve", "request_changes", "reject"];
@@ -128,7 +129,8 @@ export function CycleStageSheet({
   // durable list as the evidence rows, so the two can never disagree about what
   // is attached.
   const reviewDocument = useMemo(
-    () => artifacts.filter((item) => isReviewDocumentUri(item.uri)).at(-1) ?? null,
+    () =>
+      artifacts.filter((item) => isReviewDocumentUri(item.uri)).at(-1) ?? null,
     [artifacts],
   );
 
@@ -257,6 +259,12 @@ export function CycleStageSheet({
                   isPending={buildTest.isPending}
                   error={buildTest.error}
                 />
+              </Section>
+            )}
+
+            {stage === "learn" && cycleId && (
+              <Section icon={History} title="Learn and project knowledge">
+                <LearnReview projectId={projectId} cycleId={cycleId} />
               </Section>
             )}
 

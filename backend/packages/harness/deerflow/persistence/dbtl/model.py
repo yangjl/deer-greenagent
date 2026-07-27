@@ -572,3 +572,90 @@ class KnowledgeLinkRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
 
     __table_args__ = (UniqueConstraint("from_claim_id", "to_claim_id", "relationship", name="uq_knowledge_link"),)
+
+
+class KnowledgePublicationRow(Base):
+    """One explicit claim publication to one selected target project."""
+
+    __tablename__ = "knowledge_publications"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    claim_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("knowledge_claims.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    source_project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    target_project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    pointer: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    published_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    publisher_project_role: Mapped[str] = mapped_column(String(24), nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    authorization_reference: Mapped[str] = mapped_column(String(160), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+    retracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (UniqueConstraint("claim_id", "target_project_id", name="uq_knowledge_publication_target"),)
+
+
+class KnowledgeEventRow(Base):
+    """Immutable audit history for candidates, claims, and publications."""
+
+    __tablename__ = "knowledge_events"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    cycle_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("dbtl_cycles.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    candidate_id: Mapped[str | None] = mapped_column(
+        String(96),
+        ForeignKey("memory_candidates.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    claim_id: Mapped[str | None] = mapped_column(
+        String(96),
+        ForeignKey("knowledge_claims.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    publication_id: Mapped[str | None] = mapped_column(
+        String(96),
+        ForeignKey("knowledge_publications.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    actor_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "idempotency_key",
+            name="uq_knowledge_event_idempotency",
+        ),
+    )

@@ -17,10 +17,10 @@ from deerflow.dbtl.stage_runner import DispatchOutcome
 def _cycle(*, state: str = "design", status: str = "in_progress", revision: int = 3) -> dict:
     stage_statuses = {
         "design": status if state == "design" else "approved",
-        "reconciliation": (status if state == "reconciliation" else ("approved" if state in {"ready_for_build", "build", "test"} else "locked")),
-        "build": (status if state in {"ready_for_build", "build"} else ("approved" if state == "test" else "locked")),
-        "test": status if state == "test" else "locked",
-        "learn": "locked",
+        "reconciliation": (status if state == "reconciliation" else ("approved" if state in {"ready_for_build", "build", "test", "learn"} else "locked")),
+        "build": (status if state in {"ready_for_build", "build"} else "approved" if state in {"test", "learn"} else "locked"),
+        "test": (status if state == "test" else "approved" if state == "learn" else "locked"),
+        "learn": status if state == "learn" else "locked",
     }
     return {
         "id": "cycle-1",
@@ -46,6 +46,7 @@ class FakeRepo:
         self.cycle = cycle
         self.recorded: list[dict] = []
         self.lineage: list[dict] = []
+        self.learn_syntheses: list[dict] = []
         self.replay: dict | None = None
 
     async def get_cycle(self, cycle_id: str, *, project_id: str):
@@ -68,6 +69,7 @@ class FakeRepo:
         return {
             "cycle_id": cycle_id,
             "build_lineage": self.lineage[-1] if self.lineage else None,
+            "validity_assessment": ({"outcome": "supported"} if self.cycle and self.cycle["state"] == "learn" else None),
         }
 
     async def list_worker_runs(self, cycle_id: str, *, project_id: str, stage: str):
@@ -84,6 +86,20 @@ class FakeRepo:
     async def record_build_lineage(self, **kwargs):
         self.lineage.append(kwargs)
         return kwargs
+
+    async def record_learn_synthesis(self, **kwargs):
+        self.learn_syntheses.append(kwargs)
+        return kwargs
+
+    async def knowledge_view(self, project_id: str, *, cycle_id: str | None = None):
+        return {
+            "project_id": project_id,
+            "cycle_id": cycle_id,
+            "candidates": [],
+            "claims": [],
+            "publications": [],
+            "events": [],
+        }
 
 
 class FakeDispatcher:
@@ -368,6 +384,41 @@ async def test_ready_for_build_runs_build_and_records_reproducibility_lineage(
     assert repo.lineage[0]["output_artifacts"][0]["content_hash"]
     assert repo.lineage[0]["code_revision"] == "workspace:unversioned"
     assert repo.lineage[0]["deviations"]
+
+
+@pytest.mark.asyncio
+async def test_learn_records_only_provisional_evidence_bound_candidates(
+    tmp_path: Path,
+) -> None:
+    repo = FakeRepo(_cycle(state="learn"))
+    dispatcher = FakeDispatcher(text=_structured_result())
+    adapter = LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="knowledge-synthesizer",
+                capabilities=frozenset({Capability.KNOWLEDGE_SYNTHESIS}),
+            ),
+        ),
+        dispatcher=dispatcher,
+    )
+
+    result = await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Synthesize the bounded Learn closeout.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert result.stage == "learn"
+    assert repo.recorded[0]["stage_spec_key"] == "generic:learn:v1"
+    assert len(repo.learn_syntheses) == 1
+    synthesis = repo.learn_syntheses[0]
+    assert synthesis["expected_db_revision"] == 4
+    assert synthesis["candidates"][0]["grade"] == "supported"
+    assert synthesis["candidates"][0]["evidence"]
 
 
 @pytest.mark.asyncio
