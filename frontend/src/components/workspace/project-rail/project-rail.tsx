@@ -10,8 +10,6 @@ import {
   MessageSquarePlus,
   MessagesSquare,
   MoreHorizontal,
-  Plus,
-  Presentation,
   Trash2,
 } from "lucide-react";
 import Link from "next/link";
@@ -45,12 +43,11 @@ import {
   type DbtlStage,
   STAGE_LABELS,
   STATUS_LABELS,
-  blockedByReadiness,
-  controlAccessibleLabel,
   dbtlControlState,
   defaultSelectedCycle,
   isLive,
   openWorkItems,
+  shouldShowReadinessNotice,
   toggleCycleDisclosure,
   useAbandonCycle,
   useCycleDetail,
@@ -68,8 +65,6 @@ import {
 import { cn } from "@/lib/utils";
 
 import { CycleStageSheet } from "./cycle-stage-sheet";
-import { Phase7DemoDialog } from "./phase7-demo-dialog";
-import { StartCycleDialog } from "./start-cycle-dialog";
 
 /** Agent roster placeholder until project agent assignment ships. */
 const PLACEHOLDER_AGENTS = [
@@ -160,20 +155,9 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const controls = dbtlControlState(dbtl.feature, dbtl.isLoading);
   const cycleQuery = useProjectCycles(project?.id);
 
-  const {
-    selectedCycleId,
-    selectCycle,
-    requestDesignKickoff,
-    requestComposerScope,
-  } = useProjectCycleSelection();
-  // Cycle setup is a conversation, so it needs the supervisor graph. Where the
-  // graph is off (audit_only / manual) chat cannot run setup at all, and the
-  // form remains the only way to open a record — see `startCycle` below.
-  const setupInChat = Boolean(dbtl.feature?.graph_execution_enabled);
+  const { selectedCycleId, selectCycle } = useProjectCycleSelection();
   const [cyclesOverride, setCyclesOverride] = useState<boolean | null>(null);
   const [readinessOpen, setReadinessOpen] = useState(false);
-  const [startOpen, setStartOpen] = useState(false);
-  const [phase7DemoOpen, setPhase7DemoOpen] = useState(false);
   const [openStage, setOpenStage] = useState<DbtlStage | null>(null);
   // `undefined` means the user has not made a disclosure choice yet, so the
   // existing default cycle opens initially. `null` is an explicit fold-all.
@@ -201,21 +185,6 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   // Cycles minimize themselves once nothing is running; an explicit click
   // always wins over that default.
   const cyclesOpen = cyclesOverride ?? cycles.some(isLive);
-
-  /**
-   * Starting a cycle arms the composer rather than opening a form: the human
-   * describes the cycle in the chatbox and the setup branch proposes the rest.
-   * The rail's job is to put them in the right scope, not to collect fields.
-   */
-  function startCycle() {
-    if (blockedByReadiness(controls)) return;
-    setCyclesOverride(true);
-    if (setupInChat) {
-      requestComposerScope("start_cycle");
-      return;
-    }
-    setStartOpen(true);
-  }
 
   async function removeCycle() {
     if (!cycleToRemove || !cycleRemovalReason.trim()) return;
@@ -280,71 +249,15 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
         defaultSection="dbtl"
       />
       {project && (
-        <>
-          <StartCycleDialog
-            projectId={project.id}
-            projectName={project.name}
-            cycles={cycles}
-            open={startOpen}
-            onOpenChange={setStartOpen}
-            onCreated={(cycle) => {
-              selectCycle(cycle.id);
-              setExpandedCycleId(cycle.id);
-              requestDesignKickoff(cycle.id, cycle.title);
-            }}
-          />
-          <Phase7DemoDialog
-            open={phase7DemoOpen}
-            onOpenChange={setPhase7DemoOpen}
-          />
-          <CycleStageSheet
-            projectId={project.id}
-            cycleId={selected?.id ?? null}
-            stage={openStage}
-            open={openStage !== null}
-            onOpenChange={(next) => !next && setOpenStage(null)}
-          />
-        </>
+        <CycleStageSheet
+          projectId={project.id}
+          cycleId={selected?.id ?? null}
+          stage={openStage}
+          open={openStage !== null}
+          onOpenChange={(next) => !next && setOpenStage(null)}
+        />
       )}
-      <SectionLabel
-        action={
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              aria-label="Open one-click Phase 7 human demo"
-              title="Preview Phase 7 validity outcomes"
-              className="text-muted-foreground hover:text-foreground transition-colors"
-              onClick={() => setPhase7DemoOpen(true)}
-            >
-              <Presentation className="size-3.5" />
-            </button>
-            <button
-              type="button"
-              aria-label={controlAccessibleLabel(
-                setupInChat
-                  ? "Start a new cycle in the chatbox"
-                  : "Start a new cycle",
-                controls,
-              )}
-              aria-disabled={controls.ariaDisabled}
-              title={
-                controls.enabled
-                  ? setupInChat
-                    ? "Start a new cycle — describe it in the chatbox"
-                    : "Start a new cycle"
-                  : controls.reason
-              }
-              className={cn(
-                "text-muted-foreground transition-colors aria-disabled:cursor-not-allowed aria-disabled:opacity-40",
-                controls.enabled && "hover:text-foreground",
-              )}
-              onClick={startCycle}
-            >
-              <Plus className="size-3.5" />
-            </button>
-          </div>
-        }
-      >
+      <SectionLabel>
         <button
           type="button"
           onClick={() => setCyclesOverride(!cyclesOpen)}
@@ -361,7 +274,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           {!cyclesOpen && cycles.length ? ` · ${cycles.length}` : ""}
         </button>
       </SectionLabel>
-      {!controls.enabled && (
+      {shouldShowReadinessNotice(controls, dbtl.isLoading) && (
         <div className="mx-3 mb-2 rounded-lg border border-amber-700/20 bg-amber-500/5 px-3 py-2">
           <p className="text-foreground text-xs font-medium">
             DBTL is {controls.statusLabel}

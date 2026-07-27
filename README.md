@@ -95,8 +95,7 @@ DBTL modes:
 - `manual` — authorized humans can operate durable DBTL cycles.
 - `graph_enabled` — enables the opt-in project supervisor. Design,
   Reconciliation, Build, Test, and Learn use bounded, versioned stage contracts;
-  every scientific gate still requires a human decision. The presentation icon
-  beside **Cycles** opens a no-write, one-click Phase 7 validity demo.
+  every scientific gate still requires a human decision.
 
 The DBTL classifier gives borderline research-shaped requests a modestly higher
 proposal prior on the first turn of a conversation and in projects with no

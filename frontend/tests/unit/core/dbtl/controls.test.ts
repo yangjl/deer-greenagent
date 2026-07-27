@@ -5,6 +5,7 @@ import {
   controlAccessibleLabel,
   dbtlControlState,
   dbtlStatusLabel,
+  shouldShowReadinessNotice,
 } from "@/core/dbtl/controls";
 import type { DbtlFeature } from "@/core/features/api";
 
@@ -115,5 +116,18 @@ describe("DBTL control accessibility helpers", () => {
         ),
       ),
     ).toBe(false);
+  });
+
+  test("hides the readiness notice while loading but shows settled frozen state", () => {
+    const loading = dbtlControlState(undefined, true);
+    expect(shouldShowReadinessNotice(loading, true)).toBe(false);
+
+    const frozen = dbtlControlState(feature());
+    expect(shouldShowReadinessNotice(frozen, false)).toBe(true);
+
+    const enabled = dbtlControlState(
+      feature({ mode: "graph_enabled", graph_execution_enabled: true }),
+    );
+    expect(shouldShowReadinessNotice(enabled, false)).toBe(false);
   });
 });
