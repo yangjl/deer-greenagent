@@ -163,7 +163,9 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   conversations. **The rail is read-only** — it holds no text inputs, and the
   Cycles header is disclosure-only with no creation or demo actions. New-cycle
   intent is classified from normal project chat and enters the native setup
-  flow there. Selecting a stage opens
+  flow there. A dedicated top-row panel toggle collapses the second rail from
+  16rem to the same 3rem icon width as the first rail; it stays separate from
+  the Cycles header and unmounts the rail body while collapsed. Selecting a stage opens
   `cycle-stage-sheet.tsx` — evidence, open blockers **and the form that records
   one**, the submit/review panel with a required rationale, and the activity
   timeline with actor and revision — using the existing right-side inspection

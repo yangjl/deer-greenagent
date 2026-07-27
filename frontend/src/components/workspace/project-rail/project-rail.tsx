@@ -65,6 +65,7 @@ import {
 import { cn } from "@/lib/utils";
 
 import { CycleStageSheet } from "./cycle-stage-sheet";
+import { ProjectRailFrame } from "./project-rail-frame";
 
 /** Agent roster placeholder until project agent assignment ships. */
 const PLACEHOLDER_AGENTS = [
@@ -242,7 +243,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   }
 
   return (
-    <aside className="border-border bg-muted/20 hidden w-64 shrink-0 flex-col overflow-y-auto border-r md:flex">
+    <ProjectRailFrame>
       <SettingsDialog
         open={readinessOpen}
         onOpenChange={setReadinessOpen}
@@ -499,9 +500,8 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           <DialogHeader>
             <DialogTitle>Remove {cycleToRemove?.title}?</DialogTitle>
             <DialogDescription>
-              The cycle will leave the active rail and be recorded as
-              abandoned. Its evidence and activity history remain available
-              for audit.
+              The cycle will leave the active rail and be recorded as abandoned.
+              Its evidence and activity history remain available for audit.
             </DialogDescription>
           </DialogHeader>
           <Textarea
@@ -520,9 +520,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
             </Button>
             <Button
               variant="destructive"
-              disabled={
-                abandonCycle.isPending || !cycleRemovalReason.trim()
-              }
+              disabled={abandonCycle.isPending || !cycleRemovalReason.trim()}
               onClick={() => void removeCycle()}
             >
               {abandonCycle.isPending ? "Removing…" : "Remove cycle"}
@@ -562,6 +560,6 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </aside>
+    </ProjectRailFrame>
   );
 }

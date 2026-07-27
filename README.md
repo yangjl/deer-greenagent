@@ -14,7 +14,8 @@ Design–Build–Test–Learn (DBTL) governance.
 - **Project-owned data** — each project is a normal folder that remains visible
   and editable outside GreenAgent.
 - **Project-first workspace** — projects organize conversations, files, DBTL
-  cycles, evidence, reviews, and work items.
+  cycles, evidence, reviews, and work items. The project rail can collapse to
+  an icon-width strip when the conversation needs more room.
 - **Safe workspace cleanup** — project, cycle, and conversation rails expose
   removal actions. Project removal archives the project without deleting its
   local folder and returns its conversations to Unfiled chats; cycle removal
