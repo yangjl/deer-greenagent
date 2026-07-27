@@ -409,8 +409,19 @@ export const zhCN: Translations = {
   // Agents
   agents: {
     title: "智能体",
-    description: "创建和管理具有专属 Prompt 与能力的自定义智能体。",
+    description: "查看当前工作区可用的智能体和委派执行器。",
     newAgent: "新建智能体",
+    builtinTab: "内置",
+    customTab: "自定义",
+    builtinDescription:
+      "GreenAgent 内置的核心智能体和当前运行时可用的子智能体。",
+    customDescription: "用户创建的智能体以及为当前部署配置的子智能体。",
+    inventoryError: "无法加载智能体列表，请稍后重试。",
+    agentType: "智能体",
+    subagentType: "子智能体",
+    builtinType: "内置",
+    customType: "自定义",
+    delegatedOnly: "通过委派调用",
     emptyTitle: "还没有自定义智能体",
     emptyDescription: "创建你的第一个自定义智能体，设置专属系统提示词。",
     featureDisabledTitle: "智能体功能未启用",

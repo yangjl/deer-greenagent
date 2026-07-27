@@ -16,7 +16,10 @@ Design–Build–Test–Learn (DBTL) governance.
 - **Project-first workspace** — projects organize conversations, files, DBTL
   cycles, evidence, reviews, and work items. The project rail can collapse to
   an icon-width navigation spine for Cycles, Blockers, Agents, and
-  Conversations when the conversation needs more room.
+  Conversations when the conversation needs more room. Agent and Skill
+  management remain directly accessible from the first rail. The Agents page
+  separates built-in agents and runtime-available subagents from user-created
+  agents and deployment-configured custom subagents.
 - **Safe workspace cleanup** — project, cycle, and conversation rails expose
   removal actions when expanded; folded icon rails hide destructive controls.
   Project removal archives the project without deleting its local folder and

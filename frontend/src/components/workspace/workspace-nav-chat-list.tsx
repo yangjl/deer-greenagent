@@ -9,6 +9,7 @@ import {
   MessagesSquare,
   MoreHorizontal,
   Plus,
+  SparklesIcon,
   Trash2,
 } from "lucide-react";
 import Link from "next/link";
@@ -356,6 +357,17 @@ export function WorkspaceNavChatList({
                 </TooltipContent>
               </Tooltip>
             )}
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              isActive={pathname.startsWith("/workspace/skills")}
+              asChild
+            >
+              <Link className="text-muted-foreground" href="/workspace/skills">
+                <SparklesIcon />
+                <span>{t.settings.sections.skills}</span>
+              </Link>
+            </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton

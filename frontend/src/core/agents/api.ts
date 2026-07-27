@@ -2,7 +2,12 @@ import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 export { fetchAgentsApiEnabled } from "@/core/features/api";
 
-import type { Agent, CreateAgentRequest, UpdateAgentRequest } from "./types";
+import type {
+  Agent,
+  AgentInventoryItem,
+  CreateAgentRequest,
+  UpdateAgentRequest,
+} from "./types";
 
 const BACKEND_UNAVAILABLE_STATUSES = new Set([502, 503, 504]);
 
@@ -41,6 +46,15 @@ export async function listAgents(): Promise<Agent[]> {
   if (!res.ok) throw new Error(`Failed to load agents: ${res.statusText}`);
   const data = (await res.json()) as { agents: Agent[] };
   return data.agents;
+}
+
+export async function listAgentInventory(): Promise<AgentInventoryItem[]> {
+  const res = await fetch(`${getBackendBaseURL()}/api/agents/inventory`);
+  if (!res.ok) {
+    throw new Error(`Failed to load agent inventory: ${res.statusText}`);
+  }
+  const data = (await res.json()) as { items: AgentInventoryItem[] };
+  return data.items;
 }
 
 export async function getAgent(name: string): Promise<Agent> {

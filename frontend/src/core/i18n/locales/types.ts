@@ -341,6 +341,16 @@ export interface Translations {
     title: string;
     description: string;
     newAgent: string;
+    builtinTab: string;
+    customTab: string;
+    builtinDescription: string;
+    customDescription: string;
+    inventoryError: string;
+    agentType: string;
+    subagentType: string;
+    builtinType: string;
+    customType: string;
+    delegatedOnly: string;
     emptyTitle: string;
     emptyDescription: string;
     featureDisabledTitle: string;

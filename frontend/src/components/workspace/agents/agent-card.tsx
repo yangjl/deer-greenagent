@@ -5,6 +5,7 @@ import {
   MessageSquareIcon,
   Settings2Icon,
   Trash2Icon,
+  WorkflowIcon,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { type ComponentProps, type ReactElement, useState } from "react";
@@ -34,14 +35,14 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useDeleteAgent } from "@/core/agents";
-import type { Agent } from "@/core/agents";
+import type { AgentInventoryItem } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 import { AgentSettingsDialog } from "./agent-settings-dialog";
 
 interface AgentCardProps {
-  agent: Agent;
+  agent: AgentInventoryItem;
 }
 
 /**
@@ -115,7 +116,11 @@ export function AgentCard({ agent }: AgentCardProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   function handleChat() {
-    router.push(`/workspace/agents/${agent.name}/chats/new`);
+    router.push(
+      agent.origin === "builtin"
+        ? "/workspace/chats/new"
+        : `/workspace/agents/${encodeURIComponent(agent.name)}/chats/new`,
+    );
   }
 
   async function handleDelete() {
@@ -143,13 +148,25 @@ export function AgentCard({ agent }: AgentCardProps) {
                     {agent.name}
                   </CardTitle>
                 </TruncatedTooltip>
-                {agent.model && (
-                  <TruncatedBadge
-                    label={agent.model}
-                    variant="secondary"
-                    className="mt-0.5 text-xs"
-                  />
-                )}
+                <div className="mt-1 flex min-w-0 flex-wrap gap-1">
+                  <Badge variant="outline" className="text-xs">
+                    {agent.kind === "agent"
+                      ? t.agents.agentType
+                      : t.agents.subagentType}
+                  </Badge>
+                  <Badge variant="secondary" className="text-xs">
+                    {agent.origin === "builtin"
+                      ? t.agents.builtinType
+                      : t.agents.customType}
+                  </Badge>
+                  {agent.model && (
+                    <TruncatedBadge
+                      label={agent.model}
+                      variant="secondary"
+                      className="text-xs"
+                    />
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -162,13 +179,25 @@ export function AgentCard({ agent }: AgentCardProps) {
           )}
         </CardHeader>
 
-        {(agent.tool_groups?.length ?? agent.skills?.length ?? 0) > 0 && (
+        {(agent.tool_groups?.length ?? 0) +
+          (agent.tools?.length ?? 0) +
+          (agent.skills?.length ?? 0) +
+          (agent.dbtl_capabilities?.length ?? 0) >
+          0 && (
           <CardContent className="pt-0 pb-3">
             <div className="flex flex-wrap gap-1">
               {agent.tool_groups?.map((group) => (
                 <TruncatedBadge
                   key={`tg:${group}`}
                   label={group}
+                  variant="outline"
+                  className="text-xs"
+                />
+              ))}
+              {agent.tools?.map((tool) => (
+                <TruncatedBadge
+                  key={`tool:${tool}`}
+                  label={tool}
                   variant="outline"
                   className="text-xs"
                 />
@@ -181,41 +210,58 @@ export function AgentCard({ agent }: AgentCardProps) {
                   className="text-xs"
                 />
               ))}
+              {agent.dbtl_capabilities?.map((capability) => (
+                <TruncatedBadge
+                  key={`dbtl:${capability}`}
+                  label={capability}
+                  variant="secondary"
+                  className="text-xs"
+                />
+              ))}
             </div>
           </CardContent>
         )}
 
         <CardFooter className="mt-auto flex items-center justify-between gap-2 pt-3">
-          <Button size="sm" className="flex-1" onClick={handleChat}>
-            <MessageSquareIcon className="mr-1.5 h-3.5 w-3.5" />
-            {t.agents.chat}
-          </Button>
-          <div className="flex gap-1">
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-8 w-8 shrink-0"
-              onClick={() => setSettingsOpen(true)}
-              title={t.agents.settings}
-            >
-              <Settings2Icon className="h-3.5 w-3.5" />
+          {agent.can_chat ? (
+            <Button size="sm" className="flex-1" onClick={handleChat}>
+              <MessageSquareIcon className="mr-1.5 h-3.5 w-3.5" />
+              {t.agents.chat}
             </Button>
-            <Button
-              size="icon"
-              variant="ghost"
-              className="text-destructive hover:text-destructive h-8 w-8 shrink-0"
-              onClick={() => setDeleteOpen(true)}
-              title={t.agents.delete}
-            >
-              <Trash2Icon className="h-3.5 w-3.5" />
-            </Button>
-          </div>
+          ) : (
+            <div className="text-muted-foreground flex min-h-8 flex-1 items-center gap-1.5 text-xs">
+              <WorkflowIcon className="h-3.5 w-3.5" />
+              {t.agents.delegatedOnly}
+            </div>
+          )}
+          {agent.can_manage && (
+            <div className="flex gap-1">
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8 shrink-0"
+                onClick={() => setSettingsOpen(true)}
+                title={t.agents.settings}
+              >
+                <Settings2Icon className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="text-destructive hover:text-destructive h-8 w-8 shrink-0"
+                onClick={() => setDeleteOpen(true)}
+                title={t.agents.delete}
+              >
+                <Trash2Icon className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          )}
         </CardFooter>
       </Card>
 
       {/* Model settings — mounted only while open so its form state always
           re-seeds from the latest agent props (avoids stale values on reopen). */}
-      {settingsOpen && (
+      {agent.can_manage && settingsOpen && (
         <AgentSettingsDialog
           agent={agent}
           open={settingsOpen}
@@ -224,7 +270,10 @@ export function AgentCard({ agent }: AgentCardProps) {
       )}
 
       {/* Delete Confirm */}
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+      <Dialog
+        open={agent.can_manage && deleteOpen}
+        onOpenChange={setDeleteOpen}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{t.agents.delete}</DialogTitle>

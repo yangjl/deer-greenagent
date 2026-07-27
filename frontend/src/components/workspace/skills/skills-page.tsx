@@ -29,9 +29,9 @@ import { useEnableSkill, useSkills } from "@/core/skills/hooks";
 import type { Skill } from "@/core/skills/type";
 import { env } from "@/env";
 
-import { SettingsSection } from "./settings-section";
+import { SettingsSection } from "../settings/settings-section";
 
-export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
+export function SkillsPageContent() {
   const { t } = useI18n();
   const { skills, isLoading, error } = useSkills();
   const adminRequired =
@@ -50,19 +50,13 @@ export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
       ) : error ? (
         <div>Error: {error.message}</div>
       ) : (
-        <SkillSettingsList skills={skills} onClose={onClose} />
+        <SkillSettingsList skills={skills} />
       )}
     </SettingsSection>
   );
 }
 
-function SkillSettingsList({
-  skills,
-  onClose,
-}: {
-  skills: Skill[];
-  onClose?: () => void;
-}) {
+function SkillSettingsList({ skills }: { skills: Skill[] }) {
   const { t } = useI18n();
   const router = useRouter();
   const { user } = useAuth();
@@ -74,7 +68,6 @@ function SkillSettingsList({
     [skills, filter],
   );
   const handleCreateSkill = () => {
-    onClose?.();
     router.push("/workspace/chats/new?mode=skill");
   };
   return (

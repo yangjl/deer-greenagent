@@ -425,8 +425,20 @@ export const enUS: Translations = {
   agents: {
     title: "Agents",
     description:
-      "Create and manage custom agents with specialized prompts and capabilities.",
+      "View the agents and delegated workers available in this workspace.",
     newAgent: "New Agent",
+    builtinTab: "Built-in",
+    customTab: "Custom",
+    builtinDescription:
+      "Core agents and runtime-available subagents included with GreenAgent.",
+    customDescription:
+      "User-created agents and subagents configured for this deployment.",
+    inventoryError: "Could not load the agent inventory. Please try again.",
+    agentType: "Agent",
+    subagentType: "Subagent",
+    builtinType: "Built-in",
+    customType: "Custom",
+    delegatedOnly: "Used through delegation",
     emptyTitle: "No custom agents yet",
     emptyDescription:
       "Create your first custom agent with a specialized system prompt.",

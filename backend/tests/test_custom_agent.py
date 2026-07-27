@@ -568,6 +568,61 @@ class TestAgentsAPI:
         data = response.json()
         assert data["agents"] == []
 
+    def test_inventory_lists_builtin_and_custom_agents_and_subagents(self, agent_client, monkeypatch):
+        import app.gateway.routers.agents as agents_router
+        from deerflow.subagents.config import SubagentConfig
+
+        agent_client.post(
+            "/api/agents",
+            json={
+                "name": "field-researcher",
+                "description": "Reviews field observations",
+                "soul": "Stay grounded in project evidence.",
+            },
+        )
+
+        subagents = [
+            SubagentConfig(
+                name="general-purpose",
+                description="Handles delegated multi-step work.",
+                model="inherit",
+                max_turns=150,
+            ),
+            SubagentConfig(
+                name="trial-auditor",
+                description="Audits configured trial data.",
+                tools=["read_file"],
+                skills=["trial-review"],
+                model="auditor-model",
+                max_turns=40,
+            ),
+        ]
+        monkeypatch.setattr(
+            agents_router,
+            "list_subagents",
+            lambda **_: subagents,
+        )
+        monkeypatch.setattr(
+            agents_router,
+            "get_available_subagent_names",
+            lambda **_: ["general-purpose", "trial-auditor"],
+        )
+
+        response = agent_client.get("/api/agents/inventory")
+
+        assert response.status_code == 200
+        items = {(item["origin"], item["kind"], item["name"]): item for item in response.json()["items"]}
+        assert ("builtin", "agent", "lead_agent") in items
+        assert items[("builtin", "agent", "lead_agent")]["can_chat"] is True
+        assert items[("builtin", "agent", "lead_agent")]["can_manage"] is False
+        assert ("builtin", "subagent", "general-purpose") in items
+        assert items[("builtin", "subagent", "general-purpose")]["can_chat"] is False
+        assert ("custom", "agent", "field-researcher") in items
+        assert items[("custom", "agent", "field-researcher")]["can_manage"] is True
+        assert ("custom", "subagent", "trial-auditor") in items
+        assert items[("custom", "subagent", "trial-auditor")]["tools"] == ["read_file"]
+        assert items[("custom", "subagent", "trial-auditor")]["skills"] == ["trial-review"]
+
     def test_create_agent(self, agent_client):
         payload = {
             "name": "code-reviewer",
@@ -840,6 +895,10 @@ class TestAgentsApiDisabled:
         response = disabled_agent_client.get("/api/agents")
         assert response.status_code == 403
         assert "agents_api.enabled=true" in response.json()["detail"]
+
+    def test_agent_inventory_returns_403(self, disabled_agent_client):
+        response = disabled_agent_client.get("/api/agents/inventory")
+        assert response.status_code == 403
 
     def test_agent_get_returns_403(self, disabled_agent_client):
         response = disabled_agent_client.get("/api/agents/example-agent")

@@ -7,7 +7,6 @@ import {
   InfoIcon,
   BrainIcon,
   PaletteIcon,
-  SparklesIcon,
   WorkflowIcon,
   UserIcon,
   WrenchIcon,
@@ -29,7 +28,6 @@ import { DbtlReadinessSettingsPage } from "@/components/workspace/settings/dbtl-
 import { MemoryScopeSettingsPage } from "@/components/workspace/settings/memory-scope-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
-import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
 import { ToolSettingsPage } from "@/components/workspace/settings/tool-settings-page";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
@@ -42,7 +40,6 @@ type SettingsSection =
   | "memory"
   | "memory-scope"
   | "tools"
-  | "skills"
   | "notification"
   | "about";
 
@@ -102,7 +99,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
         icon: WorkflowIcon,
       },
       { id: "tools", label: t.settings.sections.tools, icon: WrenchIcon },
-      { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
       { id: "about", label: t.settings.sections.about, icon: InfoIcon },
     ],
     [
@@ -113,7 +109,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.memoryScope,
       t.settings.sections.dbtl,
       t.settings.sections.tools,
-      t.settings.sections.skills,
       t.settings.sections.notification,
       t.settings.sections.about,
     ],
@@ -166,11 +161,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "memory-scope" && <MemoryScopeSettingsPage />}
               {activeSection === "dbtl" && <DbtlReadinessSettingsPage />}
               {activeSection === "tools" && <ToolSettingsPage />}
-              {activeSection === "skills" && (
-                <SkillSettingsPage
-                  onClose={() => props.onOpenChange?.(false)}
-                />
-              )}
               {activeSection === "notification" && <NotificationSettingsPage />}
               {activeSection === "channels" && <ChannelsSettingsPage />}
               {activeSection === "about" && <AboutSettingsPage />}

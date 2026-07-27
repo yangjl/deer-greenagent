@@ -22,6 +22,11 @@ rs.mock("@/core/i18n/hooks", () => ({
         agentsDisabledTooltip: "Agents are disabled",
         scheduledTasks: "Scheduled tasks",
       },
+      settings: {
+        sections: {
+          skills: "Skills",
+        },
+      },
     },
   }),
 }));
@@ -74,6 +79,9 @@ describe("WorkspaceNavChatList", () => {
     );
 
     expect(screen.getByRole("link", { name: "test2" })).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "Skills" }).getAttribute("href"),
+    ).toBe("/workspace/skills");
     expect(
       screen.queryByRole("button", { name: "Project actions for test2" }),
     ).toBeNull();

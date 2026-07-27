@@ -29,6 +29,7 @@ rs.mock("@/core/config", () => ({
 import {
   AgentsApiDisabledError,
   checkAgentName,
+  listAgentInventory,
   updateAgent,
 } from "@/core/agents/api";
 import { fetch as fetcher } from "@/core/api/fetcher";
@@ -183,5 +184,39 @@ describe("updateAgent", () => {
       thinking_enabled: true,
       reasoning_effort: "high",
     });
+  });
+});
+
+describe("listAgentInventory", () => {
+  test("loads the normalized agent and subagent inventory", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        items: [
+          {
+            name: "lead_agent",
+            description: "Coordinates work.",
+            kind: "agent",
+            origin: "builtin",
+            model: null,
+            tool_groups: null,
+            tools: null,
+            skills: null,
+            can_chat: true,
+            can_manage: false,
+          },
+        ],
+      }),
+    );
+
+    await expect(listAgentInventory()).resolves.toMatchObject([
+      {
+        name: "lead_agent",
+        kind: "agent",
+        origin: "builtin",
+        can_chat: true,
+        can_manage: false,
+      },
+    ]);
+    expect(mockedFetch).toHaveBeenCalledWith("/api/agents/inventory");
   });
 });

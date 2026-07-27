@@ -31,7 +31,13 @@ describe("projectSlugOfName", () => {
   });
 
   it("never produces a slug that shadows a workspace route", () => {
-    for (const reserved of ["agents", "chats", "inbox", "scheduled-tasks"]) {
+    for (const reserved of [
+      "agents",
+      "chats",
+      "inbox",
+      "scheduled-tasks",
+      "skills",
+    ]) {
       const slug = projectSlugOfName(reserved);
       expect(isReservedWorkspaceSegment(slug)).toBe(false);
       expect(slug).toBe(`${reserved}-project`);

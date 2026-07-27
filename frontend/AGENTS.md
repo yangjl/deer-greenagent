@@ -106,7 +106,14 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   cycles/to-dos/conversations, and chat renders in the main area. The sidebar
   `PROJECTS` group label carries only a `+` create action — there is no
   portfolio route; `/workspace/projects` was removed. Legacy projectless
-  conversations stay at `/workspace/chats` under "Unfiled chats".
+  conversations stay at `/workspace/chats` under "Unfiled chats". Agent and
+  Skill management are peer destinations in the first rail; Skills lives at
+  `/workspace/skills`, not inside Settings. The Agents page consumes
+  `GET /api/agents/inventory`: its default Built-in tab shows the Lead Agent
+  and runtime-available built-in subagents, while Custom combines user agents
+  with deployment-configured subagents. Provenance and agent/subagent type are
+  visible labels; only top-level agents can start direct chats, and only
+  user-created top-level agents expose settings or deletion.
 - Project routes are flat and name-bearing: `/workspace/<project-slug>`
   redirects into `/workspace/<project-slug>/new`, and conversations live at
   `/workspace/<project-slug>/<thread_id>`. Next.js resolves static segments

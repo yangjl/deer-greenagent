@@ -21,6 +21,12 @@ from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents import AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
+from deerflow.subagents.config import SubagentConfig
+from deerflow.subagents.registry import (
+    get_available_subagent_names,
+    list_subagents,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
@@ -53,6 +59,25 @@ class AgentsListResponse(BaseModel):
     """Response model for listing all custom agents."""
 
     agents: list[AgentResponse]
+
+
+class AgentInventoryItemResponse(AgentResponse):
+    """Normalized display metadata for one agent or delegated subagent."""
+
+    kind: Literal["agent", "subagent"]
+    origin: Literal["builtin", "custom"]
+    tools: list[str] | None = Field(default=None, description="Subagent tool whitelist (None=inherit)")
+    max_turns: int | None = Field(default=None, description="Subagent turn limit")
+    timeout_seconds: int | None = Field(default=None, description="Subagent execution timeout")
+    dbtl_capabilities: list[str] = Field(default_factory=list, description="Declared DBTL stage capabilities")
+    can_chat: bool = Field(description="Whether the Web UI can start a direct conversation")
+    can_manage: bool = Field(description="Whether the current management API can edit or delete the entry")
+
+
+class AgentInventoryResponse(BaseModel):
+    """Response model for the built-in and custom agent inventory."""
+
+    items: list[AgentInventoryItemResponse]
 
 
 class AgentCreateRequest(BaseModel):
@@ -196,6 +221,26 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
     )
 
 
+def _subagent_to_inventory(config: SubagentConfig) -> AgentInventoryItemResponse:
+    """Convert a runtime subagent configuration to display-safe metadata."""
+    return AgentInventoryItemResponse(
+        name=config.name,
+        description=config.description,
+        kind="subagent",
+        origin="builtin" if config.name in BUILTIN_SUBAGENTS else "custom",
+        model=config.model,
+        tool_groups=None,
+        tools=config.tools,
+        skills=config.skills,
+        soul=None,
+        max_turns=config.max_turns,
+        timeout_seconds=config.timeout_seconds,
+        dbtl_capabilities=config.dbtl_capabilities,
+        can_chat=False,
+        can_manage=False,
+    )
+
+
 @router.get(
     "/agents",
     response_model=AgentsListResponse,
@@ -224,6 +269,66 @@ async def list_agents() -> AgentsListResponse:
     except Exception as e:
         logger.error(f"Failed to list agents: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
+
+
+@router.get(
+    "/agents/inventory",
+    response_model=AgentInventoryResponse,
+    summary="List Agent Inventory",
+    description="List built-in and custom agents plus runtime-available delegated subagents.",
+)
+async def list_agent_inventory() -> AgentInventoryResponse:
+    """Return normalized, read-only inventory metadata for the Agents page."""
+    _require_agents_api_enabled()
+    user_id = get_effective_user_id()
+
+    def _list() -> AgentInventoryResponse:
+        app_config = get_app_config()
+        available_subagent_names = set(get_available_subagent_names(app_config=app_config))
+        subagents = [_subagent_to_inventory(config) for config in list_subagents(app_config=app_config) if config.name in available_subagent_names]
+
+        builtin_items = [
+            AgentInventoryItemResponse(
+                name="lead_agent",
+                description="Coordinates conversations, tools, skills, and delegated work.",
+                kind="agent",
+                origin="builtin",
+                model=None,
+                tool_groups=None,
+                tools=None,
+                skills=None,
+                soul=None,
+                can_chat=True,
+                can_manage=False,
+            ),
+            *(item for item in subagents if item.origin == "builtin"),
+        ]
+        custom_agent_items = [
+            AgentInventoryItemResponse(
+                **_agent_config_to_response(
+                    agent,
+                    include_soul=False,
+                    user_id=user_id,
+                ).model_dump(),
+                kind="agent",
+                origin="custom",
+                tools=None,
+                can_chat=True,
+                can_manage=True,
+            )
+            for agent in list_custom_agents(user_id=user_id)
+        ]
+        custom_subagent_items = [item for item in subagents if item.origin == "custom"]
+        return AgentInventoryResponse(items=[*builtin_items, *custom_agent_items, *custom_subagent_items])
+
+    try:
+        return await asyncio.to_thread(_list)
+    except Exception as e:
+        logger.error("Failed to list agent inventory: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list agent inventory: {str(e)}",
+        )
 
 
 @router.get(

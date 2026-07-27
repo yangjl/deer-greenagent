@@ -6,6 +6,7 @@ import {
   deleteAgent,
   fetchAgentsApiEnabled,
   getAgent,
+  listAgentInventory,
   listAgents,
   updateAgent,
 } from "./api";
@@ -61,6 +62,14 @@ export function useAgents() {
     queryFn: () => listAgents(),
   });
   return { agents: data ?? [], isLoading, error };
+}
+
+export function useAgentInventory() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["agents", "inventory"],
+    queryFn: () => listAgentInventory(),
+  });
+  return { items: data ?? [], isLoading, error };
 }
 
 export function useAgent(name: string | null | undefined) {

@@ -17,6 +17,20 @@ export interface Agent {
   soul?: string | null;
 }
 
+export type AgentKind = "agent" | "subagent";
+export type AgentOrigin = "builtin" | "custom";
+
+export interface AgentInventoryItem extends Agent {
+  kind: AgentKind;
+  origin: AgentOrigin;
+  tools: string[] | null;
+  max_turns?: number | null;
+  timeout_seconds?: number | null;
+  dbtl_capabilities?: string[];
+  can_chat: boolean;
+  can_manage: boolean;
+}
+
 export interface CreateAgentRequest {
   name: string;
   description?: string;

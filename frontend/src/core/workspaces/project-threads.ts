@@ -30,6 +30,7 @@ export const RESERVED_WORKSPACE_SEGMENTS: readonly string[] = [
   "projects",
   "scheduled-tasks",
   "settings",
+  "skills",
 ];
 
 export function isReservedWorkspaceSegment(slug: string): boolean {

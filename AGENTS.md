@@ -109,6 +109,11 @@ Breeding-workspace note:
   the first sidebar rail. File selection opens the project-scoped content
   inspector and temporarily collapses that rail; the second project rail does
   not duplicate the project header/tree.
+- Agent management is an inventory-first workspace surface. Its default
+  Built-in tab lists the Lead Agent plus runtime-available built-in subagents;
+  Custom lists user-scoped agents plus `config.yaml` custom subagents.
+  Built-ins and subagents are read-only in this surface, and delegated
+  subagents do not expose a direct-chat action.
 - Memory follows the same durable project scope: project conversations load
   and learn from a `(user_id, project_id)`-specific bucket, while unfiled chats
   retain user-global memory. Older project conversations replace legacy global
