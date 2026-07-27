@@ -279,13 +279,7 @@ def _setup_clarification_message(
     from message order also means summarization compacting the original turn
     cannot strand the reply.
     """
-    project = context.project_name or "this project"
-    note = "\n\n".join(
-        [
-            f"Creating the DBTL cycle in {project}. The authenticated project action writes the durable record; this supervisor turn creates nothing.",
-            "To design it, I need a few things the request does not settle. I have proposed an answer to each — correct the ones that are wrong.",
-        ]
-    )
+    note = "I proposed an answer to each — correct the ones that are wrong."
     question = render_questions(questions) or f"Please provide:\n{_bullets(decision.missing_fields)}"
     digest = sha256(f"{context.project_id}:{request_nonce}:{source_request}".encode()).hexdigest()[:16]
     request_id = f"{SETUP_CLARIFICATION_PREFIX}{digest}"

@@ -254,7 +254,10 @@ export function HumanInputCard({
                 </Button>
               </div>
             </form>
-          ) : answeredResponse ? (
+          ) : answeredResponse && !setupQuestions ? (
+            // The wizard card omits this: its answer is every question and
+            // answer run together, which reads as a wall of text rather than a
+            // confirmation. The "Answered" badge already says what happened.
             <p className="text-muted-foreground text-sm" aria-live="polite">
               {t.humanInput.answeredValue(answeredResponse.value)}
             </p>
