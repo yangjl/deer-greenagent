@@ -337,6 +337,15 @@ def _setup_clarification_message(
                             "id": item.id,
                             "question": item.question,
                             "why": item.why,
+                            "options": [
+                                {
+                                    "id": option.id,
+                                    "label": option.label,
+                                    "description": option.description,
+                                }
+                                for option in item.options
+                            ],
+                            "recommended_option_id": item.recommended_option_id,
                             "recommendation": item.recommendation,
                             "grounded": item.grounded,
                         }
@@ -362,8 +371,6 @@ def _render_cycle_setup(decision: BranchDecision, context: SupervisorContext) ->
         f"This looks like it could be a DBTL cycle in {project}.",
         "",
         f"Proposed objective: {decision.objective}" if decision.objective else "Proposed objective: (not stated)",
-        "",
-        "If you start it, I will ask a few questions to pin the design — with a suggested answer for each.",
     ]
     lines += [
         "",

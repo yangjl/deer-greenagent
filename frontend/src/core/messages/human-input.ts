@@ -17,6 +17,28 @@ export type DbtlCycleSetup = {
   success_criteria: string;
 };
 
+export type SetupQuestionOption = {
+  id: string;
+  label: string;
+  description?: string;
+};
+
+/**
+ * One step of the DBTL setup wizard, written by the model.
+ *
+ * Present only on `cycle_setup` cards. A card without it still renders as a
+ * plain free-text question, so an older backend degrades rather than breaks.
+ */
+export type SetupQuestion = {
+  id: string;
+  question: string;
+  why?: string;
+  options?: SetupQuestionOption[];
+  recommended_option_id?: string;
+  recommendation?: string;
+  grounded?: boolean;
+};
+
 export type HumanInputRequest = {
   version: 1;
   kind: "human_input_request";
@@ -30,6 +52,7 @@ export type HumanInputRequest = {
   input_mode: HumanInputMode;
   options?: HumanInputOption[];
   dbtl_cycle_setup?: DbtlCycleSetup;
+  setup_questions?: SetupQuestion[];
 };
 
 export type HumanInputResponse =
@@ -139,6 +162,56 @@ function parseDbtlCycleSetup(value: unknown): DbtlCycleSetup | undefined {
   };
 }
 
+/**
+ * Setup questions, skipping anything unusable rather than failing the card.
+ *
+ * A malformed step must not cost the reader the whole wizard: the remaining
+ * questions are still answerable, and a card that renders nothing is worse
+ * than a card that renders less. Returns `undefined` when nothing survives,
+ * which falls back to the plain free-text question.
+ */
+function parseSetupQuestions(value: unknown): SetupQuestion[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const questions: SetupQuestion[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || !isNonEmptyString(entry.question)) {
+      continue;
+    }
+    const options: SetupQuestionOption[] = [];
+    if (Array.isArray(entry.options)) {
+      for (const option of entry.options) {
+        if (!isRecord(option) || !isNonEmptyString(option.label)) {
+          continue;
+        }
+        options.push({
+          id: isNonEmptyString(option.id) ? option.id : option.label,
+          label: option.label,
+          ...(isNonEmptyString(option.description)
+            ? { description: option.description }
+            : {}),
+        });
+      }
+    }
+    questions.push({
+      id: isNonEmptyString(entry.id) ? entry.id : `q${questions.length + 1}`,
+      question: entry.question,
+      ...(isNonEmptyString(entry.why) ? { why: entry.why } : {}),
+      ...(options.length ? { options } : {}),
+      ...(isNonEmptyString(entry.recommended_option_id)
+        ? { recommended_option_id: entry.recommended_option_id }
+        : {}),
+      ...(isNonEmptyString(entry.recommendation)
+        ? { recommendation: entry.recommendation }
+        : {}),
+      grounded: entry.grounded === true,
+    });
+  }
+  return questions.length ? questions : undefined;
+}
+
 export function parseHumanInputRequest(
   value: unknown,
 ): HumanInputRequest | null {
@@ -164,6 +237,7 @@ export function parseHumanInputRequest(
   if (value.dbtl_cycle_setup !== undefined && dbtlCycleSetup === undefined) {
     return null;
   }
+  const setupQuestions = parseSetupQuestions(value.setup_questions);
   if (
     (value.input_mode === "single_choice" ||
       value.input_mode === "choice_with_other") &&
@@ -200,6 +274,7 @@ export function parseHumanInputRequest(
     input_mode: value.input_mode,
     ...(options ? { options } : {}),
     ...(dbtlCycleSetup ? { dbtl_cycle_setup: dbtlCycleSetup } : {}),
+    ...(setupQuestions ? { setup_questions: setupQuestions } : {}),
   };
 }
 
