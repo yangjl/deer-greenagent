@@ -111,13 +111,24 @@ async def generate_suggestions(
     if not conversation:
         return SuggestionsResponse(suggestions=[])
 
+    # The language rule leads and is stated as a hard constraint. It used to be
+    # one bullet among five, phrased as "the same language as the user" —
+    # ambiguous when the assistant's turn is longer than the user's, which is
+    # the normal case here. The old length rule also named Chinese explicitly
+    # ("<= 40 Chinese characters"); mentioning one language in a prompt that
+    # must not choose a language is a nudge toward it, and multilingual models
+    # drifted into Chinese on English conversations. The cap is now expressed
+    # without naming any script.
     system_instruction = (
         "You are generating follow-up questions to help the user continue the conversation.\n"
         f"Based on the conversation below, produce EXACTLY {n} short questions the user might ask next.\n"
+        "LANGUAGE (most important): write every question in the SAME language the user "
+        "wrote their most recent message in. Match that language exactly, even if the "
+        "assistant replied in another language. Never translate and never switch languages.\n"
         "Requirements:\n"
         "- Questions must be relevant to the preceding conversation.\n"
-        "- Questions must be written in the same language as the user.\n"
-        "- Keep each question concise (ideally <= 20 words / <= 40 Chinese characters).\n"
+        "- Keep each question short: at most about 20 words, or 40 characters for "
+        "languages that do not separate words with spaces.\n"
         "- Do NOT include numbering, markdown, or any extra text.\n"
         "- Output MUST be a JSON array of strings only.\n"
     )
