@@ -122,6 +122,38 @@ pnpm check
 Backend features and bug fixes require tests. Keep user-facing documentation
 and the relevant `AGENTS.md` synchronized with architectural changes.
 
+### Replay a DeerFlow run in LLM Space
+
+`backend/scripts/export_llm_space_thread.py` converts DeerFlow's persisted
+message projection into a native LLM Space Thread. Start with the bundled
+sample:
+
+```bash
+cd backend
+PYTHONPATH=. .venv/bin/python scripts/export_llm_space_thread.py \
+  --sample \
+  --output ~/.llm-space/workspace/DeerFlow-debug/deerflow-exporter-smoke-test.json
+```
+
+With DeerFlow running, export a real thread or one run:
+
+```bash
+DEERFLOW_COOKIE='your authenticated session cookie' \
+PYTHONPATH=. .venv/bin/python scripts/export_llm_space_thread.py \
+  --thread-id THREAD_ID \
+  --run-id RUN_ID \
+  --output ~/.llm-space/workspace/DeerFlow-debug/failed-run.json
+```
+
+Use `DEERFLOW_BEARER_TOKEN` instead when the deployment accepts bearer
+authentication. The exporter preserves visible user/assistant messages, pairs
+tool results with their calls, and infers replay-only function schemas from
+the observed arguments. The generated tools do not execute automatically in
+LLM Space, and the persisted message feed does not contain DeerFlow's complete
+effective system prompt; provide one with `--system-prompt-file` when exact
+prompt reproduction matters. Pass `--force` only when intentionally replacing
+an existing Thread file.
+
 ## Git workflow
 
 - `upstream/main` — canonical ByteDance DeerFlow

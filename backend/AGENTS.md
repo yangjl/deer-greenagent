@@ -1037,6 +1037,28 @@ Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and sk
 
 **Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
 
+### LLM Space run exporter
+
+`scripts/export_llm_space_thread.py` converts the Gateway's persisted message
+projection into a native LLM Space Thread JSON file. It accepts a built-in
+sample, a saved message response, or a live authenticated thread/run. Live
+exports page backward through
+`GET /api/threads/{thread_id}/messages/page` or
+`GET /api/threads/{thread_id}/runs/{run_id}/messages`, using
+`DEERFLOW_COOKIE` and/or `DEERFLOW_BEARER_TOKEN` when set.
+
+DeerFlow persists assistant tool requests and `ToolMessage` results as
+separate rows; LLM Space nests a result under its originating assistant
+`toolCall`. The exporter joins them by `tool_call_id`, filters hidden and
+non-lead-agent AI rows, preserves visible content, and infers permissive
+replay-only function schemas from observed arguments. It deliberately does
+not claim to export the complete effective runtime prompt, tool registry,
+trace stream, subagent internals, or executable tool backends. Use
+`--system-prompt-file` when a known prompt should replace the explicit
+replay-oriented default. Output creation is exclusive unless the caller
+passes `--force`. Tests live in
+`tests/test_export_llm_space_thread.py`.
+
 ## Development Workflow
 
 ### Test-Driven Development (TDD) — MANDATORY
