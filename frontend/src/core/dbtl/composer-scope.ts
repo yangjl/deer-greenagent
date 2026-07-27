@@ -40,6 +40,7 @@ export type RequestContextKind =
   | "ordinary"
   | "cycle"
   | "recommend"
+  | "auto"
   | "start_cycle";
 
 export interface RequestContext {
@@ -56,6 +57,22 @@ export const ORDINARY_REQUEST_CONTEXT: RequestContext = Object.freeze({
 
 export const START_CYCLE_REQUEST_CONTEXT: RequestContext = Object.freeze({
   kind: "start_cycle",
+  cycleId: null,
+});
+
+/**
+ * The resting state: let the assistant judge.
+ *
+ * This is deliberately *not* `ordinary`. An explicit choice is the first rung
+ * of the backend's precedence ladder and the classifier is the last, so
+ * sending "ordinary" merely because a control defaulted to it settled every
+ * request before the classifier was ever asked — shadow telemetry recorded
+ * `route_source=explicit_choice` on every row and measured nothing. A default
+ * is the *absence* of a choice, which is exactly the case the ladder reserves
+ * for classification.
+ */
+export const AUTO_REQUEST_CONTEXT: RequestContext = Object.freeze({
+  kind: "auto",
   cycleId: null,
 });
 
@@ -190,6 +207,14 @@ export function runContextPayload(
   // assistant_id. That keeps checkpoint/state access compatible with rollback.
   const supervisor = { dbtl_supervisor_enabled: true };
   if (context.kind === "recommend") return supervisor;
+  if (context.kind === "auto") {
+    // No explicit choice, so the classifier decides. A cycle the human picked
+    // in the rail is still named: that click is a deliberate act, and without
+    // it continuing a cycle would be unreachable now that the menu is gone.
+    return context.cycleId
+      ? { ...supervisor, dbtl_selected_cycle_id: context.cycleId }
+      : supervisor;
+  }
   if (context.kind === "start_cycle") {
     // No cycle id: setup has nothing to continue yet, and sending a stale one
     // would let the backend read this as a continuation.
@@ -247,6 +272,14 @@ export function proposalContextPayload(context: RequestContext): {
   if (context.kind === "recommend") {
     return { selectedCycleId: null, explicitChoice: null };
   }
+  if (context.kind === "auto") {
+    // Must mirror `runContextPayload`'s auto branch exactly: no explicit
+    // choice, but still name a rail-selected cycle. Omitting this branch let
+    // `auto` fall through to "ordinary" below, so the graph consulted the
+    // classifier while the card was withheld and every telemetry row recorded
+    // an explicit choice that nobody made.
+    return { selectedCycleId: context.cycleId, explicitChoice: null };
+  }
   if (context.kind === "start_cycle") {
     return { selectedCycleId: null, explicitChoice: "start_cycle" };
   }
@@ -281,5 +314,5 @@ export function runActivityMetadata(
  * setup branch on every subsequent message would trap the conversation.
  */
 export function nextContextAfterSend(_sent: RequestContext): RequestContext {
-  return ORDINARY_REQUEST_CONTEXT;
+  return AUTO_REQUEST_CONTEXT;
 }

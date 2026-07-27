@@ -14,7 +14,6 @@ import {
   useThreadChat,
 } from "@/components/workspace/chats";
 import {
-  DbtlScopeMenu,
   UpgradeProposalCard,
   type UpgradeProposalSubmission,
   useDbtlUpgradeProposal,
@@ -43,7 +42,7 @@ import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicato
 import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { Welcome } from "@/components/workspace/welcome";
 import {
-  ORDINARY_REQUEST_CONTEXT,
+  AUTO_REQUEST_CONTEXT,
   type RequestContext,
   humanInputRunContext,
   nextContextAfterSend,
@@ -231,14 +230,22 @@ export default function ChatPage() {
   // The scope selector only appears where the supervisor can actually route, so
   // the control is never offered when changing it would do nothing.
   const { data: projectCycles } = useProjectCycles(projectId);
-  const [requestContext, setRequestContext] = useState<RequestContext>(
-    ORDINARY_REQUEST_CONTEXT,
-  );
+  // No scope control: the chatbox is the only input surface, so the resting
+  // state is "let the assistant judge" and the rail is what arms anything else.
+  // Sending an explicit "ordinary" here would settle every request on the first
+  // rung of the backend's precedence ladder and the classifier would never run.
+  const [requestContext, setRequestContext] =
+    useState<RequestContext>(AUTO_REQUEST_CONTEXT);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const cycleList = projectCycles?.cycles ?? [];
   // Resolve against the live list on every render: a cycle can be completed in
   // another tab, and the label must not keep claiming a scope that is gone.
-  const effectiveContext = normalizeContext(requestContext, cycleList);
+  const effectiveContext = normalizeContext(
+    requestContext.kind === "auto" && selectedCycleId
+      ? { kind: "auto", cycleId: selectedCycleId }
+      : requestContext,
+    cycleList,
+  );
 
   // A rail action arms the composer; it never sends. The human still writes the
   // request in the chatbox, which is why the cursor moves there.
@@ -329,7 +336,7 @@ export default function ChatPage() {
           runMetadata: runActivityMetadata(cycleContext),
           onSent: () => {
             consumeDesignKickoff(kickoff.nonce);
-            setRequestContext(ORDINARY_REQUEST_CONTEXT);
+            setRequestContext(AUTO_REQUEST_CONTEXT);
           },
         },
       ),
@@ -612,16 +619,6 @@ export default function ChatPage() {
                         !hasTodos && <Welcome mode={settings.context.mode} />
                       }
                       focusSignal={composerFocusSignal}
-                      extraTools={
-                        showDbtlScope ? (
-                          <DbtlScopeMenu
-                            context={effectiveContext}
-                            cycles={cycleList}
-                            onSelect={setRequestContext}
-                            disabled={thread.isLoading}
-                          />
-                        ) : null
-                      }
                       disabled={
                         isMock ||
                         env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||

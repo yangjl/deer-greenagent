@@ -198,9 +198,11 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   `/api/projects/{id}/dbtl/*` calls, and `cycle-hooks.ts` the TanStack hooks.
   Controls are derived from the server's stage status alone — the client never
   decides that a gate is open, it only renders what the durable record says.
-  Cycle creation records both class and workflow weight; once one live
-  top-level cycle exists, the dialog permits only a computational child under
-  a live season/program parent. The stage sheet displays only evidence bound
+  Cycle creation records both class and workflow weight. A project may run
+  several live top-level cycles at once (backend migration 0018 dropped the
+  single-active-cycle rule), so the dialog must not gate creation on an
+  existing live cycle; a computational child under a live season/program
+  parent remains available as before. The stage sheet displays only evidence bound
   to the selected stage and includes the manual URI + SHA-256 attachment form
   required to drive Phase 3 without a graph. Its evidence fields stay visibly
   labeled and required, and both evidence attachment and stage submission name
@@ -299,20 +301,21 @@ Tool-calling AI messages can contain user-visible text as well as `tool_calls`. 
   selection with no id degrades to ordinary rather than claiming a continuation
   it cannot name, and `start_cycle` never carries a cycle id at all, so a stale
   id cannot make setup read as a continuation.
-- `src/components/workspace/dbtl/scope-menu.tsx` renders that selector **inside
-  the composer's tool row**, gated on `useDbtlFeature().graph_execution_enabled`
-  **and** a project, so the control never appears where changing it would do
-  nothing. It is not a chip above the composer: choosing a scope is part of
-  composing the request, not a mode entered beforehand. The payload travels
-  through `sendMessage`'s `extraContext` into the run request's `context`, never
-  `config.configurable`, which is checkpointed. Interactive threads stay pinned
-  to `lead_agent`; the Gateway selects the supervisor for this run only after
-  validating the durable project scope, so disabling DBTL cannot strand an
-  existing conversation. The trigger stays **wordless** for ordinary work — the
-  overwhelmingly common case, and a permanent label would make the quiet default
-  look like an active mode — and gains a text label only when the next request is
-  scoped to a cycle or about to start one. The scope note lives inside the menu:
-  it answers a question the user only has while choosing.
+- **There is no scope selector.** The composer is the only input surface and it
+  carries no mode control: the assistant judges whether a request belongs in a
+  cycle. `AUTO_REQUEST_CONTEXT` is the resting state and it sends
+  `dbtl_supervisor_enabled` **without** `dbtl_explicit_choice` — that absence is
+  the one case where the backend's precedence ladder consults the classifier. A
+  menu defaulting to "ordinary" transmitted an explicit choice on every message,
+  which settled routing on the ladder's first rung and meant the classifier
+  never ran: every shadow-telemetry row read
+  `route_source=explicit_choice, confidence=0.0`, measuring nothing. A default
+  is the *absence* of a choice, not a choice. Anything other than `auto` now
+  comes from a deliberate act — the rail's `+` arms `start_cycle` for one
+  request, and a cycle clicked in the rail rides along as
+  `dbtl_selected_cycle_id` so continuation stays reachable without a menu.
+  `nextContextAfterSend` still returns the resting state unconditionally, so no
+  scope can capture later turns.
 - The `start_cycle` scope is how a cycle is opened: the request the user types
   becomes the setup conversation, routed to the backend supervisor's
   `cycle_setup` branch, which proposes an objective, names the missing fields,

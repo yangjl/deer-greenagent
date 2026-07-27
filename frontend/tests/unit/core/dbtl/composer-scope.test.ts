@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@rstest/core";
 
 import {
+  AUTO_REQUEST_CONTEXT,
   ORDINARY_REQUEST_CONTEXT,
   type RequestContext,
   SCOPE_ORDINARY_LABEL,
@@ -272,14 +273,15 @@ describe("shared routing context", () => {
 });
 
 describe("per-request scope", () => {
-  it("resets to ordinary after a send", () => {
-    // The menu promises the selection affects the next request only. That has
-    // to be enforced here, not remembered by the user.
+  it("resets after a send, so no scope can capture later turns", () => {
+    // A scope affects the next request only. That has to be enforced here, not
+    // remembered by the user. The resting state is "let the assistant judge"
+    // rather than "ordinary", because a default must not read as a choice.
     expect(nextContextAfterSend({ kind: "cycle", cycleId: "cyc-1" })).toEqual(
-      ORDINARY_REQUEST_CONTEXT,
+      AUTO_REQUEST_CONTEXT,
     );
     expect(nextContextAfterSend({ kind: "recommend", cycleId: null })).toEqual(
-      ORDINARY_REQUEST_CONTEXT,
+      AUTO_REQUEST_CONTEXT,
     );
   });
 
@@ -287,7 +289,7 @@ describe("per-request scope", () => {
     // The setup conversation continues through the assistant's own follow-up
     // questions; a sticky "start" scope would re-enter setup on every message.
     expect(nextContextAfterSend(START_CYCLE_REQUEST_CONTEXT)).toEqual(
-      ORDINARY_REQUEST_CONTEXT,
+      AUTO_REQUEST_CONTEXT,
     );
   });
 
@@ -373,6 +375,64 @@ describe("humanInputRunContext", () => {
     ).toEqual({
       dbtl_supervisor_enabled: true,
       dbtl_explicit_choice: "ordinary",
+    });
+  });
+});
+
+describe("no scope menu: the assistant judges by default", () => {
+  it("sends no explicit choice, so the classifier is actually consulted", () => {
+    // The precedence ladder treats an explicit choice as rung 1 and the
+    // classifier as the last. Sending "ordinary" merely because a menu
+    // defaulted to it decided every request before the classifier was ever
+    // asked — the shadow telemetry recorded route_source=explicit_choice on
+    // every row and measured nothing.
+    const payload = runContextPayload(AUTO_REQUEST_CONTEXT);
+    expect(payload).toEqual({ dbtl_supervisor_enabled: true });
+    expect(payload).not.toHaveProperty("dbtl_explicit_choice");
+  });
+
+  it("still names a rail-selected cycle so continuation keeps working", () => {
+    // Clicking a cycle in the rail is a deliberate act. It must reach the
+    // backend as the selected cycle even though no explicit choice is sent,
+    // or continuing a cycle becomes impossible without the menu.
+    expect(runContextPayload({ kind: "auto", cycleId: "cyc-7" })).toEqual({
+      dbtl_supervisor_enabled: true,
+      dbtl_selected_cycle_id: "cyc-7",
+    });
+  });
+
+  it("returns to letting the assistant judge after every send", () => {
+    // Same one-shot rule as before, but the resting state is now "judge this"
+    // rather than "this is ordinary".
+    expect(nextContextAfterSend(START_CYCLE_REQUEST_CONTEXT)).toEqual(
+      AUTO_REQUEST_CONTEXT,
+    );
+    expect(nextContextAfterSend({ kind: "cycle", cycleId: "cyc-1" })).toEqual(
+      AUTO_REQUEST_CONTEXT,
+    );
+  });
+
+  it("tells the proposal card the same thing it tells the graph", () => {
+    // These two must agree. The graph route reading "classifier" while the
+    // proposal payload says "ordinary" is the exact disagreement that let the
+    // supervisor consult the classifier while the card was never offered and
+    // every telemetry row recorded route_source=explicit_choice.
+    expect(proposalContextPayload(AUTO_REQUEST_CONTEXT)).toEqual({
+      selectedCycleId: null,
+      explicitChoice: null,
+    });
+    expect(proposalContextPayload({ kind: "auto", cycleId: "cyc-7" })).toEqual({
+      selectedCycleId: "cyc-7",
+      explicitChoice: null,
+    });
+  });
+
+  it("keeps an explicit start-cycle arming from the rail intact", () => {
+    // The rail's + still arms the composer for one request; that is a
+    // deliberate action, not a menu default.
+    expect(runContextPayload(START_CYCLE_REQUEST_CONTEXT)).toEqual({
+      dbtl_supervisor_enabled: true,
+      dbtl_explicit_choice: "start_cycle",
     });
   });
 });
