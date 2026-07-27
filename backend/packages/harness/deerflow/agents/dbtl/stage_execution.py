@@ -266,7 +266,12 @@ def _design_red_team_unit(
     *,
     attempt_id: str,
 ) -> WorkUnit | None:
-    """Guarantee an adversarial second position when only one specialist exists."""
+    """Guarantee an adversarial position, however many specialists were selected.
+
+    Its brief is built from the first unit's, so it argues against the same
+    stated task rather than a summary of it. It runs after the base round, so
+    the chair always has at least one position and one challenge to weigh.
+    """
     if not outcome.plan.units:
         return None
     first = outcome.plan.units[0]
@@ -768,31 +773,33 @@ class LiveStageAdapter:
         unit_result_pairs = list(zip(outcome.plan.units, outcome.results, strict=True))
         chair_result = None
         if stage == "design" and outcome.plan.dispatchable:
-            if len(outcome.plan.units) < 2:
-                red_team_unit = _design_red_team_unit(
-                    outcome,
-                    attempt_id=attempt_id,
+            # Unconditional: several specialists are several *positions*, not an
+            # adversarial one. Skipping the red team once a second specialist
+            # existed gave a better-configured council a weaker debate.
+            red_team_unit = _design_red_team_unit(
+                outcome,
+                attempt_id=attempt_id,
+            )
+            if red_team_unit is not None:
+                red_team_plan = StageExecutionPlan(
+                    spec=spec,
+                    selection=outcome.plan.selection,
+                    units=(red_team_unit,),
                 )
-                if red_team_unit is not None:
-                    red_team_plan = StageExecutionPlan(
-                        spec=spec,
-                        selection=outcome.plan.selection,
-                        units=(red_team_unit,),
-                    )
-                    red_team_dispatch = await dispatcher(
-                        (red_team_unit,),
-                        budget=spec.budget,
-                    )
-                    red_team_outcome = collect_results(
-                        red_team_plan,
-                        red_team_dispatch,
-                    )
-                    unit_result_pairs.append((red_team_unit, red_team_outcome.results[0]))
-                    outcome = StageExecutionOutcome(
-                        plan=outcome.plan,
-                        results=outcome.results + red_team_outcome.results,
-                        rejected=outcome.rejected + red_team_outcome.rejected,
-                    )
+                red_team_dispatch = await dispatcher(
+                    (red_team_unit,),
+                    budget=spec.budget,
+                )
+                red_team_outcome = collect_results(
+                    red_team_plan,
+                    red_team_dispatch,
+                )
+                unit_result_pairs.append((red_team_unit, red_team_outcome.results[0]))
+                outcome = StageExecutionOutcome(
+                    plan=outcome.plan,
+                    results=outcome.results + red_team_outcome.results,
+                    rejected=outcome.rejected + red_team_outcome.rejected,
+                )
             chair_unit = _design_chair_unit(
                 outcome,
                 attempt_id=attempt_id,
