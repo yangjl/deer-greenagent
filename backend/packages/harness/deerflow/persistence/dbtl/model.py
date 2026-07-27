@@ -57,18 +57,11 @@ class DbtlCycleRow(Base):
 
     __table_args__ = (
         Index("ix_dbtl_cycles_project_state", "project_id", "state"),
-        # At most one live top-level cycle per project. Enforced by the
-        # database, not by a read-then-write check, because two concurrent
-        # "Start a cycle" clicks would both pass an application-level check.
-        # Child cycles (parent_cycle_id NOT NULL) are exempt: a season/program
-        # parent may carry several computational children at once.
-        Index(
-            "uq_dbtl_active_top_level_cycle",
-            "project_id",
-            unique=True,
-            sqlite_where=text("parent_cycle_id IS NULL AND state NOT IN ('completed', 'abandoned')"),
-            postgresql_where=text("parent_cycle_id IS NULL AND state NOT IN ('completed', 'abandoned')"),
-        ),
+        # A project may run several top-level cycles at once (different traits,
+        # populations, or seasons), so there is deliberately no uniqueness on
+        # live cycles here — see migration 0018. The double-click guard that
+        # index also provided lives on in the create-idempotency index below,
+        # which is what actually collapses two simultaneous submissions.
         Index(
             "uq_dbtl_cycle_create_idempotency",
             "project_id",

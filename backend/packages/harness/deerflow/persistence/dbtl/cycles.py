@@ -70,10 +70,6 @@ class DbtlRevisionConflict(ValueError):
     """The caller acted on a revision that is no longer current."""
 
 
-class DbtlTopLevelCycleExists(ValueError):
-    """This project already has a live top-level cycle."""
-
-
 def _iso(value: Any) -> Any:
     return coerce_iso(value) if isinstance(value, datetime) else value
 
@@ -449,11 +445,12 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, ReconciliationOp
                         loaded = await self._load(replay_session, replay.id, project_id)
                         assert loaded is not None
                         return self._cycle_payload(*loaded)
-                # The partial unique index is the arbiter, not a prior read:
-                # two concurrent clicks both pass any application-level check.
-                if parent_cycle_id is None:
-                    raise DbtlTopLevelCycleExists(f"Project {project_id} already has a live top-level cycle.") from exc
-                raise DbtlWorkflowRefused("The child cycle could not be created because its durable identity conflicts.") from exc
+                # Parallel top-level cycles are allowed (migration 0018), so the
+                # only integrity failure left here is a durable-identity clash:
+                # the create-idempotency index collapsing a concurrent retry, or
+                # a reused key. Either way the caller should reload rather than
+                # be told a rule was broken that no longer exists.
+                raise DbtlWorkflowRefused("The cycle could not be created because its durable identity conflicts. Reload and try again.") from exc
 
             await self._record_event(
                 session,

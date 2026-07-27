@@ -37,7 +37,6 @@ from deerflow.dbtl import (
 )
 from deerflow.persistence.dbtl import (
     DbtlRevisionConflict,
-    DbtlTopLevelCycleExists,
     DbtlWorkflowRefused,
 )
 from deerflow.utils.file_io import run_file_io
@@ -178,8 +177,6 @@ def _require_mutations_enabled(request: Request, config: AppConfig) -> None:
 
 
 def _translate(exc: Exception) -> HTTPException:
-    if isinstance(exc, DbtlTopLevelCycleExists):
-        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This project already has an active cycle. Complete or abandon it first.")
     if isinstance(exc, DbtlRevisionConflict):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This cycle changed since you loaded it. Reload and try again.")
     if isinstance(exc, DbtlWorkflowRefused):

@@ -22,7 +22,6 @@ from deerflow.persistence.dbtl import (
     DbtlCycleRepository,
     DbtlReviewRow,
     DbtlRevisionConflict,
-    DbtlTopLevelCycleExists,
     DbtlWorkflowRefused,
 )
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
@@ -133,12 +132,21 @@ async def test_creation_key_cannot_replay_with_a_different_research_record(tmp_p
         )
 
 
-async def test_a_second_live_top_level_cycle_is_refused(tmp_path: Path) -> None:
-    repo, project_id = await _repos(tmp_path)
-    await _cycle(repo, project_id)
+async def test_a_project_may_run_several_top_level_cycles_at_once(tmp_path: Path) -> None:
+    """Parallel cycles are legitimate: different traits, populations, seasons.
 
-    with pytest.raises(DbtlTopLevelCycleExists):
-        await _cycle(repo, project_id, cycle_id="cycle-2", idempotency_key="create-2")
+    The single-active-cycle rule was dropped in migration 0018. The double-click
+    guard it also provided lives on in the create-idempotency index, which the
+    test above (`a reused create key ...`) pins separately.
+    """
+    repo, project_id = await _repos(tmp_path)
+    first = await _cycle(repo, project_id)
+
+    second = await _cycle(repo, project_id, cycle_id="cycle-2", idempotency_key="create-2")
+
+    assert second["id"] != first["id"]
+    live = [item for item in await repo.list_cycles(project_id) if item["state"] not in {"completed", "abandoned"}]
+    assert {item["id"] for item in live} == {first["id"], second["id"]}
 
 
 async def test_a_child_cycle_may_start_beside_a_live_parent(tmp_path: Path) -> None:

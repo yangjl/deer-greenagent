@@ -156,14 +156,22 @@ def _insert_cycle(
     )
 
 
-def test_a_second_live_top_level_cycle_is_rejected_by_the_database(engine) -> None:
+def test_a_project_may_run_several_live_top_level_cycles(engine) -> None:
+    """0012 forbade this; 0018 deliberately allows it.
+
+    A breeding project legitimately runs cycles in parallel across different
+    traits, populations, or seasons. The double-click guard the old index also
+    provided now rests solely on `uq_dbtl_cycle_create_idempotency`, which
+    `test_alembic_upgrade_adds_parent_fk_and_create_idempotency_index` pins.
+    """
     with engine.begin() as connection:
         _seed_project(connection, "project-1")
         _insert_cycle(connection, "cycle-1")
+        _insert_cycle(connection, "cycle-2")
 
-    with pytest.raises(IntegrityError):
-        with engine.begin() as connection:
-            _insert_cycle(connection, "cycle-2")
+    with engine.connect() as connection:
+        live = connection.execute(sa.text("SELECT COUNT(*) FROM dbtl_cycles WHERE state NOT IN ('completed','abandoned')")).scalar_one()
+    assert live == 2
 
 
 @pytest.mark.parametrize("terminal_state", sorted(TERMINAL_CYCLE_STATES))
@@ -211,7 +219,9 @@ def test_the_dedupe_pre_step_retires_the_older_duplicate(engine) -> None:
 
     with engine.begin() as connection:
         _seed_project(connection, "project-1")
-        connection.execute(sa.text(f"DROP INDEX {module._INDEX_NAME}"))
+        # 0018 already dropped it on a database upgraded to head; 0012's
+        # dedupe SQL is still worth exercising as the historical behaviour.
+        connection.execute(sa.text(f"DROP INDEX IF EXISTS {module._INDEX_NAME}"))
         _insert_cycle(connection, "cycle-old", created_at=datetime(2026, 7, 20, tzinfo=UTC))
         _insert_cycle(connection, "cycle-new", created_at=datetime(2026, 7, 21, tzinfo=UTC))
 

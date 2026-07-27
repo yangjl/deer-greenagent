@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0017_dbtl_learn_knowledge"
+HEAD = "0018_allow_parallel_top_level_cycles"
 BASELINE = "0001_baseline"
 
 

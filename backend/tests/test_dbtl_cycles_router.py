@@ -483,7 +483,13 @@ def test_a_stale_revision_is_reported_as_a_conflict(tmp_path: Path) -> None:
     assert "Reload" in response.json()["detail"]
 
 
-def test_a_second_active_cycle_is_reported_as_a_conflict(tmp_path: Path) -> None:
+def test_a_second_active_cycle_is_allowed(tmp_path: Path) -> None:
+    """Parallel cycles are legitimate research work (migration 0018).
+
+    The double-click guard is the create-idempotency key, not a limit of one:
+    a *reused* key still collapses onto the first record, which is what makes
+    dropping the single-cycle rule safe.
+    """
     workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
     with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
         project_id = _seed_project(client)
@@ -499,8 +505,8 @@ def test_a_second_active_cycle_is_reported_as_a_conflict(tmp_path: Path) -> None
             },
         )
 
-    assert response.status_code == 409
-    assert "already has an active cycle" in response.json()["detail"]
+    assert response.status_code == 201
+    assert response.json()["title"] == "Second"
 
 
 def test_approving_a_stage_with_no_evidence_is_refused(tmp_path: Path) -> None:

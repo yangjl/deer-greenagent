@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0017_dbtl_learn_knowledge"
+HEAD = "0018_allow_parallel_top_level_cycles"
 
 
 def _url(tmp_path: Path) -> str:

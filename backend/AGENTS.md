@@ -1325,16 +1325,20 @@ never make Build workable while Reconciliation is outstanding. Refusals raise
 `TransitionRefused`; the machine never falls back to a default state.
 
 Migration `0012_dbtl_cycle_hierarchy` adds `dbtl_cycles.parent_cycle_id`
-(self-FK with `RESTRICT`, so deleting a parent cannot erase child records) and
-the partial unique index `uq_dbtl_active_top_level_cycle`
-(`project_id WHERE parent_cycle_id IS NULL AND state NOT IN ('completed',
-'abandoned')`). That index — not an application check — is what stops two
-concurrent "Start a cycle" clicks, the same pattern as `uq_runs_thread_active`
-and `uq_scheduled_task_run_active`, and it ships with the same
-dedupe-before-index pre-step (losers are moved to `abandoned`, never deleted:
-a cycle is a research record). A test pins the literal SQL predicate against
-`TERMINAL_CYCLE_STATES` so adding a terminal state without updating the index
-fails loudly.
+(self-FK with `RESTRICT`, so deleting a parent cannot erase child records). It
+also added a partial unique index enforcing one live top-level cycle per
+project; **migration `0018_allow_parallel_top_level_cycles` drops that index**.
+A breeding project legitimately runs cycles in parallel across different traits,
+populations, or seasons, and refusing the second one blocked real work. The
+index was doing two jobs and only the product rule was dropped: the
+double-click guard it also provided lives on in
+`uq_dbtl_cycle_create_idempotency`, which collapses two simultaneous submissions
+onto one record because the dialog mints a single create key per opening. That
+is what makes removing the rule safe rather than a reopened race.
+`DbtlTopLevelCycleExists` is gone with it — an exception that can no longer be
+raised is worse than none. 0018's downgrade retires extra live cycles to
+`abandoned` (newest kept) before restoring the index, mirroring 0012's own
+dedupe pre-step; nothing is deleted, because a cycle is a research record.
 
 `deerflow.persistence.dbtl.DbtlCycleRepository` owns the durable workflow.
 Three separate mechanisms defend three different failures: `expected_db_revision`

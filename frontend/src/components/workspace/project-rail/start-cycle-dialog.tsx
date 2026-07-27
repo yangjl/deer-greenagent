@@ -99,21 +99,15 @@ export function StartCycleDialog({
   const parents = cycles.filter(
     (item) => item.cycle_class === "season/program" && isLive(item),
   );
-  const hasLiveTopLevel = cycles.some(
-    (item) => item.parent_cycle_id === null && isLive(item),
-  );
-  const parentRequired = hasLiveTopLevel;
-  const canCreateChild = cycleClass === "computational" && parents.length > 0;
+  // A parent is optional. The backend used to permit only one live top-level
+  // cycle per project, so an existing one forced every new cycle to be a child;
+  // migration 0018 dropped that rule because parallel cycles across different
+  // traits, populations, or seasons are ordinary research work.
   const ready =
-    title.trim().length > 0 &&
-    researchQuestion.trim().length > 0 &&
-    (!parentRequired || (canCreateChild && parentCycleId.length > 0));
+    title.trim().length > 0 && researchQuestion.trim().length > 0;
   const missingRequirements = [
     title.trim().length === 0 ? "title" : null,
     researchQuestion.trim().length === 0 ? "research question" : null,
-    parentRequired && (!canCreateChild || parentCycleId.length === 0)
-      ? "parent cycle"
-      : null,
   ].filter((item): item is string => item !== null);
   const readinessMessage =
     missingRequirements.length > 0
@@ -226,24 +220,14 @@ export function StartCycleDialog({
             {cycleClass === "computational" && parents.length > 0 && (
               <Field
                 label="Parent cycle"
-                required={parentRequired}
-                hint={
-                  parentRequired
-                    ? "Required because this project already has a live top-level cycle."
-                    : "Optional. A computational cycle can hang off a season or program."
-                }
+                hint="Optional. A computational cycle can hang off a season or program."
               >
                 <select
                   value={parentCycleId}
                   onChange={(event) => setParentCycleId(event.target.value)}
                   className="border-border bg-background focus:border-foreground/40 w-full rounded-md border px-3 py-2 text-sm outline-none"
-                  required={parentRequired}
                 >
-                  <option value="" disabled={parentRequired}>
-                    {parentRequired
-                      ? "Select the active season / program"
-                      : "No parent — top-level cycle"}
-                  </option>
+                  <option value="">No parent — top-level cycle</option>
                   {parents.map((parent) => (
                     <option key={parent.id} value={parent.id}>
                       {parent.title}
@@ -252,13 +236,7 @@ export function StartCycleDialog({
                 </select>
               </Field>
             )}
-            {parentRequired && !canCreateChild && (
-              <p className="border-border text-muted-foreground rounded-md border border-dashed px-3 py-2 text-xs">
-                This project already has a live top-level cycle. Finish or
-                abandon it before starting another, or create a computational
-                child under a live season/program cycle.
-              </p>
-            )}
+
 
             <Field label="Research question" required>
               <Textarea

@@ -1,7 +1,6 @@
 from deerflow.persistence.dbtl.cycles import (
     DbtlCycleRepository,
     DbtlRevisionConflict,
-    DbtlTopLevelCycleExists,
     DbtlWorkflowRefused,
 )
 from deerflow.persistence.dbtl.model import (
@@ -58,7 +57,6 @@ __all__ = [
     "DbtlRevisionConflict",
     "DbtlStageAttemptRow",
     "DbtlStageWorkerRunRow",
-    "DbtlTopLevelCycleExists",
     "DbtlTransitionIntentRow",
     "DbtlTransitionRow",
     "DbtlValidationRow",
