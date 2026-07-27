@@ -34,7 +34,11 @@ async function parseError(response: Response, fallback: string) {
   return body?.detail ?? `${fallback}: ${response.statusText}`;
 }
 
-async function post<T>(url: string, body: unknown, fallback: string): Promise<T> {
+async function post<T>(
+  url: string,
+  body: unknown,
+  fallback: string,
+): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -92,7 +96,9 @@ export async function fetchStageSpecs(
 ): Promise<StageSpecsResponse> {
   const response = await fetch(`${base(projectId)}/stage-specs`);
   if (!response.ok) {
-    throw new Error(await parseError(response, "Could not load the stage contracts"));
+    throw new Error(
+      await parseError(response, "Could not load the stage contracts"),
+    );
   }
   return (await response.json()) as StageSpecsResponse;
 }
@@ -121,7 +127,9 @@ export async function fetchStageWorkers(
     `${base(projectId)}/cycles/${encodeURIComponent(cycleId)}/stages/${encodeURIComponent(stage)}/workers`,
   );
   if (!response.ok) {
-    throw new Error(await parseError(response, "Could not load the agent runs"));
+    throw new Error(
+      await parseError(response, "Could not load the agent runs"),
+    );
   }
   return ((await response.json()) as { workers: StageWorkerRun[] }).workers;
 }

@@ -126,9 +126,9 @@ describe("the gate", () => {
   });
 
   test("a blocked gate leads with what has to be fixed", () => {
-    expect(gateHeadline(gate({ outcome: "blocked_conflicting_sources" }))).toContain(
-      "Blocked — sources conflict",
-    );
+    expect(
+      gateHeadline(gate({ outcome: "blocked_conflicting_sources" })),
+    ).toContain("Blocked — sources conflict");
   });
 
   test("one required row is singular", () => {
@@ -139,7 +139,9 @@ describe("the gate", () => {
 
   test("changes required is pending, a hard block is critical", () => {
     expect(gateTone(gate({ outcome: "changes_required" }))).toBe("pending");
-    expect(gateTone(gate({ outcome: "blocked_missing_data" }))).toBe("critical");
+    expect(gateTone(gate({ outcome: "blocked_missing_data" }))).toBe(
+      "critical",
+    );
     expect(gateTone(gate({ ready: true, outcome: "ready_for_build" }))).toBe(
       "positive",
     );
@@ -149,10 +151,23 @@ describe("the gate", () => {
 describe("row ordering", () => {
   test("blocking rows come first so the worst is not buried", () => {
     const rows = [
-      row({ row_id: "settled", field_name: "A", status: "resolved", blocks_gate: false }),
-      row({ row_id: "open", field_name: "Z", status: "open", blocks_gate: true }),
+      row({
+        row_id: "settled",
+        field_name: "A",
+        status: "resolved",
+        blocks_gate: false,
+      }),
+      row({
+        row_id: "open",
+        field_name: "Z",
+        status: "open",
+        blocks_gate: true,
+      }),
     ];
-    expect(orderedRows(rows).map((item) => item.row_id)).toEqual(["open", "settled"]);
+    expect(orderedRows(rows).map((item) => item.row_id)).toEqual([
+      "open",
+      "settled",
+    ]);
   });
 
   test("blocking rows are sorted blocked, then proposed, then open", () => {
@@ -169,7 +184,10 @@ describe("row ordering", () => {
   });
 
   test("ordering does not mutate the input", () => {
-    const rows = [row({ row_id: "a", blocks_gate: false }), row({ row_id: "b" })];
+    const rows = [
+      row({ row_id: "a", blocks_gate: false }),
+      row({ row_id: "b" }),
+    ];
     const before = rows.map((item) => item.row_id);
     orderedRows(rows);
     blockingRows(rows);
@@ -190,9 +208,9 @@ describe("decisions", () => {
   test("blocking requires naming why", () => {
     expect(requiresBlockerKind("blocked")).toBe(true);
     expect(canSubmitDecision("blocked", "cannot match IDs", null)).toBe(false);
-    expect(canSubmitDecision("blocked", "cannot match IDs", "missing_data")).toBe(
-      true,
-    );
+    expect(
+      canSubmitDecision("blocked", "cannot match IDs", "missing_data"),
+    ).toBe(true);
   });
 
   test("every decision requires a rationale", () => {
@@ -206,7 +224,9 @@ describe("decisions", () => {
   });
 
   test("blocking says Build stays locked", () => {
-    const blocked = decisionOptions(row()).find((item) => item.id === "blocked");
+    const blocked = decisionOptions(row()).find(
+      (item) => item.id === "blocked",
+    );
     expect(blocked!.consequence).toContain("Build locked");
   });
 });
@@ -261,7 +281,9 @@ describe("invalidation and datasets", () => {
     const notice = invalidationNotice({
       approval_invalidation: {
         invalidated: true,
-        reasons: ["A declared dataset changed since this reconciliation was approved."],
+        reasons: [
+          "A declared dataset changed since this reconciliation was approved.",
+        ],
       },
     });
     expect(notice!.headline).toContain("no longer matches");
@@ -286,7 +308,9 @@ describe("invalidation and datasets", () => {
 });
 
 describe("block reasons", () => {
-  function view(overrides: Partial<ReconciliationView> = {}): ReconciliationView {
+  function view(
+    overrides: Partial<ReconciliationView> = {},
+  ): ReconciliationView {
     const base: ReconciliationView = {
       cycle_id: "cycle-1",
       design_approved: true,
@@ -303,9 +327,9 @@ describe("block reasons", () => {
   }
 
   test("an unapproved design is named rather than shown as an empty matrix", () => {
-    expect(reconciliationBlockReason(view({ design_approved: false }))).toContain(
-      "Design has not been approved",
-    );
+    expect(
+      reconciliationBlockReason(view({ design_approved: false })),
+    ).toContain("Design has not been approved");
   });
 
   test("no declared sources is named too", () => {

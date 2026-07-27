@@ -1,10 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { cyclesQueryKey } from "./cycle-hooks";
-import {
-  fetchBuildTest,
-  recordValidityAssessment,
-} from "./validity-api";
+import { fetchBuildTest, recordValidityAssessment } from "./validity-api";
 
 const ROOT = "dbtl-build-test";
 const CYCLES_ROOT = "dbtl-cycles";

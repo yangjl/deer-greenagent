@@ -103,8 +103,7 @@ export function StartCycleDialog({
   // cycle per project, so an existing one forced every new cycle to be a child;
   // migration 0018 dropped that rule because parallel cycles across different
   // traits, populations, or seasons are ordinary research work.
-  const ready =
-    title.trim().length > 0 && researchQuestion.trim().length > 0;
+  const ready = title.trim().length > 0 && researchQuestion.trim().length > 0;
   const missingRequirements = [
     title.trim().length === 0 ? "title" : null,
     researchQuestion.trim().length === 0 ? "research question" : null,
@@ -236,7 +235,6 @@ export function StartCycleDialog({
                 </select>
               </Field>
             )}
-
 
             <Field label="Research question" required>
               <Textarea

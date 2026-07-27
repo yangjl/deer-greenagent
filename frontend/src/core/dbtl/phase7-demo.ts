@@ -24,7 +24,9 @@ const CHECK_NAMES = [
 ] as const;
 
 function checks(
-  overrides: Partial<Record<(typeof CHECK_NAMES)[number], ValidityCheck["status"]>>,
+  overrides: Partial<
+    Record<(typeof CHECK_NAMES)[number], ValidityCheck["status"]>
+  >,
 ): ValidityCheck[] {
   return CHECK_NAMES.map((check) => {
     const status = overrides[check] ?? "passed";

@@ -161,10 +161,7 @@ export function parseHumanInputRequest(
     return null;
   }
   const dbtlCycleSetup = parseDbtlCycleSetup(value.dbtl_cycle_setup);
-  if (
-    value.dbtl_cycle_setup !== undefined &&
-    dbtlCycleSetup === undefined
-  ) {
+  if (value.dbtl_cycle_setup !== undefined && dbtlCycleSetup === undefined) {
     return null;
   }
   if (

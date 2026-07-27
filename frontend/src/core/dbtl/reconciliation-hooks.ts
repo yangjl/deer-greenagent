@@ -94,7 +94,10 @@ export function useDeclareDataset(
   const invalidate = useInvalidateReconciliation(projectId, cycleId);
   return useMutation({
     mutationFn: (
-      input: Omit<Parameters<typeof declareDataset>[0], "projectId" | "cycleId">,
+      input: Omit<
+        Parameters<typeof declareDataset>[0],
+        "projectId" | "cycleId"
+      >,
     ) => declareDataset({ projectId: projectId!, cycleId: cycleId!, ...input }),
     onSuccess: invalidate,
   });

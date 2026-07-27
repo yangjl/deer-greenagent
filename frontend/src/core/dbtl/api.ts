@@ -98,7 +98,9 @@ export async function fetchDbtlGovernance(): Promise<DbtlGovernanceReport> {
     `${getBackendBaseURL()}/api/dbtl/governance/readiness`,
   );
   if (!response.ok) {
-    throw new Error(await parseError(response, "Failed to load DBTL governance"));
+    throw new Error(
+      await parseError(response, "Failed to load DBTL governance"),
+    );
   }
   return (await response.json()) as DbtlGovernanceReport;
 }

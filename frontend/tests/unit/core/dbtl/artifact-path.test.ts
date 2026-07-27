@@ -44,17 +44,17 @@ describe("resolving an artifact URI to a project path", () => {
 
 describe("recognising a readable review document", () => {
   it("accepts markdown", () => {
-    expect(isReviewDocumentUri("/mnt/user-data/outputs/dbtl/a/design/x.md")).toBe(
-      true,
-    );
+    expect(
+      isReviewDocumentUri("/mnt/user-data/outputs/dbtl/a/design/x.md"),
+    ).toBe(true);
     expect(isReviewDocumentUri("outputs/x.MD")).toBe(true);
   });
 
   it("rejects the structured package and other kinds", () => {
     // The JSON stays available for audit, but it is not the reading surface.
-    expect(isReviewDocumentUri("/mnt/user-data/outputs/dbtl/a/design/x.json")).toBe(
-      false,
-    );
+    expect(
+      isReviewDocumentUri("/mnt/user-data/outputs/dbtl/a/design/x.json"),
+    ).toBe(false);
     expect(isReviewDocumentUri("cycle-123")).toBe(false);
     expect(isReviewDocumentUri("")).toBe(false);
   });

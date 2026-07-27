@@ -165,7 +165,9 @@ export function DbtlReadinessSettingsPage() {
               disabled={validation.isPending || Boolean(governance.error)}
               onClick={() => validation.mutate()}
             >
-              <RefreshCw className={cn(validation.isPending && "animate-spin")} />
+              <RefreshCw
+                className={cn(validation.isPending && "animate-spin")}
+              />
               Run validation
             </Button>
           </div>
@@ -176,7 +178,7 @@ export function DbtlReadinessSettingsPage() {
             Checking the durable governance foundation…
           </div>
         ) : governance.error || !governance.data ? (
-          <div className="border-amber-300/60 bg-amber-50/60 mt-3 rounded-lg border p-4 dark:bg-amber-950/20">
+          <div className="mt-3 rounded-lg border border-amber-300/60 bg-amber-50/60 p-4 dark:bg-amber-950/20">
             <p className="text-sm font-medium">Operator controls unavailable</p>
             <p className="text-muted-foreground mt-1 text-xs">
               {governance.error instanceof Error
@@ -210,7 +212,10 @@ export function DbtlReadinessSettingsPage() {
 
             <div className="divide-y rounded-lg border">
               {governance.data.checks.map((check) => (
-                <div key={check.id} className="flex items-start gap-3 px-4 py-3">
+                <div
+                  key={check.id}
+                  className="flex items-start gap-3 px-4 py-3"
+                >
                   {check.status === "passed" ? (
                     <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-700 dark:text-emerald-400" />
                   ) : check.status === "waiting" ? (

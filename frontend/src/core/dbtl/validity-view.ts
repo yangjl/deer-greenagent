@@ -8,11 +8,7 @@ export const VALIDITY_OUTCOMES = [
 ] as const;
 export type ValidityOutcome = (typeof VALIDITY_OUTCOMES)[number];
 export type ValidityTone = "positive" | "neutral" | "pending" | "critical";
-export type CheckStatus =
-  | "passed"
-  | "failed"
-  | "missing"
-  | "not_applicable";
+export type CheckStatus = "passed" | "failed" | "missing" | "not_applicable";
 export type WorkflowRecommendation =
   | "advance_to_learn"
   | "repeat_test"
@@ -48,10 +44,7 @@ export const CHECK_STATUS_LABELS: Record<CheckStatus, string> = {
   not_applicable: "Not applicable",
 };
 
-export const RECOMMENDATION_LABELS: Record<
-  WorkflowRecommendation,
-  string
-> = {
+export const RECOMMENDATION_LABELS: Record<WorkflowRecommendation, string> = {
   advance_to_learn: "Advance to Learn",
   repeat_test: "Repeat Test",
   return_to_build: "Return to Build",
@@ -175,16 +168,13 @@ export function projectedValidity(
     metrics.length > 0 && metrics.every(metricMeetsThreshold);
   const implausible = metrics.some(
     (metric) =>
-      metric.plausible_max !== null &&
-      metric.value > metric.plausible_max,
+      metric.plausible_max !== null && metric.value > metric.plausible_max,
   );
   const failed = checks.filter((check) => check.status === "failed");
   const missing = Object.keys(VALIDITY_CHECK_LABELS).filter((name) => {
     const check = checks.find((item) => item.check === name);
     return (
-      !check ||
-      check.status === "missing" ||
-      check.status === "not_applicable"
+      !check || check.status === "missing" || check.status === "not_applicable"
     );
   });
 

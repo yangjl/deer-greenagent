@@ -110,9 +110,8 @@ function ReviewDrawer({
     [queue.data],
   );
   const current =
-    suggestions.find(
-      (item) => suggestionKey(item) === activeSuggestionKey,
-    ) ?? suggestions[0];
+    suggestions.find((item) => suggestionKey(item) === activeSuggestionKey) ??
+    suggestions[0];
 
   if (queue.isPending) {
     return (
@@ -375,9 +374,7 @@ export function MemoryScopeSettingsPage() {
             <Button
               onClick={() => setReviewing(true)}
               disabled={counts.private_legacy === 0}
-              className={cn(
-                counts.private_legacy === 0 && "opacity-50",
-              )}
+              className={cn(counts.private_legacy === 0 && "opacity-50")}
             >
               {reviewCallToAction(counts)}
             </Button>

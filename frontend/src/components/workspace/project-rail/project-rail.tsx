@@ -586,9 +586,8 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           <DialogHeader>
             <DialogTitle>Remove {cycleToRemove?.title}?</DialogTitle>
             <DialogDescription>
-              The cycle will leave the active rail and be recorded as
-              abandoned. Its evidence and activity history remain available
-              for audit.
+              The cycle will leave the active rail and be recorded as abandoned.
+              Its evidence and activity history remain available for audit.
             </DialogDescription>
           </DialogHeader>
           <Textarea
@@ -607,9 +606,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
             </Button>
             <Button
               variant="destructive"
-              disabled={
-                abandonCycle.isPending || !cycleRemovalReason.trim()
-              }
+              disabled={abandonCycle.isPending || !cycleRemovalReason.trim()}
               onClick={() => void removeCycle()}
             >
               {abandonCycle.isPending ? "Removing…" : "Remove cycle"}

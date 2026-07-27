@@ -64,9 +64,7 @@ export async function updateThreadProject(
     body: JSON.stringify({ container_path: containerPath }),
   });
   if (!response.ok) {
-    throw new Error(
-      await readErrorDetail(response, "Failed to link project."),
-    );
+    throw new Error(await readErrorDetail(response, "Failed to link project."));
   }
   return response.json() as Promise<ThreadProjectResponse>;
 }

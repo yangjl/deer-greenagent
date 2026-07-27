@@ -121,7 +121,8 @@ export const PROPOSAL_ACTIONS: readonly ActionDescriptor[] = [
   {
     id: "keep_ordinary",
     label: "Keep as ordinary chat",
-    consequence: "Nothing is recorded and the conversation continues unchanged.",
+    consequence:
+      "Nothing is recorded and the conversation continues unchanged.",
   },
   {
     id: "not_sure",
@@ -203,7 +204,9 @@ export type ClarificationState = Readonly<Record<string, string>>;
 export function initialClarification(
   proposal: ProposalPayload,
 ): ClarificationState {
-  return Object.fromEntries(proposal.missing_fields.map((field) => [field, ""]));
+  return Object.fromEntries(
+    proposal.missing_fields.map((field) => [field, ""]),
+  );
 }
 
 /** Returns a new state; the previous one is never mutated. */
@@ -285,7 +288,9 @@ export interface EvaluationSummary {
  * against what was not. Using one denominator for both would make the pair
  * move together and hide the trade-off between them.
  */
-export function summarizeEvaluations(stats: EvaluationStats): EvaluationSummary {
+export function summarizeEvaluations(
+  stats: EvaluationStats,
+): EvaluationSummary {
   return {
     falseUpgradeRate:
       stats.proposed > 0 ? stats.false_upgrades / stats.proposed : 0,
