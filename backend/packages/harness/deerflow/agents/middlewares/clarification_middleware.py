@@ -48,6 +48,9 @@ _RESERVED_FIELD_NAMES = frozenset(
 MAX_FORM_FIELDS = 16
 MAX_FIELD_OPTIONS = 24
 MAX_FIELD_TEXT_CHARS = 200
+# Field descriptions carry a "why" plus provenance sentence (DBTL setup
+# questions), so they get more room than labels/values.
+MAX_FIELD_DESCRIPTION_CHARS = 500
 # Total budget over the serialized normalized fields, in UTF-8 bytes. The
 # per-item caps alone still admit forms whose plain-text IM fallback exceeds
 # channel delivery limits (Slack truncates at 40k chars per message; Feishu
@@ -221,6 +224,16 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
                 if len(placeholder.strip()) > MAX_FIELD_TEXT_CHARS:
                     return []
                 field["placeholder"] = placeholder.strip()
+            description = entry.get("description")
+            if isinstance(description, str) and description.strip():
+                if len(description.strip()) > MAX_FIELD_DESCRIPTION_CHARS:
+                    return []
+                field["description"] = description.strip()
+            default = entry.get("default")
+            if isinstance(default, str) and default.strip():
+                if len(default.strip()) > MAX_FIELD_TEXT_CHARS:
+                    return []
+                field["default"] = default.strip()
             normalized.append(field)
 
         if len(json.dumps(normalized, ensure_ascii=False).encode("utf-8")) > MAX_FORM_SERIALIZED_BYTES:

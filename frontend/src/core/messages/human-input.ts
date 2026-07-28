@@ -57,6 +57,10 @@ export type HumanInputField = {
   required: boolean;
   placeholder?: string;
   options?: HumanInputOption[];
+  /** Why this field is asked / where its proposal came from (fork extension). */
+  description?: string;
+  /** Server-proposed answer the user corrects rather than composes (fork extension; wire key `default`). */
+  defaultValue?: string;
 };
 
 export type HumanInputFormValue = string | number | boolean | string[];
@@ -174,6 +178,24 @@ export function buildInitialHumanInputFormValues(
   for (const field of fields) {
     if (field.type === "checkbox") {
       values[field.name] = false;
+      continue;
+    }
+    // A server-proposed default seeds the control so the user corrects a
+    // proposal instead of composing from scratch (DBTL setup questions).
+    // Selects only accept a default naming a real option value.
+    if (!field.defaultValue) {
+      continue;
+    }
+    if (field.type === "select") {
+      if (
+        field.options?.some((option) => option.value === field.defaultValue)
+      ) {
+        values[field.name] = field.defaultValue;
+      }
+      continue;
+    }
+    if (field.type === "text" || field.type === "textarea") {
+      values[field.name] = field.defaultValue;
     }
   }
   return values;
@@ -357,6 +379,12 @@ function parseFields(value: unknown): HumanInputField[] | undefined {
       required: required === true,
       ...(readOptionalString(field.placeholder)
         ? { placeholder: readOptionalString(field.placeholder) }
+        : {}),
+      ...(readOptionalString(field.description)
+        ? { description: readOptionalString(field.description) }
+        : {}),
+      ...(readOptionalString(field.default)
+        ? { defaultValue: readOptionalString(field.default) }
         : {}),
       ...(options ? { options } : {}),
     });
