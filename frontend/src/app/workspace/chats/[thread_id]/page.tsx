@@ -250,6 +250,26 @@ export default function ChatPage() {
     cycleList,
   );
 
+  // A cycle picked in the project rail scopes the conversation it was picked
+  // in, and nothing else.
+  //
+  // The selection lives in a provider above this route, so it used to survive
+  // navigation: expand a cycle row to look at its to-dos, open a *new*
+  // conversation, and that conversation's very first message was routed as a
+  // continuation of the old cycle. The backend's precedence ladder puts a
+  // selected cycle above the classifier on purpose, so the request went
+  // straight into that cycle's Design meeting and the "is this a DBTL cycle?"
+  // proposal never ran — for a message that was describing new work.
+  //
+  // Clearing on the active conversation is what makes the ladder's first rung
+  // mean "the cycle this person is working in", rather than "the last cycle
+  // they clicked on, ever". A rail click inside one conversation still holds
+  // until they leave it, and the design kickoff is unaffected because it
+  // carries its own cycle id rather than reading this one.
+  useEffect(() => {
+    selectCycle(null);
+  }, [selectCycle, threadId]);
+
   // A rail action arms the composer; it never sends. The human still writes the
   // request in the chatbox, which is why the cursor moves there.
   useEffect(() => {
