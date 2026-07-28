@@ -205,6 +205,102 @@ gitignored.
 
 Important GreenAgent settings:
 
+Managed integrations install shared read-only skill packs without mixing them
+into custom skills. The Lark/Feishu CLI integration is available under
+`Settings → Integrations → Lark / Feishu CLI`; an administrator installs or
+upgrades the official `lark-*` pack once under
+`{DEER_FLOW_HOME}/integrations/skills/lark-cli`, and every user discovers that
+same pack with an independent enabled state. Each user's app configuration and
+OAuth data remain isolated under
+`{DEER_FLOW_HOME}/users/{user_id}/integrations/lark-cli/{config,data}`. These
+secret directories are restricted to `0700`, regular credential files to
+`0600`, and symlinks are rejected.
+
+After installation, users can click **Connect Lark** to open a browser
+authorization link; no terminal authorization is required. The same UI can
+request additional permission domains such as Calendar, Docs, or Drive, or a
+specific OAuth scope reported by `lark-cli`. A cheap status refresh only
+inspects the local credential tree, so the UI reports **Credentials configured
+(not live-verified)** until an explicit browser completion performs live token
+verification. The action then remains **Reconnect Lark** so users can replace
+or extend authorization. If an agent hits missing Lark authorization during a
+conversation, the managed `lark-shared` guidance points the user back to the
+same settings entry with `?settings=integrations`.
+
+Installing the Lark skill pack resolves the latest official `larksuite/cli`
+release from GitHub and downloads that version's skills at install time, so the
+Gateway needs outbound internet access for that step (it falls back to a
+bottom-line pinned version if the release lookup fails). The settings page shows
+the installed version and, when available, the newest published version so an
+admin can reinstall to upgrade. Air-gapped deployments can pre-stage the archive
+and point `DEER_FLOW_LARK_CLI_SKILLS_ARCHIVE` at the local file. Integrity does
+not depend on a pinned archive byte hash (GitHub does not guarantee stable
+source-archive bytes); instead the download is restricted to the official GitHub
+host, every archive member passes structural safety guards, and a content hash
+of the effective installed skill tree (including DeerFlow's injected shared
+guidance) is recorded so content changes are auditable across reinstalls.
+
+When `sandbox.use` selects the AIO provider, the same install also downloads the
+official Linux amd64 and arm64 CLI release archives, verifies their published
+SHA-256 checksums, safely extracts one executable per architecture, and mounts
+the resulting runtime read-only at `/mnt/integrations/lark-cli/runtime`. An
+architecture-selecting launcher in that mount makes `lark-cli` available in the
+sandbox `PATH`. Air-gapped AIO deployments can pre-stage a symlink-free runtime
+tree containing `bin/lark-cli` plus both `linux-{amd64,arm64}/lark-cli` files and
+set `DEER_FLOW_LARK_CLI_SANDBOX_RUNTIME_DIR` to that directory.
+
+> **Sandbox trust boundary:** the browser never receives the Lark app secret, but
+> agent conversations run `lark-cli` inside the sandbox, so the per-user
+> credential directories are mounted into it: `config` (holding the long-lived
+> `appSecret`) is mounted **read-only** and `data` (refreshable OAuth tokens)
+> writable. Both remain *readable* by any process the agent runs there, so code
+> reached via prompt injection in a tool result could read them. Treat the
+> sandbox as inside the Lark credential trust boundary until the sidecar
+> credential-broker follow-up removes these mounts from sandbox execution.
+
+For remote/Kubernetes deployments (the provisioner backend), the sandbox
+`lark-cli` runtime can instead be supplied by an optional init container that
+copies the binaries into a shared `emptyDir` — no install-time GitHub download and
+no hostPath/PVC runtime mount. Publish the image under
+[`docker/lark-cli-init`](docker/lark-cli-init/README.md) and set
+`LARK_CLI_INIT_IMAGE` on the provisioner; it stays off (legacy behavior) when
+unset. The Lark integration status (`GET /api/integrations/lark/status`) reports
+`sandbox_runtime_mode` and `sandbox_runtime_ready` so the Settings UI shows
+whether `lark-cli` will actually be present in the sandbox at chat time, rather
+than a green status hiding a later `command not found`.
+
+If a trusted operator manages the configured skills directory through an external mount such as MinIO, NFS, or CSI, an administrator can call `POST /api/skills/reload` after changing files. This invalidates skill prompt caches for the current Gateway process and waits up to the bounded refresh timeout so subsequent runs rescan the latest files; running tasks are unchanged. A loader-level filesystem failure returns a generic server error and preserves the last successfully loaded process cache rather than publishing an empty catalog. Uvicorn workers and Kubernetes Pods must each be targeted separately. Direct mount writes bypass the validation, SkillScan, and history applied by DeerFlow's install/edit APIs, so only operator-controlled systems should have write access.
+
+Skill installs and agent-managed skill edits run through **SkillScan**, a native deterministic safety scanner before the LLM-based skill scanner. Phase 1 runs offline with no Semgrep/OpenGrep dependency, blocks high-confidence `CRITICAL` findings such as private keys or shell execution, and passes warning findings to the LLM scanner for contextual review. Python instance-client exfiltration checks follow a minimal same-scope evidence chain: a simple name bound to a known client constructor, optional name-to-name aliases, and an actual outbound method or context-manager use supported by that constructor. Constructor roots must be proven imports; bare canonical-looking names are not inferred as modules. Nested scopes do not inherit client handles and inherit only constructor import aliases that are never rebound in the enclosing scope. Comprehensions, walrus-bearing statements, annotations, complex binding targets, unsupported operations, and ambiguous branch flows produce no finding from this signal; skipped constructs conservatively invalidate every name they may bind so stale client state cannot create a finding. A deterministic work budget or recursion limit reached by this best-effort analysis does not discard findings already collected for the file. Set `skill_scan.enabled: false` in `config.yaml` to disable only the deterministic analyzers; safe archive extraction and the LLM scanner still run.
+
+DeerFlow also ships with **skill-reviewer**, a public skill for read-only skill quality review. It uses the built-in `review_skill_package` tool to inspect installed skills, local packages, archives, or pasted `SKILL.md` content without activating the target skill, binding its secrets, executing its scripts, or installing it. The tool returns a compact, tag-neutralized JSON payload to the model context and keeps the full raw review payload in the tool artifact for programmatic consumers. The deterministic review core reuses DeerFlow parsing and SkillScan facts, emits versioned JSON contracts under `contracts/skill_review/`, and can be run from the backend CLI:
+
+```bash
+cd backend
+uv run python -m deerflow.skills.review.cli ../skills/public/data-analysis --format text --fail-on error --fail-on-incomplete
+```
+
+Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
+
+Advanced deployments can enable pluggable authorization with `authorization.enabled` in `config.yaml`. A configured `AuthorizationProvider` filters denied tools before they reach the model or deferred-tool catalog, then the same provider is checked again before every business-tool execution through the existing guardrail middleware. Gateway `threads:*` and `runs:*` route permissions are derived from the same provider, while existing owner checks and admin-only management gates remain in force. A generated `tool_search` may bypass the second tool check only when it fronts the current build's already-filtered deferred catalog. The built-in RBAC provider supports per-role `tools` and `routes` allow/deny policies and validates that `default_role` names a configured role; authorization is disabled by default. See `config.example.yaml` and the [authorization RFC](docs/plans/2026-07-10-pluggable-authorization-rfc.md).
+
+Advanced deployments can also extend the agent runtime itself by declaring zero-argument `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. DeerFlow loads the same configured class list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, and broken modules fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Per-context parameterization and separate lead-only/subagent-only middleware lists are not supported yet.
+
+Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
+
+The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
+
+When the agent asks for clarification, the Web UI shows the structured response card but keeps the normal composer available. Users can complete the card or send a free-form chat message to bypass it; that message closes the latest pending clarification and becomes the agent's next input.
+
+Unsent Web UI composer drafts survive page reloads and switching between conversations within the same browser tab. Drafts are isolated by user, agent, and conversation, include a selected slash skill when present, and are cleared once a send is accepted. Attachments and quoted conversation context are intentionally not persisted.
+
+The Web UI composer also supports browser-based voice dictation when the browser exposes the Web Speech API. The microphone button transcribes speech into the local draft only; DeerFlow receives only the transcribed text, while audio handling is delegated to the browser or operating system speech-recognition service according to that environment's policy. Users can review or edit the text before sending.
+
+The Web UI displays a localized AI-generated-content disclaimer below the composer in both standard and custom-agent conversations, reminding users to verify important
+information.
+
+Interrupted first-turn runs still persist a fallback conversation title, so stopping a streaming response does not leave the thread as "Untitled" after refresh.
+
 Streaming Markdown responses animate only newly arrived words; text that is already visible is not faded out and replayed when the next chunk extends the same block.
 
 In the Web UI, completed assistant turns can be branched into a new main conversation. The new thread starts from that turn's checkpoint and keeps the preceding replay checkpoint, so the branched response can be regenerated immediately. The latest response can also be regenerated after an interruption, even when its streamed partial text never reached a checkpoint. Regenerating the latest response preserves the thread's current title, including a title you renamed manually after the original response. Legacy or imported histories without checkpoint parent links use a bounded chronological fallback; if no earlier replay checkpoint exists, branching still succeeds with the legacy single-checkpoint shape, while regeneration remains unavailable for that inherited response. Existing single-checkpoint branches are left unchanged rather than attempting an unsafe checkpoint copy. Because workspace files are not checkpointed, the branch only receives a best-effort copy of the current workspace when you branch from the latest turn; branching from an older turn keeps just the restored message history so the branch never inherits files that were created in a later part of the conversation.
