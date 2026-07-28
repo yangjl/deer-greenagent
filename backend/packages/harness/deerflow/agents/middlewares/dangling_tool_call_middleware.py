@@ -38,6 +38,10 @@ _MAX_RECOVERY_ERROR_DETAIL_LEN = 500
 _UNKNOWN_TOOL_NAME = "unknown_tool"
 _EMPTY_TOOL_NAME_ERROR = "Tool call could not be executed because its name was missing or empty."
 _SYNTHETIC_TOOL_CALL_ID_PREFIX = "deerflow_synthetic_tool_call_"
+# Stands in for reasoning that was lost to an interrupted stream. Says what
+# happened rather than fabricating a thought, so the model is not led to
+# treat invented reasoning as its own.
+_DROPPED_REASONING_PLACEHOLDER = "[This turn's reasoning was lost to an interrupted response and could not be replayed.]"
 
 
 def _valid_tool_name(name: object) -> bool:
@@ -420,13 +424,72 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
             return messages
         return [rewritten.get(index, msg) for index, msg in enumerate(messages)]
 
+    @staticmethod
+    def _is_unusable_reasoning_block(block: object) -> bool:
+        """Whether a content block is a reasoning block the provider will refuse.
+
+        Anthropic streams extended thinking as ``content_block_start`` announcing
+        ``{"type": "thinking"}`` with the text arriving afterwards as deltas. A
+        stream that ends between the two — a cancelled run, a provider error, a
+        400 caused by something else in the same request — leaves an accumulated
+        ``AIMessage`` whose thinking block has no ``thinking`` field. Replaying
+        it is rejected with ``thinking.thinking: Field required``, and because
+        the damage is checkpointed, *every* later turn in that thread fails on a
+        request unrelated to the one that caused it.
+        """
+        if not isinstance(block, dict):
+            return False
+        kind = block.get("type")
+        if kind == "thinking":
+            return not str(block.get("thinking") or "").strip()
+        if kind == "redacted_thinking":
+            return not str(block.get("data") or "").strip()
+        return False
+
+    @classmethod
+    def _repair_thinking_blocks(cls, messages: list) -> list:
+        """Drop unusable reasoning blocks from assistant turns, surgically.
+
+        Only structurally unusable blocks go. A *complete* thinking block must
+        survive byte-identical because Anthropic verifies its signature, so this
+        cannot be a blanket "strip reasoning" pass.
+
+        Assistant messages only: a reasoning block on a human or tool message is
+        not something this middleware put there and not something the provider
+        will validate the same way. Untouched messages keep their identity, so a
+        clean transcript is not rebuilt on every model call.
+        """
+        repaired: list = []
+        changed = False
+        for msg in messages:
+            content = getattr(msg, "content", None)
+            if getattr(msg, "type", None) != "ai" or not isinstance(content, list):
+                repaired.append(msg)
+                continue
+            kept = [block for block in content if not cls._is_unusable_reasoning_block(block)]
+            if len(kept) == len(content):
+                repaired.append(msg)
+                continue
+            # An assistant turn serialized with no content at all is also a 400,
+            # so removing the block must not be the thing that empties it. Tool
+            # calls carry the turn on their own; without them, something has to.
+            if not kept and not cls._message_tool_calls(msg):
+                kept = [{"type": "text", "text": _DROPPED_REASONING_PLACEHOLDER}]
+            logger.info(
+                "DanglingToolCallMiddleware: dropped %d unusable reasoning block(s) from a replayed assistant message",
+                len(content) - len([b for b in kept if b in content]),
+            )
+            repaired.append(msg.model_copy(update={"content": kept}))
+            changed = True
+        return repaired if changed else messages
+
     def _build_patched_messages(self, messages: list) -> list | None:
         """Return messages with tool results grouped after their tool-call AIMessage.
 
         This normalizes model-bound causal order before provider serialization while
         preserving already-valid transcripts unchanged.
         """
-        normalized = self._normalize_tool_call_ids(messages)
+        normalized = self._repair_thinking_blocks(self._normalize_tool_call_ids(messages))
 
         tool_messages_by_id: dict[str, deque[ToolMessage]] = defaultdict(deque)
         for msg in normalized:
