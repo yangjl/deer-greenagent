@@ -124,7 +124,7 @@ def _render_consensus(results: Sequence[Mapping[str, Any]]) -> list[str]:
     if consensus is None:
         return []
 
-    lines = ["", "## Where the council landed"]
+    lines = ["", "## Where the meeting landed"]
 
     if consensus.get("unanimous"):
         # Not an accusation, and not hidden either. Every position and the red
@@ -201,7 +201,7 @@ def render_review_markdown(
             "",
             "## Design",
             "",
-            "This design was **written by the project owner**, not produced by a council. No agent was consulted and no worker ran for this attempt.",
+            "This design was **written by the project owner**, not decided in a design meeting. No agent was consulted and no worker ran for this attempt.",
             "",
             authored,
         ]

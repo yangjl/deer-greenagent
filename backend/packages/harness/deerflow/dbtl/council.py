@@ -252,6 +252,15 @@ class CouncilSeat:
     #: each was told to argue from somewhere different, and showing the same
     #: generic line under each would read as one agent listed three times.
     proposed_brief: str = ""
+    #: Owner-edited dials from the preflight card (``deerflow.dbtl.council_settings``).
+    #: ``max_tokens`` overrides the depth budget for this one seat, ``reasoning``
+    #: is ``"extended"`` to run the seat with extended thinking, and
+    #: ``instructions`` is the owner's verbatim note to this participant. All
+    #: empty unless a person edited the card, so an untouched roster records
+    #: and runs exactly as before.
+    max_tokens: int | None = None
+    reasoning: str = ""
+    instructions: str = ""
 
     @property
     def role_label(self) -> str:
@@ -284,6 +293,9 @@ class CouncilSeat:
             "inherits_all_tools": self.inherits_all_tools,
             "brief": self.brief,
             "focus": self.focus,
+            "max_tokens": self.max_tokens,
+            "reasoning": self.reasoning,
+            "instructions": self.instructions,
             "counts_toward_stage_output": self.counts_toward_stage_output,
         }
 
@@ -624,14 +636,14 @@ def recommend_depth(request_text: str) -> DepthRecommendation:
         phrases = ", ".join(sorted({hit.matched.lower() for hit in heavy}))
         return DepthRecommendation(
             depth=CouncilDepth.HEAVY,
-            reason=f"This reads as work that has to hold up outside the project ({phrases}), so it opens on a heavy council.",
+            reason=f"This reads as work that has to hold up outside the project ({phrases}), so it opens on a heavy meeting.",
             rule_hits=heavy + light,
         )
     if light:
         phrases = ", ".join(sorted({hit.matched.lower() for hit in light}))
         return DepthRecommendation(
             depth=CouncilDepth.LIGHT,
-            reason=f"This reads as a first look rather than a commitment ({phrases}), so it opens on a light council.",
+            reason=f"This reads as a first look rather than a commitment ({phrases}), so it opens on a light meeting.",
             rule_hits=light,
         )
     return DepthRecommendation(

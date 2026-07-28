@@ -63,6 +63,11 @@ from deerflow.dbtl.council import (
     recommend_depth,
     request_context,
 )
+from deerflow.dbtl.council_settings import (
+    ParticipantSettings,
+    parse_participant_settings,
+    participants_payload,
+)
 from deerflow.dbtl.routing import ExplicitChoice
 from deerflow.dbtl.setup_questions import (
     SetupQuestion,
@@ -283,7 +288,7 @@ def _render_review_intent_guidance(
             f"{action} and provide the rationale there. That authenticated action binds your decision to the exact "
             "stage attempt, artifact revision, and project revision you reviewed.",
             "",
-            "No council workers ran, no new artifact was created, and the existing review package remains unchanged.",
+            "No meeting participants ran, no new artifact was created, and the existing review package remains unchanged.",
         ]
     )
 
@@ -547,7 +552,7 @@ COUNCIL_ADJUST_PREFIX = "dbtl-council-edit__"
 #: run at, and this one is a request to redraw the roster first.
 COUNCIL_ADJUST_OPTION = "adjust"
 
-_ADJUST_QUESTION = "What should the council do differently? Name the seats to add, drop, or re-aim — your words go to the roster writer exactly as you type them."
+_ADJUST_QUESTION = "What should the meeting do differently? Name the participants to add, drop, or re-aim — your words go to the roster writer exactly as you type them."
 _ADJUST_NOTE = "Nothing has been dispatched. The roster is redrawn from what you write here, and you will see it again before anyone runs."
 
 
@@ -572,12 +577,17 @@ def _council_preflight_message(
     recommendation,
     *,
     request_nonce: str,
+    model_options: Sequence[str] = (),
 ) -> tuple[AIMessage, ToolMessage]:
-    """Show who will sit on the council, and let the human set the depth.
+    """Show who will sit in the design meeting, and let the human set it up.
 
     Emitted before any worker is dispatched, so the choice is real. The depth
     options and the roster ride on the artifact as structured data; the text
-    below is the same information for anyone who cannot see the card.
+    below is the same information for anyone who cannot see the card. The
+    roster also rides as ``council_participants`` — one editable card per
+    participant, prefilled with the roster writer's suggestions, whose edits
+    (model, token budget, reasoning strength, owner instructions) come back on
+    the reply and are validated server-side before anyone runs.
     """
     cycle = decision.cycle_id or "selected-cycle"
     digest = sha256(f"{cycle}:{request_nonce}".encode()).hexdigest()[:16]
@@ -633,12 +643,13 @@ def _council_preflight_message(
                     "source": "ask_clarification",
                     "request_id": request_id,
                     "clarification_type": "council_preflight",
-                    "title": "Before the Design council convenes",
+                    "title": "Before the design meeting starts",
                     "question": question,
                     "context": note,
                     "input_mode": "single_choice",
                     "options": options,
                     "council_plan": plan.as_dict(),
+                    "council_participants": participants_payload(plan, model_options=model_options),
                     "recommended_depth": recommendation.depth.value,
                     "recommended_option_id": recommendation.depth.value,
                 }
@@ -685,7 +696,7 @@ def _design_clarification_message(
                     "source": "ask_clarification",
                     "request_id": request_id,
                     "clarification_type": "design_decision",
-                    "title": "Design council needs your input",
+                    "title": "The design meeting needs your input",
                     "question": question,
                     "context": note,
                     "input_mode": "free_text",
@@ -811,7 +822,7 @@ def _council_adjustment_message(
                     "source": "ask_clarification",
                     "request_id": request_id,
                     "clarification_type": "council_adjustment",
-                    "title": "Adjust the Design council",
+                    "title": "Adjust the design meeting",
                     "question": _ADJUST_QUESTION,
                     "context": _ADJUST_NOTE,
                     "input_mode": "free_text",
@@ -888,6 +899,49 @@ def _confirmed_council_depth(state: dict) -> CouncilDepth | None:
         # A stale client losing a preference is a far smaller failure than a
         # cycle that cannot be designed; fall back to the recommendation.
         return None
+
+
+def _confirmed_participant_settings(state: dict, known_models: Sequence[str]) -> dict[str, ParticipantSettings]:
+    """The participant edits from the answered preflight card, validated.
+
+    The typed ``read_human_input_response`` deliberately strips unknown keys,
+    so the edits are read off the raw reply payload — then validated field by
+    field by ``parse_participant_settings``, which is what keeps this
+    server-owned rather than trusting the client's shapes. Like the depth,
+    this is scoped to the answering turn (only the newest message counts) and
+    the reply must name a card the server itself emitted; a forged
+    ``request_id`` matches nothing and the edits are ignored.
+    """
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        raw = (getattr(message, "additional_kwargs", None) or {}).get("human_input_response")
+        if not isinstance(raw, dict):
+            return {}
+        request_id = str(raw.get("request_id") or "")
+        if raw.get("source") != "ask_clarification" or not request_id.startswith(COUNCIL_PREFLIGHT_PREFIX):
+            return {}
+        if _emitted_card_request(state, request_id) is None:
+            return {}
+        return parse_participant_settings(raw.get("participants"), known_models=known_models)
+    return {}
+
+
+def _adapter_known_models(stage_adapter) -> tuple[str, ...]:
+    """The configured model names, when the adapter can report them.
+
+    ``getattr`` rather than a protocol requirement so test doubles and older
+    adapters keep working; an adapter that cannot name models simply yields a
+    card without model pickers and a reply whose model edits are dropped.
+    """
+    reader = getattr(stage_adapter, "known_models", None)
+    if not callable(reader):
+        return ()
+    try:
+        return tuple(str(item) for item in reader() or ())
+    except Exception:  # noqa: BLE001 - a broken model listing must not block routing
+        logger.debug("Could not read the configured models for the meeting preflight card.", exc_info=True)
+        return ()
 
 
 def _with_council_depth(config: RunnableConfig, depth: CouncilDepth) -> RunnableConfig:
@@ -1143,6 +1197,7 @@ def build_supervisor_graph(
                             plan,
                             recommend_depth(request_text),
                             request_nonce=request_nonce,
+                            model_options=_adapter_known_models(stage_adapter),
                         )
                     )
                 }
@@ -1159,6 +1214,12 @@ def build_supervisor_graph(
             # The roster the person approved was drawn with this note, so the
             # one that runs has to be drawn with it too.
             execute_kwargs["council_adjustment"] = adjustment
+        participant_settings = _confirmed_participant_settings(state, _adapter_known_models(stage_adapter))
+        if participant_settings:
+            # The dials the person set on the participant cards travel with
+            # the same reply as the depth, and like the depth they apply to
+            # the meeting that reply convenes — not to every later turn.
+            execute_kwargs["participant_settings"] = participant_settings
         result = stage_adapter.execute(**execute_kwargs)
         if isawaitable(result):
             result = await result

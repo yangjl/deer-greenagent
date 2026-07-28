@@ -32,7 +32,9 @@ from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.dbtl.agent_selector import AgentCandidate, Assignment, SelectionResult, build_candidates
 from deerflow.dbtl.consensus import CONSENSUS_CONTRACT
 from deerflow.dbtl.council import (
+    ROLE_BRIEFS,
     CouncilPlan,
+    CouncilRole,
     council_depth_from_config,
     depth_policy,
     plan_council,
@@ -45,11 +47,18 @@ from deerflow.dbtl.council_proposal import (
     parse_council_proposal,
     seatable_agents,
 )
+from deerflow.dbtl.council_settings import (
+    REASONING_EXTENDED,
+    ParticipantSettings,
+    apply_participant_settings,
+    owner_instruction_lines,
+)
 from deerflow.dbtl.cycle_state import StageStatus, stage_for_state
 from deerflow.dbtl.review_markdown import render_review_markdown, render_stage_digest
 from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
 from deerflow.dbtl.stage_runner import (
     RESULT_CONTRACT,
+    WORKSPACE_PATH_NOTE,
     AsyncWorkerDispatcher,
     DispatchOutcome,
     StageExecutionOutcome,
@@ -57,6 +66,7 @@ from deerflow.dbtl.stage_runner import (
     WorkUnit,
     arun_stage,
     collect_results,
+    plan_stage,
 )
 from deerflow.dbtl.stage_spec import StageSpec, WorkerBudget, resolve_stage_spec
 from deerflow.dbtl.worker_result import (
@@ -177,7 +187,9 @@ _FAILURE_REASON_CHARS = 300
 _MAX_FAILURE_REASONS = 6
 
 _HUMAN_AUTHORING_QUESTION = "Write the design for this cycle. What is the question, what will you measure, on what population and over what seasons, and what result would make you reject it?"
-_HUMAN_AUTHORING_NOTE = "This council is set to **Write it myself**, so no agent was consulted and no worker ran. Your answer is recorded as the Design review package exactly as you write it; you still review and approve it yourself."
+_HUMAN_AUTHORING_NOTE = (
+    "This design meeting is set to **Write it myself**, so no agent was consulted and no worker ran. Your answer is recorded as the Design review package exactly as you write it; you still review and approve it yourself."
+)
 
 
 def _failure_reasons(results: Sequence[dict[str, Any]]) -> list[str]:
@@ -363,6 +375,7 @@ def _proposed_units(
     context: str,
     round_number: int = 1,
     change_request: str | None = None,
+    settings: Mapping[str, ParticipantSettings] | None = None,
 ) -> tuple[WorkUnit, ...]:
     """Turn a validated roster into work units.
 
@@ -374,17 +387,19 @@ def _proposed_units(
     """
     units: list[WorkUnit] = []
     for index, seat in enumerate(proposal.positions, start=1):
+        override = (settings or {}).get(f"position-{index}")
         prompt = "\n".join(
             [
                 f"You are contributing to the {spec.title} stage of a DBTL research cycle.",
                 "",
                 f"Stage purpose: {spec.purpose}",
-                f"Your seat on the council: {seat.focus}",
+                f"Your seat in the meeting: {seat.focus}",
                 f"What you argue from: {seat.brief}",
                 "",
                 "You are one of several independent positions and you cannot see the others.",
                 "Argue your own case as strongly as the evidence allows; a chair will weigh it against the rest.",
                 "Do not hedge toward what you imagine the others will say.",
+                *owner_instruction_lines(_owner_note(override, seat.brief)),
                 *(
                     [
                         "",
@@ -400,6 +415,8 @@ def _proposed_units(
                 "Project context:",
                 context.strip() or "(none supplied)",
                 "",
+                WORKSPACE_PATH_NOTE,
+                "",
                 RESULT_CONTRACT,
             ]
         )
@@ -410,13 +427,45 @@ def _proposed_units(
                 agent_name=seat.agent_name,
                 prompt=prompt,
                 via_generalist=seat.agent_name == "general-purpose",
-                model=seat.model,
+                model=(override.model if override else None) or seat.model,
                 role="position",
                 focus=seat.focus,
                 round=round_number,
+                max_tokens=override.max_tokens if override else None,
+                reasoning=(override.reasoning if override else None) or "",
             )
         )
     return tuple(units)
+
+
+def _owner_note(override: ParticipantSettings | None, prefill: str) -> str:
+    """The owner's note to one participant, or nothing.
+
+    The card prefills the instructions box with the seat's brief, so an
+    untouched box comes back byte-identical to the suggestion. Quoting that
+    into the prompt as the owner's words would attribute the roster writer's
+    text to a person, and say it twice.
+    """
+    if override is None:
+        return ""
+    note = override.instructions.strip()
+    if note.casefold() == (prefill or "").strip().casefold():
+        return ""
+    return note
+
+
+def _unit_with_settings(unit: WorkUnit, override: ParticipantSettings | None, *, prefill: str = "") -> WorkUnit:
+    """One capability-selected unit, carrying the owner's edits for its seat."""
+    if override is None:
+        return unit
+    note = _owner_note(override, prefill)
+    return replace(
+        unit,
+        model=override.model or unit.model,
+        max_tokens=override.max_tokens if override.max_tokens is not None else unit.max_tokens,
+        reasoning=override.reasoning or unit.reasoning,
+        prompt="\n".join([unit.prompt, *owner_instruction_lines(note)]) if note else unit.prompt,
+    )
 
 
 def _stage_worker_config(base_config, budget: WorkerBudget):
@@ -588,8 +637,24 @@ def _safe_token(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:20]
 
 
+#: What the sandbox calls the project root. The manifest lists the human-visible
+#: folder, but a worker can only *read* through the virtual path, so the two must
+#: be joined before the listing is shown to anyone who will act on it.
+WORKSPACE_VIRTUAL_ROOT = "/mnt/user-data"
+
+
 def _project_manifest(project_root: str, *, limit: int = 120) -> list[dict[str, Any]]:
-    """Return a bounded, metadata-only view of the human-visible project folder."""
+    """Return a bounded, metadata-only view of the human-visible project folder.
+
+    Paths are emitted as the **virtual paths a worker can actually open**
+    (``/mnt/user-data/...``), not as paths relative to the project root.
+    ``read_file`` rejects anything outside the virtual prefix, so a relative
+    listing was an invitation to a permission error: a whole design meeting
+    reported "every file read was denied", each participant returned no
+    result, and the chair could only record that it had nothing to synthesize
+    from. The listing is the only place most workers learn a path exists, so
+    it has to name the path in the form they can use.
+    """
     root = Path(project_root).expanduser().resolve()
     ignored = {".git", ".greenagent", "node_modules", "__pycache__"}
     entries: list[dict[str, Any]] = []
@@ -609,7 +674,7 @@ def _project_manifest(project_root: str, *, limit: int = 120) -> list[dict[str, 
             continue
         entries.append(
             {
-                "path": relative.as_posix(),
+                "path": f"{WORKSPACE_VIRTUAL_ROOT}/{relative.as_posix()}",
                 "kind": "directory" if path.is_dir() else "file",
                 "size_bytes": 0 if path.is_dir() else stat.st_size,
             }
@@ -622,9 +687,11 @@ def _design_chair_unit(
     *,
     attempt_id: str,
     stage_context: str,
+    settings: Mapping[str, ParticipantSettings] | None = None,
 ) -> WorkUnit | None:
     if not outcome.plan.units:
         return None
+    override = (settings or {}).get("chair")
     positions = json.dumps(
         [item.as_dict() for item in outcome.results],
         sort_keys=True,
@@ -633,12 +700,14 @@ def _design_chair_unit(
     first = outcome.plan.units[0]
     prompt = "\n".join(
         [
-            "You chair the Design council for this DBTL research cycle.",
+            "You chair the design meeting for this DBTL research cycle.",
             "",
             "Project context:",
             stage_context,
             "",
-            "independent council positions:",
+            WORKSPACE_PATH_NOTE,
+            "",
+            "independent meeting positions:",
             positions,
             "",
             "Debate instructions:",
@@ -649,15 +718,15 @@ def _design_chair_unit(
             "- You may recommend readiness, but you cannot submit, approve, or advance the stage.",
             "",
             "Result rules (these are validated, not stylistic):",
-            "- Every entry in claims must be traceable to an entry in evidence_refs. A claim with no evidence rejects the whole result, so cite the council position it came from or move it to summary.",
-            "- An evidence_refs entry needs a kind of artifact, workspace_file, dataset, or external, plus a non-empty reference. A council position is kind 'external' with the position's unit id as its reference.",
+            "- Every entry in claims must be traceable to an entry in evidence_refs. A claim with no evidence rejects the whole result, so cite the meeting position it came from or move it to summary.",
+            "- An evidence_refs entry needs a kind of artifact, workspace_file, dataset, or external, plus a non-empty reference. A meeting position is kind 'external' with the position's unit id as its reference.",
             '- quality_checks[].passed must be a JSON boolean, not the string "true".',
             "- needs_input requires a non-empty clarification_question; every other status requires it to be omitted or null.",
             "",
             "Return one JSON object and nothing else. The arrays below are shown empty only to give the shape; fill them in:",
             """{
   "status": "completed" | "needs_input" | "blocked" | "failed",
-  "summary": "the council synthesis",
+  "summary": "the meeting synthesis",
   "artifact_refs": [],
   "claims": [],
   "evidence_refs": [],
@@ -671,16 +740,20 @@ def _design_chair_unit(
             CONSENSUS_CONTRACT,
         ]
     )
-    return WorkUnit(
-        unit_id=f"{attempt_id}-chair",
-        capability="design_council_chair",
-        agent_name=first.agent_name,
-        prompt=prompt,
-        via_generalist=first.via_generalist,
-        model=first.model,
-        role="chair",
-        focus="weighs the positions against each other",
-        round=first.round,
+    return _unit_with_settings(
+        WorkUnit(
+            unit_id=f"{attempt_id}-chair",
+            capability="design_council_chair",
+            agent_name=first.agent_name,
+            prompt=prompt,
+            via_generalist=first.via_generalist,
+            model=first.model,
+            role="chair",
+            focus="weighs the positions against each other",
+            round=first.round,
+        ),
+        override,
+        prefill=ROLE_BRIEFS[CouncilRole.CHAIR],
     )
 
 
@@ -688,6 +761,7 @@ def _design_red_team_unit(
     outcome: StageExecutionOutcome,
     *,
     attempt_id: str,
+    settings: Mapping[str, ParticipantSettings] | None = None,
 ) -> WorkUnit | None:
     """Guarantee an adversarial position, however many specialists were selected.
 
@@ -703,22 +777,26 @@ def _design_red_team_unit(
             first.prompt,
             "",
             "Independent debate role:",
-            "Act as the Design council's red team. Challenge the proposed population, "
+            "Act as the design meeting's red team. Challenge the proposed population, "
             "controls, leakage risks, success threshold, rejection criteria, and hidden "
             "assumptions. Seek a materially different defensible position rather than "
             "agreeing by default.",
         ]
     )
-    return WorkUnit(
-        unit_id=f"{attempt_id}-red-team",
-        capability="design_red_team",
-        agent_name=first.agent_name,
-        prompt=prompt,
-        via_generalist=first.via_generalist,
-        model=first.model,
-        role="red_team",
-        focus="argues against the proposed design",
-        round=first.round,
+    return _unit_with_settings(
+        WorkUnit(
+            unit_id=f"{attempt_id}-red-team",
+            capability="design_red_team",
+            agent_name=first.agent_name,
+            prompt=prompt,
+            via_generalist=first.via_generalist,
+            model=first.model,
+            role="red_team",
+            focus="argues against the proposed design",
+            round=first.round,
+        ),
+        (settings or {}).get("red-team"),
+        prefill=ROLE_BRIEFS[CouncilRole.RED_TEAM],
     )
 
 
@@ -868,6 +946,10 @@ class LiveStageAdapter:
             available,
             declared_capabilities=declared,
         )
+
+    def known_models(self) -> tuple[str, ...]:
+        """The configured model names, for the preflight card's model pickers."""
+        return self._known_models()
 
     def _known_models(self) -> tuple[str, ...]:
         app_config = self._app_config
@@ -1144,7 +1226,11 @@ class LiveStageAdapter:
                 deerflow_trace_id=normalize_trace_id(runtime.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id(),
                 project_id=project_id,
                 project_root=project_root,
-                token_budget_max_tokens=budget.max_tokens,
+                # A seat whose card was given its own budget or extended
+                # reasoning runs on those; every other seat keeps the stage
+                # budget and the plain model, exactly as before the editor.
+                token_budget_max_tokens=unit.max_tokens or budget.max_tokens,
+                thinking_enabled=unit.reasoning == REASONING_EXTENDED,
                 extra_middlewares=[deadline],
             )
             await emit(
@@ -1285,6 +1371,7 @@ class LiveStageAdapter:
         config: RunnableConfig,
         authored_design: str | None = None,
         council_adjustment: str | None = None,
+        participant_settings: Mapping[str, ParticipantSettings] | None = None,
     ) -> LiveStageResult:
         if not project_id or not cycle_id:
             return LiveStageResult(
@@ -1443,6 +1530,11 @@ class LiveStageAdapter:
                 "declared_datasets": datasets,
                 "reconciliation": reconciliation,
                 "build_test": build_test,
+                # Named explicitly beside the listing, because a worker that
+                # *constructs* a path (rather than copying one from the
+                # manifest) has no other way to learn the prefix its tools
+                # require, and a path outside it is refused outright.
+                "workspace_root": WORKSPACE_VIRTUAL_ROOT,
                 "project_workspace_manifest": await asyncio.to_thread(
                     _project_manifest,
                     project_root,
@@ -1471,6 +1563,11 @@ class LiveStageAdapter:
                 request_text=request_text,
                 attempt_id=attempt_id,
             )
+            # Applied to the plan as well as the dispatched units, because the
+            # plan is what the review package records — a package describing
+            # the proposal's dials while the workers ran on the owner's would
+            # misreport what happened.
+            council_plan = apply_participant_settings(council_plan, participant_settings)
             # Scoping the spec is what keeps the previewed roster and the
             # dispatched one the same computation: selection reads its worker
             # ceiling off the spec, and so does the dispatch budget.
@@ -1526,9 +1623,26 @@ class LiveStageAdapter:
                 context=stage_context,
                 round_number=design_round,
                 change_request=change_request,
+                settings=participant_settings,
             )
             plan = StageExecutionPlan(spec=spec, selection=_proposed_selection(proposal), units=units)
             outcome = collect_results(plan, await dispatcher(units, budget=spec.budget))
+        elif stage == "design" and participant_settings:
+            # The proposal writer failed, so the seats fall back to capability
+            # selection — but the owner's edits still apply. The card numbered
+            # these seats position-1..N in selection order, and dropping a
+            # person's instructions because a model call failed would be the
+            # verbatim-carry rule losing to an outage.
+            plan = plan_stage(spec, self._candidates(), attempt_id=attempt_id, context=stage_context)
+            plan = replace(
+                plan,
+                units=tuple(_unit_with_settings(unit, participant_settings.get(f"position-{index}")) for index, unit in enumerate(plan.units, start=1)),
+            )
+            if plan.dispatchable:
+                outcome = collect_results(plan, await dispatcher(plan.units, budget=spec.budget))
+            else:
+                logger.info("dbtl stage %s not dispatchable: %s", spec.spec_key, "; ".join(plan.selection.notes) or "no work units")
+                outcome = StageExecutionOutcome(plan=plan)
         else:
             outcome = await arun_stage(
                 spec,
@@ -1546,6 +1660,7 @@ class LiveStageAdapter:
             red_team_unit = _design_red_team_unit(
                 outcome,
                 attempt_id=attempt_id,
+                settings=participant_settings,
             )
             if red_team_unit is not None:
                 red_team_plan = StageExecutionPlan(
@@ -1571,6 +1686,7 @@ class LiveStageAdapter:
                 outcome,
                 attempt_id=attempt_id,
                 stage_context=stage_context,
+                settings=participant_settings,
             )
             if chair_unit is not None:
                 chair_plan = StageExecutionPlan(

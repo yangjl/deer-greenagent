@@ -129,7 +129,7 @@ function DesignConsensusMap({
     return (
       <p className="text-muted-foreground flex items-center gap-1.5 text-xs">
         <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-        Loading the council decision map…
+        Loading the meeting decision map…
       </p>
     );
   }
@@ -143,12 +143,12 @@ function DesignConsensusMap({
 
   return (
     <section
-      aria-label="Council decision map"
+      aria-label="Meeting decision map"
       className="border-border space-y-4 border-y py-4"
     >
       <header className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-sm font-medium">Council decision map</p>
+          <p className="text-sm font-medium">Meeting decision map</p>
           <p className="text-muted-foreground mt-0.5 text-xs">
             Read from the structured package referenced by the bound document
             below.

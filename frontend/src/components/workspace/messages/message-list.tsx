@@ -220,6 +220,45 @@ type SelectionToolbarState = {
   placement: "top" | "bottom";
 };
 
+/**
+ * Where the debate panel sits in the transcript.
+ *
+ * While the meeting runs it belongs at the very bottom, where the reader is
+ * already watching; once the run settles it belongs immediately above the
+ * assistant's closing answer, so the conclusion reads below the meeting that
+ * produced it. Anchoring it to the *request* instead put it above the
+ * preflight card, far up a long transcript — mounted, streaming, and
+ * effectively invisible.
+ */
+export function debatePanelPosition({
+  groupCount,
+  isLoading,
+}: {
+  groupCount: number;
+  isLoading: boolean;
+}): number {
+  if (isLoading || groupCount <= 1) {
+    return groupCount;
+  }
+  return groupCount - 1;
+}
+
+/**
+ * Splice the panel in at `insertAt`, leaving the group map untouched.
+ *
+ * The panel still belongs to the run rather than to any one message; this only
+ * decides where it lands. Out-of-range positions clamp instead of dropping the
+ * panel — an invisible debate is the failure this replaced.
+ */
+export function insertDebatePanel(
+  nodes: ReactNode[],
+  insertAt: number,
+  panel: ReactNode,
+): ReactNode[] {
+  const at = Math.max(0, Math.min(insertAt, nodes.length));
+  return [...nodes.slice(0, at), panel, ...nodes.slice(at)];
+}
+
 function LoadMoreHistoryIndicator({
   isLoading,
   hasMore,
@@ -490,6 +529,23 @@ export function MessageList({
   }, [groupedMessages]);
   const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
+  // Bottom of the transcript while the meeting runs; directly above the
+  // closing answer once it settles, so the conclusion reads below the meeting
+  // that produced it.
+  const debatePanelIndex = debatePanelPosition({
+    groupCount: groupedMessages.length,
+    isLoading: thread.isLoading,
+  });
+  // The run whose subagent steps the debate panel can backfill on reload.
+  const latestRunId = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const runId = (messages[index] as { run_id?: string } | undefined)?.run_id;
+      if (typeof runId === "string" && runId) {
+        return runId;
+      }
+    }
+    return undefined;
+  }, [messages]);
   const turnUsageMessagesByGroupIndex =
     getAssistantTurnUsageMessages(groupedMessages);
   const runDurationDisplaysByGroupIndex = useMemo(
@@ -1032,7 +1088,8 @@ export function MessageList({
             hasMore={hasMoreHistory}
             loadMore={loadMoreHistory}
           />
-          {groupedMessages.map((group, groupIndex) => {
+          {insertDebatePanel(
+            groupedMessages.map((group, groupIndex) => {
             const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
             const groupIsLoading =
               thread.isLoading && groupIndex === lastGroupIndex;
@@ -1350,11 +1407,15 @@ export function MessageList({
                 })}
               </div>,
             );
-          })}
-          {/* Below the transcript rather than inside a message group: the
-              debate belongs to the run, not to any one message, and pinning it
-              to a group would move it as the transcript grows. */}
-          <DebatePanel className="w-full" />
+            }),
+            debatePanelIndex,
+            <DebatePanel
+              key="debate-panel"
+              className="w-full"
+              runId={latestRunId}
+              threadId={threadId}
+            />,
+          )}
           {thread.isLoading && !hasActiveAssistantText && (
             <div className="w-full">
               <RunActivity startTime={turnStartTime} />

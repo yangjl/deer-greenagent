@@ -20,7 +20,7 @@ export function readCouncilSeat(value: unknown): CouncilSeatIdentity | null {
   }
   return {
     role,
-    roleLabel: str(value.role_label) || "Council seat",
+    roleLabel: str(value.role_label) || "Meeting participant",
     focus: str(value.focus),
     capability: str(value.capability),
     agentName,

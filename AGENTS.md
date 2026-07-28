@@ -206,6 +206,26 @@ Breeding-workspace note:
   transcript. The
   presentation icon beside Cycles opens a client-only Phase 7 three-case demo
   and never mutates durable records.
+- The Design council surfaces in the product as a **design meeting** — every
+  user-facing string (card titles, debate panel, decision map, review
+  Markdown) says "meeting"/"participants", while internal identifiers
+  (`council_preflight`, `dbtl-council__`, `council_plan`, module names) keep
+  the council vocabulary so the protocol and history stay stable.
+- The preflight card is also the meeting's setup form.
+  `deerflow.dbtl.council_settings` renders one **editable participant card per
+  seat** (`council_participants` on the artifact), prefilled with the roster
+  writer's suggestions: model (from the configured model list), token budget,
+  reasoning strength (`standard`/`extended` → the subagent's
+  `thinking_enabled`), and owner instructions (prefilled with the seat's
+  brief). Edits ride back on the depth reply's `participants` key, are
+  validated server-side field by field, recovered from the card the server
+  emitted (forged request ids match nothing, and like the depth they apply
+  only to the meeting that reply convenes), applied to the recorded
+  `CouncilPlan` so the review package reports the dials that actually ran,
+  and carried onto the dispatched `WorkUnit`s (per-seat model/token
+  budget/thinking; instructions are quoted **verbatim** into that seat's
+  prompt — an instructions box echoed back byte-identical to its prefill is
+  the writer's text, not the owner's, and is never attributed to them).
 - The council's composition is inspectable before it convenes.
   `deerflow.dbtl.council` computes the roster as values — one seat per worker,
   naming its agent, role (independent position, red team, chair), model, tools,

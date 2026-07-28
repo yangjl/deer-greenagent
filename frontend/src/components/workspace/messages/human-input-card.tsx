@@ -21,6 +21,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  buildCouncilParticipantEdits,
   buildHumanInputFormSubmissionValue,
   buildHumanInputFormSummary,
   buildInitialHumanInputFormValues,
@@ -37,6 +38,11 @@ import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
 import { MarkdownContent } from "./markdown-content";
+import {
+  buildInitialParticipantValues,
+  MeetingParticipantEditor,
+  type ParticipantFormValue,
+} from "./meeting-participant-editor";
 import { SetupQuestionWizard } from "./setup-question-wizard";
 
 export type HumanInputSubmitResult = boolean | void;
@@ -237,6 +243,10 @@ export function HumanInputCard({
   const [formValues, setFormValues] = useState<
     Record<string, HumanInputFormValue>
   >(() => buildInitialHumanInputFormValues(request.fields ?? []));
+  const participants = request.council_participants ?? [];
+  const [participantValues, setParticipantValues] = useState<
+    Record<string, ParticipantFormValue>
+  >(() => buildInitialParticipantValues(participants));
   const [invalidFieldNames, setInvalidFieldNames] = useState<Set<string>>(
     () => new Set(),
   );
@@ -279,7 +289,16 @@ export function HumanInputCard({
   };
 
   const handleOptionClick = (option: HumanInputOption) => {
-    void submitResponse(createHumanInputOptionResponse(request, option));
+    // Participant edits ride only on choices that start the meeting. The
+    // "adjust" option redraws the roster (its card returns with fresh
+    // prefills), so stale edits must not travel with it.
+    const participantEdits =
+      participants.length > 0 && option.id !== "adjust"
+        ? buildCouncilParticipantEdits(participants, participantValues)
+        : undefined;
+    void submitResponse(
+      createHumanInputOptionResponse(request, option, participantEdits),
+    );
   };
 
   const handleFormValueChange = (name: string, value: HumanInputFormValue) => {
@@ -521,6 +540,20 @@ export function HumanInputCard({
               })}
               {submitFooter}
             </form>
+          ) : null}
+
+          {participants.length > 0 ? (
+            <MeetingParticipantEditor
+              disabled={isDisabled}
+              participants={participants}
+              values={participantValues}
+              onChange={(id, value) =>
+                setParticipantValues((previous) => ({
+                  ...previous,
+                  [id]: value,
+                }))
+              }
+            />
           ) : null}
 
           {!setupQuestions && !isForm && options.length > 0 ? (

@@ -545,10 +545,32 @@ When adding features:
 
 ## Design council debate view
 
-`src/core/tasks/council-seat.ts` is the pure layer for the live Design council
-view, and `src/components/workspace/messages/debate-panel.tsx` renders it below
-the transcript (the debate belongs to the run, not to any one message, so
-pinning it inside a group would move it as the transcript grows).
+`src/core/tasks/council-seat.ts` is the pure layer for the live Design meeting
+view, and `src/components/workspace/messages/debate-panel.tsx` renders it. Its position comes from
+`message-list.tsx::debatePanelPosition` + `insertDebatePanel` (both exported and
+unit-tested): **bottom of the transcript while the run is in flight**, and
+**immediately above the closing answer once it settles**, so the conclusion
+reads below the meeting that produced it. The panel still belongs to the run
+rather than to a message; only its placement is anchored. Do not anchor it to
+the *request* instead — that puts it above the preflight card, far up a long
+transcript, where it is mounted and streaming but effectively invisible.
+Out-of-range positions clamp rather than dropping the panel.
+
+Each participant lane is clickable and opens
+`meeting-participant-inspector.tsx`, a right-side sheet showing that
+participant's steps: reasoning turns, tool calls paired with their output, and
+the closing position, with a timeline on the left and the selected step's
+request/output on the right. `src/core/tasks/meeting-transcript.ts` is the pure
+layer for it — pairing a tool result to the call that asked for it (position is
+the only honest join; the recorded step shape carries a tool name but no call
+id), keeping a result whose requesting turn was compacted away, marking a
+still-running call `pending` rather than rendering it as an empty success, and
+appending the final answer (which is dropped from the step timeline for a
+completed subagent). Lanes also show the latest step inline, so a three-minute
+meeting reports what it is doing rather than spinning. A reloaded run has no
+live SSE steps, so the lane backfills once via `fetchSubtaskSteps` — the same
+endpoint the subtask card uses — which is why `DebatePanel` takes `threadId`
+and `runId`.
 
 The backend sends a `council_seat` block on every `task_started` /
 `task_completed` / `task_failed` event. **Do not derive the seat from the task
@@ -577,7 +599,20 @@ The native council preflight uses `input_mode=single_choice`; every option has
 an `id`, `label`, and `value`, with optional description, and
 `recommended_option_id` names the server recommendation. Keep this aligned with
 `core/messages/human-input.ts` — an unrecognized mode or valueless option makes
-the entire card fail closed. Automatic Design kickoff messages carry
+the entire card fail closed. User-facing copy calls the feature the **design
+meeting**; internal keys (`council_preflight`, `council_participants`, event
+`council_seat`) keep the council vocabulary. The preflight artifact also
+carries `council_participants` — one editable card per participant, prefilled
+with the roster writer's suggestions — parsed fail-soft per entry in
+`human-input.ts` (a malformed participant is skipped; nothing usable falls
+back to the plain roster text). `meeting-participant-editor.tsx` renders the
+collapsed cards (model select, token budget, reasoning strength,
+instructions textarea) inside `HumanInputCard`; on submit,
+`buildCouncilParticipantEdits` diffs against the prefills so an untouched
+editor submits nothing, and the edits ride the option reply's optional
+`participants` key (skipped for the roster-adjust option, whose redraw
+returns fresh prefills). The backend re-validates every field, so the editor
+is honest about prefills rather than defensive. Automatic Design kickoff messages carry
 `hide_from_ui=true` plus `dbtl_design_kickoff=true`: they are explicit graph
 input containing the owner's setup decisions, but must not impersonate text the
 person typed.

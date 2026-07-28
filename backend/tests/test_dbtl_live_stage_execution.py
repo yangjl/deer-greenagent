@@ -300,7 +300,7 @@ async def test_a_live_design_run_persists_workers_and_a_reviewable_package(
     assert result.note.index("\n") < result.note.index("outputs/")
     assert len(dispatcher.calls) == 3
     assert "red team" in dispatcher.calls[1][0][0].prompt
-    assert "independent council positions" in dispatcher.calls[2][0][0].prompt
+    assert "independent meeting positions" in dispatcher.calls[2][0][0].prompt
 
 
 @pytest.mark.asyncio
@@ -344,7 +344,7 @@ async def test_the_red_team_convenes_even_when_several_specialists_are_declared(
     assert len(dispatcher.calls) == 3
     assert len(dispatcher.calls[0][0]) == 2
     assert "red team" in dispatcher.calls[1][0][0].prompt
-    assert "independent council positions" in dispatcher.calls[2][0][0].prompt
+    assert "independent meeting positions" in dispatcher.calls[2][0][0].prompt
     assert result.worker_count == 4
 
     capabilities = [item["capability"] for item in repo.recorded[0]["results"]]

@@ -1039,7 +1039,7 @@ class TestLiveStageBranch:
         assert calls == []
         answer = final["messages"][-1].content
         assert "chat text cannot record a DBTL review gate" in answer
-        assert "No council workers ran" in answer
+        assert "No meeting participants ran" in answer
         assert final["artifacts"] == FULL_STATE["artifacts"]
 
     @pytest.mark.asyncio

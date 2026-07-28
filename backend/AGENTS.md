@@ -2048,6 +2048,16 @@ knowledge`) is collapsed into `DbtlMode = disabled|audit_only|manual|graph_enabl
 - `knowledge_view` is source-project scoped, so a project that a claim was
   published _into_ returns no claims/publications and cannot see or manage it.
 
+**A stage worker can only read through the sandbox's virtual prefix, so the
+manifest must name paths in that form.** `_project_manifest` emits
+`/mnt/user-data/<relative>` (`WORKSPACE_VIRTUAL_ROOT`), the context carries
+`workspace_root`, and every worker prompt embeds `WORKSPACE_PATH_NOTE`.
+Listing project-relative paths instead cost a whole design meeting: `read_file`
+refuses anything outside the prefix, so every participant reported "every file
+read was denied", each returned no result, and the chair could only record that
+it had nothing to synthesize from. The manifest is where most workers learn a
+path exists, so it has to name the path they can actually open.
+
 Current Design attempts resolve to `generic:design:v2`. The adapter supplies a
 bounded metadata-only project workspace manifest and up to four compact prior
 Design chair syntheses (never the full accumulated worker payloads),
@@ -2070,7 +2080,21 @@ is preserved, while a `None` whitelist becomes `[]` for the bounded stage run.
 
 The Design council preflight is a native `single_choice` Human Input request;
 its options carry `id`/`label`/`value` plus descriptions and the server-owned
-recommendation. Router-created clarification pairs do not necessarily fire
+recommendation. User-facing wording calls it the **design meeting** (card
+titles, notes, review Markdown); internal identifiers keep the council
+vocabulary. The card additionally carries `council_participants` — one
+editable entry per seat, built by `deerflow.dbtl.council_settings` from the
+same `CouncilPlan` dispatch runs, prefilled with the roster writer's
+suggestions (model, token budget, reasoning strength, instructions = the
+seat's brief). Edits come back on the reply's `participants` key (read off
+the raw payload, since the typed reader strips unknown keys), are validated
+field by field against the configured models and token bounds, must name a
+card the server emitted, apply only to the answering turn, and land on both
+the recorded plan (`apply_participant_settings`) and the dispatched
+`WorkUnit`s: per-seat `model`, `max_tokens` (overrides the stage budget for
+that one worker), `reasoning: "extended"` → `SubagentExecutor(thinking_enabled=True)`,
+and instructions quoted verbatim into that seat's prompt — unless byte-identical
+to the prefill, which is the writer's suggestion, not the owner's words. Router-created clarification pairs do not necessarily fire
 model or tool callbacks, so `RunJournal` final reconciliation discovers
 allowlisted pairs only after the current run's input message and persists the
 ToolMessage artifact. Retained cards before that input are never re-journaled.
