@@ -529,3 +529,33 @@ When adding features:
 3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
 4. Run `pnpm check` before committing
 5. Update this `AGENTS.md` when architecture, commands, or conventions change
+
+## Design council debate view
+
+`src/core/tasks/council-seat.ts` is the pure layer for the live Design council
+view, and `src/components/workspace/messages/debate-panel.tsx` renders it below
+the transcript (the debate belongs to the run, not to any one message, so
+pinning it inside a group would move it as the transcript grows).
+
+The backend sends a `council_seat` block on every `task_started` /
+`task_completed` / `task_failed` event. **Do not derive the seat from the task
+id** — every field on it is technically recoverable from the id today, which is
+exactly why it must not be: a view that parses identifiers to decide who is
+speaking is one rename away from labelling every seat wrong, silently.
+`readCouncilSeat` is defensive in one direction only: a malformed or absent
+block means "ordinary subtask", never a seat with guessed fields.
+
+Three things are shown live that previously appeared only afterwards in the
+review package, by which time it is too late to intervene: which seat is the red
+team, that a differently-labelled expert is actually a stand-in generalist, and
+which lane's answer counts toward the stage. `debateRounds` sorts by debate role
+rather than arrival, because a reader is following an argument rather than a
+race.
+
+`consensusState` is **derived** from the seats rather than reported alongside
+them — a separate field would be a second source of truth about something the
+seats already say, and the two would eventually disagree in front of a user.
+`stalled` is a distinct state from `settled` and `debating`: a council whose
+chair failed has neither reached consensus nor merely finished, and leaving a
+spinner running over a council that is already over is the exact experience this
+redesign removes. Status always carries a word, never colour alone.

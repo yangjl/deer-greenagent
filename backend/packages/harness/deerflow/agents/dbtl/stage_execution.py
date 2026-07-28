@@ -180,6 +180,44 @@ def _failure_reasons(results: Sequence[dict[str, Any]]) -> list[str]:
     return lines
 
 
+_SEAT_ROLE_LABELS = {
+    "position": "Independent position",
+    "red_team": "Red team",
+    "chair": "Chair",
+}
+
+
+def _seat_description(unit: WorkUnit) -> str:
+    """The one line a live view shows for this seat while it works."""
+    role = _SEAT_ROLE_LABELS.get(unit.role, "Council seat")
+    if unit.focus:
+        return f"{role}: {unit.focus}"
+    return f"{role}: {unit.capability.replace('_', ' ')}"
+
+
+def _seat_identity(unit: WorkUnit, *, model: str) -> dict[str, Any]:
+    """Who is speaking, in what role, on whose behalf.
+
+    Carried on the event rather than left for a consumer to parse out of the
+    unit id. A live debate view has to say "the red team is arguing" while it is
+    happening, and a view that derives that from an identifier is one rename
+    away from labelling every seat wrong.
+    """
+    return {
+        "role": unit.role,
+        "role_label": _SEAT_ROLE_LABELS.get(unit.role, "Council seat"),
+        "focus": unit.focus,
+        "capability": unit.capability,
+        "agent_name": unit.agent_name,
+        "via_generalist": unit.via_generalist,
+        "model": model,
+        "round": unit.round,
+        # Only the chair's synthesis is the stage's answer, and a reader
+        # watching three lanes finish cannot otherwise tell which one mattered.
+        "counts_toward_stage_output": unit.role == "chair",
+    }
+
+
 RosterWriter = Callable[[str], Any]
 
 
@@ -288,6 +326,8 @@ def _proposed_units(
                 prompt=prompt,
                 via_generalist=seat.agent_name == "general-purpose",
                 model=seat.model,
+                role="position",
+                focus=seat.focus,
             )
         )
     return tuple(units)
@@ -441,6 +481,9 @@ def _design_chair_unit(
         agent_name=first.agent_name,
         prompt=prompt,
         via_generalist=first.via_generalist,
+        model=first.model,
+        role="chair",
+        focus="weighs the positions against each other",
     )
 
 
@@ -475,6 +518,9 @@ def _design_red_team_unit(
         agent_name=first.agent_name,
         prompt=prompt,
         via_generalist=first.via_generalist,
+        model=first.model,
+        role="red_team",
+        focus="argues against the proposed design",
     )
 
 
@@ -881,8 +927,9 @@ class LiveStageAdapter:
                 {
                     "type": "task_started",
                     "task_id": unit.unit_id,
-                    "description": f"DBTL {unit.capability.replace('_', ' ')}",
+                    "description": _seat_description(unit),
                     "model_name": effective_model,
+                    "council_seat": _seat_identity(unit, model=effective_model),
                 }
             )
             holder = SubagentResult(
@@ -903,6 +950,7 @@ class LiveStageAdapter:
                         "type": "task_failed",
                         "task_id": unit.unit_id,
                         "error": "DBTL stage run cancelled.",
+                        "council_seat": _seat_identity(unit, model=effective_model),
                     }
                 )
                 raise
@@ -914,6 +962,7 @@ class LiveStageAdapter:
                         "task_id": unit.unit_id,
                         "result": result.result or "",
                         "stop_reason": result.stop_reason,
+                        "council_seat": _seat_identity(unit, model=effective_model),
                     }
                 )
                 return DispatchOutcome(
@@ -930,6 +979,7 @@ class LiveStageAdapter:
                     "task_id": unit.unit_id,
                     "error": error,
                     "stop_reason": result.stop_reason,
+                    "council_seat": _seat_identity(unit, model=effective_model),
                 }
             )
             return DispatchOutcome(

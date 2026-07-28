@@ -52,6 +52,15 @@ class WorkUnit:
     #: files are not the same task, and before this every seat ran on whatever
     #: the composer happened to be set to.
     model: str | None = None
+    #: What this seat is doing in the debate (``position`` / ``red_team`` /
+    #: ``chair``) and which round it belongs to. Carried on the unit rather than
+    #: inferred from the unit id downstream, because a live view that parses
+    #: identifiers to work out who is speaking breaks the moment an id changes.
+    role: str = "position"
+    round: int = 1
+    #: A few words naming what this seat brings, when a proposed roster supplied
+    #: one. Empty for a capability-selected seat, whose angle is its capability.
+    focus: str = ""
 
 
 @dataclass(frozen=True, slots=True)

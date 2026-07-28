@@ -78,6 +78,7 @@ import { CopyButton } from "../copy-button";
 import { useMaybeSidecar } from "../sidecar/context";
 import { Tooltip } from "../tooltip";
 
+import { DebatePanel } from "./debate-panel";
 import {
   HumanInputCard,
   type HumanInputSubmitResult,
@@ -1295,6 +1296,10 @@ export function MessageList({
               </div>,
             );
           })}
+          {/* Below the transcript rather than inside a message group: the
+              debate belongs to the run, not to any one message, and pinning it
+              to a group would move it as the transcript grows. */}
+          <DebatePanel className="w-full" />
           {thread.isLoading && !hasActiveAssistantText && (
             <div className="w-full">
               <RunActivity startTime={turnStartTime} />

@@ -1,5 +1,6 @@
 import { normalizeTokenUsage } from "../messages/usage";
 
+import { readCouncilSeat } from "./council-seat";
 import type { Subtask } from "./types";
 
 type TaskStartedEvent = {
@@ -34,9 +35,11 @@ export function taskEventToSubtaskUpdate(
       typeof started.model_name === "string" && started.model_name.trim()
         ? started.model_name.trim()
         : undefined;
+    const councilSeat = readCouncilSeat(event.council_seat);
     return {
       id: taskId,
       ...(modelName ? { modelName } : {}),
+      ...(councilSeat ? { councilSeat } : {}),
     };
   }
 

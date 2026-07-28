@@ -1,0 +1,151 @@
+import { describe, expect, it } from "@rstest/core";
+
+import {
+  consensusState,
+  debateRounds,
+  readCouncilSeat,
+} from "@/core/tasks/council-seat";
+import type { Subtask } from "@/core/tasks/types";
+
+function seatEvent(overrides: Record<string, unknown> = {}) {
+  return {
+    role: "position",
+    role_label: "Independent position",
+    focus: "quantitative genetics",
+    capability: "quantitative_genetics",
+    agent_name: "quant-geneticist",
+    via_generalist: false,
+    model: "gpt-5.6-sol",
+    round: 1,
+    counts_toward_stage_output: false,
+    ...overrides,
+  };
+}
+
+function task(
+  id: string,
+  status: Subtask["status"],
+  seat: Record<string, unknown> | null,
+): Subtask {
+  return {
+    id,
+    status,
+    subagent_type: "general-purpose",
+    description: "",
+    prompt: "",
+    ...(seat ? { councilSeat: readCouncilSeat(seat)! } : {}),
+  };
+}
+
+describe("readCouncilSeat", () => {
+  it("reads a seat the backend sent", () => {
+    const seat = readCouncilSeat(seatEvent({ role: "red_team" }));
+
+    expect(seat?.role).toBe("red_team");
+    expect(seat?.agentName).toBe("quant-geneticist");
+    expect(seat?.model).toBe("gpt-5.6-sol");
+  });
+
+  it("keeps a stand-in generalist visible", () => {
+    const seat = readCouncilSeat(
+      seatEvent({ agent_name: "general-purpose", via_generalist: true }),
+    );
+
+    expect(seat?.viaGeneralist).toBe(true);
+  });
+
+  it("treats an absent or malformed seat as an ordinary subtask", () => {
+    // Never a seat with guessed fields: a panel that invented a role would be
+    // worse than one that showed a plain progress card.
+    expect(readCouncilSeat(undefined)).toBeNull();
+    expect(readCouncilSeat({})).toBeNull();
+    expect(readCouncilSeat({ role: "chair" })).toBeNull();
+    expect(readCouncilSeat("chair")).toBeNull();
+  });
+});
+
+describe("debateRounds", () => {
+  it("orders seats by debate role, not by arrival", () => {
+    const rounds = debateRounds([
+      task("c", "completed", seatEvent({ role: "chair" })),
+      task("p", "completed", seatEvent({ role: "position" })),
+      task("r", "completed", seatEvent({ role: "red_team" })),
+    ]);
+
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0]!.seats.map((s) => s.councilSeat!.role)).toEqual([
+      "position",
+      "red_team",
+      "chair",
+    ]);
+  });
+
+  it("keeps rounds separate and in order", () => {
+    const rounds = debateRounds([
+      task("b", "in_progress", seatEvent({ round: 2 })),
+      task("a", "completed", seatEvent({ round: 1 })),
+    ]);
+
+    expect(rounds.map((r) => r.round)).toEqual([1, 2]);
+  });
+
+  it("ignores subtasks that are not council seats", () => {
+    const rounds = debateRounds([
+      task("plain", "completed", null),
+      task("seat", "completed", seatEvent()),
+    ]);
+
+    expect(rounds[0]!.seats.map((s) => s.id)).toEqual(["seat"]);
+  });
+});
+
+describe("consensusState", () => {
+  it("is debating while positions are still arguing", () => {
+    expect(
+      consensusState([
+        task("p1", "in_progress", seatEvent()),
+        task("p2", "completed", seatEvent()),
+      ]),
+    ).toBe("debating");
+  });
+
+  it("is synthesizing once the chair is seated", () => {
+    expect(
+      consensusState([
+        task("p1", "completed", seatEvent()),
+        task("c", "in_progress", seatEvent({ role: "chair" })),
+      ]),
+    ).toBe("synthesizing");
+  });
+
+  it("is settled when the chair has spoken", () => {
+    expect(
+      consensusState([
+        task("p1", "completed", seatEvent()),
+        task("c", "completed", seatEvent({ role: "chair" })),
+      ]),
+    ).toBe("settled");
+  });
+
+  it("is stalled when the chair failed", () => {
+    // Not "settled" and not "still going": a failed chair needs a different
+    // word and a different next action from either.
+    expect(
+      consensusState([
+        task("p1", "completed", seatEvent()),
+        task("c", "failed", seatEvent({ role: "chair" })),
+      ]),
+    ).toBe("stalled");
+  });
+
+  it("is stalled when every position failed before a chair was seated", () => {
+    // Leaving a spinner running over a council that is already over is the
+    // exact experience the whole redesign is meant to remove.
+    expect(
+      consensusState([
+        task("p1", "failed", seatEvent()),
+        task("p2", "failed", seatEvent()),
+      ]),
+    ).toBe("stalled");
+  });
+});
