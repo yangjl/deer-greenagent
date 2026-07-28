@@ -936,8 +936,16 @@ async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_ap
     from deerflow.runtime.runs.store.memory import MemoryRunStore
 
     metadata_started = asyncio.Event()
+    get_calls = 0
 
-    async def get_thread(_thread_id):
+    async def get_thread(_thread_id, user_id=None):
+        # The fork's project-scope resolution reads thread metadata before run
+        # admission; only the post-admission ``_ensure_thread_metadata`` call
+        # (inside the attached worker) should hang for this scenario.
+        nonlocal get_calls
+        get_calls += 1
+        if get_calls == 1:
+            return None
         metadata_started.set()
         try:
             await asyncio.Event().wait()
@@ -985,8 +993,15 @@ async def test_thread_metadata_timeout_logs_and_run_still_starts(_stub_app_confi
 
     metadata_started = asyncio.Event()
     run_agent_called = asyncio.Event()
+    get_calls = 0
 
-    async def get_thread(_thread_id):
+    async def get_thread(_thread_id, user_id=None):
+        # First call is the fork's pre-admission project-scope read; only the
+        # post-admission metadata setup should hang for this scenario.
+        nonlocal get_calls
+        get_calls += 1
+        if get_calls == 1:
+            return None
         metadata_started.set()
         await asyncio.Event().wait()
 
