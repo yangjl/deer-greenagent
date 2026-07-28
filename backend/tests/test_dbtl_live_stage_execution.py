@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -1112,3 +1113,52 @@ def test_an_unconfigured_meeting_model_falls_back_rather_than_failing(
     )
 
     assert {seat.model for seat in plan.seats} == {"test-model"}
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_roster_writer_does_not_swallow_the_meeting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The proposal runs in front of the preflight card.
+
+    An unbounded wait there does not make the meeting slow, it makes it
+    invisible: nothing is shown, nothing is dispatched, and cancelling is the
+    only way out. The timeout degrades to capability selection, which is what
+    ran before proposals existed.
+    """
+    import deerflow.agents.dbtl.stage_execution as module
+
+    monkeypatch.setattr(module, "ROSTER_PROPOSAL_TIMEOUT_SECONDS", 0.05)
+
+    async def never_answers(prompt: str) -> str:
+        await asyncio.sleep(30)
+        return "{}"
+
+    repo = FakeRepo(_cycle())
+    adapter = LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="designer",
+                capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN}),
+            ),
+        ),
+        roster_writer=never_answers,
+    )
+
+    plan = await asyncio.wait_for(
+        adapter.preview_council(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            request_text="Draft the Design package.",
+            config=_runtime_config(tmp_path),
+        ),
+        timeout=5,
+    )
+
+    assert plan is not None
+    assert plan.dispatchable
+    # Capability selection's seats, not the proposal's: no focus was written.
+    assert [seat.focus for seat in plan.seats] == ["", "", ""]

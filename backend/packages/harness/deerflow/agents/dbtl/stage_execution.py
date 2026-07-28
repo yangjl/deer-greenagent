@@ -114,6 +114,16 @@ class LiveStageResult:
         return False
 
 
+#: How long the roster proposal may take before the meeting proceeds without it.
+#:
+#: This is not a performance tuning knob. The proposal runs *in front of the
+#: preflight card*, so an unbounded wait here does not slow the meeting down —
+#: it removes it: nothing is shown, nothing is dispatched, and cancelling is the
+#: user's only exit. Generous enough for a reasoning model on a cold start,
+#: short enough that a wedged provider costs a better roster rather than the
+#: whole interaction.
+ROSTER_PROPOSAL_TIMEOUT_SECONDS = 75.0
+
 CandidateProvider = Callable[[], Sequence[AgentCandidate]]
 
 _DESIGN_HISTORY_TURNS = 4
@@ -1273,6 +1283,14 @@ class LiveStageAdapter:
         outage, an unparseable reply — returns ``None`` and the caller falls
         back to capability selection, which is what ran before proposals
         existed. Raising here would trade a better council for no council.
+
+        **A slow reply is a failure too, and it was the loudest one.** This call
+        sits in front of the preflight card, so before the timeout a reasoning
+        model that took minutes meant the design meeting simply never appeared:
+        the user watched "Working…" with nothing on screen, and cancelling was
+        the only way out. The whole contract of this module is "degrade, never
+        raise" — a wait with no bound degrades to nothing at all, which is the
+        one outcome it is not allowed to produce.
         """
         writer = self._roster_writer
         if writer is None:
@@ -1294,7 +1312,13 @@ class LiveStageAdapter:
         try:
             reply = writer(prompt)
             if isawaitable(reply):
-                reply = await reply
+                reply = await asyncio.wait_for(reply, timeout=ROSTER_PROPOSAL_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning(
+                "The Design meeting roster was not proposed within %ss; falling back to capability selection so the preflight card is not held up.",
+                ROSTER_PROPOSAL_TIMEOUT_SECONDS,
+            )
+            return None
         except Exception:
             logger.warning("The Design council roster could not be proposed; falling back to capability selection.", exc_info=True)
             return None
