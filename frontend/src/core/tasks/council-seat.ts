@@ -73,8 +73,69 @@ export function debateRounds(
 export type ConsensusState =
   | "debating"
   | "synthesizing"
+  | "awaiting_input"
   | "settled"
   | "stalled";
+
+export type ConsensusSnapshot = {
+  agreements: number;
+  disagreements: number;
+  openQuestions: number;
+  unresolved: number;
+};
+
+export function consensusSnapshot(
+  seats: readonly Subtask[],
+): ConsensusSnapshot | null {
+  const chair = seats.find(
+    (task) =>
+      task.councilSeat?.role === "chair" &&
+      task.status === "completed" &&
+      task.result,
+  );
+  if (!chair?.result) {
+    return null;
+  }
+  const payload = parseObject(chair.result);
+  const consensus = isRecord(payload?.consensus) ? payload.consensus : null;
+  if (!consensus) {
+    return null;
+  }
+  const agreements = arrayLength(consensus.agreements);
+  const disagreements = Array.isArray(consensus.disagreements)
+    ? consensus.disagreements.filter(isRecord).length
+    : 0;
+  const openQuestions = arrayLength(consensus.open_questions);
+  const unresolvedDisagreements = Array.isArray(consensus.disagreements)
+    ? consensus.disagreements.filter(
+        (item) => isRecord(item) && !str(item.resolution),
+      ).length
+    : 0;
+  return {
+    agreements,
+    disagreements,
+    openQuestions,
+    unresolved: unresolvedDisagreements + openQuestions,
+  };
+}
+
+export function councilSeatSummary(task: Subtask): string {
+  if (task.result) {
+    const summary = str(parseObject(task.result)?.summary);
+    if (summary) {
+      return summary;
+    }
+  }
+  for (const step of [...(task.steps ?? [])].reverse()) {
+    if (step.kind === "ai" && step.text.trim()) {
+      return step.text.trim();
+    }
+  }
+  if (task.status === "failed" && task.error) {
+    return task.error;
+  }
+  return "";
+}
 
 /**
  * How far the debate has got, from the seats alone.
@@ -94,6 +155,9 @@ export function consensusState(seats: readonly Subtask[]): ConsensusState {
   const positions = council.filter((task) => task.councilSeat?.role !== "chair");
 
   if (chair?.status === "completed") {
+    if (str(parseObject(chair.result ?? "")?.status) === "needs_input") {
+      return "awaiting_input";
+    }
     return "settled";
   }
   if (chair?.status === "failed") {
@@ -117,4 +181,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function str(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function parseObject(value: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function arrayLength(value: unknown): number {
+  return Array.isArray(value)
+    ? value.filter((item) => typeof item === "string" && item.trim()).length
+    : 0;
 }

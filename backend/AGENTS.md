@@ -1804,11 +1804,29 @@ however well it investigated — which is exactly how a whole Design council
 failed, three seats at a time, every rejection reading "returned prose instead
 of a structured result". `agents/middlewares/finalization_deadline_middleware.py`
 closes that axis the way the token and loop guards already close theirs: it
-warns at `DEFAULT_RESERVE_CALLS` remaining, then strips `tool_calls` on the last
-call so the loop ends with a real answer. `_model_call_budget` halves
-`budget.max_turns` because `recursion_limit` counts super-steps and a
-tool-calling turn costs two, so a deadline computed from the raw number would
-fire after the run had already aborted.
+warns at `DEFAULT_RESERVE_CALLS` remaining and removes tools from the following
+model request, so “write the result now” cannot be ignored in favor of another
+tool loop; stripping in-flight `tool_calls` at the hard edge remains the
+fallback. Use the effective per-agent value after clamping, not the possibly
+higher stage budget, or a configured lower agent limit will abort before the
+deadline fires.
+
+**A turn is not two super-steps, and reading it that way made the deadline
+useless.** `recursion_limit` counts super-steps, and LangGraph gives *every*
+middleware `before_model`/`after_model` hook its own graph node — so a turn is
+the model node, plus one node per hook in the shared subagent chain, plus the
+tools node, plus this middleware's own `after_model`. That is
+`SUBAGENT_SUPERSTEPS_PER_TURN` (currently 9), not 2. Halving `max_turns` set the
+deadline at more than four times the calls a worker could actually make, so it
+fired after the graph had already aborted and every council seat reported prose.
+`model_call_budget` divides by the real cost and reserves a turn's worth of
+headroom so the forced answer can be produced *and committed*; the constant is
+measured from the live chain by
+`tests/test_finalization_deadline_middleware.py::TestTheTurnCostAssumption`,
+which fails and names the new number if a middleware gains or loses a hook. The
+council's `DEPTH_POLICIES` budgets were sized under the old reading and bought
+two to eight model calls each; they are now sized so every dispatchable depth
+buys a usable number, pinned by `TestCouncilBudgetsFitRealWork`.
 
 The one thing this middleware must **not** do is report a `stop_reason`. That
 channel feeds `CAPPED_STOP_REASONS`, which makes `is_trustworthy` false —
@@ -2026,6 +2044,21 @@ authenticated project review sheet without dispatching workers or creating a
 new artifact; chat text is not a typed review record. DBTL workers also do not
 implicitly inherit every enabled skill: an explicit specialist skill whitelist
 is preserved, while a `None` whitelist becomes `[]` for the bounded stage run.
+
+The Design council preflight is a native `single_choice` Human Input request;
+its options carry `id`/`label`/`value` plus descriptions and the server-owned
+recommendation. Router-created clarification pairs do not necessarily fire
+model or tool callbacks, so `RunJournal` final reconciliation discovers
+allowlisted pairs only after the current run's input message and persists the
+ToolMessage artifact. Retained cards before that input are never re-journaled.
+
+Live council terminal events report the validated stage contract, not merely a
+stopped child graph. Prose, malformed structured output, blocked/failed output,
+and unusable capped output emit `task_failed`, matching
+`dbtl_stage_worker_runs`; only contract-valid completed or needs-input results
+emit `task_completed`. The automatic kickoff is a hidden
+`dbtl_design_kickoff` HumanMessage so its owner answers reach
+`_latest_cycle_request_text` without appearing as user-authored chat.
 
 `threads_meta` carries nullable `workspace_id` and `project_id` plus explicit
 `scope_type` and `visibility`. Existing and newly projectless conversations

@@ -136,9 +136,16 @@ class DepthPolicy:
         }
 
 
-#: The three settings, described in the terms the chooser thinks in. ``medium``
-#: reproduces the budget the council used before depth existed, so an unchanged
-#: default behaves exactly as it did.
+#: The four settings, described in the terms the chooser thinks in.
+#:
+#: ``max_turns`` reaches LangGraph as ``recursion_limit``, which counts
+#: super-steps, not turns — see ``SUBAGENT_SUPERSTEPS_PER_TURN``. These numbers
+#: were originally read as turns, which bought every depth two to eight model
+#: calls: not enough for a worker to read its context, argue, and emit a
+#: structured result, so each one was cut off mid-loop and the whole council
+#: reported prose. They are now sized so ``model_call_budget`` yields a usable
+#: number of calls, and ``TestCouncilBudgetsFitRealWork`` fails if a future edit
+#: takes one back below that.
 DEPTH_POLICIES: Mapping[CouncilDepth, DepthPolicy] = MappingProxyType(
     {
         CouncilDepth.HUMAN_INPUT: DepthPolicy(
@@ -157,21 +164,21 @@ DEPTH_POLICIES: Mapping[CouncilDepth, DepthPolicy] = MappingProxyType(
             label="Light debate",
             description="One position, one challenge, one synthesis. For a quick look, a pilot, or a design you mostly already have.",
             max_positions=1,
-            budget=WorkerBudget(max_workers=1, max_turns=20, max_tokens=150_000, timeout_seconds=420),
+            budget=WorkerBudget(max_workers=1, max_turns=80, max_tokens=150_000, timeout_seconds=420),
         ),
         CouncilDepth.MEDIUM: DepthPolicy(
             depth=CouncilDepth.MEDIUM,
             label="Medium debate",
             description="Up to two independent positions before the challenge and synthesis. The default for ordinary cycle work.",
             max_positions=2,
-            budget=WorkerBudget(max_workers=2, max_turns=40, max_tokens=400_000, timeout_seconds=900),
+            budget=WorkerBudget(max_workers=2, max_turns=120, max_tokens=400_000, timeout_seconds=900),
         ),
         CouncilDepth.HEAVY: DepthPolicy(
             depth=CouncilDepth.HEAVY,
             label="Heavy research",
             description="Up to four independent positions, each with room to read the workspace and argue in detail. For work that has to survive outside review.",
             max_positions=4,
-            budget=WorkerBudget(max_workers=4, max_turns=80, max_tokens=900_000, timeout_seconds=1800),
+            budget=WorkerBudget(max_workers=4, max_turns=190, max_tokens=900_000, timeout_seconds=1800),
         ),
     }
 )
@@ -237,6 +244,14 @@ class CouncilSeat:
     via_generalist: bool = False
     tools: tuple[str, ...] = ()
     inherits_all_tools: bool = True
+    #: What this seat argues *from*, when a proposal wrote it for the question.
+    #: Empty for a capability-selected seat, which has only its capability.
+    focus: str = ""
+    #: The proposal's own brief. Overrides the capability's generic one: three
+    #: seats that all resolve to ``general-purpose`` are a debate only because
+    #: each was told to argue from somewhere different, and showing the same
+    #: generic line under each would read as one agent listed three times.
+    proposed_brief: str = ""
 
     @property
     def role_label(self) -> str:
@@ -245,6 +260,8 @@ class CouncilSeat:
     @property
     def brief(self) -> str:
         """What this seat is being asked to do, in one line."""
+        if self.proposed_brief:
+            return self.proposed_brief
         if self.role is CouncilRole.POSITION:
             return capability_brief(self.capability)
         return ROLE_BRIEFS[self.role]
@@ -266,6 +283,7 @@ class CouncilSeat:
             "tools": list(self.tools),
             "inherits_all_tools": self.inherits_all_tools,
             "brief": self.brief,
+            "focus": self.focus,
             "counts_toward_stage_output": self.counts_toward_stage_output,
         }
 
@@ -470,6 +488,54 @@ def plan_council(
         notes=selection.notes,
         known_agents=known,
     )
+
+
+def plan_from_proposal(plan: CouncilPlan, proposal) -> CouncilPlan:
+    """The same council, re-described from a roster written for the question.
+
+    Depth, budget, and stage spec are kept from *plan* — those are the human's
+    setting and the contract the attempt runs under, and a proposal has no
+    business changing either. Only who sits, and what each seat argues from,
+    comes from the proposal.
+
+    Positions are capped by the plan's **depth**, not by however many the model
+    returned: the person chose how much debate to buy. A proposal with no chair
+    falls back to *plan* untouched, because a council with nobody to synthesize
+    it is not a council.
+
+    Takes ``proposal`` untyped to keep this module free of an import cycle with
+    ``council_proposal``, which already depends on the capability vocabulary.
+    """
+    chair = getattr(proposal, "chair", None)
+    positions = tuple(getattr(proposal, "positions", ()) or ())
+    if chair is None or not positions:
+        return plan
+
+    policy = depth_policy(plan.depth)
+    attempt_id = plan.seats[0].seat_id.rsplit("-position-", 1)[0] if plan.seats else "council"
+
+    def _seat(seat_id: str, role: CouncilRole, source, *, describe: bool) -> CouncilSeat:
+        return CouncilSeat(
+            seat_id=seat_id,
+            role=role,
+            capability=source.capability,
+            agent_name=source.agent_name,
+            model=source.model or (plan.seats[0].model if plan.seats else ""),
+            # A proposal names an agent outright, so nothing is standing in for
+            # a specialist nobody registered — the badge would be a lie here.
+            via_generalist=False,
+            # The red team borrows the chair's agent but not its brief: its job
+            # is fixed by its role, and labelling it "synthesis" would describe
+            # the opposite of what it does.
+            focus=source.focus if describe else "",
+            proposed_brief=source.brief if describe else "",
+        )
+
+    seats = [_seat(f"{attempt_id}-position-{index}", CouncilRole.POSITION, seat, describe=True) for index, seat in enumerate(positions[: policy.max_positions], start=1)]
+    seats.append(_seat(f"{attempt_id}-red-team", CouncilRole.RED_TEAM, chair, describe=False))
+    seats.append(_seat(f"{attempt_id}-chair", CouncilRole.CHAIR, chair, describe=True))
+
+    return replace(plan, seats=tuple(seats), unmet_capabilities=(), notes=(*plan.notes, *tuple(getattr(proposal, "rejected", ()) or ())))
 
 
 # ---------------------------------------------------------------------------

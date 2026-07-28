@@ -198,7 +198,11 @@ Breeding-workspace note:
   `ask_clarification` human-input card and resumes in the same selected cycle.
   A completed synthesis is emitted through the existing `present_files`
   message shape and thread artifact inspector; it only creates review evidence
-  and never submits or approves the human gate. The
+  and never submits or approves the human gate. The in-chat council view reports
+  validated seat progress and counted consensus, while the Design review sheet
+  renders a structured decision map from the package referenced by the bound
+  Markdown. Automatic kickoff plumbing is hidden from the user-authored
+  transcript. The
   presentation icon beside Cycles opens a client-only Phase 7 three-case demo
   and never mutates durable records.
 - The council's composition is inspectable before it convenes.
@@ -227,9 +231,36 @@ Breeding-workspace note:
   `recommend_depth` suggests one from named phrases in the request rather than
   a model's opinion, and stakes beat brevity. The confirmed depth travels in
   the request's own context (`dbtl_council_depth`, next-request-only like the
-  selected cycle) and the executor scopes the stage spec by it, so the previewed
-  roster and the dispatched one are the same computation — pinned by a test that
-  runs the real adapter. Depth and effective budget are recorded in the review
+  selected cycle) and the executor scopes the stage spec by it.
+  **The server also recovers that depth from the card it emitted**
+  (`_confirmed_council_depth`), because a client reply that loses the echoed
+  value is indistinguishable from one that never carried a choice — and the
+  fallback is the server's own recommendation, so someone who chose "Light
+  debate" silently got a medium council and nothing said so. The client's value
+  still wins when it sends one; recovery only fills the gap, and is scoped to
+  the answering turn, since a preflight answer sits in history forever and must
+  not pin the whole cycle to one depth.
+  **The preview is the proposal.** `preview_council` runs the roster proposal
+  rather than showing capability selection's roster while dispatch used a
+  proposed one: in a generalist-only deployment selection yields one
+  undifferentiated seat, so the card described a thin council and four
+  differentiated seats then ran. `plan_from_proposal` re-describes the plan from
+  the proposal while keeping depth, budget, and stage spec — the human's setting
+  and the attempt's contract — fixed. Approving a roster you were not shown is
+  not a choice.
+  A fifth preflight option, `adjust`, is the only one that starts nothing: it
+  raises a free-text `council_adjustment` card, carries the reviewer's words
+  **verbatim** into `build_proposal_prompt`, redraws the roster, and shows it
+  again before anyone runs. It is deliberately not a `CouncilDepth` — a value in
+  that enum is something the council can be *run at*. The note is read back from
+  the emitted card at dispatch (`_council_adjustment`), scanning back rather than
+  reading only the newest message, because by then the depth answer is the newest
+  thing said and the roster that runs must be the one that was approved.
+  Being *registered* is not the same as being able to debate: `bash` is a real
+  subagent, so the fail-closed agent check accepted it and a live council seated
+  it as an independent position, where it spent its whole budget running commands
+  and returned no argument. `NON_DELIBERATIVE_AGENTS` keeps built-in execution
+  specialists out of both the prompt's agent list and the parser. Depth and effective budget are recorded in the review
   package, because the budget a reviewer would reconstruct from `stage_spec_key`
   is the spec's, not the one those workers had. An agent that declares no
   `subagents.custom_agents.<name>.dbtl_capabilities` covers nothing, so a

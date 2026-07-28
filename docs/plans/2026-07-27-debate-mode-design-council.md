@@ -1,9 +1,9 @@
 # Debate Mode: redesigning the Design council
 
-**Status:** implemented. All seven steps in §4 have landed; see the commits from
-`ae965ea0` (`fix(dbtl): give a stage worker a deadline it can actually meet`)
-through `6faec55a` (`feat(dbtl): answer the objection instead of re-running the
-debate`).
+**Status:** implemented and independently re-audited against a real manual run.
+All seven steps in §4 have landed. The follow-up audit found that several
+backend pieces existed without a working browser protocol, so the original
+“implemented” label was premature; the corrections are recorded in §2.1.
 **Date:** 2026-07-27
 
 ## 1. What actually went wrong
@@ -72,6 +72,40 @@ Also landed: the chair prompt now states the evidence, boolean, and
 `clarification_question` rules it is validated against, and the failure note
 lists per-worker reasons with the guardrail named separately (a cap and a
 contract violation need opposite fixes).
+
+### 2.1 Independent implementation audit
+
+The first real browser walkthrough exposed four integration failures that unit
+coverage around the individual backend pieces did not catch:
+
+- The council preflight emitted `input_mode: "select"` and options without a
+  `value`, while the native Human Input parser accepts `single_choice` and
+  requires a value. The artifact was discarded, no card rendered, and the
+  person's next typed reply routed as ordinary chat. The protocol now uses the
+  native shape, carries option descriptions and a recommended option, and has
+  browser coverage.
+- The frontend ignored `task_completed` and `task_failed` custom events. It now
+  folds the full lifecycle, displays a reported-seat counter, bounded live
+  argument summaries, a real terminal state, and counted chair consensus.
+- DBTL workers emitted `task_completed` when the child graph stopped, before
+  validating the stage result. A prose or capped result could therefore look
+  successful live while the durable worker row correctly said failed. Terminal
+  seat events now apply the same structured-result validation before reporting
+  completion.
+- Graph-created clarification cards did not pass through model/tool callbacks,
+  so they were absent from the journal after history refresh. Root-run final
+  reconciliation now discovers only allowlisted card pairs added after the
+  current run input, preserving the card without replaying an older one.
+- The turn-deadline warning still left tools enabled, so a worker could ignore
+  “write the result now,” call another tool, and hit the same recursion cap with
+  prose. The finalization call now has no tools, and its deadline is derived
+  from the effective per-agent limit rather than a possibly higher stage budget.
+
+The synthetic Design kickoff is now hidden from the user-authored transcript
+while remaining explicit server input to the selected cycle. The chat digest
+reports agreements, contested points, and owner decisions. The stage review
+sheet also renders a structured decision map from the machine package named by
+the bound Markdown; the Markdown remains the approval authority.
 
 ## 3. Debate Mode
 
@@ -197,17 +231,13 @@ work the way a dataset change already invalidates a reconciliation approval.
 Step 3 is what makes the council a council. Everything after it is how a person
 watches and judges one.
 
-## 5. What was deliberately not done
+## 5. Deliberate interaction boundaries
 
-**The consensus renders into the review Markdown, not into a separate React
-sheet.** The plan called for a structured visual sheet beside the Markdown. The
-Markdown is what the approval binds by content hash, and
-`design-review.tsx` renders it deliberately rather than re-rendering the JSON —
-that is a governance property, not a UI shortcut. Putting the agreements and
-disagreements into the bound document means the reviewer reads them in the thing
-they are approving, and a second surface rendering the same data from the JSON
-could drift from it. A React sheet remains possible later; it should read the
-`consensus` block from the package rather than recompute anything.
+**The structured decision map is a guide; the Markdown remains the authority.**
+The review sheet reads the `consensus` block from the exact machine package
+named by the bound Markdown and renders the chosen path, agreements,
+disagreements, unresolved owner decisions, risks, and next actions. It does not
+recompute consensus, and the approval still binds to the Markdown hash.
 
 **Rounds are numbered but the panel does not yet offer a "request changes"
 button.** The refinement round fires on the durable review record, so it is

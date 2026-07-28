@@ -226,3 +226,14 @@ class TestTheReviewDocument:
         document = render_review_markdown(package, data_filename="p.json", data_hash="b" * 64)
 
         assert "Where the council landed" not in document
+
+    def test_chat_digest_reports_consensus_and_open_decisions(self):
+        from deerflow.dbtl.review_markdown import render_stage_digest
+
+        digest = render_stage_digest(
+            self._package(),
+            document_path="outputs/dbtl/cycle-1/design/review.md",
+        )
+
+        assert "**Council:** 1 agreed · 1 contested · 1 owner decision" in digest
+        assert "Which sites can guarantee irrigation control?" in digest

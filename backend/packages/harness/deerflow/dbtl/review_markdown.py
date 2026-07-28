@@ -248,6 +248,7 @@ def render_review_markdown(
 #: attention, so it states the decision-relevant facts and stops.
 _DIGEST_SUMMARY_CHARS = 700
 _DIGEST_MAX_FAILED_CHECKS = 4
+_DIGEST_MAX_OPEN_QUESTIONS = 2
 
 
 def _leading_summary(results: Sequence[Mapping[str, Any]]) -> str:
@@ -271,6 +272,29 @@ def _failed_checks(results: Sequence[Mapping[str, Any]]) -> list[str]:
     return failures[:_DIGEST_MAX_FAILED_CHECKS]
 
 
+def _consensus_digest(results: Sequence[Mapping[str, Any]]) -> list[str]:
+    consensus: Mapping[str, Any] | None = None
+    for result in _reading_order(results):
+        candidate = result.get("consensus")
+        if isinstance(candidate, Mapping):
+            consensus = candidate
+            break
+    if consensus is None:
+        return []
+
+    agreements = [str(item).strip() for item in _as_list(consensus.get("agreements")) if str(item).strip()]
+    disagreements = [item for item in _as_list(consensus.get("disagreements")) if isinstance(item, Mapping)]
+    open_questions = [str(item).strip() for item in _as_list(consensus.get("open_questions")) if str(item).strip()]
+    owner_label = "owner decision" if len(open_questions) == 1 else "owner decisions"
+    lines = [
+        "",
+        f"**Council:** {len(agreements)} agreed · {len(disagreements)} contested · {len(open_questions)} {owner_label}",
+    ]
+    if open_questions:
+        lines.append("**Still needs you:** " + "; ".join(open_questions[:_DIGEST_MAX_OPEN_QUESTIONS]))
+    return lines
+
+
 def render_stage_digest(payload: Mapping[str, Any], *, document_path: str) -> str:
     """A short, readable digest of a stage run, for the chat reply.
 
@@ -286,6 +310,8 @@ def render_stage_digest(payload: Mapping[str, Any], *, document_path: str) -> st
     summary = _leading_summary(results)
     if summary:
         lines.append(summary)
+
+    lines += _consensus_digest(results)
 
     failures = _failed_checks(results)
     if failures:

@@ -343,6 +343,10 @@ export default function ChatPage() {
         runContextPayload(cycleContext),
         {
           runMetadata: runActivityMetadata(cycleContext),
+          additionalKwargs: {
+            hide_from_ui: true,
+            dbtl_design_kickoff: true,
+          },
           onSent: () => {
             consumeDesignKickoff(kickoff.nonce);
             setRequestContext(AUTO_REQUEST_CONTEXT);

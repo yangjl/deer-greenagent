@@ -16,7 +16,7 @@ import os
 import platform
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from inspect import isawaitable
 from pathlib import Path
@@ -25,8 +25,8 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.middlewares.finalization_deadline_middleware import (
-    DEFAULT_RESERVE_CALLS,
     FinalizationDeadlineMiddleware,
+    model_call_budget,
 )
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.dbtl.agent_selector import AgentCandidate, Assignment, SelectionResult, build_candidates
@@ -36,12 +36,14 @@ from deerflow.dbtl.council import (
     council_depth_from_config,
     depth_policy,
     plan_council,
+    plan_from_proposal,
     recommend_depth,
 )
 from deerflow.dbtl.council_proposal import (
     CouncilProposal,
     build_proposal_prompt,
     parse_council_proposal,
+    seatable_agents,
 )
 from deerflow.dbtl.cycle_state import StageStatus, stage_for_state
 from deerflow.dbtl.review_markdown import render_review_markdown, render_stage_digest
@@ -57,7 +59,12 @@ from deerflow.dbtl.stage_runner import (
     collect_results,
 )
 from deerflow.dbtl.stage_spec import StageSpec, WorkerBudget, resolve_stage_spec
-from deerflow.dbtl.worker_result import WorkerStatus
+from deerflow.dbtl.worker_result import (
+    WorkerResultRejected,
+    WorkerStatus,
+    extract_result_payload,
+    parse_worker_result,
+)
 from deerflow.projects.storage import ensure_project_dirs, project_outputs_dir
 from deerflow.trace_context import (
     DEERFLOW_TRACE_METADATA_KEY,
@@ -140,17 +147,30 @@ def _compact_design_history(prior_runs: Sequence[dict[str, Any]]) -> list[dict[s
     return compact
 
 
+def _preview_context(cycle: Mapping[str, Any]) -> str:
+    """The little a roster proposal needs, cheap enough to build interactively.
+
+    Deliberately not the full ``stage_context`` the dispatch path assembles:
+    that walks the project workspace and prior council runs, and this one runs
+    in front of a person waiting for a card. Who should sit on a council is
+    decided by what the cycle is asking, which is all of this.
+    """
+    return json.dumps(
+        {key: cycle.get(key) for key in ("title", "cycle_class", "research_question", "objective", "success_criteria")},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
 def _model_call_budget(max_turns: int) -> int:
     """How many model calls fit in a turn budget.
 
-    ``max_turns`` is passed to LangGraph as ``recursion_limit``, which counts
-    *super-steps*: an agent turn that calls a tool costs two (the model node and
-    the tool node). So the model gets to speak roughly half as often as the turn
-    budget suggests, and a deadline computed from the raw number would fire
-    after the run had already been aborted. Floor-divide, then keep enough room
-    for the reserve plus the answer itself.
+    Delegates to the middleware that enforces the deadline, so the number the
+    stage layer reserves and the number the deadline fires on are one
+    computation. See ``SUBAGENT_SUPERSTEPS_PER_TURN`` for why this is not simply
+    half of ``max_turns``.
     """
-    return max(DEFAULT_RESERVE_CALLS + 1, int(max_turns) // 2)
+    return model_call_budget(max_turns)
 
 
 _FAILURE_REASON_CHARS = 300
@@ -216,6 +236,57 @@ def _seat_identity(unit: WorkUnit, *, model: str) -> dict[str, Any]:
         # Only the chair's synthesis is the stage's answer, and a reader
         # watching three lanes finish cannot otherwise tell which one mattered.
         "counts_toward_stage_output": unit.role == "chair",
+    }
+
+
+def _terminal_seat_event(
+    unit: WorkUnit,
+    outcome: DispatchOutcome,
+    *,
+    model: str,
+) -> dict[str, Any]:
+    """Report contract-valid evidence progress, not child-graph termination."""
+    base = {
+        "task_id": unit.unit_id,
+        "council_seat": _seat_identity(unit, model=model),
+    }
+    if outcome.error or not outcome.text:
+        return {
+            "type": "task_failed",
+            **base,
+            "error": outcome.error or "The worker returned no output.",
+            "stop_reason": outcome.stop_reason,
+        }
+    try:
+        parsed = parse_worker_result(
+            extract_result_payload(outcome.text),
+            capability=unit.capability,
+            agent_name=unit.agent_name,
+            stop_reason=outcome.stop_reason,
+        )
+    except WorkerResultRejected as exc:
+        return {
+            "type": "task_failed",
+            **base,
+            "error": (f"The worker's result did not satisfy the stage contract: {exc}"),
+            "stop_reason": outcome.stop_reason,
+        }
+    if parsed.status in {WorkerStatus.FAILED, WorkerStatus.BLOCKED} or (parsed.was_capped and parsed.status is not WorkerStatus.NEEDS_INPUT):
+        return {
+            "type": "task_failed",
+            **base,
+            "error": parsed.summary,
+            "stop_reason": outcome.stop_reason,
+        }
+    return {
+        "type": "task_completed",
+        **base,
+        # Publish the validated, normalized contract. Workers sometimes wrap
+        # otherwise-valid JSON in prose or a code fence; forwarding that raw
+        # text would make the browser's bounded live summary unreadable even
+        # though the durable stage package parsed correctly.
+        "result": json.dumps(parsed.as_dict(), ensure_ascii=False),
+        "stop_reason": outcome.stop_reason,
     }
 
 
@@ -811,6 +882,7 @@ class LiveStageAdapter:
         request_text: str,
         stage_context: str,
         max_positions: int,
+        adjustment: str | None = None,
     ) -> CouncilProposal | None:
         """Ask for a roster written for this question. Never fatal.
 
@@ -823,7 +895,10 @@ class LiveStageAdapter:
         writer = self._roster_writer
         if writer is None:
             return None
-        known_agents = tuple(dict.fromkeys(item.name for item in self._candidates() if item.available))
+        # Filtered at the source so the "known agents" a refusal names is the
+        # same list the model was shown; an execution specialist appearing in
+        # one but not the other reads as an arbitrary rejection.
+        known_agents = seatable_agents(tuple(dict.fromkeys(item.name for item in self._candidates() if item.available)))
         if not known_agents:
             return None
         prompt = build_proposal_prompt(
@@ -832,6 +907,7 @@ class LiveStageAdapter:
             known_agents=known_agents,
             known_models=self._known_models(),
             max_positions=max_positions,
+            adjustment=adjustment,
         )
         try:
             reply = writer(prompt)
@@ -857,6 +933,7 @@ class LiveStageAdapter:
         cycle_id: str | None,
         request_text: str,
         config: RunnableConfig,
+        adjustment: str | None = None,
     ) -> CouncilPlan | None:
         """The roster this request would convene, without convening it.
 
@@ -879,12 +956,29 @@ class LiveStageAdapter:
         status = str((attempt or {}).get("status") or "")
         if status not in {StageStatus.IN_PROGRESS.value, StageStatus.CHANGES_REQUESTED.value}:
             return None
-        return self._plan_council(
+        plan = self._plan_council(
             resolve_stage_spec(stage),
             config=config,
             request_text=request_text,
             attempt_id="preview",
         )
+        if plan.human_authored or not plan.dispatchable:
+            # Nothing to propose for: one is a deliberate choice to seat nobody,
+            # the other cannot run at all. Asked before ``dispatchable`` because
+            # they are false for opposite reasons.
+            return plan
+        # The preview *is* the proposal. Building the card from capability
+        # selection while dispatch used a proposed roster meant the card
+        # described a council that never convened — and in a generalist-only
+        # deployment (the common one) selection shows one undifferentiated seat
+        # where four differentiated ones then ran.
+        proposal = await self._propose_roster(
+            request_text=request_text,
+            stage_context=_preview_context(cycle),
+            max_positions=depth_policy(plan.depth).max_positions,
+            adjustment=adjustment,
+        )
+        return plan if proposal is None else plan_from_proposal(plan, proposal)
 
     def _plan_council(
         self,
@@ -1025,7 +1119,10 @@ class LiveStageAdapter:
             # its result is parsed from. The deadline reserves the last few model
             # calls for writing that answer.
             deadline = FinalizationDeadlineMiddleware(
-                max_model_calls=_model_call_budget(budget.max_turns),
+                # Config may impose a lower per-agent turn limit than the
+                # versioned stage budget. Derive the deadline from the limit
+                # the executor will actually enforce.
+                max_model_calls=_model_call_budget(worker_config.max_turns),
             )
             executor = SubagentExecutor(
                 config=worker_config,
@@ -1083,38 +1180,36 @@ class LiveStageAdapter:
                 raise
 
             if result.status is SubagentStatus.COMPLETED:
-                await emit(
-                    {
-                        "type": "task_completed",
-                        "task_id": unit.unit_id,
-                        "result": result.result or "",
-                        "stop_reason": result.stop_reason,
-                        "council_seat": _seat_identity(unit, model=effective_model),
-                    }
-                )
-                return DispatchOutcome(
+                dispatch_outcome = DispatchOutcome(
                     unit_id=unit.unit_id,
                     text=result.result,
                     stop_reason=result.stop_reason,
                     forced_finalization=deadline.forced_any(),
                 )
+                await emit(
+                    _terminal_seat_event(
+                        unit,
+                        dispatch_outcome,
+                        model=effective_model,
+                    )
+                )
+                return dispatch_outcome
 
             error = result.error or f"Subagent ended with status {result.status.value}."
-            await emit(
-                {
-                    "type": "task_failed",
-                    "task_id": unit.unit_id,
-                    "error": error,
-                    "stop_reason": result.stop_reason,
-                    "council_seat": _seat_identity(unit, model=effective_model),
-                }
-            )
-            return DispatchOutcome(
+            dispatch_outcome = DispatchOutcome(
                 unit_id=unit.unit_id,
                 text=result.result,
                 stop_reason=result.stop_reason,
                 error=error,
             )
+            await emit(
+                _terminal_seat_event(
+                    unit,
+                    dispatch_outcome,
+                    model=effective_model,
+                )
+            )
+            return dispatch_outcome
 
         return await asyncio.gather(*(run_one(unit) for unit in units))
 
@@ -1189,6 +1284,7 @@ class LiveStageAdapter:
         state: dict[str, Any],
         config: RunnableConfig,
         authored_design: str | None = None,
+        council_adjustment: str | None = None,
     ) -> LiveStageResult:
         if not project_id or not cycle_id:
             return LiveStageResult(
@@ -1414,6 +1510,9 @@ class LiveStageAdapter:
                     depth_policy(council_plan.depth).max_positions,
                     change_request=change_request,
                 ),
+                # Carried from the preflight the person approved, so the roster
+                # that runs is the one they were shown.
+                adjustment=council_adjustment,
             )
         if proposal is not None:
             # The roster replaces selection's units rather than sitting beside

@@ -98,6 +98,36 @@ class CouncilProposal:
         }
 
 
+#: Registered subagents that cannot hold a council seat.
+#:
+#: Being registered is not the same as being able to debate. ``bash`` is a
+#: real subagent, so the fail-closed "is this a known agent?" check accepted
+#: it — and a live council duly seated it as an independent position, where it
+#: spent its entire turn budget running commands and returned no argument. An
+#: execution specialist has no position to take.
+#:
+#: Deliberately a short list of *built-in* executors rather than a rule like
+#: "must declare ``dbtl_capabilities``": most deployments register no
+#: capabilities at all, and requiring them would collapse every council back to
+#: the single generalist this whole proposal path exists to escape.
+NON_DELIBERATIVE_AGENTS = frozenset({"bash"})
+
+
+def is_deliberative_agent(agent_name: str) -> bool:
+    """Whether *agent_name* can argue a position rather than only act."""
+    return str(agent_name or "").strip().lower() not in NON_DELIBERATIVE_AGENTS
+
+
+def seatable_agents(agent_names: Sequence[str]) -> tuple[str, ...]:
+    """The subset of *agent_names* that may be offered a council seat.
+
+    Applied to the prompt's agent list as well as the parser's check: the model
+    cannot pick what it was never shown, and refusing afterwards is the
+    backstop rather than the mechanism.
+    """
+    return tuple(name for name in agent_names if is_deliberative_agent(name))
+
+
 def _extract_object(text: str) -> Mapping[str, object] | None:
     """The outermost JSON object, or ``None``.
 
@@ -149,6 +179,8 @@ def _parse_seat(
     if agent_name not in set(known_agents):
         known = ", ".join(known_agents) or "none"
         return None, f"{label} ({focus}): {agent_name or 'no agent'!r} is not a registered agent (known: {known})."
+    if not is_deliberative_agent(agent_name):
+        return None, f"{label} ({focus}): {agent_name!r} runs commands rather than arguing a position, so it cannot hold a council seat."
 
     raw_model = raw.get("model")
     model = _clean(raw_model, limit=120) or None
@@ -225,6 +257,68 @@ def parse_council_proposal(
     )
 
 
+def proposal_as_dict(proposal: CouncilProposal) -> dict[str, object]:
+    """The roster as plain data, for the card that shows it to a person."""
+
+    def _seat(seat: ProposedSeat) -> dict[str, object]:
+        return {
+            "focus": seat.focus,
+            "brief": seat.brief,
+            "agent_name": seat.agent_name,
+            "capability": seat.capability.value,
+            "model": seat.model,
+        }
+
+    return {
+        "positions": [_seat(seat) for seat in proposal.positions],
+        "chair": _seat(proposal.chair) if proposal.chair is not None else None,
+    }
+
+
+def proposal_from_dict(payload: object) -> CouncilProposal | None:
+    """The roster a person approved, restored from the card that showed it.
+
+    Replaying the approved roster is what makes the preview honest: proposing
+    again at dispatch means a second model call, and a second call can return a
+    different council — so the seats someone approved and the seats that ran
+    would differ, with nothing recording that they had.
+
+    Re-validated on the way back rather than trusted. The card is server-owned,
+    so this is not a trust boundary; it keeps one function deciding who may hold
+    a seat instead of two that can drift. Anything unusable restores to
+    ``None`` — half a council is worse than falling back to selection.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+
+    def _seat(raw: object) -> ProposedSeat | None:
+        if not isinstance(raw, Mapping):
+            return None
+        focus = _clean(raw.get("focus"), limit=MAX_FOCUS_CHARS)
+        brief = _clean(raw.get("brief"), limit=MAX_BRIEF_CHARS)
+        agent_name = _clean(raw.get("agent_name"), limit=120)
+        if not focus or not brief or not agent_name or not is_deliberative_agent(agent_name):
+            return None
+        try:
+            capability = Capability(_clean(raw.get("capability"), limit=120))
+        except ValueError:
+            return None
+        return ProposedSeat(
+            focus=focus,
+            brief=brief,
+            agent_name=agent_name,
+            capability=capability,
+            model=_clean(raw.get("model"), limit=120) or None,
+        )
+
+    chair = _seat(payload.get("chair"))
+    raw_positions = payload.get("positions")
+    positions = tuple(seat for seat in (_seat(raw) for raw in (raw_positions if isinstance(raw_positions, Sequence) and not isinstance(raw_positions, str) else ())) if seat is not None)
+    if chair is None or not positions:
+        return None
+    return CouncilProposal(positions=positions, chair=chair)
+
+
 _PROMPT_TEMPLATE = """\
 You are assembling a Design council for a DBTL research cycle. Decide who should
 sit on it for *this* question, then stop. You are not designing the study.
@@ -234,7 +328,7 @@ The request:
 
 Project context:
 {context}
-
+{adjustment}
 Propose up to {max_positions} independent positions. What makes this a council
 rather than one opinion is that the seats **disagree**: give each a different
 place to argue from, so that a reader can tell their positions apart before
@@ -269,6 +363,17 @@ you do not need to propose one.
 """
 
 
+_ADJUSTMENT_TEMPLATE = """
+The person reviewing this roster asked for a change, quoted exactly:
+\"\"\"
+{adjustment}
+\"\"\"
+Their words are the requirement. Change what they asked to change and leave the
+rest of the roster alone — re-drawing the seats they accepted spends the round
+re-arguing what was already settled.
+"""
+
+
 def build_proposal_prompt(
     *,
     request_text: str,
@@ -276,18 +381,25 @@ def build_proposal_prompt(
     known_agents: Sequence[str],
     known_models: Sequence[str],
     max_positions: int,
+    adjustment: str | None = None,
 ) -> str:
     """The one-shot prompt that asks for a roster.
 
     The allowed agents, models, and capabilities are listed explicitly. Parsing
     is fail-closed, and a fail-closed rule applied to a model that was never
     shown the options is a trap rather than a contract.
+
+    An ``adjustment`` is the reviewer's own words, carried verbatim. Restating
+    it in the prompt's vocabulary is exactly how "drop the reproducibility
+    seat" becomes a roster that keeps it.
     """
+    note = (adjustment or "").strip()
     return _PROMPT_TEMPLATE.format(
         request=(request_text or "").strip() or "(no request text)",
         context=(stage_context or "").strip() or "(none)",
+        adjustment=_ADJUSTMENT_TEMPLATE.format(adjustment=note) if note else "",
         max_positions=max(1, min(int(max_positions), MAX_PROPOSED_POSITIONS)),
-        agents=", ".join(known_agents) or "(none registered)",
+        agents=", ".join(seatable_agents(known_agents)) or "(none registered)",
         models=", ".join(known_models) or "(none configured)",
         capabilities=", ".join(item.value for item in Capability),
     )

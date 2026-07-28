@@ -322,3 +322,92 @@ class TestReachingDispatch:
 
         assert dispatcher.calls
         assert result.artifact_uri
+
+
+class TestWhoMayHoldASeat:
+    """A council seat argues a position; not every registered agent can.
+
+    ``bash`` is a genuinely registered subagent, so the fail-closed agent check
+    accepted it — and a live council seated it as "Independent position:
+    simulation implementation and reproducibility". It spent its whole turn
+    budget running commands and returned no argument, because an execution
+    specialist has no position to take. The agent list was constraining *which*
+    names may be used without asking whether they can debate at all.
+    """
+
+    def test_an_execution_specialist_is_not_eligible(self):
+        from deerflow.dbtl.council_proposal import is_deliberative_agent
+
+        assert not is_deliberative_agent("bash")
+
+    def test_the_generalist_and_custom_specialists_remain_eligible(self):
+        from deerflow.dbtl.council_proposal import is_deliberative_agent
+
+        assert is_deliberative_agent("general-purpose")
+        assert is_deliberative_agent("quant-geneticist")
+
+    def test_eligibility_ignores_case_and_padding(self):
+        from deerflow.dbtl.council_proposal import is_deliberative_agent
+
+        assert not is_deliberative_agent("  BASH ")
+
+    def test_seatable_agents_filters_a_candidate_list(self):
+        from deerflow.dbtl.council_proposal import seatable_agents
+
+        assert seatable_agents(("general-purpose", "bash", "designer")) == (
+            "general-purpose",
+            "designer",
+        )
+
+    def test_a_proposal_naming_an_ineligible_agent_is_refused_by_name(self):
+        """Refused with a reason, not silently swapped for the generalist.
+
+        The silent swap is the original bug arriving through the feature meant
+        to fix it, and a seat that was asked for and refused is otherwise
+        indistinguishable from one never considered.
+        """
+        proposal = parse_council_proposal(
+            _payload(
+                _seat(agent_name="bash", focus="reproducibility"),
+                _seat(focus="variance"),
+                chair=_seat(focus="synthesis", agent_name="general-purpose", capability="experimental_design"),
+            ),
+            known_agents=(*KNOWN_AGENTS, "bash"),
+            known_models=KNOWN_MODELS,
+            max_positions=3,
+        )
+
+        assert any("bash" in reason for reason in proposal.rejected)
+        # One bad seat does not discard the good ones.
+        assert [seat.focus for seat in proposal.positions] == ["variance"]
+
+    def test_an_ineligible_chair_is_refused_too(self):
+        proposal = parse_council_proposal(
+            _payload(
+                _seat(focus="variance"),
+                chair=_seat(agent_name="bash", focus="synthesis"),
+            ),
+            known_agents=(*KNOWN_AGENTS, "bash"),
+            known_models=KNOWN_MODELS,
+            max_positions=2,
+        )
+
+        assert proposal.chair is None
+        assert any("bash" in reason for reason in proposal.rejected)
+
+    def test_the_prompt_never_offers_an_ineligible_agent(self):
+        """Cheaper to not ask than to refuse: the model cannot pick what it
+        was never shown, and the refusal path stays a backstop."""
+        from deerflow.dbtl.council_proposal import build_proposal_prompt
+
+        prompt = build_proposal_prompt(
+            request_text="Design a drought trial.",
+            stage_context="",
+            known_agents=("general-purpose", "bash", "designer"),
+            known_models=KNOWN_MODELS,
+            max_positions=2,
+        )
+
+        agent_line = next(line for line in prompt.splitlines() if "general-purpose" in line)
+        assert "bash" not in agent_line
+        assert "designer" in agent_line

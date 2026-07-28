@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@rstest/core";
 
 import {
+  consensusSnapshot,
+  councilSeatSummary,
   consensusState,
   debateRounds,
   readCouncilSeat,
@@ -127,6 +129,26 @@ describe("consensusState", () => {
     ).toBe("settled");
   });
 
+  it("waits on the human when the chair asks for one decision", () => {
+    const chair = task(
+      "c",
+      "completed",
+      seatEvent({ role: "chair" }),
+    );
+    chair.result = JSON.stringify({
+      status: "needs_input",
+      summary: "The site choice remains open.",
+      clarification_question: "Which site can guarantee irrigation?",
+    });
+
+    expect(
+      consensusState([
+        task("p1", "completed", seatEvent()),
+        chair,
+      ]),
+    ).toBe("awaiting_input");
+  });
+
   it("is stalled when the chair failed", () => {
     // Not "settled" and not "still going": a failed chair needs a different
     // word and a different next action from either.
@@ -147,5 +169,52 @@ describe("consensusState", () => {
         task("p2", "failed", seatEvent()),
       ]),
     ).toBe("stalled");
+  });
+});
+
+describe("consensusSnapshot", () => {
+  it("counts the chair's recorded agreements, disagreements, and open questions", () => {
+    const chair = task("chair", "completed", seatEvent({ role: "chair" }));
+    chair.result = JSON.stringify({
+      status: "completed",
+      summary: "Use two seasons and preserve the holdout.",
+      consensus: {
+        agreements: ["Preserve a holdout.", "Model genotype by environment."],
+        disagreements: [
+          {
+            topic: "Season count",
+            positions: ["Two.", "Three."],
+            resolution: "",
+          },
+        ],
+        open_questions: ["Which sites have irrigation control?"],
+      },
+    });
+
+    expect(consensusSnapshot([chair])).toEqual({
+      agreements: 2,
+      disagreements: 1,
+      openQuestions: 1,
+      unresolved: 2,
+    });
+    expect(councilSeatSummary(chair)).toBe(
+      "Use two seasons and preserve the holdout.",
+    );
+  });
+
+  it("uses the latest bounded argument step while a seat is running", () => {
+    const position = task("position", "in_progress", seatEvent());
+    position.steps = [
+      {
+        message_index: 1,
+        kind: "ai",
+        text: "The holdout must be separated by family.",
+        truncated: false,
+      },
+    ];
+
+    expect(councilSeatSummary(position)).toBe(
+      "The holdout must be separated by family.",
+    );
   });
 });

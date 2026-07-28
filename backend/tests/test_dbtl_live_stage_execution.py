@@ -513,7 +513,15 @@ async def test_the_review_package_records_who_sat_on_the_council(
     package = json.loads(next(document.parent.glob("design-package-rev3-*.json")).read_text())
     council = package["council"]
     assert council["depth"] == "heavy"
-    assert council["budget"]["max_turns"] == 80
+    # The *chosen depth's* budget, not the stage spec's default — a reviewer
+    # reconstructing the allowance from ``stage_spec_key`` alone would read the
+    # wrong one. Asserted against the policy rather than a literal so retuning a
+    # depth does not look like a regression here.
+    from deerflow.dbtl.council import CouncilDepth, depth_policy
+    from deerflow.dbtl.stage_spec import resolve_stage_spec
+
+    assert council["budget"]["max_turns"] == depth_policy(CouncilDepth.HEAVY).budget.max_turns
+    assert council["budget"]["max_turns"] != resolve_stage_spec("design").budget.max_turns
     assert [seat["role"] for seat in council["seats"]][-1] == "chair"
     assert council["seats"][0]["agent_name"] == "designer"
 

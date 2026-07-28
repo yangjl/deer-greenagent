@@ -51,6 +51,42 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_RESERVE_CALLS = 3
 
+#: What one tool-calling worker turn actually costs in LangGraph super-steps.
+#:
+#: ``max_turns`` reaches the graph as ``recursion_limit``, which counts
+#: super-steps rather than conversational turns — and LangGraph gives **every**
+#: middleware ``before_model`` / ``after_model`` hook its own node. So a turn is
+#: not "model + tools" (2); it is the model node, plus one node per hook in the
+#: shared subagent chain, plus the tools node, plus this middleware's own
+#: ``after_model``. Reading ``max_turns`` as turns overstates the real allowance
+#: by more than fourfold, which is how a deadline set at half the limit came to
+#: fire after the run had already been aborted.
+#:
+#: Measured from the real chain and pinned by
+#: ``tests/test_finalization_deadline_middleware.py::TestTheTurnCostAssumption``:
+#: if a middleware gains or loses a hook, that test fails and names the new
+#: number rather than letting every stage worker quietly lose budget.
+SUBAGENT_SUPERSTEPS_PER_TURN = 9
+
+#: Super-steps held back so the forced final answer has somewhere to land.
+#: Roughly one turn's worth: at the moment the deadline fires, the graph still
+#: has to run this middleware's rewrite and the remaining hook nodes.
+_DEADLINE_HEADROOM_STEPS = SUBAGENT_SUPERSTEPS_PER_TURN
+
+
+def model_call_budget(max_turns: int, *, steps_per_turn: int = SUBAGENT_SUPERSTEPS_PER_TURN) -> int:
+    """How many model calls actually fit in a ``recursion_limit`` of ``max_turns``.
+
+    Divides by the true per-turn super-step cost, then reserves a turn's worth
+    of headroom so the forced answer can be produced *and committed* before the
+    graph aborts. The floor keeps a degenerate budget legal: a deadline that
+    warns on the first call and stops on the second is worse than none, so the
+    result never drops below the reserve plus the one call needed to answer in.
+    """
+    usable = max(0, int(max_turns) - _DEADLINE_HEADROOM_STEPS)
+    return max(DEFAULT_RESERVE_CALLS + 1, usable // max(1, int(steps_per_turn)))
+
+
 _DEADLINE_NOTICE = (
     "[FINALIZATION DEADLINE] You have {remaining} model call(s) left before this "
     "run ends. Stop investigating now and spend the next call writing your "
@@ -201,7 +237,17 @@ class FinalizationDeadlineMiddleware(AgentMiddleware[AgentState]):
         notices = self.drain_pending_notices(request.runtime)
         if not notices:
             return request
-        return request.override(messages=[*request.messages, *(HumanMessage(content=text) for text in notices)])
+        # The warning says "write the result now", so make that instruction
+        # mechanically true. Leaving tools available let the worker ignore the
+        # notice, call one more tool, and eventually reach recursion_limit with
+        # prose again—the exact failure this middleware exists to prevent.
+        return request.override(
+            messages=[
+                *request.messages,
+                *(HumanMessage(content=text) for text in notices),
+            ],
+            tools=[],
+        )
 
     @override
     def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]) -> ModelCallResult:

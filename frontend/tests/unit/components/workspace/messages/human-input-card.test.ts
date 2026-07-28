@@ -41,6 +41,35 @@ describe("HumanInputCard", () => {
     expect(html).toContain("Type another answer...");
   });
 
+  it("renders option guidance and marks the recommended council depth", () => {
+    const html = renderCard({
+      request: {
+        ...request,
+        clarification_type: "council_preflight",
+        input_mode: "single_choice",
+        recommended_option_id: "option-2",
+        options: [
+          {
+            id: "option-1",
+            label: "Light",
+            value: "light",
+            description: "One position, one challenge, one synthesis.",
+          },
+          {
+            id: "option-2",
+            label: "Medium",
+            value: "medium",
+            description: "Two independent positions and a chair.",
+          },
+        ],
+      },
+    });
+
+    expect(html).toContain("One position, one challenge, one synthesis.");
+    expect(html).toContain("Two independent positions and a chair.");
+    expect(html).toContain("Recommended");
+  });
+
   it("renders answered state as disabled with the selected value", () => {
     const response: HumanInputResponse = {
       version: 1,

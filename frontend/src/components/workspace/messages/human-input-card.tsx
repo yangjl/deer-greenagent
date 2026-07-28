@@ -192,8 +192,23 @@ export function HumanInputCard({
                   variant="outline"
                   onClick={() => handleOptionClick(option)}
                 >
-                  <span className="min-w-0 wrap-break-word whitespace-pre-wrap">
-                    {option.label}
+                  <span className="min-w-0 flex-1 wrap-break-word whitespace-normal">
+                    <span className="flex flex-wrap items-center gap-2">
+                      <span>{option.label}</span>
+                      {request.recommended_option_id === option.id ? (
+                        <Badge
+                          className="h-5 rounded px-1.5 text-[10px] font-medium"
+                          variant="secondary"
+                        >
+                          Recommended
+                        </Badge>
+                      ) : null}
+                    </span>
+                    {option.description ? (
+                      <span className="text-muted-foreground mt-0.5 block text-xs leading-5">
+                        {option.description}
+                      </span>
+                    ) : null}
                   </span>
                 </Button>
               ))}

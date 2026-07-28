@@ -22,7 +22,11 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from deerflow.agents.dbtl.supervisor import _make_llm_question_writer, build_supervisor_graph
+from deerflow.agents.dbtl.supervisor import (
+    _latest_cycle_request_text,
+    _make_llm_question_writer,
+    build_supervisor_graph,
+)
 from deerflow.agents.thread_state import get_thread_state_schema
 from deerflow.dbtl.branches import SupervisorBranch, SupervisorContext
 from deerflow.dbtl.routing import ExplicitChoice
@@ -781,12 +785,48 @@ class TestCouncilPreflight:
         assert card["request_id"].startswith("dbtl-council__")
         # Ordered least-agent-effort first, so declining the council entirely is
         # the option a decisive owner reaches without reading past it.
-        assert [option["id"] for option in card["options"]] == ["human_input", "light", "medium", "heavy"]
+        # Depths ordered least-agent-effort first, so declining the council
+        # entirely is the option a decisive owner reaches without reading past
+        # it. "adjust" sits last because it is the one option that starts
+        # nothing — it sends the roster back to be redrawn.
+        assert [option["id"] for option in card["options"]] == [
+            "human_input",
+            "light",
+            "medium",
+            "heavy",
+            "adjust",
+        ]
+        assert card["input_mode"] == "single_choice"
+        assert [option["value"] for option in card["options"]] == [
+            "human_input",
+            "light",
+            "medium",
+            "heavy",
+            "adjust",
+        ]
         assert card["council_plan"]["seats"][-1]["role"] == "chair"
         assert card["recommended_depth"] == "medium"
+        assert card["recommended_option_id"] == "medium"
         # The text stands alone for anyone who cannot see the card.
         assert "designer" in card["context"]
         assert "gpt-5.6-sol" in card["context"]
+
+    def test_hidden_automatic_kickoff_remains_the_design_request(self):
+        state = {
+            "messages": [
+                HumanMessage(content="Set up a maize simulation.", id="visible"),
+                HumanMessage(
+                    content="Start the Design council with the owner's recorded answers.",
+                    id="kickoff",
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        "dbtl_design_kickoff": True,
+                    },
+                ),
+            ]
+        }
+
+        assert _latest_cycle_request_text(state) == "Start the Design council with the owner's recorded answers."
 
     @staticmethod
     def _human_input_adapter(executed):

@@ -41,6 +41,59 @@ test("extractHumanInputRequest reads a valid tool artifact payload", () => {
   expect(extractHumanInputRequest(message)).toEqual(requestPayload);
 });
 
+test("extractHumanInputRequest reads the Design council preflight card", () => {
+  const message = {
+    type: "tool",
+    name: "ask_clarification",
+    content: "fallback",
+    artifact: {
+      human_input: {
+        version: 1,
+        kind: "human_input_request",
+        source: "ask_clarification",
+        request_id: "dbtl-council__cycle-1__abc",
+        clarification_type: "council_preflight",
+        title: "Before the Design council convenes",
+        question: "How much debate should this design get?",
+        context: "**Three seats**",
+        input_mode: "single_choice",
+        options: [
+          {
+            id: "light",
+            label: "Light",
+            value: "light",
+            description: "One position, one challenge, one synthesis.",
+          },
+          {
+            id: "medium",
+            label: "Medium",
+            value: "medium",
+            description: "Two independent positions.",
+          },
+        ],
+        recommended_option_id: "medium",
+      },
+    },
+  } as unknown as Message;
+
+  expect(extractHumanInputRequest(message)).toMatchObject({
+    input_mode: "single_choice",
+    recommended_option_id: "medium",
+    options: [
+      {
+        id: "light",
+        value: "light",
+        description: "One position, one challenge, one synthesis.",
+      },
+      {
+        id: "medium",
+        value: "medium",
+        description: "Two independent positions.",
+      },
+    ],
+  });
+});
+
 test("extractHumanInputRequest rejects malformed artifacts", () => {
   const message = {
     type: "tool",

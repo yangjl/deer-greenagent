@@ -4,6 +4,7 @@ import {
   CheckIcon,
   GavelIcon,
   Loader2Icon,
+  MessageCircleQuestionIcon,
   ShieldAlertIcon,
   SwordsIcon,
   TriangleAlertIcon,
@@ -13,9 +14,12 @@ import { useMemo } from "react";
 
 import { useSubtaskContext } from "@/core/tasks/context";
 import {
+  consensusSnapshot,
   consensusState,
+  councilSeatSummary,
   debateRounds,
   type ConsensusState,
+  type ConsensusSnapshot,
 } from "@/core/tasks/council-seat";
 import type { CouncilSeatIdentity, Subtask } from "@/core/tasks/types";
 import { cn } from "@/lib/utils";
@@ -35,10 +39,15 @@ export function DebatePanel({ className }: { className?: string }) {
   const tasks = useMemo(() => Object.values(taskMap), [taskMap]);
   const rounds = useMemo(() => debateRounds(tasks), [tasks]);
   const state = useMemo(() => consensusState(tasks), [tasks]);
+  const snapshot = useMemo(() => consensusSnapshot(tasks), [tasks]);
 
   if (rounds.length === 0) {
     return null;
   }
+  const seats = rounds.flatMap((round) => round.seats);
+  const reported = seats.filter((seat) => seat.status !== "in_progress").length;
+  const progress = Math.round((reported / seats.length) * 100);
+  const currentRound = Math.max(...rounds.map((round) => round.round));
 
   return (
     <section
@@ -48,11 +57,31 @@ export function DebatePanel({ className }: { className?: string }) {
       )}
       aria-label="Design council debate"
     >
-      <header className="border-border/60 flex items-baseline justify-between gap-4 border-b px-4 py-3">
-        <h3 className="text-foreground text-sm font-medium tracking-tight">
-          Design council
-        </h3>
-        <ConsensusBadge state={state} />
+      <header className="border-border/60 space-y-2.5 border-b px-4 py-3">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-foreground text-sm font-medium tracking-tight">
+              Design council
+            </h3>
+            <p className="text-muted-foreground mt-0.5 text-xs">
+              Round {currentRound} · {reported} of {seats.length} seats reported
+            </p>
+          </div>
+          <ConsensusBadge snapshot={snapshot} state={state} />
+        </div>
+        <div
+          aria-label={`${reported} of ${seats.length} council seats reported`}
+          aria-valuemax={seats.length}
+          aria-valuemin={0}
+          aria-valuenow={reported}
+          className="bg-muted h-1 overflow-hidden rounded-full"
+          role="progressbar"
+        >
+          <div
+            className="bg-primary h-full rounded-full transition-[width] duration-500 ease-out"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
       </header>
 
       <div className="divide-border/40 divide-y">
@@ -84,6 +113,10 @@ const CONSENSUS_COPY: Record<ConsensusState, { label: string; hint: string }> = 
     label: "Synthesizing",
     hint: "The chair is weighing the positions against each other.",
   },
+  awaiting_input: {
+    label: "Waiting on you",
+    hint: "The chair needs one project-owner decision before it can synthesize.",
+  },
   settled: {
     label: "Synthesis ready",
     hint: "The chair has reported. You review it; nothing has advanced.",
@@ -94,14 +127,23 @@ const CONSENSUS_COPY: Record<ConsensusState, { label: string; hint: string }> = 
   },
 };
 
-function ConsensusBadge({ state }: { state: ConsensusState }) {
+function ConsensusBadge({
+  state,
+  snapshot,
+}: {
+  state: ConsensusState;
+  snapshot: ConsensusSnapshot | null;
+}) {
   const copy = CONSENSUS_COPY[state];
   const settled = state === "settled";
   const stalled = state === "stalled";
+  const awaitingInput = state === "awaiting_input";
   return (
     <span className="flex items-center gap-1.5" title={copy.hint}>
       {settled ? (
         <CheckIcon className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+      ) : awaitingInput ? (
+        <MessageCircleQuestionIcon className="text-primary size-3.5" />
       ) : stalled ? (
         <TriangleAlertIcon className="size-3.5 text-amber-600 dark:text-amber-500" />
       ) : (
@@ -109,7 +151,15 @@ function ConsensusBadge({ state }: { state: ConsensusState }) {
       )}
       {/* Never colour alone: the state has to survive a greyscale screenshot
           and a reader who cannot distinguish the two accent hues. */}
-      <span className="text-muted-foreground text-xs">{copy.label}</span>
+      <span className="text-muted-foreground text-right text-xs">
+        <span className="block">{copy.label}</span>
+        {snapshot ? (
+          <span className="mt-0.5 block text-[10px] tabular-nums">
+            {snapshot.agreements} agreed · {snapshot.disagreements} contested ·{" "}
+            {snapshot.openQuestions} open
+          </span>
+        ) : null}
+      </span>
     </span>
   );
 }
@@ -126,6 +176,7 @@ function SeatLane({ task }: { task: Subtask }) {
     return null;
   }
   const Icon = ROLE_ICONS[seat.role] ?? UserIcon;
+  const summary = councilSeatSummary(task);
 
   return (
     <li className="flex items-start gap-3">
@@ -165,6 +216,11 @@ function SeatLane({ task }: { task: Subtask }) {
             </span>
           )}
         </p>
+        {summary ? (
+          <p className="text-foreground/80 mt-1 line-clamp-2 text-xs leading-5">
+            {summary}
+          </p>
+        ) : null}
       </div>
 
       <SeatStatus status={task.status} stopReason={task.stopReason} />

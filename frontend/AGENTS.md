@@ -472,7 +472,12 @@ designNotes` and are handed to the council as the owner's decisions rather
   the depth from this same per-request context, so a reply carrying only the
   scope would re-raise the card it just answered; an unrecognized value is
   omitted rather than guessed at, and the backend falls back to its own
-  recommendation), and anything unrecognized stays ordinary. The preflight card
+  recommendation; every option the card offers must appear in `COUNCIL_DEPTHS`,
+  because an omission is silent — `human_input` was missing, so "Write it myself"
+  sent no depth and convened the council the person had just declined),
+  `council_adjustment` continues the selected cycle carrying **no** depth (that
+  option starts nothing; the redrawn roster is shown again before a depth is
+  chosen), and anything unrecognized stays ordinary. The preflight card
   itself needs no bespoke component — it is a native `select` human-input
   request whose roster rides in the Markdown `context`. Adding a
   new `clarification_type` on the backend means adding its case here too; the
@@ -559,3 +564,23 @@ seats already say, and the two would eventually disagree in front of a user.
 chair failed has neither reached consensus nor merely finished, and leaving a
 spinner running over a council that is already over is the exact experience this
 redesign removes. Status always carries a word, never colour alone.
+
+The native council preflight uses `input_mode=single_choice`; every option has
+an `id`, `label`, and `value`, with optional description, and
+`recommended_option_id` names the server recommendation. Keep this aligned with
+`core/messages/human-input.ts` — an unrecognized mode or valueless option makes
+the entire card fail closed. Automatic Design kickoff messages carry
+`hide_from_ui=true` plus `dbtl_design_kickoff=true`: they are explicit graph
+input containing the owner's setup decisions, but must not impersonate text the
+person typed.
+
+`core/tasks/lifecycle.ts` owns all four custom-event transitions. A council
+`task_started` creates an in-progress seat; `task_completed` and `task_failed`
+are terminal and preserve result/error, cap reason, and seat identity. The
+debate panel shows the current round, reported-seat count, bounded latest
+argument summary, and counts from the chair's recorded `consensus` object.
+
+`core/dbtl/design-consensus-view.ts` reads the machine package filename from the
+bound review Markdown and parses only the chair's recorded consensus. The stage
+sheet renders that decision map above the Markdown as a reading guide; it never
+recomputes consensus, and the approval remains bound to the Markdown bytes.

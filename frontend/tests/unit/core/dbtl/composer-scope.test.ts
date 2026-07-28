@@ -340,6 +340,33 @@ describe("humanInputRunContext", () => {
     });
   });
 
+  it.each(["human_input", "light", "medium", "heavy"])(
+    "carries every depth the card offers, including %s",
+    (depth) => {
+      // A depth missing from this list is dropped silently, and the backend
+      // falls back to its own recommendation — so the option the person chose
+      // is replaced by one they did not. "Write it myself" was the casualty:
+      // declining to consult anyone convened the council anyway.
+      expect(
+        humanInputRunContext(preflight, "cyc-9", depth).dbtl_council_depth,
+      ).toBe(depth);
+    },
+  );
+
+  it("routes an adjustment reply back to the cycle, carrying no depth", () => {
+    // "Adjust the roster first" starts nothing: the person has not chosen a
+    // depth yet, and the redrawn roster is shown again before they do.
+    const context = humanInputRunContext(
+      { source: "ask_clarification", clarification_type: "council_adjustment" },
+      "cyc-9",
+      "Add a statistician.",
+    );
+
+    expect(context.dbtl_selected_cycle_id).toBe("cyc-9");
+    expect(context.dbtl_explicit_choice).toBe("continue_cycle");
+    expect(context.dbtl_council_depth).toBeUndefined();
+  });
+
   it("omits a depth it does not recognize rather than guessing one", () => {
     // The backend then falls back to its own recommendation, which is a much
     // smaller failure than running an exhaustive council nobody asked for.

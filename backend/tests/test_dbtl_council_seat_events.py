@@ -13,8 +13,14 @@ rename away from labelling every seat wrong, silently.
 
 from __future__ import annotations
 
-from deerflow.agents.dbtl.stage_execution import _seat_description, _seat_identity
-from deerflow.dbtl.stage_runner import WorkUnit
+import json
+
+from deerflow.agents.dbtl.stage_execution import (
+    _seat_description,
+    _seat_identity,
+    _terminal_seat_event,
+)
+from deerflow.dbtl.stage_runner import DispatchOutcome, WorkUnit
 
 
 def _unit(**overrides) -> WorkUnit:
@@ -86,3 +92,58 @@ class TestSeatDescription:
     def test_a_capability_selected_seat_falls_back_to_its_capability(self):
         """A selected seat has no focus; its capability is its angle."""
         assert _seat_description(_unit(role="position", focus="")) == "Independent position: experimental design"
+
+
+class TestTerminalSeatEvent:
+    def test_contract_valid_output_completes_the_live_lane(self):
+        event = _terminal_seat_event(
+            _unit(role="chair"),
+            DispatchOutcome(
+                unit_id="dbtl-abc-1-experimental_design",
+                text=(
+                    '{"status":"completed","summary":"Use two seasons.",'
+                    '"artifact_refs":[],"claims":[],"evidence_refs":[],'
+                    '"limitations":[],"quality_checks":[],'
+                    '"recommended_next_actions":[],"provenance":'
+                    '{"inputs_examined":[],"tools_used":[]}}'
+                ),
+            ),
+            model="gpt-5.6-sol",
+        )
+
+        assert event["type"] == "task_completed"
+        assert event["council_seat"]["role"] == "chair"
+        assert json.loads(event["result"])["summary"] == "Use two seasons."
+
+    def test_a_valid_result_wrapped_in_prose_is_normalized_for_the_live_view(self):
+        event = _terminal_seat_event(
+            _unit(role="chair"),
+            DispatchOutcome(
+                unit_id="dbtl-abc-1-experimental_design",
+                text=(
+                    "Here is the result:\n```json\n"
+                    '{"status":"completed","summary":"Use two seasons.",'
+                    '"artifact_refs":[],"claims":[],"evidence_refs":[],'
+                    '"limitations":[],"quality_checks":[],'
+                    '"recommended_next_actions":[],"provenance":{}}\n```'
+                ),
+            ),
+            model="gpt-5.6-sol",
+        )
+
+        assert json.loads(event["result"])["summary"] == "Use two seasons."
+
+    def test_prose_output_fails_the_live_lane_instead_of_claiming_completion(self):
+        event = _terminal_seat_event(
+            _unit(),
+            DispatchOutcome(
+                unit_id="dbtl-abc-1-experimental_design",
+                text="I investigated the design but ran out of time.",
+                stop_reason="turn_capped",
+            ),
+            model="gpt-5.6-sol",
+        )
+
+        assert event["type"] == "task_failed"
+        assert event["stop_reason"] == "turn_capped"
+        assert "returned prose" in event["error"]

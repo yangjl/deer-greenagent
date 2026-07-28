@@ -246,6 +246,7 @@ class RunJournal(BaseCallbackHandler):
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._current_run_tool_call_names: dict[str, str] = {}
         self._persisted_tool_message_identities: set[str] = set()
+        self._input_message_identities: set[str] = set()
 
     # -- Lifecycle callbacks --
 
@@ -296,6 +297,13 @@ class RunJournal(BaseCallbackHandler):
             return
         messages = inputs.get("messages")
         if isinstance(messages, Sequence) and not isinstance(messages, (str, bytes)):
+            for raw_message in messages:
+                message = _coerce_seed_message(raw_message)
+                if not isinstance(message, BaseMessage):
+                    continue
+                identity = self._message_identity(message)
+                if identity:
+                    self._input_message_identities.add(identity)
             self._record_first_human_input(messages)
 
     def on_chain_start(
@@ -626,7 +634,24 @@ class RunJournal(BaseCallbackHandler):
         return identity is not None and identity not in self._persisted_tool_message_identities
 
     def _reconcile_final_tool_messages(self, outputs: Any) -> None:
-        for message in self._final_output_messages(outputs):
+        messages = self._final_output_messages(outputs)
+        current_input_index = -1
+        for index, message in enumerate(messages):
+            if not isinstance(message, BaseMessage):
+                continue
+            identity = self._message_identity(message)
+            if identity and identity in self._input_message_identities:
+                current_input_index = index
+
+        if current_input_index >= 0:
+            for message in messages[current_input_index + 1 :]:
+                if isinstance(message, AIMessage):
+                    self._remember_current_run_tool_calls(
+                        message,
+                        caller="lead_agent",
+                    )
+
+        for message in messages:
             if not isinstance(message, ToolMessage):
                 continue
             if self._should_reconcile_tool_message(message):

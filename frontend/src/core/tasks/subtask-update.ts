@@ -78,9 +78,33 @@ function subtaskChanged(prev: Subtask | undefined, next: Subtask): boolean {
     prev.subagent_type !== next.subagent_type ||
     prev.description !== next.description ||
     prev.prompt !== next.prompt ||
+    !councilSeatEquals(prev.councilSeat, next.councilSeat) ||
     prev.latestMessage !== next.latestMessage ||
     prev.steps !== next.steps ||
     !usageEquals(prev.usage, next.usage)
+  );
+}
+
+function councilSeatEquals(
+  a: Subtask["councilSeat"],
+  b: Subtask["councilSeat"],
+) {
+  if (a === b) {
+    return true;
+  }
+  if (!a || !b) {
+    return false;
+  }
+  return (
+    a.role === b.role &&
+    a.roleLabel === b.roleLabel &&
+    a.focus === b.focus &&
+    a.capability === b.capability &&
+    a.agentName === b.agentName &&
+    a.viaGeneralist === b.viaGeneralist &&
+    a.model === b.model &&
+    a.round === b.round &&
+    a.countsTowardStageOutput === b.countsTowardStageOutput
   );
 }
 

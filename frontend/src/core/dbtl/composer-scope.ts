@@ -32,8 +32,19 @@ import { CYCLE_STATE_LABELS, type CycleRecord, isLive } from "./cycle-view";
  * The council depths the backend accepts, in the order the card offers them.
  * Kept as a literal list rather than derived from the card's own options so a
  * malformed payload cannot smuggle an unknown depth into the run context.
+ *
+ * Every option the card offers must appear here. An omission is silent — the
+ * depth is simply dropped and the backend falls back to its own
+ * recommendation, so the person's answer is replaced by one they did not give.
+ * `human_input` was missing, which meant declining to consult anyone convened
+ * the council anyway.
  */
-export const COUNCIL_DEPTHS = ["light", "medium", "heavy"] as const;
+export const COUNCIL_DEPTHS = [
+  "human_input",
+  "light",
+  "medium",
+  "heavy",
+] as const;
 
 export type CouncilDepth = (typeof COUNCIL_DEPTHS)[number];
 
@@ -276,9 +287,13 @@ export function humanInputRunContext(
     // reply carries no depth: the server put it on the card it emitted and
     // reads it back from there, so a client that has forgotten the choice
     // cannot accidentally convene the council the owner declined.
+    // A roster adjustment belongs to the cycle whose preflight raised it, and
+    // like the authoring reply it carries no depth: the person has not chosen
+    // one yet, and the redrawn roster is shown again before they do.
     if (
       request.clarification_type === "design_decision" ||
-      request.clarification_type === "design_authoring"
+      request.clarification_type === "design_authoring" ||
+      request.clarification_type === "council_adjustment"
     ) {
       return selectedCycleId
         ? runContextPayload({ kind: "cycle", cycleId: selectedCycleId })

@@ -9,6 +9,7 @@ export type HumanInputOption = {
   id: string;
   label: string;
   value: string;
+  description?: string;
 };
 
 export type DbtlCycleSetup = {
@@ -51,6 +52,7 @@ export type HumanInputRequest = {
   context?: string | null;
   input_mode: HumanInputMode;
   options?: HumanInputOption[];
+  recommended_option_id?: string;
   dbtl_cycle_setup?: DbtlCycleSetup;
   setup_questions?: SetupQuestion[];
 };
@@ -138,7 +140,14 @@ function parseOptions(value: unknown): HumanInputOption[] | undefined {
     ) {
       return undefined;
     }
-    options.push({ id, label, value: optionValue });
+    options.push({
+      id,
+      label,
+      value: optionValue,
+      ...(isNonEmptyString(option.description)
+        ? { description: option.description }
+        : {}),
+    });
   }
   return options;
 }
@@ -254,6 +263,9 @@ export function parseHumanInputRequest(
   ) {
     return null;
   }
+  const recommendedOptionId = isNonEmptyString(value.recommended_option_id)
+    ? value.recommended_option_id
+    : undefined;
 
   return {
     version: 1,
@@ -273,6 +285,10 @@ export function parseHumanInputRequest(
     ...(context !== undefined ? { context } : {}),
     input_mode: value.input_mode,
     ...(options ? { options } : {}),
+    ...(recommendedOptionId &&
+    options?.some((option) => option.id === recommendedOptionId)
+      ? { recommended_option_id: recommendedOptionId }
+      : {}),
     ...(dbtlCycleSetup ? { dbtl_cycle_setup: dbtlCycleSetup } : {}),
     ...(setupQuestions ? { setup_questions: setupQuestions } : {}),
   };

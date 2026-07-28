@@ -49,6 +49,11 @@ Design–Build–Test–Learn (DBTL) governance.
   council progress remains available through its task timeline. Shadow
   proposal evaluation records telemetry only; it does not mount a second card
   beside the composer.
+- **Inspectable Design debate** — before a council runs, chat shows its roster,
+  depth choices, stand-ins, and recommendation. During the run it reports
+  validated seat progress and counted consensus; the final stage sheet pairs a
+  structured decision map with the exact Markdown document the human review
+  binds.
 - **DeerFlow capabilities** — sandboxed execution, tools, skills, MCP,
   subagents, persistent conversations, and multiple model providers.
 

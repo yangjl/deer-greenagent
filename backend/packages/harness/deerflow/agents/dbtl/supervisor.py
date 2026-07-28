@@ -168,13 +168,17 @@ def _is_new_conversation(state: dict) -> bool:
 def _latest_cycle_request_text(state: dict) -> str:
     """Prefer a Design-council card response over the preceding visible prompt."""
     from deerflow.agents.human_input import read_human_input_response
+    from deerflow.utils.messages import message_content_to_text
 
     for message in reversed(state.get("messages") or []):
         if not isinstance(message, HumanMessage):
             continue
-        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+        response = read_human_input_response(additional_kwargs)
         if response and response.get("source") == "ask_clarification" and str(response.get("request_id") or "").startswith(DESIGN_CLARIFICATION_PREFIX):
             return str(response.get("value") or "")
+        if additional_kwargs.get("dbtl_design_kickoff") is True:
+            return message_content_to_text(message.content) or ""
         break
     return _latest_user_text(state)
 
@@ -535,6 +539,16 @@ def _render_continuation(decision: BranchDecision, note: str) -> str:
 
 
 COUNCIL_PREFLIGHT_PREFIX = "dbtl-council__"
+COUNCIL_ADJUST_PREFIX = "dbtl-council-edit__"
+
+#: The preflight option that is not a depth. Choosing it asks what should
+#: change instead of how much debate to buy, so it is kept out of
+#: :class:`CouncilDepth` — a value in that enum is something the council can be
+#: run at, and this one is a request to redraw the roster first.
+COUNCIL_ADJUST_OPTION = "adjust"
+
+_ADJUST_QUESTION = "What should the council do differently? Name the seats to add, drop, or re-aim — your words go to the roster writer exactly as you type them."
+_ADJUST_NOTE = "Nothing has been dispatched. The roster is redrawn from what you write here, and you will see it again before anyone runs."
 
 
 def _render_council_roster(plan) -> str:
@@ -574,10 +588,22 @@ def _council_preflight_message(
         {
             "id": policy.depth.value,
             "label": policy.label,
+            "value": policy.depth.value,
             "description": policy.description,
         }
         for policy in (depth_policy(item) for item in CouncilDepth)
     ]
+    # Last, because it is the only option that does not start the council. A
+    # roster is a proposal, and a proposal you can only accept or decline is not
+    # one — this is how someone says "these seats, but not that one".
+    options.append(
+        {
+            "id": COUNCIL_ADJUST_OPTION,
+            "label": "Adjust the roster first",
+            "value": COUNCIL_ADJUST_OPTION,
+            "description": "Say what should change about who sits and what they argue from. The roster is redrawn and shown again before anyone runs.",
+        }
+    )
     return (
         AIMessage(
             id=f"{request_id}:call",
@@ -610,10 +636,11 @@ def _council_preflight_message(
                     "title": "Before the Design council convenes",
                     "question": question,
                     "context": note,
-                    "input_mode": "select",
+                    "input_mode": "single_choice",
                     "options": options,
                     "council_plan": plan.as_dict(),
                     "recommended_depth": recommendation.depth.value,
+                    "recommended_option_id": recommendation.depth.value,
                 }
             },
         ),
@@ -738,6 +765,129 @@ def _authored_design(state: dict) -> str | None:
     if request is None or request.get("council_depth") != CouncilDepth.HUMAN_INPUT.value:
         return None
     return value
+
+
+def _council_adjustment_message(
+    decision: BranchDecision,
+    *,
+    request_nonce: str,
+) -> tuple[AIMessage, ToolMessage]:
+    """Ask what should change about the roster. Free text, deliberately.
+
+    A structured editor would be a form, and the roster's seats are prose —
+    what a seat argues *from* is a sentence, not a dropdown. Free text also
+    survives a request the option list never anticipated ("nobody who will just
+    agree with the agronomist").
+    """
+    cycle = decision.cycle_id or "selected-cycle"
+    digest = sha256(f"{cycle}:{request_nonce}".encode()).hexdigest()[:16]
+    request_id = f"{COUNCIL_ADJUST_PREFIX}{cycle}__{digest}"
+    return (
+        AIMessage(
+            id=f"{request_id}:call",
+            content="",
+            tool_calls=[
+                {
+                    "name": "ask_clarification",
+                    "args": {
+                        "question": _ADJUST_QUESTION,
+                        "context": _ADJUST_NOTE,
+                        "clarification_type": "council_adjustment",
+                    },
+                    "id": request_id,
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(
+            id=request_id,
+            name="ask_clarification",
+            tool_call_id=request_id,
+            content=f"{_ADJUST_NOTE}\n\n{_ADJUST_QUESTION}",
+            artifact={
+                "human_input": {
+                    "version": 1,
+                    "kind": "human_input_request",
+                    "source": "ask_clarification",
+                    "request_id": request_id,
+                    "clarification_type": "council_adjustment",
+                    "title": "Adjust the Design council",
+                    "question": _ADJUST_QUESTION,
+                    "context": _ADJUST_NOTE,
+                    "input_mode": "free_text",
+                }
+            },
+        ),
+    )
+
+
+def _wants_roster_adjustment(state: dict) -> bool:
+    """Whether the newest message answered the preflight by asking for changes."""
+    answered = _card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
+    if answered is None:
+        return False
+    request_id, value = answered
+    if _emitted_card_request(state, request_id) is None:
+        return False
+    return value.strip().lower() == COUNCIL_ADJUST_OPTION
+
+
+def _council_adjustment(state: dict) -> str | None:
+    """The newest roster change a person asked for in this cycle.
+
+    Unlike the depth, this is *not* read only from the newest message: the
+    adjustment is answered one turn and the depth the next, so by the time the
+    council runs the adjustment is no longer the last thing said. Scanning back
+    for the most recent answered adjustment card is what carries it to dispatch.
+
+    Resolved from the emitted card rather than the reply, so a forged
+    ``request_id`` matches nothing.
+    """
+    from deerflow.agents.human_input import read_human_input_response
+
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if not response or response.get("source") != "ask_clarification":
+            continue
+        request_id = str(response.get("request_id") or "")
+        if not request_id.startswith(COUNCIL_ADJUST_PREFIX):
+            continue
+        if _emitted_card_request(state, request_id) is None:
+            return None
+        return str(response.get("value") or "").strip() or None
+    return None
+
+
+def _confirmed_council_depth(state: dict) -> CouncilDepth | None:
+    """The depth a person chose, read off the card the server itself emitted.
+
+    The browser echoes the choice back in the next request's context, but a
+    reply that loses it is indistinguishable from one that never carried a
+    choice — and the fallback is the server's own recommendation, so the
+    council convenes at a depth nobody picked and nothing says so. The answer
+    is already in state; recovering it here needs no cooperation from the
+    client and, like ``_authored_design``, resolves the card rather than
+    trusting the reply, so a forged ``request_id`` matches nothing.
+
+    Scoped to the answering turn by ``_card_answer``, which matches only when
+    the newest message is that reply. A preflight answer stays in history
+    forever, and re-reading it on every later request would pin the whole cycle
+    to one depth with no way to say otherwise.
+    """
+    answered = _card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
+    if answered is None:
+        return None
+    request_id, value = answered
+    if _emitted_card_request(state, request_id) is None:
+        return None
+    try:
+        return CouncilDepth(value.strip().lower())
+    except ValueError:
+        # A stale client losing a preference is a far smaller failure than a
+        # cycle that cannot be designed; fall back to the recommendation.
+        return None
 
 
 def _with_council_depth(config: RunnableConfig, depth: CouncilDepth) -> RunnableConfig:
@@ -951,7 +1101,28 @@ def build_supervisor_graph(
         authored_design = _authored_design(state)
         if authored_design is not None:
             config = _with_council_depth(config, CouncilDepth.HUMAN_INPUT)
-        if authored_design is None and council_depth_from_config(config) is None and not _has_emitted_card(state, COUNCIL_PREFLIGHT_PREFIX):
+        elif council_depth_from_config(config) is None:
+            # The client's value wins when it sent one: it is the same answer
+            # arriving by the path that already existed. This only fills the
+            # gap when it did not.
+            confirmed = _confirmed_council_depth(state)
+            if confirmed is not None:
+                config = _with_council_depth(config, confirmed)
+        request_nonce = str(raw_context.get("run_id") or "")
+        adjustment = _council_adjustment(state)
+
+        # Asked for changes rather than a depth: nothing runs, and the question
+        # is what to change. Checked before the preflight guard below, which
+        # would otherwise see an already-emitted card and fall straight through
+        # to dispatching the roster the person just declined.
+        if authored_design is None and _wants_roster_adjustment(state):
+            return {"messages": list(_council_adjustment_message(decision, request_nonce=request_nonce))}
+
+        # A fresh preflight, or a redraw after an adjustment. The redraw has to
+        # bypass the once-only guard: the whole point is to show the roster
+        # again, changed.
+        answered_adjustment = _card_answer(state, COUNCIL_ADJUST_PREFIX) is not None
+        if authored_design is None and council_depth_from_config(config) is None and (answered_adjustment or not _has_emitted_card(state, COUNCIL_PREFLIGHT_PREFIX)):
             preview = getattr(stage_adapter, "preview_council", None)
             plan = None
             if callable(preview):
@@ -960,6 +1131,7 @@ def build_supervisor_graph(
                     cycle_id=decision.cycle_id,
                     request_text=request_text,
                     config=config,
+                    adjustment=adjustment,
                 )
                 if isawaitable(plan):
                     plan = await plan
@@ -970,7 +1142,7 @@ def build_supervisor_graph(
                             decision,
                             plan,
                             recommend_depth(request_text),
-                            request_nonce=str(raw_context.get("run_id") or ""),
+                            request_nonce=request_nonce,
                         )
                     )
                 }
@@ -983,6 +1155,10 @@ def build_supervisor_graph(
         }
         if authored_design is not None:
             execute_kwargs["authored_design"] = authored_design
+        if adjustment is not None:
+            # The roster the person approved was drawn with this note, so the
+            # one that runs has to be drawn with it too.
+            execute_kwargs["council_adjustment"] = adjustment
         result = stage_adapter.execute(**execute_kwargs)
         if isawaitable(result):
             result = await result

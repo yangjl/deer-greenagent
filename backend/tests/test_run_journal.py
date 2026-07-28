@@ -358,6 +358,89 @@ class TestToolCallbacks:
 
 class TestFinalToolMessageReconciliation:
     @pytest.mark.anyio
+    async def test_root_chain_end_reconciles_graph_created_clarification_after_current_input(
+        self,
+        journal_setup,
+    ):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        user = HumanMessage(content="Start the council", id="human-current")
+        j.record_input({"messages": [user]})
+        ai = AIMessage(
+            id="dbtl-council__cycle-1__abc:call",
+            content="",
+            tool_calls=[
+                {
+                    "id": "dbtl-council__cycle-1__abc",
+                    "name": "ask_clarification",
+                    "args": {"question": "How much debate?"},
+                    "type": "tool_call",
+                }
+            ],
+        )
+        tool = ToolMessage(
+            id="dbtl-council__cycle-1__abc",
+            content="How much debate?",
+            tool_call_id="dbtl-council__cycle-1__abc",
+            name="ask_clarification",
+            artifact={
+                "human_input": {
+                    "kind": "human_input_request",
+                    "request_id": "dbtl-council__cycle-1__abc",
+                }
+            },
+        )
+
+        j.on_chain_end(
+            {"messages": [user, ai, tool]},
+            run_id=uuid4(),
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [row for row in messages if row["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"]["artifact"]["human_input"]["request_id"] == "dbtl-council__cycle-1__abc"
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_does_not_reconcile_graph_card_before_current_input(
+        self,
+        journal_setup,
+    ):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        user = HumanMessage(content="Continue", id="human-current")
+        j.record_input({"messages": [user]})
+        old_ai = AIMessage(
+            id="old:call",
+            content="",
+            tool_calls=[
+                {
+                    "id": "old-card",
+                    "name": "ask_clarification",
+                    "args": {"question": "Old?"},
+                    "type": "tool_call",
+                }
+            ],
+        )
+        old_tool = ToolMessage(
+            id="old-card",
+            content="Old?",
+            tool_call_id="old-card",
+            name="ask_clarification",
+        )
+
+        j.on_chain_end(
+            {"messages": [old_ai, old_tool, user]},
+            run_id=uuid4(),
+        )
+        await j.flush()
+
+        assert not any(row["event_type"] == "llm.tool.result" for row in await store.list_messages("t1"))
+
+    @pytest.mark.anyio
     async def test_root_chain_end_reconciles_missing_ask_clarification_tool_message(self, journal_setup):
         from langchain_core.messages import ToolMessage
 

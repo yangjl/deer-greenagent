@@ -121,6 +121,67 @@ const SETUP_MESSAGES = [
   },
 ];
 
+const COUNCIL_REQUEST_ID = "dbtl-council__cycle-existing__e2e";
+const COUNCIL_PREFLIGHT_MESSAGES = [
+  {
+    type: "human",
+    id: "msg-human-council",
+    content: "Start the Design council",
+  },
+  {
+    type: "ai",
+    id: `${COUNCIL_REQUEST_ID}:call`,
+    content: "",
+    tool_calls: [
+      {
+        id: COUNCIL_REQUEST_ID,
+        name: "ask_clarification",
+        type: "tool_call",
+        args: {
+          question: "How much debate should this design get?",
+          clarification_type: "council_preflight",
+        },
+      },
+    ],
+  },
+  {
+    type: "tool",
+    id: COUNCIL_REQUEST_ID,
+    name: "ask_clarification",
+    tool_call_id: COUNCIL_REQUEST_ID,
+    content: "Choose the Design council depth.",
+    artifact: {
+      human_input: {
+        version: 1,
+        kind: "human_input_request",
+        source: "ask_clarification",
+        request_id: COUNCIL_REQUEST_ID,
+        clarification_type: "council_preflight",
+        title: "Before the Design council convenes",
+        question: "How much debate should this design get?",
+        context:
+          "**claude-opus-5** · 3 workers\n\n- Independent position\n- Red team\n- Chair",
+        input_mode: "single_choice",
+        options: [
+          {
+            id: "light",
+            label: "Light",
+            value: "light",
+            description: "One position, one challenge, one synthesis.",
+          },
+          {
+            id: "medium",
+            label: "Medium",
+            value: "medium",
+            description: "Two positions, one challenge, one synthesis.",
+          },
+        ],
+        recommended_option_id: "medium",
+      },
+    },
+  },
+];
+
 /** Every request that would create a durable DBTL record. Must stay empty. */
 async function setupProject(
   page: Page,
@@ -167,6 +228,22 @@ async function setupProject(
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ needs_setup: false }),
+    }),
+  );
+  await page.route("**/api/features", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        agents_api: { enabled: true },
+        browser_control: { enabled: true },
+        dbtl: {
+          mode: "graph_enabled",
+          mutations_enabled: true,
+          graph_execution_enabled: true,
+          reason: "DBTL browser fixture",
+        },
+      }),
     }),
   );
   await page.route("**/api/workspaces**", (route) =>
@@ -300,6 +377,33 @@ test("the supervisor setup artifact renders as DeerFlow's native inline card", a
   expect(cycleWrites).toEqual([]);
 });
 
+test("the Design council preflight is an actionable native card", async ({
+  page,
+}) => {
+  await setupProject(
+    page,
+    CONTINUATION_RESPONSE,
+    [EXISTING_CYCLE],
+    COUNCIL_PREFLIGHT_MESSAGES,
+  );
+  await page.goto(`/workspace/test2/${MOCK_THREAD_ID}`);
+
+  const card = page.getByTestId("human-input-card");
+  await expect(card).toBeVisible();
+  await expect(
+    card.getByRole("heading", {
+      name: "Before the Design council convenes",
+    }),
+  ).toBeVisible();
+  await expect(card.getByText("Red team")).toBeVisible();
+  await expect(
+    card.getByRole("button", { name: /Medium.*Recommended/s }),
+  ).toBeEnabled();
+  await expect(
+    card.getByText("Two positions, one challenge, one synthesis."),
+  ).toBeVisible();
+});
+
 test("the native card's explicit confirmation creates exactly one cycle", async ({
   page,
 }) => {
@@ -330,7 +434,14 @@ test("a selected-cycle continuation runs without a second card", async ({
   );
   await page.goto(`/workspace/test2/${MOCK_THREAD_ID}`);
 
-  await page.getByRole("button", { name: EXISTING_CYCLE.title }).click();
+  const cycleButton = page.getByRole("button", {
+    name: `${EXISTING_CYCLE.title} Design`,
+    exact: true,
+  });
+  // The default cycle begins disclosed for review but is not an explicit chat
+  // scope. Close and reopen it to exercise a deliberate human selection.
+  await cycleButton.click();
+  await cycleButton.click();
   await send(page, "Run the next validation analysis");
   await expect.poll(() => evaluateCalls.length).toBe(1);
   expect(JSON.parse(evaluateCalls[0]!)).toMatchObject({

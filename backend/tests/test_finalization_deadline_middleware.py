@@ -61,11 +61,13 @@ def _make_request(messages, runtime):
     request = MagicMock()
     request.messages = list(messages)
     request.runtime = runtime
+    request.tools = [MagicMock(name="read_file")]
 
-    def override_fn(messages=None, **_kwargs):
+    def override_fn(messages=None, tools=None, **_kwargs):
         replacement = MagicMock()
         replacement.messages = messages if messages is not None else request.messages
         replacement.runtime = request.runtime
+        replacement.tools = request.tools if tools is None else tools
         return replacement
 
     request.override = override_fn
@@ -115,6 +117,7 @@ class TestDeadlineWarning:
         injected = captured[0].messages[-1]
         assert isinstance(injected, HumanMessage)
         assert "final message" in injected.content.lower()
+        assert captured[0].tools == []
 
 
 class TestForcedFinalization:
@@ -181,20 +184,117 @@ class TestRunIsolation:
 class TestStageWiring:
     """The deadline only helps if the stage layer derives and reports it."""
 
-    def test_model_call_budget_halves_the_recursion_limit(self):
-        from deerflow.agents.dbtl.stage_execution import _model_call_budget
+    def test_the_budget_leaves_room_for_the_forced_answer_to_land(self):
+        """A deadline that fires at the recursion limit is not a deadline.
 
-        # ``max_turns`` is LangGraph's recursion_limit, which counts super-steps;
-        # a tool-calling turn costs two. A deadline computed from the raw number
-        # would fire after the run had already been aborted.
-        assert _model_call_budget(40) == 20
-        assert _model_call_budget(80) == 40
+        ``max_turns`` is LangGraph's ``recursion_limit``, which counts
+        super-steps — and every middleware ``before_model``/``after_model`` hook
+        is its own graph node, so a turn costs far more than "model + tools".
+        Forcing finalization on the last model call the budget allows leaves no
+        steps for the forced answer itself, and the run aborts anyway with the
+        prose this middleware exists to replace.
+        """
+        from deerflow.agents.middlewares.finalization_deadline_middleware import (
+            SUBAGENT_SUPERSTEPS_PER_TURN,
+            model_call_budget,
+        )
+
+        for max_turns in (80, 120, 190):
+            budget = model_call_budget(max_turns)
+            # Every call but the last one calls a tool; the last one answers.
+            steps_used = budget * SUBAGENT_SUPERSTEPS_PER_TURN
+            assert steps_used < max_turns, f"{max_turns=} leaves no room for the forced answer"
+
+    def test_the_budget_is_not_so_conservative_that_it_wastes_the_run(self):
+        """Headroom is the point; throwing away half the budget is not."""
+        from deerflow.agents.middlewares.finalization_deadline_middleware import (
+            SUBAGENT_SUPERSTEPS_PER_TURN,
+            model_call_budget,
+        )
+
+        for max_turns in (80, 120, 190):
+            assert model_call_budget(max_turns) >= (max_turns // SUBAGENT_SUPERSTEPS_PER_TURN) - 2
 
     def test_model_call_budget_never_leaves_less_room_than_the_reserve(self):
-        from deerflow.agents.dbtl.stage_execution import _model_call_budget
+        from deerflow.agents.middlewares.finalization_deadline_middleware import model_call_budget
 
-        assert _model_call_budget(2) >= DEFAULT_RESERVE_CALLS + 1
-        assert _model_call_budget(0) >= DEFAULT_RESERVE_CALLS + 1
+        assert model_call_budget(2) >= DEFAULT_RESERVE_CALLS + 1
+        assert model_call_budget(0) >= DEFAULT_RESERVE_CALLS + 1
+
+    def test_the_stage_layer_uses_the_shared_budget(self):
+        """One computation, so the deadline and the graph cannot disagree."""
+        from deerflow.agents.dbtl.stage_execution import _model_call_budget
+        from deerflow.agents.middlewares.finalization_deadline_middleware import model_call_budget
+
+        assert _model_call_budget(120) == model_call_budget(120)
+
+
+class TestTheTurnCostAssumption:
+    """``SUBAGENT_SUPERSTEPS_PER_TURN`` is measured, not guessed.
+
+    LangGraph gives every middleware ``before_model``/``after_model`` hook its
+    own graph node, so the cost of one worker turn is a property of the shared
+    subagent chain. If a middleware gains or loses a hook the constant is wrong
+    and every stage worker silently loses (or wastes) budget — so the chain is
+    counted here rather than trusted.
+    """
+
+    @staticmethod
+    def _hook_nodes() -> int:
+        from langchain.agents.middleware import AgentMiddleware
+
+        from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+
+        def overrides(middleware, hook: str) -> bool:
+            return getattr(type(middleware), hook, None) is not getattr(AgentMiddleware, hook, None)
+
+        middlewares = build_subagent_runtime_middlewares()
+        before = sum(1 for m in middlewares if overrides(m, "before_model") or overrides(m, "abefore_model"))
+        after = sum(1 for m in middlewares if overrides(m, "after_model") or overrides(m, "aafter_model"))
+        return before + after
+
+    def test_the_constant_matches_the_real_subagent_chain(self):
+        from deerflow.agents.middlewares.finalization_deadline_middleware import SUBAGENT_SUPERSTEPS_PER_TURN
+
+        # model node + every hook node + the tools node + this middleware's own
+        # after_model, which is appended through ``extra_middlewares``.
+        expected = 1 + self._hook_nodes() + 1 + 1
+        assert SUBAGENT_SUPERSTEPS_PER_TURN == expected, f"The subagent middleware chain now costs {expected} super-steps per turn, not {SUBAGENT_SUPERSTEPS_PER_TURN}. Update the constant."
+
+    def test_a_turn_costs_much_more_than_a_model_call_and_a_tool_call(self):
+        """Guards the naive reading that produced the original bug."""
+        from deerflow.agents.middlewares.finalization_deadline_middleware import SUBAGENT_SUPERSTEPS_PER_TURN
+
+        assert SUBAGENT_SUPERSTEPS_PER_TURN > 2
+
+
+class TestCouncilBudgetsFitRealWork:
+    """Every depth must buy enough model calls to be worth dispatching.
+
+    A depth whose turn budget allows two or three model calls cannot read
+    context, think, and emit a structured result — the worker spends its whole
+    allowance investigating and is cut off mid-loop. That is the failure the
+    deadline recovers from, not one it should be configured into.
+    """
+
+    MIN_USEFUL_CALLS = 6
+
+    def test_every_dispatchable_depth_buys_enough_model_calls(self):
+        from deerflow.agents.middlewares.finalization_deadline_middleware import model_call_budget
+        from deerflow.dbtl.council import DEPTH_POLICIES, CouncilDepth
+
+        for depth, policy in DEPTH_POLICIES.items():
+            if depth is CouncilDepth.HUMAN_INPUT:
+                continue  # Seats nobody; its budget is carried for shape only.
+            calls = model_call_budget(policy.budget.max_turns)
+            assert calls >= self.MIN_USEFUL_CALLS, f"{depth.value} buys only {calls} model call(s)"
+
+    def test_deeper_debate_buys_more_room_than_shallower_debate(self):
+        from deerflow.agents.middlewares.finalization_deadline_middleware import model_call_budget
+        from deerflow.dbtl.council import CouncilDepth, depth_policy
+
+        light, medium, heavy = (model_call_budget(depth_policy(d).budget.max_turns) for d in (CouncilDepth.LIGHT, CouncilDepth.MEDIUM, CouncilDepth.HEAVY))
+        assert light < medium < heavy
 
     def test_a_forced_worker_reports_a_limitation_and_stays_trustworthy(self):
         """The whole point: deadline work is evidence, capped work is not."""
