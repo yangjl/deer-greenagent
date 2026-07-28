@@ -257,6 +257,44 @@ Breeding-workspace note:
   ran before proposals existed: a worse council, not a failed one. `WorkUnit`
   gained `model`, so a seat may name its own; before this every seat ran on
   whatever the composer was set to.
+  The chair reports a **structured consensus** beside its prose
+  (`deerflow.dbtl.consensus`): agreements, disagreements that keep *both*
+  positions and how each was settled, and the questions only the project owner
+  can answer. The chair is told not to average incompatible positions, and prose
+  is exactly where a reviewer cannot check that — a real convergence and a
+  smoothed-away disagreement read identically. An unsettled disagreement keeps
+  an empty resolution and renders as "Not resolved" rather than being dropped;
+  `unanimous` flags the opposite shape (agreement on everything with no argument
+  recorded) and requires at least one agreement, so a chair that reported
+  nothing cannot be rendered as one reporting total accord. The block renders
+  **before** the positions, because where the council disagreed is what tells a
+  reader whether the synthesis is a conclusion or an average, and it is
+  worthless once they have read the synthesis as settled. It is read off the
+  recorded chair result so the document cannot describe a consensus the chair
+  never reported, and parsing is permissive — a malformed consensus costs the
+  structured view, not the Design attempt.
+
+  **"Request changes" opens a focused refinement round, not a fresh debate.**
+  `_change_request` reads the latest Design review from the activity feed and
+  carries the reviewer's objection **verbatim** into the seats' prompts, because
+  a paraphrase is the failure this exists to fix. Only a `changes_requested`
+  verdict counts: an approval clears a previous objection (a cycle re-opened for
+  an unrelated reason must not keep arguing a settled point) and a rejection
+  ends the attempt rather than meaning "try again addressing this". Rounds are
+  numbered (`_design_round`, capped at `MAX_DESIGN_ROUNDS`) and every wave of a
+  round shares its number so the debate panel groups it rather than splitting
+  the chair off. A refinement seats fewer positions than a first pass but never
+  fewer than two — re-opening the full debate spends a second council's budget
+  re-litigating the parts the reviewer accepted, while a single voice with no
+  red team is not a debate at all.
+
+  **Build, Test, and Learn receive the approved design.** `_approved_design_brief`
+  puts the human-approved Design package into `stage_context` with its content
+  hash, since the approval bound a specific document and a stage naming only the
+  path could silently work from a later revision. Only an *approved* design
+  travels; its absence is meaningful (work happening before the gate, not merely
+  without context), and the read never raises because it runs on every
+  Build/Test/Learn request.
   `council.request_context` is the single reader of per-request context: a
   run request carries `context` at the top level, but LangGraph relocates it to
   `configurable["context"]` before a node sees it, so code running on both sides

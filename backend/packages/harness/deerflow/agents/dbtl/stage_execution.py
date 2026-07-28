@@ -290,6 +290,8 @@ def _proposed_units(
     *,
     attempt_id: str,
     context: str,
+    round_number: int = 1,
+    change_request: str | None = None,
 ) -> tuple[WorkUnit, ...]:
     """Turn a validated roster into work units.
 
@@ -312,6 +314,17 @@ def _proposed_units(
                 "You are one of several independent positions and you cannot see the others.",
                 "Argue your own case as strongly as the evidence allows; a chair will weigh it against the rest.",
                 "Do not hedge toward what you imagine the others will say.",
+                *(
+                    [
+                        "",
+                        f"This is round {round_number}. A previous design was reviewed and the project owner asked for changes:",
+                        f"    {change_request}",
+                        "Answer that objection specifically. Do not re-open the parts of the design they did not contest;",
+                        "re-litigating what they accepted wastes the round and buries the change they asked for.",
+                    ]
+                    if change_request
+                    else []
+                ),
                 "",
                 "Project context:",
                 context.strip() or "(none supplied)",
@@ -329,6 +342,7 @@ def _proposed_units(
                 model=seat.model,
                 role="position",
                 focus=seat.focus,
+                round=round_number,
             )
         )
     return tuple(units)
@@ -382,6 +396,114 @@ def _learn_synthesis_payload(
         "\n\n".join(summaries) or fallback_summary or "Learn completed without a promotable candidate.",
         candidates,
     )
+
+
+#: How many Design rounds are numbered. The cap does not stop a reviewer from
+#: asking for changes again — it stops the numbering from claiming a depth of
+#: debate the budget never funded.
+MAX_DESIGN_ROUNDS = 5
+
+_CHANGE_REQUEST_CHARS = 2_000
+
+
+def _design_reviews(activity: Any) -> list[dict[str, Any]]:
+    """Design-stage review decisions, oldest first. Never raises."""
+    if not isinstance(activity, Sequence) or isinstance(activity, str):
+        return []
+    reviews: list[dict[str, Any]] = []
+    for item in activity:
+        if not isinstance(item, dict) or item.get("event_type") != "stage.reviewed":
+            continue
+        payload = item.get("payload")
+        if not isinstance(payload, dict) or payload.get("stage") != "design":
+            continue
+        reviews.append(payload)
+    return reviews
+
+
+def _change_request(activity: Any) -> str | None:
+    """The objection the council should be answering, if there is one.
+
+    Only the *latest* Design review counts, and only when it asked for changes.
+    An approval clears a previous objection — otherwise a cycle re-opened for an
+    unrelated reason would keep arguing about something already settled — and a
+    rejection is not "try again addressing this", it ends the attempt.
+    """
+    reviews = _design_reviews(activity)
+    if not reviews:
+        return None
+    latest = reviews[-1]
+    if str(latest.get("decision") or "") != "changes_requested":
+        return None
+    rationale = str(latest.get("rationale") or "").strip()[:_CHANGE_REQUEST_CHARS]
+    return rationale or None
+
+
+def _design_round(activity: Any) -> int:
+    """Which round of this Design debate the next attempt is."""
+    requested = sum(1 for payload in _design_reviews(activity) if str(payload.get("decision") or "") == "changes_requested")
+    return min(requested + 1, MAX_DESIGN_ROUNDS)
+
+
+def _refinement_positions(max_positions: int, *, change_request: str | None) -> int:
+    """How wide a refinement round should be.
+
+    Narrower than a first pass, deliberately. A reviewer who objected to one
+    thing is owed an answer to that thing, and re-opening the full debate spends
+    a second council's budget re-litigating the parts they accepted. Never below
+    two, because a refinement with a single voice and a red team is still a
+    debate and one with a single voice alone is not.
+    """
+    if not change_request:
+        return max_positions
+    return max(2, min(max_positions, 2))
+
+
+def _approved_design_brief(cycle: dict[str, Any]) -> dict[str, Any] | None:
+    """The Design package a human approved, for the stages that implement it.
+
+    Build, Test, and Learn received the datasets and the reconciliation matrix
+    but not the design those exist to serve, so a Build worker had to re-derive
+    the study's intent from the cycle title.
+
+    Two rules make carrying it safe. Only an **approved** design travels — an
+    unapproved one would let later work proceed from something nobody agreed
+    to, which is the gate this whole workflow is built around. And the content
+    hash travels with the URI, because the approval bound a specific document
+    and a stage naming only the path could silently work from a later revision
+    of it.
+
+    Never raises: this runs on every Build/Test/Learn request and must not be
+    the reason a stage cannot run.
+    """
+    stages = cycle.get("stages")
+    if not isinstance(stages, Sequence) or isinstance(stages, str):
+        return None
+    attempt_id = ""
+    for item in stages:
+        if isinstance(item, dict) and item.get("stage") == "design" and str(item.get("status") or "") == "approved":
+            attempt_id = str(item.get("id") or "")
+            break
+    if not attempt_id:
+        return None
+
+    artifacts = cycle.get("artifacts")
+    if not isinstance(artifacts, Sequence) or isinstance(artifacts, str):
+        return None
+    newest: dict[str, Any] | None = None
+    for item in artifacts:
+        if not isinstance(item, dict) or str(item.get("stage_attempt_id") or "") != attempt_id:
+            continue
+        if newest is None or int(item.get("revision") or 0) > int(newest.get("revision") or 0):
+            newest = item
+    if newest is None:
+        return None
+    return {
+        "uri": str(newest.get("uri") or ""),
+        "content_hash": str(newest.get("content_hash") or ""),
+        "revision": int(newest.get("revision") or 0),
+        "artifact_type": str(newest.get("artifact_type") or ""),
+    }
 
 
 def _stage_attempt(cycle: dict[str, Any], stage: str) -> dict[str, Any] | None:
@@ -487,6 +609,7 @@ def _design_chair_unit(
         model=first.model,
         role="chair",
         focus="weighs the positions against each other",
+        round=first.round,
     )
 
 
@@ -524,6 +647,7 @@ def _design_red_team_unit(
         model=first.model,
         role="red_team",
         focus="argues against the proposed design",
+        round=first.round,
     )
 
 
@@ -1193,6 +1317,18 @@ class LiveStageAdapter:
             if stage == "design"
             else []
         )
+        # The reviewer's objection lives in a review rationale nobody read back,
+        # so a second attempt argued the same points from the same starting
+        # position and could not know what had been rejected. Failing to load
+        # the activity feed costs the focus, not the round.
+        activity: list[dict[str, Any]] = []
+        if stage == "design":
+            try:
+                activity = await self._repo.list_activity(cycle_id, project_id=project_id)
+            except Exception:  # noqa: BLE001 - a missing feed must not block a design round
+                logger.warning("Could not read cycle activity for the Design council's refinement context.", exc_info=True)
+        change_request = _change_request(activity)
+        design_round = _design_round(activity)
         stage_context = json.dumps(
             {
                 "request": request_text,
@@ -1216,6 +1352,15 @@ class LiveStageAdapter:
                     project_root,
                 ),
                 "prior_design_council_runs": _compact_design_history(prior_design_runs),
+                # Only present once a person has approved a Design package.
+                # Its absence is meaningful: a later stage seeing no brief is
+                # working before the gate, not merely without context.
+                "approved_design_brief": _approved_design_brief(cycle),
+                # Verbatim, not summarized. The council is being asked to answer
+                # this specific sentence, and a paraphrase is the failure mode
+                # the refinement round exists to fix.
+                "human_change_request": change_request,
+                "design_round": design_round,
             },
             sort_keys=True,
             ensure_ascii=False,
@@ -1265,14 +1410,24 @@ class LiveStageAdapter:
                 # happen to be registered, and inheriting that limit here would
                 # cap a heavy council at one position in exactly the
                 # generalist-only deployment this feature exists for.
-                max_positions=depth_policy(council_plan.depth).max_positions,
+                max_positions=_refinement_positions(
+                    depth_policy(council_plan.depth).max_positions,
+                    change_request=change_request,
+                ),
             )
         if proposal is not None:
             # The roster replaces selection's units rather than sitting beside
             # them: two sources of seats would let the package describe a
             # council that did not run, which is the failure the roster work
             # exists to prevent.
-            units = _proposed_units(proposal, spec, attempt_id=attempt_id, context=stage_context)
+            units = _proposed_units(
+                proposal,
+                spec,
+                attempt_id=attempt_id,
+                context=stage_context,
+                round_number=design_round,
+                change_request=change_request,
+            )
             plan = StageExecutionPlan(spec=spec, selection=_proposed_selection(proposal), units=units)
             outcome = collect_results(plan, await dispatcher(units, budget=spec.budget))
         else:
