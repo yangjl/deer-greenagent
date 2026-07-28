@@ -1,6 +1,9 @@
 # Debate Mode: redesigning the Design council
 
-**Status:** design, not yet implemented. The execution fix in §2 has landed.
+**Status:** implemented. All seven steps in §4 have landed; see the commits from
+`ae965ea0` (`fix(dbtl): give a stage worker a deadline it can actually meet`)
+through `6faec55a` (`feat(dbtl): answer the objection instead of re-running the
+debate`).
 **Date:** 2026-07-27
 
 ## 1. What actually went wrong
@@ -184,12 +187,48 @@ work the way a dataset change already invalidates a reconciliation approval.
 ## 4. Order of work
 
 1. ~~Finalization deadline, failure reasons, chair prompt~~ — landed.
-2. Merge `feat/design-council`; add `HUMAN_INPUT` to `CouncilDepth`.
-3. Dynamic roster proposal + validation + per-seat models.
-4. Seat/round metadata on task events; Debate panel.
-5. `consensus.v1` in the package; structured review sheet.
-6. Focused refinement rounds.
-7. `approved_design_brief` propagation into Build/Test/Learn.
+2. ~~Merge `feat/design-council`; add `HUMAN_INPUT` to `CouncilDepth`~~ — landed.
+3. ~~Dynamic roster proposal + validation + per-seat models~~ — landed.
+4. ~~Seat/round metadata on task events; Debate panel~~ — landed.
+5. ~~`consensus.v1` in the package~~ — landed, rendered into the review Markdown.
+6. ~~Focused refinement rounds~~ — landed.
+7. ~~`approved_design_brief` propagation into Build/Test/Learn~~ — landed.
 
 Step 3 is what makes the council a council. Everything after it is how a person
 watches and judges one.
+
+## 5. What was deliberately not done
+
+**The consensus renders into the review Markdown, not into a separate React
+sheet.** The plan called for a structured visual sheet beside the Markdown. The
+Markdown is what the approval binds by content hash, and
+`design-review.tsx` renders it deliberately rather than re-rendering the JSON —
+that is a governance property, not a UI shortcut. Putting the agreements and
+disagreements into the bound document means the reviewer reads them in the thing
+they are approving, and a second surface rendering the same data from the JSON
+could drift from it. A React sheet remains possible later; it should read the
+`consensus` block from the package rather than recompute anything.
+
+**Rounds are numbered but the panel does not yet offer a "request changes"
+button.** The refinement round fires on the durable review record, so it is
+reached through the existing stage review sheet. Wiring a shortcut into the
+debate panel would need it to call `POST …/stages/{stage}/review`, and a review
+recorded from a live progress view — before the reviewer has opened the document
+the approval binds — is the wrong default.
+
+## 6. What to watch on the first real run
+
+The failure this began with was invisible until the run database was inspected.
+Three things now make it visible earlier, and they are the first places to look:
+
+- The chat note lists **per-worker reasons** when nothing counted, with the
+  guardrail named separately from a contract violation.
+- The debate panel shows `stand-in` beside any seat resolving to
+  `general-purpose`, live. Three stand-ins is the shape of the original bug.
+- `GET /api/projects/{id}/dbtl/cycles/{id}/stages/design/workers` remains the
+  authoritative record; `dbtl_stage_worker_runs.result` carries the rejection
+  reason verbatim.
+
+Registering real specialists with `subagents.custom_agents.<name>.dbtl_capabilities`
+is still worth doing — the roster proposal makes generalist seats *argue*
+differently, but it cannot make them *know* differently.
