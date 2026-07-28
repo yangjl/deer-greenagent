@@ -27,6 +27,7 @@ import {
   buildInitialHumanInputFormValues,
   createHumanInputOptionResponse,
   createHumanInputTextResponse,
+  participantsForCouncilDepth,
   readHumanInputFormValue,
   type HumanInputField,
   type HumanInputFormValue,
@@ -244,6 +245,12 @@ export function HumanInputCard({
     Record<string, HumanInputFormValue>
   >(() => buildInitialHumanInputFormValues(request.fields ?? []));
   const participants = request.council_participants ?? [];
+  const isCouncilPreflight =
+    request.clarification_type === "council_preflight" &&
+    participants.length > 0;
+  const [selectedCouncilOptionId, setSelectedCouncilOptionId] = useState(
+    () => request.recommended_option_id ?? "",
+  );
   const [participantValues, setParticipantValues] = useState<
     Record<string, ParticipantFormValue>
   >(() => buildInitialParticipantValues(participants));
@@ -265,6 +272,16 @@ export function HumanInputCard({
     (request.input_mode === "free_text" ||
       request.input_mode === "choice_with_other");
   const options = request.options ?? [];
+  const effectiveCouncilOptionId =
+    answeredResponse?.response_kind === "option"
+      ? answeredResponse.option_id
+      : selectedCouncilOptionId;
+  const selectedCouncilOption = options.find(
+    (option) => option.id === effectiveCouncilOptionId,
+  );
+  const activeParticipants = isCouncilPreflight
+    ? participantsForCouncilDepth(participants, effectiveCouncilOptionId)
+    : participants;
   const fields = request.fields ?? [];
   const readOnly = !onSubmit;
   const isDisabled =
@@ -289,15 +306,36 @@ export function HumanInputCard({
   };
 
   const handleOptionClick = (option: HumanInputOption) => {
+    if (isCouncilPreflight && !["adjust", "human_input"].includes(option.id)) {
+      setSelectedCouncilOptionId(option.id);
+      return;
+    }
     // Participant edits ride only on choices that start the meeting. The
     // "adjust" option redraws the roster (its card returns with fresh
     // prefills), so stale edits must not travel with it.
     const participantEdits =
-      participants.length > 0 && option.id !== "adjust"
-        ? buildCouncilParticipantEdits(participants, participantValues)
+      activeParticipants.length > 0 && option.id !== "adjust"
+        ? buildCouncilParticipantEdits(activeParticipants, participantValues)
         : undefined;
     void submitResponse(
       createHumanInputOptionResponse(request, option, participantEdits),
+    );
+  };
+
+  const handleCouncilSubmit = () => {
+    if (!selectedCouncilOption) {
+      return;
+    }
+    const participantEdits = buildCouncilParticipantEdits(
+      activeParticipants,
+      participantValues,
+    );
+    void submitResponse(
+      createHumanInputOptionResponse(
+        request,
+        selectedCouncilOption,
+        participantEdits,
+      ),
     );
   };
 
@@ -542,10 +580,10 @@ export function HumanInputCard({
             </form>
           ) : null}
 
-          {participants.length > 0 ? (
+          {activeParticipants.length > 0 ? (
             <MeetingParticipantEditor
               disabled={isDisabled}
-              participants={participants}
+              participants={activeParticipants}
               values={participantValues}
               onChange={(id, value) =>
                 setParticipantValues((previous) => ({
@@ -561,7 +599,17 @@ export function HumanInputCard({
               {options.map((option) => (
                 <Button
                   key={option.id}
-                  className="min-h-11 w-full justify-start rounded-md px-3 py-2 text-left leading-5 whitespace-normal"
+                  className={cn(
+                    "min-h-11 w-full justify-start rounded-md px-3 py-2 text-left leading-5 whitespace-normal",
+                    isCouncilPreflight &&
+                      effectiveCouncilOptionId === option.id &&
+                      "border-primary/40 bg-primary/10",
+                  )}
+                  aria-pressed={
+                    isCouncilPreflight
+                      ? effectiveCouncilOptionId === option.id
+                      : undefined
+                  }
                   disabled={isDisabled}
                   type="button"
                   variant="outline"
@@ -587,6 +635,27 @@ export function HumanInputCard({
                   </span>
                 </Button>
               ))}
+              {isCouncilPreflight && selectedCouncilOption ? (
+                <div className="border-border/60 mt-1 flex flex-wrap items-center justify-between gap-2 border-t pt-3">
+                  <p className="text-muted-foreground text-xs leading-5">
+                    Review the participants shown for{" "}
+                    <span className="text-foreground font-medium">
+                      {selectedCouncilOption.label}
+                    </span>
+                    , then start the meeting.
+                  </p>
+                  <Button
+                    disabled={isDisabled}
+                    type="button"
+                    onClick={handleCouncilSubmit}
+                  >
+                    {pending ? (
+                      <Loader2Icon className="size-4 animate-spin" />
+                    ) : null}
+                    Start meeting
+                  </Button>
+                </div>
+              ) : null}
             </div>
           ) : null}
 

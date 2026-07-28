@@ -589,6 +589,57 @@ async def test_design_council_pauses_for_one_human_clarification_without_artifac
 
 
 @pytest.mark.asyncio
+async def test_failed_participants_make_the_chair_note_partial_and_count_roles(
+    tmp_path: Path,
+) -> None:
+    repo = FakeRepo(_cycle())
+
+    class PartialDispatcher:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def __call__(self, units, *, budget):
+            self.calls.append((units, budget))
+            if len(self.calls) < 3:
+                return [
+                    DispatchOutcome(
+                        unit_id=unit.unit_id,
+                        text=None,
+                        error="Codex API response.failed: upstream_overloaded",
+                    )
+                    for unit in units
+                ]
+            text = json.dumps(
+                {
+                    "status": "needs_input",
+                    "summary": "Only project context was available to the chair.",
+                    "artifact_refs": [],
+                    "claims": [],
+                    "evidence_refs": [],
+                    "limitations": ["Both debating participants failed."],
+                    "quality_checks": [],
+                    "recommended_next_actions": ["Ask the project owner."],
+                    "provenance": {"inputs_examined": ["cycle metadata"]},
+                    "clarification_question": "Which benchmark should govern the cycle?",
+                }
+            )
+            return [DispatchOutcome(unit_id=unit.unit_id, text=text) for unit in units]
+
+    result = await _design_adapter(repo, PartialDispatcher()).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Start the Design meeting.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert "1 independent position(s) and one red team" in result.note
+    assert "2 of 2 returned no usable result" in result.note
+    assert "partial synthesis" in result.note
+    assert "2 independent" not in result.note
+
+
+@pytest.mark.asyncio
 async def test_design_council_receives_a_bounded_project_file_manifest(
     tmp_path: Path,
 ) -> None:
@@ -915,11 +966,18 @@ def _paused_meeting_runs() -> list[dict]:
         {
             "unit_id": "dbtl-x-chair",
             "capability": "design_council_chair",
+            "agent_name": "experimental-design",
+            "via_generalist": False,
             "status": "needs_input",
             "result": {
                 "status": "needs_input",
                 "summary": "The positions converge on one gating decision.",
                 "clarification_question": "Toy benchmark or credible simulator?",
+                "execution": {
+                    "model": "gpt-5.5",
+                    "max_tokens": 81_000,
+                    "reasoning": "extended",
+                },
             },
         },
     ]
@@ -947,6 +1005,9 @@ async def test_answering_the_chair_resumes_it_instead_of_re_running_the_meeting(
     assert len(dispatcher.calls) == 1
     units = dispatcher.calls[0][0]
     assert [unit.capability for unit in units] == ["design_council_chair"]
+    assert units[0].model == "gpt-5.5"
+    assert units[0].max_tokens == 81_000
+    assert units[0].reasoning == "extended"
     assert result.worker_count == 1
     assert result.produced_usable_evidence
 
@@ -958,6 +1019,11 @@ async def test_answering_the_chair_resumes_it_instead_of_re_running_the_meeting(
 
     notes = repo.recorded[0]["results"]
     assert notes[0]["counts_toward_stage_output"] is True
+    assert notes[0]["execution"] == {
+        "model": "gpt-5.5",
+        "max_tokens": 81_000,
+        "reasoning": "extended",
+    }
 
 
 @pytest.mark.asyncio

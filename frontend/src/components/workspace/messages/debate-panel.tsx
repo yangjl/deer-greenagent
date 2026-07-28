@@ -136,28 +136,33 @@ export function DebatePanel({
   );
 }
 
-const CONSENSUS_COPY: Record<ConsensusState, { label: string; hint: string }> = {
-  debating: {
-    label: "Debating",
-    hint: "Independent positions are still being argued.",
-  },
-  synthesizing: {
-    label: "Synthesizing",
-    hint: "The chair is weighing the positions against each other.",
-  },
-  awaiting_input: {
-    label: "Waiting on you",
-    hint: "The chair needs one project-owner decision before it can synthesize.",
-  },
-  settled: {
-    label: "Synthesis ready",
-    hint: "The chair has reported. You review it; nothing has advanced.",
-  },
-  stalled: {
-    label: "No synthesis",
-    hint: "The debate ended without a usable synthesis.",
-  },
-};
+const CONSENSUS_COPY: Record<ConsensusState, { label: string; hint: string }> =
+  {
+    debating: {
+      label: "Debating",
+      hint: "Independent positions are still being argued.",
+    },
+    synthesizing: {
+      label: "Synthesizing",
+      hint: "The chair is weighing the positions against each other.",
+    },
+    awaiting_input: {
+      label: "Waiting on you",
+      hint: "The chair needs one project-owner decision before it can synthesize.",
+    },
+    partial: {
+      label: "Partial synthesis",
+      hint: "The chair reported, but one or more participants returned no usable result.",
+    },
+    settled: {
+      label: "Synthesis ready",
+      hint: "The chair has reported. You review it; nothing has advanced.",
+    },
+    stalled: {
+      label: "No synthesis",
+      hint: "The debate ended without a usable synthesis.",
+    },
+  };
 
 function ConsensusBadge({
   state,
@@ -170,13 +175,14 @@ function ConsensusBadge({
   const settled = state === "settled";
   const stalled = state === "stalled";
   const awaitingInput = state === "awaiting_input";
+  const partial = state === "partial";
   return (
     <span className="flex items-center gap-1.5" title={copy.hint}>
       {settled ? (
         <CheckIcon className="size-3.5 text-emerald-600 dark:text-emerald-400" />
       ) : awaitingInput ? (
         <MessageCircleQuestionIcon className="text-primary size-3.5" />
-      ) : stalled ? (
+      ) : stalled || partial ? (
         <TriangleAlertIcon className="size-3.5 text-amber-600 dark:text-amber-500" />
       ) : (
         <Loader2Icon className="text-muted-foreground size-3.5 animate-spin" />

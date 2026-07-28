@@ -386,6 +386,65 @@ class TestWorkerResultContract:
         with pytest.raises(WorkerResultRejected, match="evidence"):
             parse_worker_result(_valid_payload(evidence_refs=[]), capability="c", agent_name="a")
 
+    def test_named_structured_claims_are_normalized_without_losing_evidence(self) -> None:
+        """Models commonly make the claim/evidence relationship explicit.
+
+        That is stricter than the requested string list, not an unusable
+        scientific result, so the parser keeps only recognized textual fields
+        rather than stringifying arbitrary objects.
+        """
+        result = parse_worker_result(
+            _valid_payload(
+                claims=[
+                    {"claim": "Population structure must be preserved."},
+                    {"statement": "Validation families must remain held out."},
+                    {"text": "The null simulation needs zero genetic effects."},
+                ]
+            ),
+            capability="quantitative_genetics",
+            agent_name="general-purpose",
+        )
+
+        assert result.claims == (
+            "Population structure must be preserved.",
+            "Validation families must remain held out.",
+            "The null simulation needs zero genetic effects.",
+        )
+        assert result.evidence_refs[0].reference == "yield_2024"
+
+    def test_a_structured_claim_can_supply_its_own_typed_evidence(self) -> None:
+        result = parse_worker_result(
+            _valid_payload(
+                claims=[
+                    {
+                        "claim": "The breeding population has a fixed scope.",
+                        "evidence_refs": [
+                            {
+                                "kind": "workspace_file",
+                                "reference": "/mnt/user-data/design.md",
+                                "description": "Population definition",
+                            }
+                        ],
+                    }
+                ],
+                evidence_refs=[],
+            ),
+            capability="quantitative_genetics",
+            agent_name="general-purpose",
+        )
+
+        assert result.claims == ("The breeding population has a fixed scope.",)
+        assert result.evidence_refs[0].kind == "workspace_file"
+        assert result.evidence_refs[0].reference == "/mnt/user-data/design.md"
+
+    def test_an_unnamed_claim_object_is_still_rejected(self) -> None:
+        with pytest.raises(WorkerResultRejected, match="recognized text field"):
+            parse_worker_result(
+                _valid_payload(claims=[{"confidence": 0.9}]),
+                capability="c",
+                agent_name="a",
+            )
+
     def test_a_result_with_no_claims_needs_no_evidence(self) -> None:
         result = parse_worker_result(_valid_payload(claims=[], evidence_refs=[]), capability="c", agent_name="a")
         assert result.claims == ()

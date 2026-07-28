@@ -5,6 +5,7 @@ import {
   createHumanInputOptionResponse,
   parseHumanInputRequest,
   parseHumanInputResponse,
+  participantsForCouncilDepth,
   type CouncilParticipant,
 } from "@/core/messages/human-input";
 
@@ -135,6 +136,31 @@ test("participant edits round-trip through the response parser", () => {
   expect(parsed).toMatchObject({
     response_kind: "option",
     option_id: "light",
-    participants: { "position-1": { model: "claude-fable-5", max_tokens: 90000 } },
+    participants: {
+      "position-1": { model: "claude-fable-5", max_tokens: 90000 },
+    },
   });
+});
+
+test("a debate depth exposes only the participants that will run", () => {
+  const participants = [
+    participant({ id: "position-1", focus: "first" }),
+    participant({ id: "position-2", focus: "second" }),
+    participant({ id: "position-3", focus: "third" }),
+    participant({ id: "red-team", role: "red_team", role_label: "Red team" }),
+    participant({ id: "chair", role: "chair", role_label: "Chair" }),
+  ] as CouncilParticipant[];
+
+  expect(
+    participantsForCouncilDepth(participants, "light").map((entry) => entry.id),
+  ).toEqual(["position-1", "red-team", "chair"]);
+  expect(
+    participantsForCouncilDepth(participants, "medium").map(
+      (entry) => entry.id,
+    ),
+  ).toEqual(["position-1", "position-2", "red-team", "chair"]);
+  expect(
+    participantsForCouncilDepth(participants, "heavy").map((entry) => entry.id),
+  ).toEqual(["position-1", "position-2", "position-3", "red-team", "chair"]);
+  expect(participantsForCouncilDepth(participants, "human_input")).toEqual([]);
 });

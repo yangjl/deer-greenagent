@@ -259,6 +259,11 @@ export function insertDebatePanel(
   return [...nodes.slice(0, at), panel, ...nodes.slice(at)];
 }
 
+/** A run panel needs a transcript anchor; a blank chat owns no prior run. */
+export function shouldRenderDebatePanel(groupCount: number): boolean {
+  return groupCount > 0;
+}
+
 function LoadMoreHistoryIndicator({
   isLoading,
   hasMore,
@@ -1409,12 +1414,14 @@ export function MessageList({
             );
             }),
             debatePanelIndex,
-            <DebatePanel
-              key="debate-panel"
-              className="w-full"
-              runId={latestRunId}
-              threadId={threadId}
-            />,
+            shouldRenderDebatePanel(groupedMessages.length) ? (
+              <DebatePanel
+                key="debate-panel"
+                className="w-full"
+                runId={latestRunId}
+                threadId={threadId}
+              />
+            ) : null,
           )}
           {thread.isLoading && !hasActiveAssistantText && (
             <div className="w-full">

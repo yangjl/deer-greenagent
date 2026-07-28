@@ -133,6 +133,40 @@ class TestTerminalSeatEvent:
 
         assert json.loads(event["result"])["summary"] == "Use two seasons."
 
+    def test_a_named_structured_claim_completes_instead_of_showing_no_result(self):
+        event = _terminal_seat_event(
+            _unit(),
+            DispatchOutcome(
+                unit_id="dbtl-abc-1-experimental_design",
+                text=json.dumps(
+                    {
+                        "status": "completed",
+                        "summary": "Preserve the breeding-population structure.",
+                        "artifact_refs": [],
+                        "claims": [
+                            {
+                                "claim": "Validation families must remain held out.",
+                            }
+                        ],
+                        "evidence_refs": [
+                            {
+                                "kind": "workspace_file",
+                                "reference": "/mnt/user-data/design.md",
+                            }
+                        ],
+                        "limitations": [],
+                        "quality_checks": [],
+                        "recommended_next_actions": [],
+                        "provenance": {},
+                    }
+                ),
+            ),
+            model="gpt-5.4",
+        )
+
+        assert event["type"] == "task_completed"
+        assert json.loads(event["result"])["claims"] == ["Validation families must remain held out."]
+
     def test_prose_output_fails_the_live_lane_instead_of_claiming_completion(self):
         event = _terminal_seat_event(
             _unit(),

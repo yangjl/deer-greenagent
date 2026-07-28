@@ -44,6 +44,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from hashlib import sha256
 from inspect import isawaitable
+from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -62,6 +63,12 @@ from deerflow.dbtl.council import (
     depth_policy,
     recommend_depth,
     request_context,
+)
+from deerflow.dbtl.council_proposal import (
+    CouncilProposal,
+    proposal_as_dict,
+    proposal_from_dict,
+    proposal_from_plan,
 )
 from deerflow.dbtl.council_settings import (
     ParticipantSettings,
@@ -645,6 +652,7 @@ def _council_preflight_message(
             "description": "Say what should change about who sits and what they argue from. The roster is redrawn and shown again before anyone runs.",
         }
     )
+    proposal = proposal_from_plan(plan)
     return (
         AIMessage(
             id=f"{request_id}:call",
@@ -680,6 +688,7 @@ def _council_preflight_message(
                     "input_mode": "single_choice",
                     "options": options,
                     "council_plan": plan.as_dict(),
+                    **({"council_proposal": proposal_as_dict(proposal)} if proposal is not None else {}),
                     "council_participants": participants_payload(plan, model_options=model_options),
                     "recommended_depth": recommendation.depth.value,
                     "recommended_option_id": recommendation.depth.value,
@@ -953,6 +962,63 @@ def _confirmed_participant_settings(state: dict, known_models: Sequence[str]) ->
             return {}
         return parse_participant_settings(raw.get("participants"), known_models=known_models)
     return {}
+
+
+def _confirmed_council_proposal(state: dict) -> CouncilProposal | None:
+    """Return the exact question-specific roster shown on the answered card.
+
+    The roster writer is a model call, so invoking it again at dispatch can
+    legitimately return different seats and models. The emitted card is
+    server-owned and matched by request id; replay its serialized proposal
+    instead of redrawing the meeting after the person approves it.
+    """
+    answered = _card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
+    if answered is None:
+        return None
+    request = _emitted_card_request(state, answered[0])
+    if request is None:
+        return None
+    return proposal_from_dict(request.get("council_proposal"))
+
+
+def _latest_answered_council_preflight(state: dict) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """The most recent approved meeting setup, for a chair resume only.
+
+    Normal Design turns must not inherit an old meeting's roster. A chair
+    clarification is different: it is explicitly the second half of the same
+    meeting, so rebuilding its chair from today's defaults changes who is
+    finishing the synthesis. Return both server-owned card and raw validated
+    reply so the exact roster and participant dials can be restored.
+    """
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        raw = (getattr(message, "additional_kwargs", None) or {}).get("human_input_response")
+        if not isinstance(raw, dict):
+            continue
+        request_id = str(raw.get("request_id") or "")
+        if raw.get("source") != "ask_clarification" or not request_id.startswith(COUNCIL_PREFLIGHT_PREFIX):
+            continue
+        request = _emitted_card_request(state, request_id)
+        if request is None:
+            continue
+        return request, raw
+    return None
+
+
+def _resumed_council_setup(
+    state: dict,
+    known_models: Sequence[str],
+) -> tuple[CouncilProposal | None, dict[str, ParticipantSettings]]:
+    """Restore the approved roster and dials for a paused meeting."""
+    answered = _latest_answered_council_preflight(state)
+    if answered is None:
+        return None, {}
+    request, raw = answered
+    return (
+        proposal_from_dict(request.get("council_proposal")),
+        parse_participant_settings(raw.get("participants"), known_models=known_models),
+    )
 
 
 def _adapter_known_models(stage_adapter) -> tuple[str, ...]:
@@ -1255,12 +1321,27 @@ def build_supervisor_graph(
             # says nothing about what it is answering: the adapter resumes the
             # paused meeting on it instead of convening a new one.
             execute_kwargs["clarification_answer"] = design_answer[1]
-        participant_settings = _confirmed_participant_settings(state, _adapter_known_models(stage_adapter))
+        known_models = _adapter_known_models(stage_adapter)
+        participant_settings = _confirmed_participant_settings(state, known_models)
+        approved_proposal = _confirmed_council_proposal(state)
+        if design_answer is not None:
+            # This is not a new meeting. The preflight reply is necessarily an
+            # older message now, behind the chair's clarification card and its
+            # answer, so the answering-turn-only readers above cannot see it.
+            # Recover it only on this resume path; ordinary later Design turns
+            # must remain free to convene a different roster.
+            resumed_proposal, resumed_settings = _resumed_council_setup(state, known_models)
+            if approved_proposal is None:
+                approved_proposal = resumed_proposal
+            if not participant_settings:
+                participant_settings = resumed_settings
         if participant_settings:
             # The dials the person set on the participant cards travel with
             # the same reply as the depth, and like the depth they apply to
             # the meeting that reply convenes — not to every later turn.
             execute_kwargs["participant_settings"] = participant_settings
+        if approved_proposal is not None:
+            execute_kwargs["approved_council_proposal"] = approved_proposal
         result = stage_adapter.execute(**execute_kwargs)
         if isawaitable(result):
             result = await result

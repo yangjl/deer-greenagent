@@ -3,6 +3,7 @@ import { expect, test } from "@rstest/core";
 import {
   debatePanelPosition,
   insertDebatePanel,
+  shouldRenderDebatePanel,
 } from "@/components/workspace/messages/message-list";
 
 // The nodes are opaque to the helper, so plain strings stand in for rendered
@@ -15,7 +16,10 @@ test("a running meeting keeps the panel at the bottom, where the reader is", () 
 });
 
 test("a settled run puts the closing answer below the meeting", () => {
-  const at = debatePanelPosition({ groupCount: nodes.length, isLoading: false });
+  const at = debatePanelPosition({
+    groupCount: nodes.length,
+    isLoading: false,
+  });
   const placed = insertDebatePanel(nodes, at, "panel");
   expect(placed).toEqual([
     "human",
@@ -33,9 +37,14 @@ test("a single group has no answer to sit above, so the panel follows it", () =>
   expect(insertDebatePanel(["human"], at, "panel")).toEqual(["human", "panel"]);
 });
 
-test("an empty transcript still renders the panel", () => {
+test("an empty transcript has no anchor for a previous conversation's panel", () => {
   const at = debatePanelPosition({ groupCount: 0, isLoading: false });
-  expect(insertDebatePanel([], at, "panel")).toEqual(["panel"]);
+  expect(shouldRenderDebatePanel(0)).toBe(false);
+  expect(insertDebatePanel([], at, null)).toEqual([null]);
+});
+
+test("a conversation with a transcript can render its meeting", () => {
+  expect(shouldRenderDebatePanel(1)).toBe(true);
 });
 
 test("an out-of-range position clamps rather than dropping the panel", () => {

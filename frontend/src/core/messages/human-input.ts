@@ -405,9 +405,8 @@ function parseCouncilParticipants(
       max_tokens_max: toFiniteNumber(entry.max_tokens_max) ?? maxTokens,
       reasoning: isNonEmptyString(entry.reasoning) ? entry.reasoning : "",
       reasoning_options: parseStringList(entry.reasoning_options),
-      instructions: typeof entry.instructions === "string"
-        ? entry.instructions
-        : "",
+      instructions:
+        typeof entry.instructions === "string" ? entry.instructions : "",
     });
   }
   return participants.length ? participants : undefined;
@@ -450,7 +449,12 @@ export function buildCouncilParticipantEdits(
   participants: CouncilParticipant[],
   values: Record<
     string,
-    { model: string; maxTokens: string; reasoning: string; instructions: string }
+    {
+      model: string;
+      maxTokens: string;
+      reasoning: string;
+      instructions: string;
+    }
   >,
 ): Record<string, CouncilParticipantEdits> | undefined {
   const edits: Record<string, CouncilParticipantEdits> = {};
@@ -480,6 +484,41 @@ export function buildCouncilParticipantEdits(
     }
   }
   return Object.keys(edits).length > 0 ? edits : undefined;
+}
+
+const COUNCIL_POSITION_LIMITS: Record<string, number> = {
+  light: 1,
+  medium: 2,
+  heavy: 4,
+};
+
+/**
+ * The participants a selected debate depth will actually dispatch.
+ *
+ * The preflight can show a medium roster while the owner chooses light. Keep
+ * the first N independent positions and always preserve the red team and
+ * chair, matching the backend's depth policy. Human-authored Design seats
+ * nobody.
+ */
+export function participantsForCouncilDepth(
+  participants: CouncilParticipant[],
+  depth: string,
+): CouncilParticipant[] {
+  if (depth === "human_input") {
+    return [];
+  }
+  const limit = COUNCIL_POSITION_LIMITS[depth];
+  if (limit === undefined) {
+    return participants;
+  }
+  let positions = 0;
+  return participants.filter((participant) => {
+    if (participant.role !== "position") {
+      return true;
+    }
+    positions += 1;
+    return positions <= limit;
+  });
 }
 
 function parseFields(value: unknown): HumanInputField[] | undefined {

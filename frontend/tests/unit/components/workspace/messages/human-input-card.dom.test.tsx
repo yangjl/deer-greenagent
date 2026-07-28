@@ -101,3 +101,96 @@ describe("HumanInputCard form validation (DOM)", () => {
     ).toBe(false);
   });
 });
+
+describe("HumanInputCard meeting setup (DOM)", () => {
+  it("shows the selected depth's seats before a separate confirmation", () => {
+    const onSubmit = rs.fn();
+    render(
+      <I18nContext.Provider
+        value={{ locale: "en-US", setLocale: () => undefined }}
+      >
+        <HumanInputCard
+          request={{
+            version: 1,
+            kind: "human_input_request",
+            source: "ask_clarification",
+            request_id: "dbtl-council__cycle-1__run-1",
+            clarification_type: "council_preflight",
+            question: "How much debate should this design get?",
+            input_mode: "single_choice",
+            recommended_option_id: "medium",
+            options: [
+              { id: "light", label: "Light debate", value: "light" },
+              { id: "medium", label: "Medium debate", value: "medium" },
+            ],
+            council_participants: [
+              {
+                id: "position-1",
+                role: "position",
+                role_label: "Independent position",
+                agent_name: "general-purpose",
+                via_generalist: false,
+                focus: "first position",
+                model: "gpt-5.4",
+                model_options: ["gpt-5.4"],
+                max_tokens: 400000,
+                max_tokens_min: 10000,
+                max_tokens_max: 2000000,
+                reasoning: "standard",
+                reasoning_options: ["standard", "extended"],
+                instructions: "Argue first.",
+              },
+              {
+                id: "position-2",
+                role: "position",
+                role_label: "Independent position",
+                agent_name: "experimental-design",
+                via_generalist: false,
+                focus: "second position",
+                model: "gpt-5.3-codex-spark",
+                model_options: ["gpt-5.3-codex-spark"],
+                max_tokens: 400000,
+                max_tokens_min: 10000,
+                max_tokens_max: 2000000,
+                reasoning: "standard",
+                reasoning_options: ["standard", "extended"],
+                instructions: "Argue second.",
+              },
+              {
+                id: "chair",
+                role: "chair",
+                role_label: "Chair",
+                agent_name: "experimental-design",
+                via_generalist: false,
+                focus: "synthesis",
+                model: "gpt-5.6-sol",
+                model_options: ["gpt-5.6-sol"],
+                max_tokens: 400000,
+                max_tokens_min: 10000,
+                max_tokens_max: 2000000,
+                reasoning: "standard",
+                reasoning_options: ["standard", "extended"],
+                instructions: "Synthesize.",
+              },
+            ],
+          }}
+          onSubmit={onSubmit}
+        />
+      </I18nContext.Provider>,
+    );
+
+    expect(screen.getByText("second position")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Light debate" }));
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.queryByText("second position")).toBeNull();
+    expect(screen.getByText("first position")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Start meeting" }));
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0]?.[0]).toMatchObject({
+      option_id: "light",
+      value: "light",
+    });
+  });
+});

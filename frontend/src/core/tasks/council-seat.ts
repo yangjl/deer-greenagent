@@ -74,6 +74,7 @@ export type ConsensusState =
   | "debating"
   | "synthesizing"
   | "awaiting_input"
+  | "partial"
   | "settled"
   | "stalled";
 
@@ -152,9 +153,14 @@ export function consensusState(seats: readonly Subtask[]): ConsensusState {
     return "debating";
   }
   const chair = council.find((task) => task.councilSeat?.role === "chair");
-  const positions = council.filter((task) => task.councilSeat?.role !== "chair");
+  const positions = council.filter(
+    (task) => task.councilSeat?.role !== "chair",
+  );
 
   if (chair?.status === "completed") {
+    if (positions.some((task) => task.status === "failed")) {
+      return "partial";
+    }
     if (str(parseObject(chair.result ?? "")?.status) === "needs_input") {
       return "awaiting_input";
     }
@@ -169,7 +175,10 @@ export function consensusState(seats: readonly Subtask[]): ConsensusState {
   // No chair yet. If every position has already failed there is nothing left
   // to synthesize, and calling that "debating" would leave a spinner running
   // over a council that is already over.
-  if (positions.length > 0 && positions.every((task) => task.status === "failed")) {
+  if (
+    positions.length > 0 &&
+    positions.every((task) => task.status === "failed")
+  ) {
     return "stalled";
   }
   return "debating";

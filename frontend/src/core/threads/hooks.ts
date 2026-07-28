@@ -1464,6 +1464,21 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
+  const taskViewThreadIdRef = useRef(currentViewThreadId);
+
+  useEffect(() => {
+    if (taskViewThreadIdRef.current === currentViewThreadId) {
+      return;
+    }
+    taskViewThreadIdRef.current = currentViewThreadId;
+    // Project chat layouts persist across navigation. In the native-history
+    // new-thread flow, Next's route param can also remain "new" after the
+    // browser URL becomes the created UUID, so a provider key alone cannot
+    // detect the later return to /new. The display id is the canonical view
+    // identity in both router and native-history transitions.
+    tasksRef.current = {};
+    setTasks({});
+  }, [currentViewThreadId, setTasks, tasksRef]);
 
   const clearPreparedReplayMasks = useCallback(
     (replay: PendingPreparedReplayMask | null) => {

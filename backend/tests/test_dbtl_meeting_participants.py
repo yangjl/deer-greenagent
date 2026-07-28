@@ -293,6 +293,23 @@ class TestTheCardCarriesTheEditor:
 
 class TestTheEditsReachTheMeeting:
     @pytest.mark.asyncio
+    async def test_the_server_emitted_roster_reaches_dispatch(self):
+        executed: list = []
+
+        await _graph(executed).ainvoke(
+            _answered_state("light"),
+            config={"configurable": {"thread_id": "approved-roster"}},
+        )
+
+        assert executed, "the meeting never ran"
+        proposal = executed[0]["approved_council_proposal"]
+        assert [seat.focus for seat in proposal.positions] == [
+            "experimental design",
+        ]
+        assert proposal.chair is not None
+        assert proposal.chair.focus == "synthesis"
+
+    @pytest.mark.asyncio
     async def test_edits_on_the_reply_reach_dispatch_validated(self):
         executed: list = []
 
@@ -310,6 +327,51 @@ class TestTheEditsReachTheMeeting:
         # The made-up model was dropped server-side; the budget survived.
         assert settings["chair"].model is None
         assert settings["chair"].max_tokens == 80_000
+
+    def test_a_chair_resume_recovers_the_approved_roster_and_dials(self):
+        """The clarification answer is newer than the preflight reply, but it
+        is still the same meeting and must keep that chair."""
+        from deerflow.agents.dbtl import supervisor
+        from deerflow.dbtl.branches import BranchDecision, SupervisorBranch
+        from deerflow.dbtl.routing import RouteKind, RouteSource, RoutingDecision
+
+        state = _answered_state(
+            "light",
+            {
+                "chair": {
+                    "model": "claude-fable-5",
+                    "max_tokens": 81_000,
+                    "reasoning": "extended",
+                }
+            },
+        )
+        decision = BranchDecision(
+            branch=SupervisorBranch.CYCLE_CONTINUATION,
+            route=RoutingDecision(kind=RouteKind.CYCLE_CONTINUATION, source=RouteSource.EXPLICIT_CHOICE),
+            cycle_id="cyc-1",
+        )
+        ai, tool = supervisor._design_clarification_message(
+            decision,
+            note="The chair paused.",
+            question="Toy benchmark or credible simulator?",
+            request_nonce="resume-1",
+        )
+        state["messages"].extend(
+            [
+                ai,
+                tool,
+                _answer(ai.tool_calls[0]["id"], "A credible simulator."),
+            ]
+        )
+
+        proposal, settings = supervisor._resumed_council_setup(state, KNOWN_MODELS)
+
+        assert proposal is not None
+        assert proposal.chair is not None
+        assert proposal.chair.model == "gpt-5.6-sol"
+        assert settings["chair"].model == "claude-fable-5"
+        assert settings["chair"].max_tokens == 81_000
+        assert settings["chair"].reasoning == "extended"
 
     @pytest.mark.asyncio
     async def test_an_untouched_reply_sends_no_settings(self):

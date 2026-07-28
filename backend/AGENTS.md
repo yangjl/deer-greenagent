@@ -1790,6 +1790,12 @@ everything would make the selection record meaningless.
 `worker_result.py` is the structured contract. A claim with no `evidence_refs`
 is rejected, a non-boolean `quality_checks[].passed` is refused rather than
 coerced (a truthy string would turn an unanswered check into a passing one),
+and `claims` accepts either canonical strings or explicitly named structured
+objects with a non-empty `claim`, `statement`, or `text` field. Fully typed
+nested `evidence_ref(s)` are merged into the canonical evidence list. Arbitrary
+objects are never stringified, and string-only nested evidence ids are not
+promoted to a made-up evidence kind, so normalizing a model's more-structured
+shape cannot manufacture support,
 and `capability`/`agent_name` come from the **dispatcher**, never the payload —
 accepting the worker's own account of what it exercised would let a selection
 failure look like a satisfied requirement. `is_trustworthy` folds `status`
@@ -2097,7 +2103,15 @@ the table. Three rules, all in `stage_execution`:
   run, so a stray card reply after a completed synthesis is not a resume. The
   supervisor passes the answer as an explicit `clarification_answer` rather than
   letting the adapter infer it from request text: the answer and an ordinary
-  cycle request are the same string.
+  cycle request are the same string. The clarification reply is newer than the
+  preflight answer, so `_resumed_council_setup` deliberately scans back to that
+  server-emitted card only on this resume path and restores its exact proposal
+  and participant dials. Worker results also persist `execution.model`,
+  `execution.max_tokens`, and `execution.reasoning`; `_prior_chair_execution`
+  supplies the durable fallback after message compaction or process restart.
+  Rebuilding a resumed chair from the current default council plan is a
+  correctness bug: the synthesis would be finished by a model the person did
+  not approve.
 - `dbtl.council_model_name` sets the **default model for seats that do not name
   one**. Inheriting the composer's model meant a meeting convened from an
   expensive chat ran every unassigned seat on it — a model chosen to talk to,
@@ -2136,7 +2150,11 @@ over-long ids in the **model-bound request** (never the checkpoint), on both
 halves of the call/result pair together — renaming one without the other trades
 a length error for an orphaned tool result. `CodexChatModel` now reads a
 streamed error body before raising, so a provider 400 names its own cause
-instead of reporting a bare status.
+instead of reporting a bare status. Successful HTTP streams may still terminate
+with `response.failed`, `response.incomplete`, or `error`; those SSE frames are
+terminal failures too, and `_stream_failure_message` carries their provider
+code/reason/message into the worker error instead of reducing all three to
+“stream ended without response.completed”.
 
 The Design council preflight is a native `single_choice` Human Input request;
 its options carry `id`/`label`/`value` plus descriptions and the server-owned
@@ -2154,7 +2172,18 @@ the recorded plan (`apply_participant_settings`) and the dispatched
 `WorkUnit`s: per-seat `model`, `max_tokens` (overrides the stage budget for
 that one worker), `reasoning: "extended"` → `SubagentExecutor(thinking_enabled=True)`,
 and instructions quoted verbatim into that seat's prompt — unless byte-identical
-to the prefill, which is the writer's suggestion, not the owner's words. Router-created clarification pairs do not necessarily fire
+to the prefill, which is the writer's suggestion, not the owner's words.
+The card also serializes the question-specific `council_proposal`.
+`_confirmed_council_proposal` recovers it only from the matching server-emitted
+card and passes it as `approved_council_proposal`; `LiveStageAdapter.execute`
+trims its positions to the confirmed depth and replays it without invoking the
+roster writer again. Red-team and chair work units take their agent and model
+from that approved plan rather than copying the first position. A second roster
+model call here is a correctness bug: it can replace the seats and model edits
+the person just approved. A paused chair note counts roles from their
+`WorkUnit.role` values (independent positions exclude the red team), and names
+the synthesis as partial when any non-chair participant returned no trustworthy
+result. Router-created clarification pairs do not necessarily fire
 model or tool callbacks, so `RunJournal` final reconciliation discovers
 allowlisted pairs only after the current run's input message and persists the
 ToolMessage artifact. Retained cards before that input are never re-journaled.

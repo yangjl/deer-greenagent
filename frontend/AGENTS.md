@@ -556,6 +556,20 @@ the *request* instead — that puts it above the preflight card, far up a long
 transcript, where it is mounted and streaming but effectively invisible.
 Out-of-range positions clamp rather than dropping the panel.
 
+The task ledger is **conversation-scoped**, even though project layouts persist
+while navigating between conversations. `ChatProviders` keys
+`ThreadScopedSubtasksProvider` by the routed `thread_id`, so a paused meeting
+remains visible when its conversation is reopened but cannot render over
+`/workspace/<project>/new` or another thread. The native-history transition
+from a new-chat route to the UUID created by its first send can leave Next's
+route param as `"new"`; `useThreadStream` therefore also clears the ledger when
+its canonical `currentViewThreadId` changes. `MessageList` refuses to mount a
+debate panel with zero transcript groups, preventing even a one-frame stale
+paint on a blank chat. Do not move the unkeyed `SubtasksProvider` back to
+project scope: it makes a clean new-chat transcript display the previous
+conversation's debate panel and can make its pending decision look
+project-global.
+
 Each participant lane is clickable and opens
 `meeting-participant-inspector.tsx`, a right-side sheet showing that
 participant's steps: reasoning turns, tool calls paired with their output, and
@@ -600,7 +614,9 @@ seats already say, and the two would eventually disagree in front of a user.
 `stalled` is a distinct state from `settled` and `debating`: a council whose
 chair failed has neither reached consensus nor merely finished, and leaving a
 spinner running over a council that is already over is the exact experience this
-redesign removes. Status always carries a word, never colour alone.
+redesign removes. `partial` is distinct too: the chair reported, but at least
+one non-chair participant failed, so its output must not be presented as a
+successful discussion. Status always carries a word, never colour alone.
 
 The native council preflight uses `input_mode=single_choice`; every option has
 an `id`, `label`, and `value`, with optional description, and
@@ -614,7 +630,12 @@ with the roster writer's suggestions — parsed fail-soft per entry in
 `human-input.ts` (a malformed participant is skipped; nothing usable falls
 back to the plain roster text). `meeting-participant-editor.tsx` renders the
 collapsed cards (model select, token budget, reasoning strength,
-instructions textarea) inside `HumanInputCard`; on submit,
+instructions textarea) inside `HumanInputCard`. Meeting depth is a local
+selection first, not an immediate submit: `participantsForCouncilDepth` removes
+positions the selected policy will not run while preserving the red team and
+chair, and a separate **Start meeting** action confirms the now-visible roster.
+Only those visible participants contribute edits, so changing `position-2`
+cannot silently ride on a Light reply that keeps only `position-1`. On submit,
 `buildCouncilParticipantEdits` diffs against the prefills so an untouched
 editor submits nothing, and the edits ride the option reply's optional
 `participants` key (skipped for the roster-adjust option, whose redraw

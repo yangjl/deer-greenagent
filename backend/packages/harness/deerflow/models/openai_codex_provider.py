@@ -35,6 +35,21 @@ _ERROR_BODY_LOG_CHARS = 4_000
 _ERROR_BODY_MESSAGE_CHARS = 600
 
 
+def _stream_failure_message(event: dict[str, Any]) -> str:
+    """Turn a terminal SSE failure into the provider's actionable detail."""
+    event_type = str(event.get("type") or "stream failure")
+    response = event.get("response")
+    response = response if isinstance(response, dict) else {}
+    error = response.get("error", event.get("error"))
+    error = error if isinstance(error, dict) else {}
+    details = response.get("incomplete_details")
+    details = details if isinstance(details, dict) else {}
+    code = str(error.get("code") or details.get("reason") or response.get("status") or "").strip()
+    message = str(error.get("message") or event.get("message") or "").strip()
+    suffix = ": ".join(part for part in (code, message) if part)
+    return f"Codex API {event_type}{f': {suffix}' if suffix else ''}"[:_ERROR_BODY_MESSAGE_CHARS]
+
+
 def _build_usage_metadata(oai_usage: dict) -> dict:
     """Convert Codex/Responses API usage dict to LangChain usage_metadata format.
 
@@ -287,6 +302,12 @@ class CodexChatModel(BaseChatModel):
                             streamed_output_items[output_index] = output_item
                     elif event_type == "response.completed":
                         completed_response = data["response"]
+                    elif event_type in {
+                        "response.failed",
+                        "response.incomplete",
+                        "error",
+                    }:
+                        raise RuntimeError(_stream_failure_message(data))
 
         if not completed_response:
             raise RuntimeError("Codex API stream ended without response.completed event")
