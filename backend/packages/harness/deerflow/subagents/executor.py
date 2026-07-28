@@ -20,6 +20,7 @@ from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.constants import TAG_NOSTREAM
 from langgraph.errors import GraphRecursionError
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
@@ -781,7 +782,9 @@ class SubagentExecutor:
             run_config: RunnableConfig = {
                 "recursion_limit": self.config.max_turns,
                 "callbacks": [collector],
-                "tags": [collector_caller],
+                # Child reasoning/tool traffic belongs in the subtask timeline,
+                # not in the parent conversation's message stream.
+                "tags": [collector_caller, TAG_NOSTREAM],
             }
 
             # Inject tracing callbacks at the graph level so a single subagent run

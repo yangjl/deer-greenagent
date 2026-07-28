@@ -471,6 +471,7 @@ async def run_agent(
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
+            journal.record_input(graph_input)
 
         # 1. Mark running
         await run_manager.set_status(run_id, RunStatus.running)

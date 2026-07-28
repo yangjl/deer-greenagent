@@ -25,6 +25,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langgraph.constants import TAG_NOSTREAM
 from packaging.version import Version
 
 from deerflow.skills.types import Skill
@@ -2925,6 +2926,7 @@ class TestSubagentTracingWiring:
         assert fake_agent.captured_config is not None
         callbacks = fake_agent.captured_config.get("callbacks") or []
         assert sentinel_handler in callbacks, "tracing handler must reach run_config['callbacks']"
+        assert TAG_NOSTREAM in (fake_agent.captured_config.get("tags") or [])
         # SubagentTokenCollector must survive the append (graph-root tracing
         # cannot displace the token-accounting callback).
         assert len(callbacks) >= 2, "existing callbacks must be preserved when tracing is injected"

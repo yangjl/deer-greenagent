@@ -27,6 +27,7 @@ from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage, messages_from_dict
+from langgraph.constants import TAG_NOSTREAM
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
@@ -51,6 +52,10 @@ logger = logging.getLogger(__name__)
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
 _RECONCILED_TOOL_MESSAGE_NAMES = frozenset({"ask_clarification"})
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"})
+
+
+def _is_nostream(tags: Sequence[str] | None) -> bool:
+    return TAG_NOSTREAM in (tags or ())
 
 
 def _should_persist_human_input_message(message: BaseMessage) -> bool:
@@ -262,6 +267,37 @@ class RunJournal(BaseCallbackHandler):
             if text:
                 self._last_ai_msg = text[:2000]
 
+    def _record_first_human_input(self, messages: Sequence[Any]) -> None:
+        if self._first_human_msg:
+            return
+        for raw_message in reversed(messages):
+            message = _coerce_seed_message(raw_message)
+            if not isinstance(message, BaseMessage) or not _should_persist_human_input_message(message):
+                continue
+            persisted_message = restore_original_human_message(message)
+            self.set_first_human_message(self._message_text(persisted_message))
+            self._put(
+                event_type=LLM_HUMAN_INPUT_EVENT.event_type,
+                category=LLM_HUMAN_INPUT_EVENT.category,
+                content=persisted_message.model_dump(),
+                metadata={"caller": "lead_agent"},
+            )
+            self._record_message_summary(persisted_message, caller="lead_agent")
+            return
+
+    def record_input(self, inputs: Any) -> None:
+        """Persist the actual run input before any internal model call can fire.
+
+        Callback-only capture is unsafe for router graphs: their first model
+        call may be a hidden classifier or DBTL prompt rather than the human
+        message that started the run.
+        """
+        if not isinstance(inputs, Mapping):
+            return
+        messages = inputs.get("messages")
+        if isinstance(messages, Sequence) and not isinstance(messages, (str, bytes)):
+            self._record_first_human_input(messages)
+
     def on_chain_start(
         self,
         serialized: dict[str, Any],
@@ -305,7 +341,17 @@ class RunJournal(BaseCallbackHandler):
         )
         self._flush_sync()
 
-    def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+    def on_chain_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if parent_run_id is not None or _is_nostream(tags):
+            return
         self._put(
             event_type=RUN_ERROR_EVENT.event_type,
             category=RUN_ERROR_EVENT.category,
@@ -344,22 +390,14 @@ class RunJournal(BaseCallbackHandler):
             [len(batch) for batch in messages],
         )
 
+        if _is_nostream(tags):
+            return
+
         # Capture the first user message sent to the lead agent in this run.
         caller = self._identify_caller(tags)
         if caller == "lead_agent" and not self._first_human_msg and messages:
             for batch in reversed(messages):
-                for m in reversed(batch):
-                    if _should_persist_human_input_message(m):
-                        persisted_message = restore_original_human_message(m)
-                        self.set_first_human_message(self._message_text(persisted_message))
-                        self._put(
-                            event_type=LLM_HUMAN_INPUT_EVENT.event_type,
-                            category=LLM_HUMAN_INPUT_EVENT.category,
-                            content=persisted_message.model_dump(),
-                            metadata={"caller": caller},
-                        )
-                        self._record_message_summary(persisted_message, caller=caller)
-                        break
+                self._record_first_human_input(batch)
                 if self._first_human_msg:
                     break
 
@@ -377,6 +415,8 @@ class RunJournal(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         messages: list[AnyMessage] = []
+        persist_messages = not _is_nostream(tags)
+        persisted_any = False
         logger.debug("on_llm_end %s: tags=%s", run_id, tags)
         for generation in response.generations:
             for gen in generation:
@@ -387,7 +427,8 @@ class RunJournal(BaseCallbackHandler):
 
         for message in messages:
             caller = self._identify_caller(tags)
-            self._remember_current_run_tool_calls(message, caller=caller)
+            if persist_messages:
+                self._remember_current_run_tool_calls(message, caller=caller)
 
             # Latency
             rid = str(run_id)
@@ -418,20 +459,22 @@ class RunJournal(BaseCallbackHandler):
                 call_index = self._llm_call_index
                 self._seen_llm_starts.add(rid)
 
-            # Message event: checkpoint-aligned llm.ai.response payload.
-            self._put(
-                event_type=LLM_AI_RESPONSE_EVENT.event_type,
-                category=LLM_AI_RESPONSE_EVENT.category,
-                content=message.model_dump(),
-                metadata={
-                    "caller": caller,
-                    "usage": usage_dict,
-                    "latency_ms": latency_ms,
-                    "llm_call_index": call_index,
-                },
-            )
-            if rid not in self._counted_message_llm_run_ids:
-                self._record_message_summary(message, caller=caller)
+            if persist_messages:
+                # Message event: checkpoint-aligned llm.ai.response payload.
+                self._put(
+                    event_type=LLM_AI_RESPONSE_EVENT.event_type,
+                    category=LLM_AI_RESPONSE_EVENT.category,
+                    content=message.model_dump(),
+                    metadata={
+                        "caller": caller,
+                        "usage": usage_dict,
+                        "latency_ms": latency_ms,
+                        "llm_call_index": call_index,
+                    },
+                )
+                persisted_any = True
+                if rid not in self._counted_message_llm_run_ids:
+                    self._record_message_summary(message, caller=caller)
 
             # Token accumulation (dedup by langchain run_id to avoid double-counting
             # when the callback fires more than once for the same response)
@@ -464,7 +507,7 @@ class RunJournal(BaseCallbackHandler):
 
                     self._schedule_progress_flush()
 
-        if messages:
+        if persisted_any:
             self._counted_message_llm_run_ids.add(str(run_id))
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
@@ -480,18 +523,29 @@ class RunJournal(BaseCallbackHandler):
         tool_call_id = str(run_id)
         logger.debug("Tool start for node %s, tool_call_id=%s, tags=%s", run_id, tool_call_id, tags)
 
-    def on_tool_end(self, output, *, run_id, parent_run_id=None, **kwargs):
+    def on_tool_end(
+        self,
+        output,
+        *,
+        run_id,
+        parent_run_id=None,
+        tags=None,
+        **kwargs,
+    ):
         """Handle tool end event, append message and clear node data"""
+        if _is_nostream(tags):
+            return
+        caller = self._identify_caller(tags)
         try:
             if isinstance(output, ToolMessage):
                 msg = cast(ToolMessage, output)
-                self._persist_tool_result_message(msg)
+                self._persist_tool_result_message(msg, caller=caller)
             elif isinstance(output, Command):
                 cmd = cast(Command, output)
                 messages = cmd.update.get("messages", [])
                 for message in messages:
                     if isinstance(message, BaseMessage):
-                        self._persist_tool_result_message(message)
+                        self._persist_tool_result_message(message, caller=caller)
                     else:
                         logger.warning(f"on_tool_end {run_id}: command update message is not BaseMessage: {type(message)}")
             else:
@@ -533,11 +587,17 @@ class RunJournal(BaseCallbackHandler):
             name = self._tool_call_value(tool_call, "name")
             self._current_run_tool_call_names[tool_call_id] = str(name or "")
 
-    def _persist_tool_result_message(self, message: BaseMessage) -> None:
+    def _persist_tool_result_message(
+        self,
+        message: BaseMessage,
+        *,
+        caller: str | None = None,
+    ) -> None:
         self._put(
             event_type=LLM_TOOL_RESULT_EVENT.event_type,
             category=LLM_TOOL_RESULT_EVENT.category,
             content=message.model_dump(),
+            metadata={"caller": caller} if caller else None,
         )
         identity = self._message_identity(message)
         if identity:
@@ -570,7 +630,7 @@ class RunJournal(BaseCallbackHandler):
             if not isinstance(message, ToolMessage):
                 continue
             if self._should_reconcile_tool_message(message):
-                self._persist_tool_result_message(message)
+                self._persist_tool_result_message(message, caller="lead_agent")
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
         self._buffer.append(

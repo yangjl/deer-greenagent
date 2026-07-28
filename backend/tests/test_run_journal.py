@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 from langchain_core.messages import HumanMessage
+from langgraph.constants import TAG_NOSTREAM
 
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
@@ -59,6 +60,46 @@ def _make_llm_response(content="Hello", usage=None, tool_calls=None, additional_
 
 
 class TestLlmCallbacks:
+    @pytest.mark.anyio
+    async def test_record_input_persists_real_user_message_before_internal_nostream_prompt(
+        self,
+        journal_setup,
+    ):
+        j, store = journal_setup
+        user_message = HumanMessage(content="Start the Design council", id="human-1")
+
+        j.record_input({"messages": [user_message]})
+        j.on_chat_model_start(
+            {},
+            [[HumanMessage(content="Internal DBTL prompt")]],
+            run_id=uuid4(),
+            tags=["lead_agent", TAG_NOSTREAM],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert [(row["event_type"], row["content"]["content"]) for row in messages] == [("llm.human.input", "Start the Design council")]
+        assert j._first_human_msg == "Start the Design council"
+
+    @pytest.mark.anyio
+    async def test_nostream_llm_response_counts_usage_without_persisting_internal_text(
+        self,
+        journal_setup,
+    ):
+        j, store = journal_setup
+        usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+
+        j.on_llm_end(
+            _make_llm_response('{"questions": []}', usage=usage),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent", TAG_NOSTREAM],
+        )
+        await j.flush()
+
+        assert await store.list_messages("t1") == []
+        assert j._total_tokens == 15
+
     @pytest.mark.anyio
     async def test_on_chat_model_start_persists_original_user_input_without_mutating_model_message(self, journal_setup):
         j, store = journal_setup
@@ -214,6 +255,23 @@ class TestLifecycleCallbacks:
         assert not any(e["event_type"] == "run.start" for e in events)
         assert not any(e["event_type"] == "run.end" for e in events)
 
+    @pytest.mark.anyio
+    async def test_nested_chain_error_is_not_reported_as_root_run_error(
+        self,
+        journal_setup,
+    ):
+        j, store = journal_setup
+        j.on_chain_error(
+            RuntimeError("internal subagent failed"),
+            run_id=uuid4(),
+            parent_run_id=uuid4(),
+            tags=["subagent:general-purpose", TAG_NOSTREAM],
+        )
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "run.error" for e in events)
+
 
 class TestToolCallbacks:
     @pytest.mark.anyio
@@ -229,6 +287,47 @@ class TestToolCallbacks:
         assert len(messages) == 1
         assert messages[0]["event_type"] == "llm.tool.result"
         assert messages[0]["content"]["type"] == "tool"
+
+    @pytest.mark.anyio
+    async def test_subagent_tool_result_carries_caller_for_thread_history_filter(
+        self,
+        journal_setup,
+    ):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        tool_msg = ToolMessage(
+            content="huge internal directory tree",
+            tool_call_id="call-subagent-1",
+            name="filesystem_directory_tree",
+        )
+        j.on_tool_end(
+            tool_msg,
+            run_id=uuid4(),
+            tags=["subagent:general-purpose"],
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert messages[0]["metadata"]["caller"] == "subagent:general-purpose"
+
+    @pytest.mark.anyio
+    async def test_nostream_tool_result_is_not_persisted(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_tool_end(
+            ToolMessage(
+                content="internal result",
+                tool_call_id="call-internal",
+                name="filesystem_directory_tree",
+            ),
+            run_id=uuid4(),
+            tags=["subagent:general-purpose", TAG_NOSTREAM],
+        )
+        await j.flush()
+
+        assert await store.list_messages("t1") == []
 
     @pytest.mark.anyio
     async def test_tool_end_with_command_unwraps_tool_message(self, journal_setup):

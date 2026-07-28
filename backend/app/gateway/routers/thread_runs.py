@@ -277,9 +277,40 @@ def _is_visible_ai_message(message: Any) -> bool:
     return _message_type(message) == "ai" and not _is_hidden_or_control_message(message)
 
 
-def _is_thread_history_hidden_message_row(row: dict[str, Any]) -> bool:
+def _subagent_tool_call_ids(rows: list[dict[str, Any]]) -> set[str]:
+    ids: set[str] = set()
+    for row in rows:
+        caller = str((row.get("metadata") or {}).get("caller", ""))
+        content = row.get("content")
+        if not caller.startswith("subagent:") or not isinstance(content, dict):
+            continue
+        tool_calls = content.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            tool_call_id = tool_call.get("id")
+            if isinstance(tool_call_id, str) and tool_call_id:
+                ids.add(tool_call_id)
+    return ids
+
+
+def _is_thread_history_hidden_message_row(
+    row: dict[str, Any],
+    *,
+    legacy_subagent_tool_call_ids: set[str] | None = None,
+) -> bool:
     caller = str((row.get("metadata") or {}).get("caller", ""))
-    return caller.startswith("middleware:") or (caller.startswith("subagent:") and _message_type(row.get("content")) == "ai")
+    if caller.startswith("middleware:"):
+        return True
+    content = row.get("content")
+    if caller.startswith("subagent:") and (_message_type(content) == "ai" or row.get("event_type") == "llm.tool.result"):
+        return True
+    if not isinstance(content, dict) or _message_type(content) != "tool":
+        return False
+    tool_call_id = content.get("tool_call_id")
+    return isinstance(tool_call_id, str) and legacy_subagent_tool_call_ids is not None and tool_call_id in legacy_subagent_tool_call_ids
 
 
 def _checkpoint_messages(snapshot: Any) -> list[Any]:
@@ -837,8 +868,15 @@ async def _scan_thread_message_page(
             )
             raise RuntimeError("Run event message rows are missing sequence values")
 
+        legacy_subagent_tool_call_ids = _subagent_tool_call_ids(raw)
         for row in reversed(raw):
-            if _is_thread_history_hidden_message_row(row) or row.get("run_id") in superseded_run_ids:
+            if (
+                _is_thread_history_hidden_message_row(
+                    row,
+                    legacy_subagent_tool_call_ids=legacy_subagent_tool_call_ids,
+                )
+                or row.get("run_id") in superseded_run_ids
+            ):
                 continue
             visible_desc.append(row)
             if len(visible_desc) == limit + 1:

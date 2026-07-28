@@ -98,6 +98,7 @@ PYTHONPATH=. exec uv run uvicorn app.gateway.app:app \
     --reload \
     --reload-include='*.yaml' \
     --reload-include='.env' \
+    --reload-exclude='tests/**' \
     --reload-exclude=/app/backend/sandbox \
     --reload-exclude="$DEER_FLOW_HOME" \
     --reload-exclude=/app/backend/.deer-flow

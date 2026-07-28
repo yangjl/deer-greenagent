@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.constants import TAG_NOSTREAM
 
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
@@ -53,7 +54,15 @@ async def run_oneshot_llm(
         The extracted plain-text content of the model response (uncleaned).
     """
     model = create_chat_model(name=model_name, thinking_enabled=False, app_config=app_config)
-    invoke_config: dict = {"run_name": run_name}
+    # A one-shot call may run inside a larger LangGraph node (for example the
+    # DBTL setup-question writer). Without TAG_NOSTREAM, LangGraph's inherited
+    # messages callback broadcasts this helper's private prompt and raw reply
+    # as if they were root chat messages. The caller receives the extracted
+    # text directly, so none of this model exchange belongs in the UI stream.
+    invoke_config: dict = {
+        "run_name": run_name,
+        "tags": [TAG_NOSTREAM],
+    }
     inject_langfuse_metadata(
         invoke_config,
         thread_id=thread_id,

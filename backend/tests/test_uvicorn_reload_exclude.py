@@ -37,6 +37,11 @@ LAUNCHERS = {
     "docker/dev-entrypoint.sh": REPO_ROOT / "docker" / "dev-entrypoint.sh",
 }
 
+DEV_GATEWAY_LAUNCHERS = {
+    **LAUNCHERS,
+    "backend/Makefile": REPO_ROOT / "backend" / "Makefile",
+}
+
 # Shell terminators / redirects that end a simple command's argument list.
 _CMD_BOUNDARY = re.compile(r"[;&|<>]")
 
@@ -148,6 +153,14 @@ def test_launcher_precreates_every_absolute_reload_exclude(name):
 
     for value in absolute_excludes:
         assert value in created, f"{name}: absolute reload-exclude {value!r} is never created via mkdir (created dirs: {sorted(created)})"
+
+
+@pytest.mark.parametrize("name", list(DEV_GATEWAY_LAUNCHERS))
+def test_dev_gateway_reload_excludes_backend_tests(name):
+    """Editing or formatting tests must not interrupt the running Gateway."""
+    script = DEV_GATEWAY_LAUNCHERS[name].read_text(encoding="utf-8")
+    excludes = _reload_exclude_values(script)
+    assert "tests/**" in excludes, f"{name}: backend tests are inside Uvicorn's watched tree; every test edit would restart the live Gateway"
 
 
 @pytest.mark.parametrize("name", list(LAUNCHERS))

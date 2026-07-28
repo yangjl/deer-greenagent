@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langgraph.constants import TAG_NOSTREAM
 
 from app.gateway.routers import suggestions
 from deerflow.trace_context import request_trace_context
@@ -122,7 +123,9 @@ def test_generate_suggestions_parses_and_limits(monkeypatch):
 
     assert result.suggestions == ["Q1", "Q2", "Q3"]
     fake_model.ainvoke.assert_awaited_once()
-    assert fake_model.ainvoke.await_args.kwargs["config"] == {"run_name": "suggest_agent"}
+    invoke_config = fake_model.ainvoke.await_args.kwargs["config"]
+    assert invoke_config["run_name"] == "suggest_agent"
+    assert TAG_NOSTREAM in invoke_config["tags"]
 
 
 def test_generate_suggestions_injects_deerflow_trace_metadata_when_langfuse_enabled(monkeypatch):
@@ -176,7 +179,9 @@ def test_generate_suggestions_parses_list_block_content(monkeypatch):
 
     assert result.suggestions == ["Q1", "Q2"]
     fake_model.ainvoke.assert_awaited_once()
-    assert fake_model.ainvoke.await_args.kwargs["config"] == {"run_name": "suggest_agent"}
+    invoke_config = fake_model.ainvoke.await_args.kwargs["config"]
+    assert invoke_config["run_name"] == "suggest_agent"
+    assert TAG_NOSTREAM in invoke_config["tags"]
 
 
 def test_generate_suggestions_parses_output_text_block_content(monkeypatch):
@@ -198,7 +203,9 @@ def test_generate_suggestions_parses_output_text_block_content(monkeypatch):
 
     assert result.suggestions == ["Q1", "Q2"]
     fake_model.ainvoke.assert_awaited_once()
-    assert fake_model.ainvoke.await_args.kwargs["config"] == {"run_name": "suggest_agent"}
+    invoke_config = fake_model.ainvoke.await_args.kwargs["config"]
+    assert invoke_config["run_name"] == "suggest_agent"
+    assert TAG_NOSTREAM in invoke_config["tags"]
 
 
 def test_generate_suggestions_returns_empty_on_model_error(monkeypatch):

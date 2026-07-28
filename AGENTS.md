@@ -142,8 +142,12 @@ Breeding-workspace note:
   scoped, and it applies to the next request only. Cycles are opened by
   describing them in the chatbox under the `Start a new cycle` scope, which routes
   to the supervisor's setup branch — nothing is recorded until the human
-  confirms. See [backend/AGENTS.md](backend/AGENTS.md) for the
-  reducer-idempotency and stream-contract constraints that make delegation safe.
+  confirms. Internal one-shot model calls and Design-council subagent runs are
+  tagged `nostream`; their prompts, raw JSON, reasoning, and tool output must
+  never appear in the parent conversation stream or thread history. The
+  council's bounded task timeline remains available separately. See
+  [backend/AGENTS.md](backend/AGENTS.md) for the reducer-idempotency and
+  stream-contract constraints that make delegation safe.
 - DBTL Phase 6 replaces the continuation stub with a production
   `LiveStageAdapter` for Design and Data Reconciliation. It verifies the
   selected cycle belongs to the runtime project, fans bounded work units out
@@ -224,6 +228,7 @@ Run `make help` for the full list.
 # Backend (see backend/AGENTS.md for the full set)
 cd backend && make dev        # Gateway API with reload (port 8001)
 cd backend && make test       # Backend test suite
+cd backend && make test-core  # Faster local subset (skips live-LLM + unused-subsystem tests)
 cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
 
@@ -235,6 +240,10 @@ cd frontend && pnpm test      # Unit tests
 
 Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
 (`pnpm`) = per-module work.**
+
+Gateway development launchers exclude `backend/tests/` from Uvicorn's reload
+watcher. Test edits must not restart the live Gateway; runtime source and
+configuration changes remain hot-reloaded.
 
 ## Where to Go Next
 

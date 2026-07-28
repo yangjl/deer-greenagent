@@ -44,8 +44,11 @@ Design–Build–Test–Learn (DBTL) governance.
   approval language in chat does not mutate the gate or rerun the council.
 - **One native setup interaction** — DBTL setup and confirmation are emitted
   through DeerFlow's existing `ask_clarification` Human Input Card in the chat
-  transcript. Shadow proposal evaluation records telemetry only; it does not
-  mount a second card beside the composer.
+  transcript. Internal model prompts, structured drafting responses, subagent
+  reasoning, and subagent tool output stay out of the visible conversation;
+  council progress remains available through its task timeline. Shadow
+  proposal evaluation records telemetry only; it does not mount a second card
+  beside the composer.
 - **DeerFlow capabilities** — sandboxed execution, tools, skills, MCP,
   subagents, persistent conversations, and multiple model providers.
 
@@ -145,6 +148,9 @@ pnpm check
 
 Backend features and bug fixes require tests. Keep user-facing documentation
 and the relevant `AGENTS.md` synchronized with architectural changes.
+Gateway hot reload watches backend runtime code and configuration, but excludes
+`backend/tests/` so editing or formatting tests does not interrupt the running
+development server.
 
 ### Replay a DeerFlow run in LLM Space
 

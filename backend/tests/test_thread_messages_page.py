@@ -120,6 +120,20 @@ def test_thread_page_hides_subagent_ai_but_keeps_root_task_result():
             category="message",
             content={
                 "type": "tool",
+                "id": "internal-subagent-tool-result",
+                "tool_call_id": "subagent-call-1",
+                "content": "huge internal directory tree",
+                "additional_kwargs": {},
+            },
+            metadata={"caller": "subagent:general-purpose"},
+        )
+        await store.put(
+            thread_id="thread-1",
+            run_id="run-1",
+            event_type="llm.tool.result",
+            category="message",
+            content={
+                "type": "tool",
                 "id": "root-task-result",
                 "tool_call_id": "task-0",
                 "content": "Task Succeeded. Result: poem",
@@ -139,6 +153,59 @@ def test_thread_page_hides_subagent_ai_but_keeps_root_task_result():
         "user-prompt",
         "lead-task-call",
         "root-task-result",
+        "lead-final-answer",
+    ]
+
+
+def test_thread_page_hides_legacy_unattributed_tool_result_from_subagent_call():
+    store = MemoryRunEventStore()
+
+    async def seed():
+        await _put_message(store, "run-1", "human", "user-prompt")
+        await store.put(
+            thread_id="thread-1",
+            run_id="run-1",
+            event_type="llm.ai.response",
+            category="message",
+            content={
+                "type": "ai",
+                "id": "internal-subagent-call",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "legacy-call-1",
+                        "name": "filesystem_directory_tree",
+                        "args": {},
+                    }
+                ],
+                "additional_kwargs": {},
+            },
+            metadata={"caller": "subagent:general-purpose"},
+        )
+        await store.put(
+            thread_id="thread-1",
+            run_id="run-1",
+            event_type="llm.tool.result",
+            category="message",
+            content={
+                "type": "tool",
+                "id": "legacy-internal-result",
+                "tool_call_id": "legacy-call-1",
+                "content": "huge internal directory tree",
+                "additional_kwargs": {},
+            },
+            metadata={},
+        )
+        await _put_message(store, "run-1", "ai", "lead-final-answer")
+
+    asyncio.run(seed())
+    app = _make_app(store)
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages/page")
+
+    assert response.status_code == 200
+    assert [row["content"]["id"] for row in response.json()["data"]] == [
+        "user-prompt",
         "lead-final-answer",
     ]
 
