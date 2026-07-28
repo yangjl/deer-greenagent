@@ -98,6 +98,8 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         # Capture user_id at enqueue time while the request context is still alive.
         # threading.Timer fires on a different thread where ContextVar values are not
         # propagated, so we must store user_id explicitly in ConversationContext.
+        # Already resolves from the runtime (upstream #4538); the project
+        # scope wrapper picks the (user, project) bucket from there.
         user_id = scoped_memory_user_id(resolve_runtime_user_id(runtime), runtime_context)
         trace_id = normalize_trace_id(runtime_context.get(DEERFLOW_TRACE_METADATA_KEY))
         if trace_id is None:

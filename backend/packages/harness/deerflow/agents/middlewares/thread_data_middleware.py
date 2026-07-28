@@ -11,7 +11,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config.paths import Paths, get_paths
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import resolve_runtime_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,9 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         if thread_id is None:
             raise ValueError("Thread ID is required in runtime context or config.configurable")
 
-        user_id = get_effective_user_id()
+        # Upstream #4538: resolve from the runtime so a LangGraph Server
+        # identity is honored; ambient ``get_effective_user_id()`` does not see it.
+        user_id = resolve_runtime_user_id(runtime)
         project_root = context.get("project_root")
         if not isinstance(project_root, str) or not project_root:
             project_root = None
