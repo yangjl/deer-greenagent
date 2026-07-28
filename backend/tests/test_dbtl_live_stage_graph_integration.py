@@ -183,5 +183,15 @@ async def test_selected_cycle_runs_workers_and_persists_review_evidence(
     # directory and the file says which stage, kind, and revision it is.
     assert "outputs/dbtl/drought-tolerance-1/design/design-review-rev1-" in reply
     assert final["messages"][-2].tool_calls[0]["name"] == "present_files"
-    assert final["artifacts"][-1] == cycle["artifacts"][0]["uri"]
+    # The reviewed document leads and the slide deck follows it, in the state
+    # and in the present-files call: the first path is what an approval binds
+    # to, and a deck listed first is the one a reader opens and reviews.
+    presented = final["messages"][-2].tool_calls[0]["args"]["filepaths"]
+    assert presented[0] == cycle["artifacts"][0]["uri"]
+    assert presented[1].endswith(".html")
+    assert final["artifacts"][0] == cycle["artifacts"][0]["uri"]
+    assert final["artifacts"][-1] == presented[1]
+    # The deck is a presentation of the record and is never registered as part
+    # of it, or a gate could end up bound to a summary of its own evidence.
+    assert [item["uri"] for item in cycle["artifacts"]] == [cycle["artifacts"][0]["uri"]]
     assert "cannot satisfy a review gate" in final["messages"][-2].content

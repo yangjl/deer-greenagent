@@ -44,6 +44,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from hashlib import sha256
 from inspect import isawaitable
+from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -62,6 +63,17 @@ from deerflow.dbtl.council import (
     depth_policy,
     recommend_depth,
     request_context,
+)
+from deerflow.dbtl.council_proposal import (
+    CouncilProposal,
+    proposal_as_dict,
+    proposal_from_dict,
+    proposal_from_plan,
+)
+from deerflow.dbtl.council_settings import (
+    ParticipantSettings,
+    parse_participant_settings,
+    participants_payload,
 )
 from deerflow.dbtl.routing import ExplicitChoice
 from deerflow.dbtl.setup_questions import (
@@ -105,6 +117,40 @@ DESIGN_AUTHORING_PREFIX = "dbtl-design-write__"
 # Not a card: the id of the ``present_files`` pair that delivers a finished
 # package. Same provider constraint, same failure mode.
 PRESENT_ARTIFACT_PREFIX = "dbtl-present__"
+
+#: OpenAI's Responses API rejects a ``call_id`` longer than this. Anthropic has
+#: no such limit, so embedding a full cycle id in the request id passed every
+#: local check and every Claude turn, then failed **every** later turn on a GPT
+#: model in that thread with ``Invalid 'input[N].call_id': string too long`` —
+#: a 74-character id, one turn after the card, naming a message the reader never
+#: sent. Same shape as the ``:``-in-the-id bug the grammar rule above prevents:
+#: a provider constraint that becomes durable the moment it reaches a checkpoint.
+MAX_CARD_REQUEST_ID_CHARS = 64
+
+#: Enough of the cycle id to correlate a card with its cycle by eye. Uniqueness
+#: comes from the digest, which hashes the *full* cycle id, so truncating here
+#: cannot collide two cycles onto one card.
+_CYCLE_TOKEN_CHARS = 12
+
+
+def card_request_id(prefix: str, cycle: str, *parts: str) -> str:
+    """A card id that fits every provider's ``call_id`` limit.
+
+    Built as ``<prefix><cycle-token>__<digest>`` so it stays matchable by
+    ``startswith``, readable enough to correlate with a cycle, and unique per
+    card — the digest covers the full cycle id plus whatever else distinguishes
+    this card (the run nonce, the question). Nothing parses the cycle back out
+    of the id, so shortening it costs no behavior.
+    """
+    digest = sha256("\x1f".join((cycle, *parts)).encode()).hexdigest()[:16]
+    token = "".join(char for char in cycle[:_CYCLE_TOKEN_CHARS] if char.isalnum() or char in "_-")
+    request_id = f"{prefix}{token}__{digest}"
+    if len(request_id) > MAX_CARD_REQUEST_ID_CHARS:  # pragma: no cover - guarded by test
+        # A future prefix long enough to overflow drops the readable token
+        # rather than shipping an id that breaks the thread on its next turn.
+        request_id = f"{prefix}{digest}"
+    return request_id
+
 
 _REVIEW_INTENT_RE = re.compile(
     r"""
@@ -283,7 +329,7 @@ def _render_review_intent_guidance(
             f"{action} and provide the rationale there. That authenticated action binds your decision to the exact "
             "stage attempt, artifact revision, and project revision you reviewed.",
             "",
-            "No council workers ran, no new artifact was created, and the existing review package remains unchanged.",
+            "No meeting participants ran, no new artifact was created, and the existing review package remains unchanged.",
         ]
     )
 
@@ -310,8 +356,7 @@ def _setup_clarification_message(
     """
     note = "I proposed an answer to each — correct the ones that are wrong."
     question = render_questions(questions) or f"Please provide:\n{_bullets(decision.missing_fields)}"
-    digest = sha256(f"{context.project_id}:{request_nonce}:{source_request}".encode()).hexdigest()[:16]
-    request_id = f"{SETUP_CLARIFICATION_PREFIX}{digest}"
+    request_id = card_request_id(SETUP_CLARIFICATION_PREFIX, context.project_id or "", request_nonce, source_request)
     tool_call = {
         "name": "ask_clarification",
         "args": {
@@ -402,8 +447,7 @@ def _setup_confirmation_message(
 ) -> tuple[AIMessage, ToolMessage]:
     """Offer the final no-write setup decision through DeerFlow's native card."""
     summary = _render_cycle_setup(decision, context)
-    digest = sha256(f"{context.project_id}:{request_nonce}:{source_request}:confirm".encode()).hexdigest()[:16]
-    request_id = f"{SETUP_CONFIRMATION_PREFIX}{digest}"
+    request_id = card_request_id(SETUP_CONFIRMATION_PREFIX, context.project_id or "", request_nonce, source_request, "confirm")
     question = "How should this request proceed?"
     options = [
         {
@@ -547,7 +591,7 @@ COUNCIL_ADJUST_PREFIX = "dbtl-council-edit__"
 #: run at, and this one is a request to redraw the roster first.
 COUNCIL_ADJUST_OPTION = "adjust"
 
-_ADJUST_QUESTION = "What should the council do differently? Name the seats to add, drop, or re-aim — your words go to the roster writer exactly as you type them."
+_ADJUST_QUESTION = "What should the meeting do differently? Name the participants to add, drop, or re-aim — your words go to the roster writer exactly as you type them."
 _ADJUST_NOTE = "Nothing has been dispatched. The roster is redrawn from what you write here, and you will see it again before anyone runs."
 
 
@@ -572,16 +616,20 @@ def _council_preflight_message(
     recommendation,
     *,
     request_nonce: str,
+    model_options: Sequence[str] = (),
 ) -> tuple[AIMessage, ToolMessage]:
-    """Show who will sit on the council, and let the human set the depth.
+    """Show who will sit in the design meeting, and let the human set it up.
 
     Emitted before any worker is dispatched, so the choice is real. The depth
     options and the roster ride on the artifact as structured data; the text
-    below is the same information for anyone who cannot see the card.
+    below is the same information for anyone who cannot see the card. The
+    roster also rides as ``council_participants`` — one editable card per
+    participant, prefilled with the roster writer's suggestions, whose edits
+    (model, token budget, reasoning strength, owner instructions) come back on
+    the reply and are validated server-side before anyone runs.
     """
     cycle = decision.cycle_id or "selected-cycle"
-    digest = sha256(f"{cycle}:{request_nonce}".encode()).hexdigest()[:16]
-    request_id = f"{COUNCIL_PREFLIGHT_PREFIX}{cycle}__{digest}"
+    request_id = card_request_id(COUNCIL_PREFLIGHT_PREFIX, cycle, request_nonce)
     note = _render_council_roster(plan)
     question = f"How much debate should this design get? {recommendation.reason}"
     options = [
@@ -604,6 +652,7 @@ def _council_preflight_message(
             "description": "Say what should change about who sits and what they argue from. The roster is redrawn and shown again before anyone runs.",
         }
     )
+    proposal = proposal_from_plan(plan)
     return (
         AIMessage(
             id=f"{request_id}:call",
@@ -633,12 +682,14 @@ def _council_preflight_message(
                     "source": "ask_clarification",
                     "request_id": request_id,
                     "clarification_type": "council_preflight",
-                    "title": "Before the Design council convenes",
+                    "title": "Before the design meeting starts",
                     "question": question,
                     "context": note,
                     "input_mode": "single_choice",
                     "options": options,
                     "council_plan": plan.as_dict(),
+                    **({"council_proposal": proposal_as_dict(proposal)} if proposal is not None else {}),
+                    "council_participants": participants_payload(plan, model_options=model_options),
                     "recommended_depth": recommendation.depth.value,
                     "recommended_option_id": recommendation.depth.value,
                 }
@@ -655,8 +706,7 @@ def _design_clarification_message(
     request_nonce: str,
 ) -> tuple[AIMessage, ToolMessage]:
     cycle = decision.cycle_id or "selected-cycle"
-    digest = sha256(f"{cycle}:{request_nonce}:{question}".encode()).hexdigest()[:16]
-    request_id = f"{DESIGN_CLARIFICATION_PREFIX}{cycle}__{digest}"
+    request_id = card_request_id(DESIGN_CLARIFICATION_PREFIX, cycle, request_nonce, question)
     tool_call = {
         "name": "ask_clarification",
         "args": {
@@ -685,7 +735,7 @@ def _design_clarification_message(
                     "source": "ask_clarification",
                     "request_id": request_id,
                     "clarification_type": "design_decision",
-                    "title": "Design council needs your input",
+                    "title": "The design meeting needs your input",
                     "question": question,
                     "context": note,
                     "input_mode": "free_text",
@@ -713,8 +763,7 @@ def _design_authoring_message(
     for a recovered setup intent.
     """
     cycle = decision.cycle_id or "selected-cycle"
-    digest = sha256(f"{cycle}:{request_nonce}".encode()).hexdigest()[:16]
-    request_id = f"{DESIGN_AUTHORING_PREFIX}{cycle}__{digest}"
+    request_id = card_request_id(DESIGN_AUTHORING_PREFIX, cycle, request_nonce)
     tool_call = {
         "name": "ask_clarification",
         "args": {
@@ -780,8 +829,7 @@ def _council_adjustment_message(
     agree with the agronomist").
     """
     cycle = decision.cycle_id or "selected-cycle"
-    digest = sha256(f"{cycle}:{request_nonce}".encode()).hexdigest()[:16]
-    request_id = f"{COUNCIL_ADJUST_PREFIX}{cycle}__{digest}"
+    request_id = card_request_id(COUNCIL_ADJUST_PREFIX, cycle, request_nonce)
     return (
         AIMessage(
             id=f"{request_id}:call",
@@ -811,7 +859,7 @@ def _council_adjustment_message(
                     "source": "ask_clarification",
                     "request_id": request_id,
                     "clarification_type": "council_adjustment",
-                    "title": "Adjust the Design council",
+                    "title": "Adjust the design meeting",
                     "question": _ADJUST_QUESTION,
                     "context": _ADJUST_NOTE,
                     "input_mode": "free_text",
@@ -890,6 +938,106 @@ def _confirmed_council_depth(state: dict) -> CouncilDepth | None:
         return None
 
 
+def _confirmed_participant_settings(state: dict, known_models: Sequence[str]) -> dict[str, ParticipantSettings]:
+    """The participant edits from the answered preflight card, validated.
+
+    The typed ``read_human_input_response`` deliberately strips unknown keys,
+    so the edits are read off the raw reply payload — then validated field by
+    field by ``parse_participant_settings``, which is what keeps this
+    server-owned rather than trusting the client's shapes. Like the depth,
+    this is scoped to the answering turn (only the newest message counts) and
+    the reply must name a card the server itself emitted; a forged
+    ``request_id`` matches nothing and the edits are ignored.
+    """
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        raw = (getattr(message, "additional_kwargs", None) or {}).get("human_input_response")
+        if not isinstance(raw, dict):
+            return {}
+        request_id = str(raw.get("request_id") or "")
+        if raw.get("source") != "ask_clarification" or not request_id.startswith(COUNCIL_PREFLIGHT_PREFIX):
+            return {}
+        if _emitted_card_request(state, request_id) is None:
+            return {}
+        return parse_participant_settings(raw.get("participants"), known_models=known_models)
+    return {}
+
+
+def _confirmed_council_proposal(state: dict) -> CouncilProposal | None:
+    """Return the exact question-specific roster shown on the answered card.
+
+    The roster writer is a model call, so invoking it again at dispatch can
+    legitimately return different seats and models. The emitted card is
+    server-owned and matched by request id; replay its serialized proposal
+    instead of redrawing the meeting after the person approves it.
+    """
+    answered = _card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
+    if answered is None:
+        return None
+    request = _emitted_card_request(state, answered[0])
+    if request is None:
+        return None
+    return proposal_from_dict(request.get("council_proposal"))
+
+
+def _latest_answered_council_preflight(state: dict) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """The most recent approved meeting setup, for a chair resume only.
+
+    Normal Design turns must not inherit an old meeting's roster. A chair
+    clarification is different: it is explicitly the second half of the same
+    meeting, so rebuilding its chair from today's defaults changes who is
+    finishing the synthesis. Return both server-owned card and raw validated
+    reply so the exact roster and participant dials can be restored.
+    """
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        raw = (getattr(message, "additional_kwargs", None) or {}).get("human_input_response")
+        if not isinstance(raw, dict):
+            continue
+        request_id = str(raw.get("request_id") or "")
+        if raw.get("source") != "ask_clarification" or not request_id.startswith(COUNCIL_PREFLIGHT_PREFIX):
+            continue
+        request = _emitted_card_request(state, request_id)
+        if request is None:
+            continue
+        return request, raw
+    return None
+
+
+def _resumed_council_setup(
+    state: dict,
+    known_models: Sequence[str],
+) -> tuple[CouncilProposal | None, dict[str, ParticipantSettings]]:
+    """Restore the approved roster and dials for a paused meeting."""
+    answered = _latest_answered_council_preflight(state)
+    if answered is None:
+        return None, {}
+    request, raw = answered
+    return (
+        proposal_from_dict(request.get("council_proposal")),
+        parse_participant_settings(raw.get("participants"), known_models=known_models),
+    )
+
+
+def _adapter_known_models(stage_adapter) -> tuple[str, ...]:
+    """The configured model names, when the adapter can report them.
+
+    ``getattr`` rather than a protocol requirement so test doubles and older
+    adapters keep working; an adapter that cannot name models simply yields a
+    card without model pickers and a reply whose model edits are dropped.
+    """
+    reader = getattr(stage_adapter, "known_models", None)
+    if not callable(reader):
+        return ()
+    try:
+        return tuple(str(item) for item in reader() or ())
+    except Exception:  # noqa: BLE001 - a broken model listing must not block routing
+        logger.debug("Could not read the configured models for the meeting preflight card.", exc_info=True)
+        return ()
+
+
 def _with_council_depth(config: RunnableConfig, depth: CouncilDepth) -> RunnableConfig:
     """A per-request view carrying a depth the server recovered.
 
@@ -912,14 +1060,20 @@ def _present_artifact_messages(
     note: str,
     artifact_uri: str,
     request_nonce: str,
+    deck_uri: str | None = None,
 ) -> tuple[AIMessage, ToolMessage]:
-    """Use the same present-files turn shape as the lead agent."""
+    """Use the same present-files turn shape as the lead agent.
+
+    The reviewed document leads and the slide deck follows it. Order is the
+    whole point: the first path is what an approval binds to, and a deck listed
+    first would be the one a reader opens and reviews.
+    """
     cycle = decision.cycle_id or "selected-cycle"
-    digest = sha256(f"{cycle}:{request_nonce}:{artifact_uri}".encode()).hexdigest()[:16]
-    tool_call_id = f"{PRESENT_ARTIFACT_PREFIX}{cycle}__{digest}"
+    filepaths = [path for path in (artifact_uri, deck_uri) if path]
+    tool_call_id = card_request_id(PRESENT_ARTIFACT_PREFIX, cycle, request_nonce, *filepaths)
     tool_call = {
         "name": "present_files",
-        "args": {"filepaths": [artifact_uri]},
+        "args": {"filepaths": filepaths},
         "id": tool_call_id,
         "type": "tool_call",
     }
@@ -1143,6 +1297,7 @@ def build_supervisor_graph(
                             plan,
                             recommend_depth(request_text),
                             request_nonce=request_nonce,
+                            model_options=_adapter_known_models(stage_adapter),
                         )
                     )
                 }
@@ -1159,6 +1314,34 @@ def build_supervisor_graph(
             # The roster the person approved was drawn with this note, so the
             # one that runs has to be drawn with it too.
             execute_kwargs["council_adjustment"] = adjustment
+        design_answer = _card_answer(state, DESIGN_CLARIFICATION_PREFIX)
+        if design_answer is not None and design_answer[1].strip():
+            # The answer to the chair's own question. Passed explicitly rather
+            # than inferred from the request text, which is the same string but
+            # says nothing about what it is answering: the adapter resumes the
+            # paused meeting on it instead of convening a new one.
+            execute_kwargs["clarification_answer"] = design_answer[1]
+        known_models = _adapter_known_models(stage_adapter)
+        participant_settings = _confirmed_participant_settings(state, known_models)
+        approved_proposal = _confirmed_council_proposal(state)
+        if design_answer is not None:
+            # This is not a new meeting. The preflight reply is necessarily an
+            # older message now, behind the chair's clarification card and its
+            # answer, so the answering-turn-only readers above cannot see it.
+            # Recover it only on this resume path; ordinary later Design turns
+            # must remain free to convene a different roster.
+            resumed_proposal, resumed_settings = _resumed_council_setup(state, known_models)
+            if approved_proposal is None:
+                approved_proposal = resumed_proposal
+            if not participant_settings:
+                participant_settings = resumed_settings
+        if participant_settings:
+            # The dials the person set on the participant cards travel with
+            # the same reply as the depth, and like the depth they apply to
+            # the meeting that reply convenes — not to every later turn.
+            execute_kwargs["participant_settings"] = participant_settings
+        if approved_proposal is not None:
+            execute_kwargs["approved_council_proposal"] = approved_proposal
         result = stage_adapter.execute(**execute_kwargs)
         if isawaitable(result):
             result = await result
@@ -1174,19 +1357,39 @@ def build_supervisor_graph(
                     )
                 )
             }
+        deck_uri = getattr(result, "deck_uri", None)
+        deck_uri = deck_uri if isinstance(deck_uri, str) and deck_uri else None
         clarification_question = getattr(result, "clarification_question", None)
         if isinstance(clarification_question, str) and clarification_question:
             raw_context = request_context(config)
             request_nonce = str(raw_context.get("run_id") or "")
+            # The deck goes in front of the question, not after it: what the
+            # meeting agreed and where it split is the context the decision is
+            # made from, and a person asked to decide first and read second is
+            # being asked to guess.
+            deck_messages = (
+                list(
+                    _present_artifact_messages(
+                        decision,
+                        note="Here is where the meeting got to — what the participants agreed, and where they are still split.",
+                        artifact_uri=deck_uri,
+                        request_nonce=request_nonce,
+                    )
+                )
+                if deck_uri
+                else []
+            )
             return {
-                "messages": list(
-                    _design_clarification_message(
+                "messages": [
+                    *deck_messages,
+                    *_design_clarification_message(
                         decision,
                         note=result.note,
                         question=clarification_question,
                         request_nonce=request_nonce,
-                    )
-                )
+                    ),
+                ],
+                **({"artifacts": [deck_uri]} if deck_uri else {}),
             }
         artifact_uri = getattr(result, "artifact_uri", None)
         if isinstance(artifact_uri, str) and artifact_uri:
@@ -1199,9 +1402,10 @@ def build_supervisor_graph(
                         note=result.note,
                         artifact_uri=artifact_uri,
                         request_nonce=request_nonce,
+                        deck_uri=deck_uri,
                     )
                 ),
-                "artifacts": [artifact_uri],
+                "artifacts": [path for path in (artifact_uri, deck_uri) if path],
             }
         return {"messages": [AIMessage(content=_render_continuation(decision, result.note))]}
 

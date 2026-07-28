@@ -419,6 +419,7 @@ class SubagentExecutor:
         project_root: str | None = None,
         token_budget_max_tokens: int | None = None,
         extra_middlewares: Sequence[Any] | None = None,
+        thinking_enabled: bool = False,
     ):
         """Initialize the executor.
 
@@ -478,6 +479,10 @@ class SubagentExecutor:
         self.project_id = project_id
         self.project_root = project_root
         self.token_budget_max_tokens = token_budget_max_tokens
+        # Off by default so ordinary delegation is unchanged; DBTL meeting
+        # participants may opt in per seat via the preflight card's
+        # "reasoning" dial, which the stage dispatcher maps to this flag.
+        self.thinking_enabled = thinking_enabled
         # Appended after the shared subagent chain so a caller-supplied guard
         # wraps the built-ins rather than being wrapped by them. Kept as a
         # tuple so a caller cannot mutate the chain after construction.
@@ -510,7 +515,7 @@ class SubagentExecutor:
         app_config = self.app_config or get_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+        model = create_chat_model(name=self.model_name, thinking_enabled=self.thinking_enabled, app_config=app_config, attach_tracing=False)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 

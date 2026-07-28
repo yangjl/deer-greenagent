@@ -187,7 +187,7 @@ class TestTheReviewDocument:
     def test_disagreements_appear_before_the_synthesis(self):
         document = self._render()
 
-        landed = document.index("Where the council landed")
+        landed = document.index("Where the meeting landed")
         synthesis = document.index("The council settled on three sites")
         # A reader who has already accepted the synthesis has no use for the
         # argument that produced it.
@@ -225,7 +225,7 @@ class TestTheReviewDocument:
 
         document = render_review_markdown(package, data_filename="p.json", data_hash="b" * 64)
 
-        assert "Where the council landed" not in document
+        assert "Where the meeting landed" not in document
 
     def test_chat_digest_reports_consensus_and_open_decisions(self):
         from deerflow.dbtl.review_markdown import render_stage_digest

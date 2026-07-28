@@ -1177,3 +1177,65 @@ class TestAwrapModelCall:
 
         handler.assert_called_once_with(patched_request)
         assert result == "response"
+
+
+class TestOverlongToolCallIdsAreRepairedForTheProvider:
+    """A thread that already contains an over-long id must still be usable.
+
+    OpenAI's Responses API rejects a ``call_id`` over 64 characters; Anthropic
+    does not. An id minted on one provider is therefore durable damage on the
+    other: it is in the checkpoint, and every later turn fails with
+    ``Invalid 'input[N].call_id': string too long`` on an unrelated request.
+    Bounding new ids cannot help those threads, so the wire copy is repaired
+    the same way an unusable reasoning block is — request only, never the
+    checkpoint.
+    """
+
+    @staticmethod
+    def _pair(call_id: str):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        return [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "ask_clarification", "args": {}, "id": call_id, "type": "tool_call"}],
+                additional_kwargs={"tool_calls": [{"id": call_id, "function": {"name": "ask_clarification", "arguments": "{}"}}]},
+            ),
+            ToolMessage(content="answer me", name="ask_clarification", tool_call_id=call_id),
+        ]
+
+    def test_both_halves_of_the_pair_are_rewritten_together(self):
+        from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+        long_id = "dbtl-council__cycle-f5fad897-e43b-44b8-b2ae-7d9ba2f08fcf__0123456789abcdef"
+        assert len(long_id) > 64
+        repaired = DanglingToolCallMiddleware._shorten_overlong_tool_call_ids(self._pair(long_id))
+
+        call_id = repaired[0].tool_calls[0]["id"]
+        assert len(call_id) <= 64
+        # Renaming the call without the result would trade a length error for
+        # an orphaned tool result — the same 400 with a different message.
+        assert repaired[1].tool_call_id == call_id
+        assert repaired[0].additional_kwargs["tool_calls"][0]["id"] == call_id
+
+    def test_the_rewrite_is_deterministic_across_turns(self):
+        from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+        long_id = "x" * 80
+        first = DanglingToolCallMiddleware._shorten_overlong_tool_call_ids(self._pair(long_id))
+        second = DanglingToolCallMiddleware._shorten_overlong_tool_call_ids(self._pair(long_id))
+        assert first[0].tool_calls[0]["id"] == second[0].tool_calls[0]["id"]
+
+    def test_two_different_long_ids_do_not_collapse_into_one(self):
+        from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+        head = "dbtl-council__cycle-f5fad897-e43b-44b8-b2ae-7d9ba2f08fcf__"
+        messages = [*self._pair(f"{head}aaaaaaaaaaaaaaaa"), *self._pair(f"{head}bbbbbbbbbbbbbbbb")]
+        repaired = DanglingToolCallMiddleware._shorten_overlong_tool_call_ids(messages)
+        assert repaired[0].tool_calls[0]["id"] != repaired[2].tool_calls[0]["id"]
+
+    def test_ids_within_the_limit_are_left_identical(self):
+        from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+
+        messages = self._pair("dbtl-council__cycle-f5fa__0123456789abcdef")
+        assert DanglingToolCallMiddleware._shorten_overlong_tool_call_ids(messages) is messages

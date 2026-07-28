@@ -1790,6 +1790,12 @@ everything would make the selection record meaningless.
 `worker_result.py` is the structured contract. A claim with no `evidence_refs`
 is rejected, a non-boolean `quality_checks[].passed` is refused rather than
 coerced (a truthy string would turn an unanswered check into a passing one),
+and `claims` accepts either canonical strings or explicitly named structured
+objects with a non-empty `claim`, `statement`, or `text` field. Fully typed
+nested `evidence_ref(s)` are merged into the canonical evidence list. Arbitrary
+objects are never stringified, and string-only nested evidence ids are not
+promoted to a made-up evidence kind, so normalizing a model's more-structured
+shape cannot manufacture support,
 and `capability`/`agent_name` come from the **dispatcher**, never the payload —
 accepting the worker's own account of what it exercised would let a selection
 failure look like a satisfied requirement. `is_trustworthy` folds `status`
@@ -2048,6 +2054,16 @@ knowledge`) is collapsed into `DbtlMode = disabled|audit_only|manual|graph_enabl
 - `knowledge_view` is source-project scoped, so a project that a claim was
   published _into_ returns no claims/publications and cannot see or manage it.
 
+**A stage worker can only read through the sandbox's virtual prefix, so the
+manifest must name paths in that form.** `_project_manifest` emits
+`/mnt/user-data/<relative>` (`WORKSPACE_VIRTUAL_ROOT`), the context carries
+`workspace_root`, and every worker prompt embeds `WORKSPACE_PATH_NOTE`.
+Listing project-relative paths instead cost a whole design meeting: `read_file`
+refuses anything outside the prefix, so every participant reported "every file
+read was denied", each returned no result, and the chair could only record that
+it had nothing to synthesize from. The manifest is where most workers learn a
+path exists, so it has to name the path they can actually open.
+
 Current Design attempts resolve to `generic:design:v2`. The adapter supplies a
 bounded metadata-only project workspace manifest and up to four compact prior
 Design chair syntheses (never the full accumulated worker payloads),
@@ -2068,9 +2084,106 @@ new artifact; chat text is not a typed review record. DBTL workers also do not
 implicitly inherit every enabled skill: an explicit specialist skill whitelist
 is preserved, while a `None` whitelist becomes `[]` for the bounded stage run.
 
+**A meeting convenes when a person asks for one.** A Design stage stays
+`in_progress` until someone submits it for review, so before this every later
+cycle-scoped message re-ran the whole council over a design already sitting on
+the table. Three rules, all in `stage_execution`:
+
+- `_unreviewed_design_package` **holds**: a package on the attempt plus no
+  `changes_requested` review means nothing is dispatched and the reply points at
+  the review sheet. `_wants_new_debate` is the deterministic override (the same
+  named-phrase style as `recommend_depth`), and a `changes_requested` attempt is
+  deliberately excluded from the hold — that verdict *is* the request to argue
+  again, and it already carries what to argue about.
+- `_resumed_chair_unit` **resumes**: an answer to the chair's own `needs_input`
+  question dispatches the chair alone over `_prior_positions` (the durable
+  worker runs), carrying the question and the owner's words verbatim, and skips
+  the roster proposal entirely — there is no roster to draw for a council that
+  will not convene. `_pending_design_question` reads only the *newest* chair
+  run, so a stray card reply after a completed synthesis is not a resume. The
+  supervisor passes the answer as an explicit `clarification_answer` rather than
+  letting the adapter infer it from request text: the answer and an ordinary
+  cycle request are the same string. The clarification reply is newer than the
+  preflight answer, so `_resumed_council_setup` deliberately scans back to that
+  server-emitted card only on this resume path and restores its exact proposal
+  and participant dials. Worker results also persist `execution.model`,
+  `execution.max_tokens`, and `execution.reasoning`; `_prior_chair_execution`
+  supplies the durable fallback after message compaction or process restart.
+  Rebuilding a resumed chair from the current default council plan is a
+  correctness bug: the synthesis would be finished by a model the person did
+  not approve.
+- `dbtl.council_model_name` sets the **default model for seats that do not name
+  one**. Inheriting the composer's model meant a meeting convened from an
+  expensive chat ran every unassigned seat on it — a model chosen to talk to,
+  not a budget for four workers. `_council_model` validates it against the
+  configured list and falls back with a warning rather than failing the meeting
+  on an operator typo. A seat's own model and the setup card's per-participant
+  override both still win.
+
+**Every round writes a slide deck.** `deerflow.dbtl.council_deck` is a pure
+renderer over the recorded chair result: agreements → contested →
+needs-your-decision → synthesis → limitations → next, the same
+disagreement-before-synthesis ordering as `review_markdown`. One self-contained
+HTML file (inline CSS/JS, no network, `@media print` page breaks) written by
+`_write_council_deck` beside the package as `design-slides-rev<N>-<hash>.html`
+(`review_paths.stage_file_name` gained the `slides` kind). It is a renderer
+rather than a worker prompt because a model asked to summarise a meeting can
+smooth a contested point into a bullet. It is **not** registered as a durable
+artifact and is listed *after* the review Markdown in `present_files`: an
+approval must bind to the reviewed document, and a deck listed first is the one
+a reader opens and reviews. `LiveStageResult.deck_uri` carries it; a paused
+meeting gets one too, presented ahead of the `ask_clarification` card, since the
+round that asks for a decision is the one that most needs its context on screen.
+Failure to render or write returns `None` and logs — the deck is a presentation
+of a record already committed, so it must never fail the turn.
+
+**A card's tool-call id must satisfy every provider it may be replayed to.**
+`supervisor.card_request_id` builds every card/present-files id as
+`<prefix><cycle-token>__<digest>` and caps it at `MAX_CARD_REQUEST_ID_CHARS`
+(64). Embedding a full cycle id produced 74 characters, which Anthropic accepts
+and OpenAI's Responses API rejects — so the card succeeded and then *every*
+later GPT turn in that thread failed with `Invalid 'input[N].call_id': string
+too long`, on an unrelated request, unrecoverable from inside the conversation.
+Bounding new ids cannot rescue a thread that already contains one, so
+`DanglingToolCallMiddleware._shorten_overlong_tool_call_ids` also rewrites
+over-long ids in the **model-bound request** (never the checkpoint), on both
+halves of the call/result pair together — renaming one without the other trades
+a length error for an orphaned tool result. `CodexChatModel` now reads a
+streamed error body before raising, so a provider 400 names its own cause
+instead of reporting a bare status. Successful HTTP streams may still terminate
+with `response.failed`, `response.incomplete`, or `error`; those SSE frames are
+terminal failures too, and `_stream_failure_message` carries their provider
+code/reason/message into the worker error instead of reducing all three to
+“stream ended without response.completed”.
+
 The Design council preflight is a native `single_choice` Human Input request;
 its options carry `id`/`label`/`value` plus descriptions and the server-owned
-recommendation. Router-created clarification pairs do not necessarily fire
+recommendation. User-facing wording calls it the **design meeting** (card
+titles, notes, review Markdown); internal identifiers keep the council
+vocabulary. The card additionally carries `council_participants` — one
+editable entry per seat, built by `deerflow.dbtl.council_settings` from the
+same `CouncilPlan` dispatch runs, prefilled with the roster writer's
+suggestions (model, token budget, reasoning strength, instructions = the
+seat's brief). Edits come back on the reply's `participants` key (read off
+the raw payload, since the typed reader strips unknown keys), are validated
+field by field against the configured models and token bounds, must name a
+card the server emitted, apply only to the answering turn, and land on both
+the recorded plan (`apply_participant_settings`) and the dispatched
+`WorkUnit`s: per-seat `model`, `max_tokens` (overrides the stage budget for
+that one worker), `reasoning: "extended"` → `SubagentExecutor(thinking_enabled=True)`,
+and instructions quoted verbatim into that seat's prompt — unless byte-identical
+to the prefill, which is the writer's suggestion, not the owner's words.
+The card also serializes the question-specific `council_proposal`.
+`_confirmed_council_proposal` recovers it only from the matching server-emitted
+card and passes it as `approved_council_proposal`; `LiveStageAdapter.execute`
+trims its positions to the confirmed depth and replays it without invoking the
+roster writer again. Red-team and chair work units take their agent and model
+from that approved plan rather than copying the first position. A second roster
+model call here is a correctness bug: it can replace the seats and model edits
+the person just approved. A paused chair note counts roles from their
+`WorkUnit.role` values (independent positions exclude the red team), and names
+the synthesis as partial when any non-chair participant returned no trustworthy
+result. Router-created clarification pairs do not necessarily fire
 model or tool callbacks, so `RunJournal` final reconciliation discovers
 allowlisted pairs only after the current run's input message and persists the
 ToolMessage artifact. Retained cards before that input are never re-journaled.

@@ -18,6 +18,7 @@ at the correct positions (immediately after each dangling AIMessage), not append
 to the end of the message list as before_model + add_messages reducer would do.
 """
 
+import hashlib
 import json
 import logging
 from collections import defaultdict, deque
@@ -42,6 +43,18 @@ _SYNTHETIC_TOOL_CALL_ID_PREFIX = "deerflow_synthetic_tool_call_"
 # happened rather than fabricating a thought, so the model is not led to
 # treat invented reasoning as its own.
 _DROPPED_REASONING_PLACEHOLDER = "[This turn's reasoning was lost to an interrupted response and could not be replayed.]"
+
+# OpenAI's Responses API rejects a `call_id` longer than 64 characters; Anthropic
+# has no such limit. An id minted under one provider is therefore durable damage
+# under the other: it reaches the checkpoint, and every later turn in that thread
+# fails with `Invalid 'input[N].call_id': string too long` — on an unrelated
+# request, naming a message the user never sent, with no way to recover from
+# inside the conversation. The producer-side fix (bounded ids) cannot help a
+# thread that already contains one, so the id is also shortened in the
+# model-bound request, exactly like the thinking-block repair above: the
+# checkpoint keeps the original, only the wire copy is rewritten.
+_MAX_PROVIDER_TOOL_CALL_ID_LEN = 64
+_SHORTENED_TOOL_CALL_ID_DIGEST_LEN = 16
 
 
 def _valid_tool_name(name: object) -> bool:
@@ -483,13 +496,76 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
             changed = True
         return repaired if changed else messages
 
+    @staticmethod
+    def _shortened_tool_call_id(tool_call_id: str) -> str:
+        """A bounded id that still points at the same call.
+
+        Deterministic, so the same original maps to the same replacement on
+        every turn, and the AI message's call and its ToolMessage stay paired.
+        Keeps a readable head so the id remains recognizable in a trace.
+        """
+        digest = hashlib.sha256(tool_call_id.encode()).hexdigest()[:_SHORTENED_TOOL_CALL_ID_DIGEST_LEN]
+        head = tool_call_id[: _MAX_PROVIDER_TOOL_CALL_ID_LEN - len(digest) - 1]
+        return f"{head}_{digest}"
+
+    @classmethod
+    def _shorten_overlong_tool_call_ids(cls, messages: list) -> list:
+        """Rewrite ids the provider will refuse, on both halves of the pair.
+
+        Both halves or neither: renaming a call without renaming the result
+        that answers it turns a length error into an orphaned tool result,
+        which is the same 400 wearing a different message.
+        """
+        overlong: set[str] = set()
+        for msg in messages:
+            for tool_call in cls._message_tool_calls(msg):
+                tool_call_id = tool_call.get("id") if isinstance(tool_call, dict) else None
+                if isinstance(tool_call_id, str) and len(tool_call_id) > _MAX_PROVIDER_TOOL_CALL_ID_LEN:
+                    overlong.add(tool_call_id)
+            if isinstance(msg, ToolMessage) and isinstance(msg.tool_call_id, str) and len(msg.tool_call_id) > _MAX_PROVIDER_TOOL_CALL_ID_LEN:
+                overlong.add(msg.tool_call_id)
+        if not overlong:
+            return messages
+
+        mapping = {original: cls._shortened_tool_call_id(original) for original in overlong}
+        logger.info(
+            "DanglingToolCallMiddleware: shortened %d over-long tool-call id(s) for the model request",
+            len(mapping),
+        )
+
+        rewritten: list = []
+        for msg in messages:
+            if isinstance(msg, ToolMessage):
+                replacement = mapping.get(msg.tool_call_id)
+                rewritten.append(msg.model_copy(update={"tool_call_id": replacement}) if replacement else msg)
+                continue
+            update: dict = {}
+            for field in ("tool_calls", "invalid_tool_calls"):
+                calls = getattr(msg, field, None)
+                if not isinstance(calls, list) or not calls:
+                    continue
+                patched = [({**call, "id": mapping[call["id"]]} if isinstance(call, dict) and isinstance(call.get("id"), str) and call["id"] in mapping else call) for call in calls]
+                if patched != calls:
+                    update[field] = patched
+            # Strict providers serialize from the raw payload when it is
+            # present, so a rewrite that skipped it would send the original
+            # id after all.
+            additional = getattr(msg, "additional_kwargs", None)
+            raw_calls = additional.get("tool_calls") if isinstance(additional, dict) else None
+            if isinstance(raw_calls, list) and raw_calls:
+                patched_raw = [({**call, "id": mapping[call["id"]]} if isinstance(call, dict) and isinstance(call.get("id"), str) and call["id"] in mapping else call) for call in raw_calls]
+                if patched_raw != raw_calls:
+                    update["additional_kwargs"] = {**additional, "tool_calls": patched_raw}
+            rewritten.append(msg.model_copy(update=update) if update else msg)
+        return rewritten
+
     def _build_patched_messages(self, messages: list) -> list | None:
         """Return messages with tool results grouped after their tool-call AIMessage.
 
         This normalizes model-bound causal order before provider serialization while
         preserving already-valid transcripts unchanged.
         """
-        normalized = self._repair_thinking_blocks(self._normalize_tool_call_ids(messages))
+        normalized = self._shorten_overlong_tool_call_ids(self._repair_thinking_blocks(self._normalize_tool_call_ids(messages)))
 
         tool_messages_by_id: dict[str, deque[ToolMessage]] = defaultdict(deque)
         for msg in normalized:

@@ -944,6 +944,30 @@ export function getVisibleOptimisticMessages(
   return optimisticMessages;
 }
 
+/**
+ * Whether switching to `nextThreadId` may re-baseline the human-message count.
+ *
+ * The baseline exists so an optimistic user bubble survives until the server's
+ * copy arrives. It is captured at send time — but a send that *creates* the
+ * thread changes `threadId` afterwards, and re-baselining then sets the
+ * baseline to a count that already includes the server's copy. The
+ * "has a new human message arrived?" test can never become true after that, so
+ * the optimistic bubble is stranded and the user sees their message twice.
+ * That is the DBTL new-cycle flow exactly: send, thread created, classifier
+ * card raised, message rendered twice for the rest of the run.
+ *
+ * Carrying the baseline across that transition is safe because the optimistic
+ * messages being carried are the ones this send just created for this very
+ * thread; a switch to any *other* thread still re-baselines, and its
+ * optimistic messages are dropped by the sibling effect.
+ */
+export function shouldRebaselineHumanCount(
+  optimisticThreadId: string | null,
+  nextThreadId: string | null | undefined,
+): boolean {
+  return optimisticThreadId === null || optimisticThreadId !== nextThreadId;
+}
+
 export function areOptimisticMessagesConfirmed(
   optimisticMessages: Message[],
   persistedMessages: Message[],
@@ -1349,6 +1373,11 @@ export function useThreadStream({
   const [optimisticThreadId, setOptimisticThreadId] = useState<string | null>(
     null,
   );
+  // Mirrored so the thread-switch effect can read the current value without
+  // depending on it — it must run on a threadId change only, or it would also
+  // fire when optimistic state settles and re-baseline after all.
+  const optimisticThreadIdRef = useRef<string | null>(null);
+  optimisticThreadIdRef.current = optimisticThreadId;
   const [liveMessagesThreadId, setLiveMessagesThreadId] = useState<
     string | null
   >(null);
@@ -1435,6 +1464,21 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
+  const taskViewThreadIdRef = useRef(currentViewThreadId);
+
+  useEffect(() => {
+    if (taskViewThreadIdRef.current === currentViewThreadId) {
+      return;
+    }
+    taskViewThreadIdRef.current = currentViewThreadId;
+    // Project chat layouts persist across navigation. In the native-history
+    // new-thread flow, Next's route param can also remain "new" after the
+    // browser URL becomes the created UUID, so a provider key alone cannot
+    // detect the later return to /new. The display id is the canonical view
+    // identity in both router and native-history transitions.
+    tasksRef.current = {};
+    setTasks({});
+  }, [currentViewThreadId, setTasks, tasksRef]);
 
   const clearPreparedReplayMasks = useCallback(
     (replay: PendingPreparedReplayMask | null) => {
@@ -1785,8 +1829,13 @@ export function useThreadStream({
     pendingPreparedReplayRef.current = null;
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
-    prevHumanMsgCountRef.current =
-      latestMessageCountsRef.current.humanMessageCount;
+    // Not when this send created the thread we are switching into: the
+    // baseline captured at send time is still the right one, and replacing it
+    // strands the optimistic bubble beside the server's copy.
+    if (shouldRebaselineHumanCount(optimisticThreadIdRef.current, threadId)) {
+      prevHumanMsgCountRef.current =
+        latestMessageCountsRef.current.humanMessageCount;
+    }
   }, [threadId]);
 
   // Release entries individually once canonical history confirms their stable

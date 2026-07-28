@@ -196,6 +196,58 @@ def _string_tuple(raw: object, field_name: str) -> tuple[str, ...]:
     return tuple(items)
 
 
+_CLAIM_TEXT_FIELDS = ("claim", "statement", "text")
+
+
+def _claim_tuple(raw: object) -> tuple[tuple[str, ...], tuple[EvidenceRef, ...]]:
+    """Normalize strings or explicitly named structured claims.
+
+    Some models make the claim/evidence relationship more explicit than the
+    requested flat string array. Rejecting the whole position for that
+    information-preserving shape loses completed research over formatting.
+    Only recognized textual fields are accepted; arbitrary mappings are never
+    stringified into authoritative-looking claims.
+    """
+    if raw is None:
+        return (), ()
+    if isinstance(raw, str) or not isinstance(raw, Sequence):
+        raise WorkerResultRejected("'claims' must be a list of strings or named claim objects.")
+
+    claims: list[str] = []
+    nested_evidence: list[EvidenceRef] = []
+    for entry in raw[:MAX_ITEMS]:
+        if isinstance(entry, str):
+            text = entry.strip()
+        elif isinstance(entry, Mapping):
+            text = ""
+            for field_name in _CLAIM_TEXT_FIELDS:
+                candidate = entry.get(field_name)
+                if isinstance(candidate, str) and candidate.strip():
+                    text = candidate.strip()
+                    break
+            if not text:
+                expected = ", ".join(repr(name) for name in _CLAIM_TEXT_FIELDS)
+                raise WorkerResultRejected(f"Each claim object needs a recognized text field: {expected}.")
+
+            # A structured claim may carry fully typed evidence beside it. A
+            # list of string ids is not silently promoted to external evidence;
+            # top-level evidence can still support that claim, and otherwise
+            # StageWorkerResult rejects it as an unsupported claim below.
+            claim_evidence = entry.get("evidence_refs")
+            if isinstance(claim_evidence, Mapping):
+                nested_evidence.extend(_evidence_tuple([claim_evidence]))
+            elif isinstance(claim_evidence, Sequence) and not isinstance(claim_evidence, str) and all(isinstance(item, Mapping) for item in claim_evidence):
+                nested_evidence.extend(_evidence_tuple(claim_evidence))
+            singular_evidence = entry.get("evidence_ref")
+            if isinstance(singular_evidence, Mapping):
+                nested_evidence.extend(_evidence_tuple([singular_evidence]))
+        else:
+            raise WorkerResultRejected("'claims' must contain only strings or named claim objects.")
+        if text:
+            claims.append(text[:MAX_ITEM_CHARS])
+    return tuple(claims), tuple(nested_evidence)
+
+
 def _evidence_tuple(raw: object) -> tuple[EvidenceRef, ...]:
     if raw is None:
         return ()
@@ -213,6 +265,10 @@ def _evidence_tuple(raw: object) -> tuple[EvidenceRef, ...]:
             )
         )
     return tuple(refs)
+
+
+def _dedupe_evidence(refs: Sequence[EvidenceRef]) -> tuple[EvidenceRef, ...]:
+    return tuple(dict.fromkeys(refs))
 
 
 def _quality_tuple(raw: object) -> tuple[QualityCheck, ...]:
@@ -301,14 +357,17 @@ def parse_worker_result(
     if raw_clarification is not None and not isinstance(raw_clarification, str):
         raise WorkerResultRejected("'clarification_question' must be a string.")
 
+    claims, claim_evidence = _claim_tuple(payload.get("claims"))
+    evidence_refs = _dedupe_evidence((*_evidence_tuple(payload.get("evidence_refs")), *claim_evidence))
+
     return StageWorkerResult(
         status=status,
         summary=summary.strip()[:MAX_SUMMARY_CHARS],
         capability=capability,
         agent_name=agent_name,
         artifact_refs=_string_tuple(payload.get("artifact_refs"), "artifact_refs"),
-        evidence_refs=_evidence_tuple(payload.get("evidence_refs")),
-        claims=_string_tuple(payload.get("claims"), "claims"),
+        evidence_refs=evidence_refs,
+        claims=claims,
         limitations=_string_tuple(payload.get("limitations"), "limitations"),
         provenance=dict(provenance),
         quality_checks=_quality_tuple(payload.get("quality_checks")),

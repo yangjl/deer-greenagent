@@ -61,6 +61,12 @@ class WorkUnit:
     #: A few words naming what this seat brings, when a proposed roster supplied
     #: one. Empty for a capability-selected seat, whose angle is its capability.
     focus: str = ""
+    #: Owner-edited dials from the meeting preflight card. ``max_tokens``
+    #: overrides the stage budget's per-worker token cap for this one unit, and
+    #: ``reasoning`` is ``"extended"`` to run the worker with extended thinking.
+    #: Unset means the stage budget and the plain model, exactly as before.
+    max_tokens: int | None = None
+    reasoning: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,6 +178,21 @@ class StageExecutionOutcome:
 
 _FORCED_FINALIZATION_LIMITATION = "This worker was stopped at its turn deadline and wrote its result from the work it had completed by then; it may not have examined everything it intended to."
 
+#: Every stage worker reads files through the sandbox's virtual paths, and a
+#: path outside that prefix is refused rather than resolved. Saying so in the
+#: prompt costs four lines; not saying it cost a whole design meeting, where
+#: each participant reported "every file read was denied" and the chair had
+#: nothing to synthesize from.
+WORKSPACE_PATH_NOTE = """
+Reading files:
+- Every path you open must start with /mnt/user-data/ — that is how the project
+  folder is mounted for you. A path outside it is refused, not resolved.
+- The manifest in the context above already lists paths in that form. Use them
+  as given rather than shortening them to project-relative paths.
+- If a read is refused, report it in limitations; do not keep retrying the same
+  path in a different shorthand.
+""".strip()
+
 RESULT_CONTRACT = """
 Answer with a single JSON object and nothing else:
 
@@ -211,6 +232,8 @@ def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> st
         "",
         "Project context:",
         context.strip() or "(none supplied)",
+        "",
+        WORKSPACE_PATH_NOTE,
         "",
         "Constraints:",
         "- Do not modify any file declared as raw data. Write derived output to a separate path.",

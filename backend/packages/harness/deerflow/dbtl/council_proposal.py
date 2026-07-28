@@ -275,6 +275,57 @@ def proposal_as_dict(proposal: CouncilProposal) -> dict[str, object]:
     }
 
 
+def proposal_from_plan(plan) -> CouncilProposal | None:
+    """Recover the proposal represented by a previewed council plan.
+
+    The preflight shows a ``CouncilPlan``, while dispatch needs the proposal
+    that gave that plan its question-specific focuses, briefs, agents, and
+    models. Serializing this value on the server-emitted card lets the answer
+    turn replay those exact seats instead of asking the roster writer twice.
+
+    ``plan`` remains untyped here to avoid importing ``council``, which already
+    calls into this module.
+    """
+
+    def _seat(raw, *, role: str) -> ProposedSeat | None:
+        try:
+            capability = Capability(raw.capability)
+        except (AttributeError, ValueError):
+            return None
+        focus = _clean(
+            getattr(raw, "focus", "") or (capability.value.replace("_", " ") if role == "position" else "synthesis"),
+            limit=MAX_FOCUS_CHARS,
+        )
+        brief = _clean(getattr(raw, "brief", ""), limit=MAX_BRIEF_CHARS)
+        agent_name = _clean(getattr(raw, "agent_name", ""), limit=120)
+        if not focus or not brief or not agent_name or not is_deliberative_agent(agent_name):
+            return None
+        return ProposedSeat(
+            focus=focus,
+            brief=brief,
+            agent_name=agent_name,
+            capability=capability,
+            model=_clean(getattr(raw, "model", ""), limit=120) or None,
+        )
+
+    positions: list[ProposedSeat] = []
+    chair: ProposedSeat | None = None
+    for raw in tuple(getattr(plan, "seats", ()) or ()):
+        role = str(getattr(getattr(raw, "role", None), "value", getattr(raw, "role", "")))
+        if role not in {"position", "chair"}:
+            continue
+        seat = _seat(raw, role=role)
+        if seat is None:
+            return None
+        if role == "position":
+            positions.append(seat)
+        else:
+            chair = seat
+    if not positions or chair is None:
+        return None
+    return CouncilProposal(positions=tuple(positions), chair=chair)
+
+
 def proposal_from_dict(payload: object) -> CouncilProposal | None:
     """The roster a person approved, restored from the card that showed it.
 

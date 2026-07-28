@@ -41,6 +41,39 @@ export type SetupQuestion = {
   grounded?: boolean;
 };
 
+/**
+ * One editable participant card on the design-meeting preflight request.
+ *
+ * Present only on `council_preflight` cards. The values are the roster
+ * writer's suggestions — what runs if the person touches nothing — and the
+ * card lets them edit the model, token budget, reasoning strength, and
+ * instructions per participant. Edits ride back on the option reply as
+ * `participants` and are re-validated server-side.
+ */
+export type CouncilParticipant = {
+  id: string;
+  role: string;
+  role_label: string;
+  agent_name: string;
+  via_generalist: boolean;
+  focus?: string;
+  model: string;
+  model_options: string[];
+  max_tokens: number;
+  max_tokens_min: number;
+  max_tokens_max: number;
+  reasoning: string;
+  reasoning_options: string[];
+  instructions: string;
+};
+
+export type CouncilParticipantEdits = {
+  model?: string;
+  max_tokens?: number;
+  reasoning?: string;
+  instructions?: string;
+};
+
 export type HumanInputFieldType =
   | "text"
   | "textarea"
@@ -77,6 +110,7 @@ export type HumanInputRequest = {
   dbtl_cycle_setup?: DbtlCycleSetup;
   setup_questions?: SetupQuestion[];
   fields?: HumanInputField[];
+  council_participants?: CouncilParticipant[];
 };
 
 export type HumanInputResponse =
@@ -88,6 +122,10 @@ export type HumanInputResponse =
       response_kind: "option";
       option_id: string;
       value: string;
+      // Participant edits from a design-meeting preflight card, keyed by
+      // participant id. Optional and additive: the backend validates each
+      // field and older backends ignore the key entirely.
+      participants?: Record<string, CouncilParticipantEdits>;
     }
   | {
       version: 1;
@@ -307,6 +345,182 @@ function parseSetupQuestions(value: unknown): SetupQuestion[] | undefined {
   return questions.length ? questions : undefined;
 }
 
+function parseStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is string => isNonEmptyString(entry));
+}
+
+function toFiniteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+/**
+ * Participant cards, skipping anything unusable rather than failing the card.
+ *
+ * Same posture as `parseSetupQuestions`: one malformed participant must not
+ * cost the reader the whole preflight — the depth options still work without
+ * the editor. Returns `undefined` when nothing survives, which renders the
+ * plain roster text instead.
+ */
+function parseCouncilParticipants(
+  value: unknown,
+): CouncilParticipant[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const participants: CouncilParticipant[] = [];
+  const seenIds = new Set<string>();
+  for (const entry of value) {
+    if (
+      !isRecord(entry) ||
+      !isNonEmptyString(entry.id) ||
+      !isNonEmptyString(entry.agent_name) ||
+      seenIds.has(entry.id)
+    ) {
+      continue;
+    }
+    const maxTokens = toFiniteNumber(entry.max_tokens);
+    if (maxTokens === undefined) {
+      continue;
+    }
+    seenIds.add(entry.id);
+    participants.push({
+      id: entry.id,
+      role: isNonEmptyString(entry.role) ? entry.role : "position",
+      role_label: isNonEmptyString(entry.role_label)
+        ? entry.role_label
+        : "Participant",
+      agent_name: entry.agent_name,
+      via_generalist: entry.via_generalist === true,
+      ...(isNonEmptyString(entry.focus) ? { focus: entry.focus } : {}),
+      model: isNonEmptyString(entry.model) ? entry.model : "",
+      model_options: parseStringList(entry.model_options),
+      max_tokens: maxTokens,
+      max_tokens_min: toFiniteNumber(entry.max_tokens_min) ?? 1,
+      max_tokens_max: toFiniteNumber(entry.max_tokens_max) ?? maxTokens,
+      reasoning: isNonEmptyString(entry.reasoning) ? entry.reasoning : "",
+      reasoning_options: parseStringList(entry.reasoning_options),
+      instructions:
+        typeof entry.instructions === "string" ? entry.instructions : "",
+    });
+  }
+  return participants.length ? participants : undefined;
+}
+
+function parseParticipantEdits(
+  value: unknown,
+): Record<string, CouncilParticipantEdits> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const edits: Record<string, CouncilParticipantEdits> = {};
+  for (const [id, raw] of Object.entries(value)) {
+    if (!isNonEmptyString(id) || !isRecord(raw)) {
+      continue;
+    }
+    const entry: CouncilParticipantEdits = {
+      ...(isNonEmptyString(raw.model) ? { model: raw.model } : {}),
+      ...(toFiniteNumber(raw.max_tokens) !== undefined
+        ? { max_tokens: toFiniteNumber(raw.max_tokens) }
+        : {}),
+      ...(isNonEmptyString(raw.reasoning) ? { reasoning: raw.reasoning } : {}),
+      ...(typeof raw.instructions === "string"
+        ? { instructions: raw.instructions }
+        : {}),
+    };
+    if (Object.keys(entry).length > 0) {
+      edits[id] = entry;
+    }
+  }
+  return Object.keys(edits).length > 0 ? edits : undefined;
+}
+
+/**
+ * The edits a submitted preflight should carry: only fields that differ from
+ * the card's own prefills, so an untouched card submits nothing and the
+ * backend records the roster exactly as proposed.
+ */
+export function buildCouncilParticipantEdits(
+  participants: CouncilParticipant[],
+  values: Record<
+    string,
+    {
+      model: string;
+      maxTokens: string;
+      reasoning: string;
+      instructions: string;
+    }
+  >,
+): Record<string, CouncilParticipantEdits> | undefined {
+  const edits: Record<string, CouncilParticipantEdits> = {};
+  for (const participant of participants) {
+    const value = Object.prototype.hasOwnProperty.call(values, participant.id)
+      ? values[participant.id]
+      : undefined;
+    if (!value) {
+      continue;
+    }
+    const entry: CouncilParticipantEdits = {};
+    if (value.model && value.model !== participant.model) {
+      entry.model = value.model;
+    }
+    const tokens = Number.parseInt(value.maxTokens, 10);
+    if (Number.isFinite(tokens) && tokens !== participant.max_tokens) {
+      entry.max_tokens = tokens;
+    }
+    if (value.reasoning && value.reasoning !== participant.reasoning) {
+      entry.reasoning = value.reasoning;
+    }
+    if (value.instructions.trim() !== participant.instructions.trim()) {
+      entry.instructions = value.instructions.trim();
+    }
+    if (Object.keys(entry).length > 0) {
+      edits[participant.id] = entry;
+    }
+  }
+  return Object.keys(edits).length > 0 ? edits : undefined;
+}
+
+const COUNCIL_POSITION_LIMITS: Record<string, number> = {
+  light: 1,
+  medium: 2,
+  heavy: 4,
+};
+
+/**
+ * The participants a selected debate depth will actually dispatch.
+ *
+ * The preflight can show a medium roster while the owner chooses light. Keep
+ * the first N independent positions and always preserve the red team and
+ * chair, matching the backend's depth policy. Human-authored Design seats
+ * nobody.
+ */
+export function participantsForCouncilDepth(
+  participants: CouncilParticipant[],
+  depth: string,
+): CouncilParticipant[] {
+  if (depth === "human_input") {
+    return [];
+  }
+  const limit = COUNCIL_POSITION_LIMITS[depth];
+  if (limit === undefined) {
+    return participants;
+  }
+  let positions = 0;
+  return participants.filter((participant) => {
+    if (participant.role !== "position") {
+      return true;
+    }
+    positions += 1;
+    return positions <= limit;
+  });
+}
+
 function parseFields(value: unknown): HumanInputField[] | undefined {
   if (value === undefined) {
     return undefined;
@@ -402,6 +616,9 @@ export function parseHumanInputRequest(
   if (value.fields !== undefined && fields === undefined) {
     return null;
   }
+  const councilParticipants = parseCouncilParticipants(
+    value.council_participants,
+  );
   if (value.input_mode === "form" && (!fields || fields.length === 0)) {
     return null;
   }
@@ -448,6 +665,9 @@ export function parseHumanInputRequest(
     ...(dbtlCycleSetup ? { dbtl_cycle_setup: dbtlCycleSetup } : {}),
     ...(setupQuestions ? { setup_questions: setupQuestions } : {}),
     ...(fields ? { fields } : {}),
+    ...(councilParticipants
+      ? { council_participants: councilParticipants }
+      : {}),
   };
 }
 
@@ -471,6 +691,7 @@ export function parseHumanInputResponse(
     if (!isNonEmptyString(value.option_id)) {
       return null;
     }
+    const participants = parseParticipantEdits(value.participants);
     return {
       version: 1,
       kind: "human_input_response",
@@ -479,6 +700,7 @@ export function parseHumanInputResponse(
       response_kind: "option",
       option_id: value.option_id,
       value: value.value,
+      ...(participants ? { participants } : {}),
     };
   }
 
@@ -618,6 +840,7 @@ export function hasOpenHumanInputRequest(
 export function createHumanInputOptionResponse(
   request: HumanInputRequest,
   option: HumanInputOption,
+  participants?: Record<string, CouncilParticipantEdits>,
 ): HumanInputResponse {
   return {
     version: 1,
@@ -627,6 +850,9 @@ export function createHumanInputOptionResponse(
     response_kind: "option",
     option_id: option.id,
     value: option.value,
+    ...(participants && Object.keys(participants).length > 0
+      ? { participants }
+      : {}),
   };
 }
 

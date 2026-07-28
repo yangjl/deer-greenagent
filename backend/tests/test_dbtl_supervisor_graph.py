@@ -1039,7 +1039,7 @@ class TestLiveStageBranch:
         assert calls == []
         answer = final["messages"][-1].content
         assert "chat text cannot record a DBTL review gate" in answer
-        assert "No council workers ran" in answer
+        assert "No meeting participants ran" in answer
         assert final["artifacts"] == FULL_STATE["artifacts"]
 
     @pytest.mark.asyncio
@@ -1157,3 +1157,104 @@ class TestLiveStageBranch:
         assert presented.tool_calls[0]["name"] == "present_files"
         assert presented.tool_calls[0]["args"]["filepaths"] == ["/mnt/user-data/outputs/dbtl/design.json"]
         assert final["artifacts"][-1] == "/mnt/user-data/outputs/dbtl/design.json"
+
+    @pytest.mark.asyncio
+    async def test_the_slide_deck_is_shown_before_the_question_it_needs_answered(self):
+        """A person asked to decide first and read second is asked to guess."""
+
+        class Adapter:
+            async def execute(self, **kwargs):
+                return SimpleNamespace(
+                    note="The meeting needs one project decision.",
+                    clarification_question="Toy benchmark or credible simulator?",
+                    deck_uri="/mnt/user-data/outputs/dbtl/design-slides-rev1-abc123.html",
+                    satisfies_gate=False,
+                )
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id="cyc-1",
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [HumanMessage(content="start the design council", id="human-1")],
+            },
+            config={
+                "configurable": {"thread_id": "design-deck"},
+                "context": {"run_id": "run-deck"},
+            },
+        )
+
+        presented = final["messages"][-4]
+        assert presented.tool_calls[0]["args"]["filepaths"] == ["/mnt/user-data/outputs/dbtl/design-slides-rev1-abc123.html"]
+        card = final["messages"][-1]
+        assert isinstance(card, ToolMessage)
+        assert card.artifact["human_input"]["question"] == "Toy benchmark or credible simulator?"
+        assert final["artifacts"][-1] == "/mnt/user-data/outputs/dbtl/design-slides-rev1-abc123.html"
+
+    @pytest.mark.asyncio
+    async def test_answering_the_meetings_question_is_passed_as_an_answer(self):
+        """The adapter resumes the paused meeting rather than convening a new one.
+
+        The answer and the ordinary request text are the same string, so without
+        naming it the adapter cannot tell "the owner replied to the chair" from
+        "someone typed something in the cycle".
+        """
+        calls: list[dict] = []
+
+        class Adapter:
+            async def execute(self, **kwargs):
+                calls.append(kwargs)
+                if len(calls) == 1:
+                    return SimpleNamespace(
+                        note="One decision is required.",
+                        clarification_question="Toy benchmark or credible simulator?",
+                        satisfies_gate=False,
+                    )
+                return SimpleNamespace(
+                    note="Synthesis complete.",
+                    clarification_question=None,
+                    artifact_uri="/mnt/user-data/outputs/dbtl/design.md",
+                    satisfies_gate=False,
+                )
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id="cyc-1",
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        config = {
+            "configurable": {"thread_id": "design-resume"},
+            "context": {"run_id": "run-resume"},
+        }
+        asked = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [HumanMessage(content="start the design council", id="human-1")],
+            },
+            config=config,
+        )
+        request_id = asked["messages"][-1].tool_call_id
+
+        await graph.ainvoke(
+            {"messages": [TestSetupClarificationIsACard.card_reply(request_id, "A credible simulator.")]},
+            config=config,
+        )
+
+        assert len(calls) == 2
+        assert "clarification_answer" not in calls[0]
+        assert calls[1]["clarification_answer"] == "A credible simulator."

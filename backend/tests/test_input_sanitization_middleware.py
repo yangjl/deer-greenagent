@@ -268,6 +268,35 @@ _EXEMPT_BLOCK_TAGS = {
     # Documentation artifact: appears only in this middleware's own explanatory
     # comment describing the tag pattern, not emitted into any prompt.
     "tag",
+    # Ordinary HTML document markup, from renderers that write **files**
+    # (`deerflow.dbtl.council_deck` writes the design meeting's slide deck into
+    # the project workspace). These never enter a ModelRequest, so this
+    # denylist does not defend them either way — and blocking them would be
+    # actively wrong: the middleware's own docstring states that normal
+    # HTML/XML tags are deliberately not escaped, because a user pasting
+    # `<div>` into a message is not forging framework authority. The standing
+    # rule this rests on is that no framework authority block may be named
+    # after an HTML element; if one ever is, it must be renamed rather than
+    # added here.
+    "article",
+    "body",
+    "button",
+    "div",
+    "h2",
+    "h3",
+    "head",
+    "html",
+    "i",
+    "li",
+    "main",
+    "nav",
+    "p",
+    "script",
+    "section",
+    "span",
+    "style",
+    "title",
+    "ul",
 }
 
 

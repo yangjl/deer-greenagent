@@ -153,6 +153,7 @@ def test_codex_provider_parses_valid_tool_arguments(monkeypatch):
 class _FakeResponseStream:
     def __init__(self, lines: list[str]):
         self._lines = lines
+        self.is_error = False
 
     def __enter__(self):
         return self
@@ -269,3 +270,29 @@ def test_codex_provider_preserves_completed_output_when_stream_only_has_placehol
         }
     ]
     assert parsed.generations[0].message.content == "Final from completed"
+
+
+def test_codex_provider_surfaces_streamed_failure_detail(monkeypatch):
+    monkeypatch.setattr(
+        CodexChatModel,
+        "_load_codex_auth",
+        lambda self: CodexCliCredential(access_token="token", account_id="acct"),
+    )
+
+    lines = [
+        'data: {"type":"response.failed","response":{"status":"failed","error":{"code":"model_not_available","message":"This model is not available for this account."}}}',
+        "data: [DONE]",
+    ]
+
+    monkeypatch.setattr(
+        codex_provider_module.httpx,
+        "Client",
+        lambda *args, **kwargs: _FakeHttpxClient(lines, *args, **kwargs),
+    )
+
+    model = CodexChatModel()
+    with pytest.raises(
+        RuntimeError,
+        match=r"model_not_available.*This model is not available for this account",
+    ):
+        model._stream_response(headers={}, payload={})

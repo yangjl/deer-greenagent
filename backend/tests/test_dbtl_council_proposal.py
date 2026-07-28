@@ -22,6 +22,8 @@ import pytest
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.council_proposal import (
     MAX_PROPOSED_POSITIONS,
+    CouncilProposal,
+    ProposedSeat,
     build_proposal_prompt,
     parse_council_proposal,
 )
@@ -269,6 +271,64 @@ class TestReachingDispatch:
         # produce corroboration, not debate.
         assert len({unit.prompt for unit in first_wave}) == 2
         assert "field logistics" in first_wave[1].prompt
+
+    @pytest.mark.anyio
+    async def test_dispatch_replays_the_approved_roster_without_redrawing_it(
+        self,
+        tmp_path,
+    ):
+        from test_dbtl_live_stage_execution import (
+            FakeDispatcher,
+            _runtime_config,
+            _structured_result,
+        )
+
+        writer_calls: list[str] = []
+        dispatcher = FakeDispatcher(text=_structured_result())
+        adapter = self._adapter(
+            tmp_path,
+            dispatcher,
+            _payload(_seat(focus="a different roster")),
+        )
+        adapter._roster_writer = lambda prompt: writer_calls.append(prompt)
+        approved = CouncilProposal(
+            positions=(
+                ProposedSeat(
+                    focus="approved quantitative genetics",
+                    brief="Argue from the approved quantitative-genetic brief.",
+                    agent_name="quant-geneticist",
+                    capability=Capability.EXPERIMENTAL_DESIGN,
+                    model="approved-position-model",
+                ),
+            ),
+            chair=ProposedSeat(
+                focus="approved synthesis",
+                brief="Synthesize the approved roster.",
+                agent_name="general-purpose",
+                capability=Capability.KNOWLEDGE_SYNTHESIS,
+                model="approved-chair-model",
+            ),
+        )
+
+        await adapter.execute(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            request_text="Design the drought trial.",
+            state={},
+            config=_runtime_config(tmp_path),
+            approved_council_proposal=approved,
+        )
+
+        assert writer_calls == []
+        position = dispatcher.calls[0][0][0]
+        red_team = dispatcher.calls[1][0][0]
+        chair = dispatcher.calls[2][0][0]
+        assert position.focus == "approved quantitative genetics"
+        assert position.model == "approved-position-model"
+        assert red_team.agent_name == "general-purpose"
+        assert red_team.model == "approved-chair-model"
+        assert chair.agent_name == "general-purpose"
+        assert chair.model == "approved-chair-model"
 
     @pytest.mark.anyio
     async def test_an_unusable_roster_falls_back_to_selection(self, tmp_path):

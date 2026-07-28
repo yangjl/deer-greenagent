@@ -50,10 +50,21 @@ Design–Build–Test–Learn (DBTL) governance.
   proposal evaluation records telemetry only; it does not mount a second card
   beside the composer.
 - **Inspectable Design debate** — before a council runs, chat shows its roster,
-  depth choices, stand-ins, and recommendation. During the run it reports
-  validated seat progress and counted consensus; the final stage sheet pairs a
-  structured decision map with the exact Markdown document the human review
-  binds.
+  depth choices, stand-ins, and recommendation. Choosing a depth first updates
+  the visible participant list; a separate confirmation starts exactly that
+  approved roster, including its per-seat model choices. During the run it
+  reports validated seat progress and counted consensus, and labels a
+  chair-only fallback as a partial synthesis when another participant failed;
+  common structured claim objects from participants are normalized without
+  discarding an otherwise valid position, while unsupported claims still fail
+  evidence validation;
+  if the chair pauses for a decision, the resumed synthesis keeps that same
+  chair model and participant settings rather than inheriting the current chat
+  model;
+  the waiting meeting remains scoped to that conversation, so a new project
+  chat opens cleanly and can start a separate cycle;
+  the final stage sheet pairs a structured decision map with the exact Markdown
+  document the human review binds.
 - **DeerFlow capabilities** — sandboxed execution, tools, skills, MCP,
   subagents, persistent conversations, and multiple model providers.
 

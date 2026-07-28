@@ -1214,6 +1214,12 @@ dbtl:
   # and are shown as such; a human confirmation still creates the record.
   # null disables drafting and the form opens blank.
   setup_draft_model_name: null
+  # Default model for design-meeting participants whose seat does not name one.
+  # null inherits whatever model the composer is set to, so a meeting convened
+  # from an expensive chat runs every unassigned seat on that expensive model.
+  # Set this to what a routine meeting should cost; a seat may still name a
+  # different model, and any seat can be overridden on the meeting setup card.
+  council_model_name: null
   # Show the DBTL Upgrade Proposal card to users. Off by default so shadow
   # evaluation can be measured before anyone is interrupted; turn on only
   # after reviewing the false-upgrade and missed-cycle rates in

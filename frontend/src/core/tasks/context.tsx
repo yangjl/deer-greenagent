@@ -40,6 +40,27 @@ export function SubtasksProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * Give each routed conversation its own task ledger.
+ *
+ * Project layouts stay mounted while the user moves between conversations.
+ * Without the keyed boundary, a finished or paused Design meeting from one
+ * thread remains in context and is rendered over the next thread's transcript.
+ * A native-history transition from `/new` to its created UUID intentionally
+ * keeps the same route key, preserving the live ledger for that new thread;
+ * `useThreadStream` separately clears on its canonical displayed-thread id
+ * when navigation returns to a fresh `/new`.
+ */
+export function ThreadScopedSubtasksProvider({
+  scopeKey,
+  children,
+}: {
+  scopeKey: string;
+  children: React.ReactNode;
+}) {
+  return <SubtasksProvider key={scopeKey}>{children}</SubtasksProvider>;
+}
+
 export function useSubtaskContext() {
   const context = useContext(SubtaskContext);
   if (context === undefined) {

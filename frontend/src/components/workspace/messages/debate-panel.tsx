@@ -9,10 +9,12 @@ import {
   SwordsIcon,
   TriangleAlertIcon,
   UserIcon,
+  WrenchIcon,
 } from "lucide-react";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { useSubtaskContext } from "@/core/tasks/context";
+import { fetchSubtaskSteps } from "@/core/tasks/api";
+import { useSubtaskContext, useUpdateSubtask } from "@/core/tasks/context";
 import {
   consensusSnapshot,
   consensusState,
@@ -21,8 +23,11 @@ import {
   type ConsensusState,
   type ConsensusSnapshot,
 } from "@/core/tasks/council-seat";
+import { meetingTranscript } from "@/core/tasks/meeting-transcript";
 import type { CouncilSeatIdentity, Subtask } from "@/core/tasks/types";
 import { cn } from "@/lib/utils";
+
+import { MeetingParticipantInspector } from "./meeting-participant-inspector";
 
 /**
  * The Design council, while it is arguing.
@@ -34,12 +39,22 @@ import { cn } from "@/lib/utils";
  * here, live, because finding out afterwards in a file is finding out too late
  * to intervene.
  */
-export function DebatePanel({ className }: { className?: string }) {
+export function DebatePanel({
+  className,
+  threadId,
+  runId,
+}: {
+  className?: string;
+  threadId?: string;
+  runId?: string;
+}) {
   const { tasks: taskMap } = useSubtaskContext();
   const tasks = useMemo(() => Object.values(taskMap), [taskMap]);
   const rounds = useMemo(() => debateRounds(tasks), [tasks]);
   const state = useMemo(() => consensusState(tasks), [tasks]);
   const snapshot = useMemo(() => consensusSnapshot(tasks), [tasks]);
+  const [inspectedId, setInspectedId] = useState<string | null>(null);
+  const inspected = inspectedId ? (taskMap[inspectedId] ?? null) : null;
 
   if (rounds.length === 0) {
     return null;
@@ -55,22 +70,23 @@ export function DebatePanel({ className }: { className?: string }) {
         "border-border/60 bg-card/40 rounded-xl border backdrop-blur-sm",
         className,
       )}
-      aria-label="Design council debate"
+      aria-label="Design meeting debate"
     >
       <header className="border-border/60 space-y-2.5 border-b px-4 py-3">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h3 className="text-foreground text-sm font-medium tracking-tight">
-              Design council
+              Design meeting
             </h3>
             <p className="text-muted-foreground mt-0.5 text-xs">
-              Round {currentRound} · {reported} of {seats.length} seats reported
+              Round {currentRound} · {reported} of {seats.length} participants
+              reported
             </p>
           </div>
           <ConsensusBadge snapshot={snapshot} state={state} />
         </div>
         <div
-          aria-label={`${reported} of ${seats.length} council seats reported`}
+          aria-label={`${reported} of ${seats.length} meeting participants reported`}
           aria-valuemax={seats.length}
           aria-valuemin={0}
           aria-valuenow={reported}
@@ -94,38 +110,59 @@ export function DebatePanel({ className }: { className?: string }) {
             )}
             <ul className="space-y-2">
               {seats.map((seat) => (
-                <SeatLane key={seat.id} task={seat} />
+                <SeatLane
+                  key={seat.id}
+                  runId={runId}
+                  task={seat}
+                  threadId={threadId}
+                  onInspect={() => setInspectedId(seat.id)}
+                />
               ))}
             </ul>
           </div>
         ))}
       </div>
+
+      <MeetingParticipantInspector
+        open={inspected !== null}
+        task={inspected}
+        onOpenChange={(next) => {
+          if (!next) {
+            setInspectedId(null);
+          }
+        }}
+      />
     </section>
   );
 }
 
-const CONSENSUS_COPY: Record<ConsensusState, { label: string; hint: string }> = {
-  debating: {
-    label: "Debating",
-    hint: "Independent positions are still being argued.",
-  },
-  synthesizing: {
-    label: "Synthesizing",
-    hint: "The chair is weighing the positions against each other.",
-  },
-  awaiting_input: {
-    label: "Waiting on you",
-    hint: "The chair needs one project-owner decision before it can synthesize.",
-  },
-  settled: {
-    label: "Synthesis ready",
-    hint: "The chair has reported. You review it; nothing has advanced.",
-  },
-  stalled: {
-    label: "No synthesis",
-    hint: "The debate ended without a usable synthesis.",
-  },
-};
+const CONSENSUS_COPY: Record<ConsensusState, { label: string; hint: string }> =
+  {
+    debating: {
+      label: "Debating",
+      hint: "Independent positions are still being argued.",
+    },
+    synthesizing: {
+      label: "Synthesizing",
+      hint: "The chair is weighing the positions against each other.",
+    },
+    awaiting_input: {
+      label: "Waiting on you",
+      hint: "The chair needs one project-owner decision before it can synthesize.",
+    },
+    partial: {
+      label: "Partial synthesis",
+      hint: "The chair reported, but one or more participants returned no usable result.",
+    },
+    settled: {
+      label: "Synthesis ready",
+      hint: "The chair has reported. You review it; nothing has advanced.",
+    },
+    stalled: {
+      label: "No synthesis",
+      hint: "The debate ended without a usable synthesis.",
+    },
+  };
 
 function ConsensusBadge({
   state,
@@ -138,13 +175,14 @@ function ConsensusBadge({
   const settled = state === "settled";
   const stalled = state === "stalled";
   const awaitingInput = state === "awaiting_input";
+  const partial = state === "partial";
   return (
     <span className="flex items-center gap-1.5" title={copy.hint}>
       {settled ? (
         <CheckIcon className="size-3.5 text-emerald-600 dark:text-emerald-400" />
       ) : awaitingInput ? (
         <MessageCircleQuestionIcon className="text-primary size-3.5" />
-      ) : stalled ? (
+      ) : stalled || partial ? (
         <TriangleAlertIcon className="size-3.5 text-amber-600 dark:text-amber-500" />
       ) : (
         <Loader2Icon className="text-muted-foreground size-3.5 animate-spin" />
@@ -170,8 +208,45 @@ const ROLE_ICONS: Record<string, typeof GavelIcon> = {
   chair: GavelIcon,
 };
 
-function SeatLane({ task }: { task: Subtask }) {
+function SeatLane({
+  task,
+  threadId,
+  runId,
+  onInspect,
+}: {
+  task: Subtask;
+  threadId?: string;
+  runId?: string;
+  onInspect: () => void;
+}) {
   const seat = task.councilSeat;
+  const updateSubtask = useUpdateSubtask();
+  const stepCount = task.steps?.length ?? 0;
+  const entries = useMemo(() => meetingTranscript(task.steps), [task.steps]);
+  const toolCalls = entries.filter((entry) => entry.kind === "tool").length;
+  const latest = entries[entries.length - 1];
+
+  // A reloaded run has no live SSE steps, so the timeline would be empty for
+  // exactly the meetings a reader most wants to inspect — the ones that
+  // already finished badly. Backfill once from the events endpoint; a failure
+  // leaves the lane readable and retries on the next mount.
+  const backfilledRef = useRef(false);
+  useEffect(() => {
+    if (backfilledRef.current || stepCount > 0 || !threadId || !runId) {
+      return;
+    }
+    backfilledRef.current = true;
+    fetchSubtaskSteps(threadId, runId, task.id)
+      .then((steps) => {
+        if (steps.length > 0) {
+          updateSubtask({ id: task.id, steps });
+        }
+      })
+      .catch(() => {
+        backfilledRef.current = false;
+      });
+  }, [stepCount, threadId, runId, task.id, updateSubtask]);
+
   if (!seat) {
     return null;
   }
@@ -179,7 +254,19 @@ function SeatLane({ task }: { task: Subtask }) {
   const summary = councilSeatSummary(task);
 
   return (
-    <li className="flex items-start gap-3">
+    <li
+      className="hover:bg-muted/40 -mx-2 flex cursor-pointer items-start gap-3 rounded-md px-2 py-1 transition-colors"
+      role="button"
+      tabIndex={0}
+      title="Open this participant's steps"
+      onClick={onInspect}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onInspect();
+        }
+      }}
+    >
       <span
         className={cn(
           "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md",
@@ -216,11 +303,29 @@ function SeatLane({ task }: { task: Subtask }) {
             </span>
           )}
         </p>
+        {/* The live process report: what this participant is doing right now,
+            not merely that it is busy. A spinner labelled "arguing" over three
+            minutes of silence is what sent a reader to the logs. */}
+        {latest ? (
+          <p className="text-muted-foreground mt-1 flex items-center gap-1.5 font-mono text-[11px]">
+            {task.status === "in_progress" ? (
+              <Loader2Icon className="size-2.5 shrink-0 animate-spin" />
+            ) : (
+              <WrenchIcon className="size-2.5 shrink-0" />
+            )}
+            <span className="truncate">{latest.title}</span>
+          </p>
+        ) : null}
         {summary ? (
           <p className="text-foreground/80 mt-1 line-clamp-2 text-xs leading-5">
             {summary}
           </p>
         ) : null}
+        <p className="text-muted-foreground mt-1 text-[11px]">
+          {toolCalls > 0
+            ? `${toolCalls} tool call${toolCalls === 1 ? "" : "s"} · open to inspect`
+            : "open to inspect the steps"}
+        </p>
       </div>
 
       <SeatStatus status={task.status} stopReason={task.stopReason} />

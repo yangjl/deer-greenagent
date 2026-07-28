@@ -130,23 +130,33 @@ describe("consensusState", () => {
   });
 
   it("waits on the human when the chair asks for one decision", () => {
-    const chair = task(
-      "c",
-      "completed",
-      seatEvent({ role: "chair" }),
-    );
+    const chair = task("c", "completed", seatEvent({ role: "chair" }));
     chair.result = JSON.stringify({
       status: "needs_input",
       summary: "The site choice remains open.",
       clarification_question: "Which site can guarantee irrigation?",
     });
 
+    expect(consensusState([task("p1", "completed", seatEvent()), chair])).toBe(
+      "awaiting_input",
+    );
+  });
+
+  it("labels a chair summary as partial when another participant failed", () => {
+    const chair = task("c", "completed", seatEvent({ role: "chair" }));
+    chair.result = JSON.stringify({
+      status: "needs_input",
+      summary: "The chair could only inspect the workspace.",
+      clarification_question: "Which benchmark should govern the cycle?",
+    });
+
     expect(
       consensusState([
-        task("p1", "completed", seatEvent()),
+        task("p1", "failed", seatEvent()),
+        task("red", "failed", seatEvent({ role: "red_team" })),
         chair,
       ]),
-    ).toBe("awaiting_input");
+    ).toBe("partial");
   });
 
   it("is stalled when the chair failed", () => {
