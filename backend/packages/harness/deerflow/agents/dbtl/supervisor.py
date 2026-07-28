@@ -111,6 +111,40 @@ DESIGN_AUTHORING_PREFIX = "dbtl-design-write__"
 # package. Same provider constraint, same failure mode.
 PRESENT_ARTIFACT_PREFIX = "dbtl-present__"
 
+#: OpenAI's Responses API rejects a ``call_id`` longer than this. Anthropic has
+#: no such limit, so embedding a full cycle id in the request id passed every
+#: local check and every Claude turn, then failed **every** later turn on a GPT
+#: model in that thread with ``Invalid 'input[N].call_id': string too long`` —
+#: a 74-character id, one turn after the card, naming a message the reader never
+#: sent. Same shape as the ``:``-in-the-id bug the grammar rule above prevents:
+#: a provider constraint that becomes durable the moment it reaches a checkpoint.
+MAX_CARD_REQUEST_ID_CHARS = 64
+
+#: Enough of the cycle id to correlate a card with its cycle by eye. Uniqueness
+#: comes from the digest, which hashes the *full* cycle id, so truncating here
+#: cannot collide two cycles onto one card.
+_CYCLE_TOKEN_CHARS = 12
+
+
+def card_request_id(prefix: str, cycle: str, *parts: str) -> str:
+    """A card id that fits every provider's ``call_id`` limit.
+
+    Built as ``<prefix><cycle-token>__<digest>`` so it stays matchable by
+    ``startswith``, readable enough to correlate with a cycle, and unique per
+    card — the digest covers the full cycle id plus whatever else distinguishes
+    this card (the run nonce, the question). Nothing parses the cycle back out
+    of the id, so shortening it costs no behavior.
+    """
+    digest = sha256("\x1f".join((cycle, *parts)).encode()).hexdigest()[:16]
+    token = "".join(char for char in cycle[:_CYCLE_TOKEN_CHARS] if char.isalnum() or char in "_-")
+    request_id = f"{prefix}{token}__{digest}"
+    if len(request_id) > MAX_CARD_REQUEST_ID_CHARS:  # pragma: no cover - guarded by test
+        # A future prefix long enough to overflow drops the readable token
+        # rather than shipping an id that breaks the thread on its next turn.
+        request_id = f"{prefix}{digest}"
+    return request_id
+
+
 _REVIEW_INTENT_RE = re.compile(
     r"""
     ^\s*
@@ -315,8 +349,7 @@ def _setup_clarification_message(
     """
     note = "I proposed an answer to each — correct the ones that are wrong."
     question = render_questions(questions) or f"Please provide:\n{_bullets(decision.missing_fields)}"
-    digest = sha256(f"{context.project_id}:{request_nonce}:{source_request}".encode()).hexdigest()[:16]
-    request_id = f"{SETUP_CLARIFICATION_PREFIX}{digest}"
+    request_id = card_request_id(SETUP_CLARIFICATION_PREFIX, context.project_id or "", request_nonce, source_request)
     tool_call = {
         "name": "ask_clarification",
         "args": {
@@ -407,8 +440,7 @@ def _setup_confirmation_message(
 ) -> tuple[AIMessage, ToolMessage]:
     """Offer the final no-write setup decision through DeerFlow's native card."""
     summary = _render_cycle_setup(decision, context)
-    digest = sha256(f"{context.project_id}:{request_nonce}:{source_request}:confirm".encode()).hexdigest()[:16]
-    request_id = f"{SETUP_CONFIRMATION_PREFIX}{digest}"
+    request_id = card_request_id(SETUP_CONFIRMATION_PREFIX, context.project_id or "", request_nonce, source_request, "confirm")
     question = "How should this request proceed?"
     options = [
         {
@@ -590,8 +622,7 @@ def _council_preflight_message(
     the reply and are validated server-side before anyone runs.
     """
     cycle = decision.cycle_id or "selected-cycle"
-    digest = sha256(f"{cycle}:{request_nonce}".encode()).hexdigest()[:16]
-    request_id = f"{COUNCIL_PREFLIGHT_PREFIX}{cycle}__{digest}"
+    request_id = card_request_id(COUNCIL_PREFLIGHT_PREFIX, cycle, request_nonce)
     note = _render_council_roster(plan)
     question = f"How much debate should this design get? {recommendation.reason}"
     options = [
@@ -666,8 +697,7 @@ def _design_clarification_message(
     request_nonce: str,
 ) -> tuple[AIMessage, ToolMessage]:
     cycle = decision.cycle_id or "selected-cycle"
-    digest = sha256(f"{cycle}:{request_nonce}:{question}".encode()).hexdigest()[:16]
-    request_id = f"{DESIGN_CLARIFICATION_PREFIX}{cycle}__{digest}"
+    request_id = card_request_id(DESIGN_CLARIFICATION_PREFIX, cycle, request_nonce, question)
     tool_call = {
         "name": "ask_clarification",
         "args": {
@@ -724,8 +754,7 @@ def _design_authoring_message(
     for a recovered setup intent.
     """
     cycle = decision.cycle_id or "selected-cycle"
-    digest = sha256(f"{cycle}:{request_nonce}".encode()).hexdigest()[:16]
-    request_id = f"{DESIGN_AUTHORING_PREFIX}{cycle}__{digest}"
+    request_id = card_request_id(DESIGN_AUTHORING_PREFIX, cycle, request_nonce)
     tool_call = {
         "name": "ask_clarification",
         "args": {
@@ -791,8 +820,7 @@ def _council_adjustment_message(
     agree with the agronomist").
     """
     cycle = decision.cycle_id or "selected-cycle"
-    digest = sha256(f"{cycle}:{request_nonce}".encode()).hexdigest()[:16]
-    request_id = f"{COUNCIL_ADJUST_PREFIX}{cycle}__{digest}"
+    request_id = card_request_id(COUNCIL_ADJUST_PREFIX, cycle, request_nonce)
     return (
         AIMessage(
             id=f"{request_id}:call",
@@ -969,8 +997,7 @@ def _present_artifact_messages(
 ) -> tuple[AIMessage, ToolMessage]:
     """Use the same present-files turn shape as the lead agent."""
     cycle = decision.cycle_id or "selected-cycle"
-    digest = sha256(f"{cycle}:{request_nonce}:{artifact_uri}".encode()).hexdigest()[:16]
-    tool_call_id = f"{PRESENT_ARTIFACT_PREFIX}{cycle}__{digest}"
+    tool_call_id = card_request_id(PRESENT_ARTIFACT_PREFIX, cycle, request_nonce, artifact_uri)
     tool_call = {
         "name": "present_files",
         "args": {"filepaths": [artifact_uri]},

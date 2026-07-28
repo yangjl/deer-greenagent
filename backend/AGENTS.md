@@ -2078,6 +2078,21 @@ new artifact; chat text is not a typed review record. DBTL workers also do not
 implicitly inherit every enabled skill: an explicit specialist skill whitelist
 is preserved, while a `None` whitelist becomes `[]` for the bounded stage run.
 
+**A card's tool-call id must satisfy every provider it may be replayed to.**
+`supervisor.card_request_id` builds every card/present-files id as
+`<prefix><cycle-token>__<digest>` and caps it at `MAX_CARD_REQUEST_ID_CHARS`
+(64). Embedding a full cycle id produced 74 characters, which Anthropic accepts
+and OpenAI's Responses API rejects — so the card succeeded and then *every*
+later GPT turn in that thread failed with `Invalid 'input[N].call_id': string
+too long`, on an unrelated request, unrecoverable from inside the conversation.
+Bounding new ids cannot rescue a thread that already contains one, so
+`DanglingToolCallMiddleware._shorten_overlong_tool_call_ids` also rewrites
+over-long ids in the **model-bound request** (never the checkpoint), on both
+halves of the call/result pair together — renaming one without the other trades
+a length error for an orphaned tool result. `CodexChatModel` now reads a
+streamed error body before raising, so a provider 400 names its own cause
+instead of reporting a bare status.
+
 The Design council preflight is a native `single_choice` Human Input request;
 its options carry `id`/`label`/`value` plus descriptions and the server-owned
 recommendation. User-facing wording calls it the **design meeting** (card

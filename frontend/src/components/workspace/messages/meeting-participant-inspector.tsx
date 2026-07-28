@@ -22,6 +22,8 @@ import {
 } from "@/components/ui/sheet";
 import {
   meetingTranscriptWithResult,
+  parseMeetingResult,
+  type MeetingResultView,
   type MeetingTranscriptEntry,
 } from "@/core/tasks/meeting-transcript";
 import type { Subtask } from "@/core/tasks/types";
@@ -109,6 +111,125 @@ function EntryRow({
   );
 }
 
+function Section({
+  title,
+  items,
+  tone,
+}: {
+  title: string;
+  items: string[];
+  tone?: "warn";
+}) {
+  if (items.length === 0) {
+    return null;
+  }
+  return (
+    <section className="space-y-1">
+      <h4
+        className={cn(
+          "text-[11px] font-medium tracking-wide uppercase",
+          tone === "warn"
+            ? "text-amber-600 dark:text-amber-500"
+            : "text-muted-foreground",
+        )}
+      >
+        {title}
+      </h4>
+      <ul className="list-disc space-y-1 pl-4 text-xs leading-5">
+        {items.map((item, index) => (
+          <li key={`${title}-${index}`}>{item}</li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/**
+ * The closing position as a reviewer reads it.
+ *
+ * Where the meeting disagreed comes **first**: it is what tells someone
+ * whether the synthesis is a conclusion or an average, and it is worthless
+ * once they have already read the synthesis as settled. The same ordering the
+ * review document uses.
+ */
+function ResultDetail({ result }: { result: MeetingResultView }) {
+  const { consensus } = result;
+  return (
+    <div className="space-y-4">
+      {result.clarificationQuestion ? (
+        <section className="border-primary/30 bg-primary/5 space-y-1 rounded-md border p-2">
+          <h4 className="text-primary text-[11px] font-medium tracking-wide uppercase">
+            Needs your decision
+          </h4>
+          <p className="text-xs leading-5">{result.clarificationQuestion}</p>
+        </section>
+      ) : null}
+
+      {consensus ? (
+        <div className="space-y-3">
+          <Section title="Agreed" items={consensus.agreements} />
+          {consensus.disagreements.length > 0 ? (
+            <section className="space-y-1">
+              <h4 className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
+                Contested
+              </h4>
+              <ul className="space-y-2">
+                {consensus.disagreements.map((item, index) => (
+                  <li
+                    key={`${item.topic}-${index}`}
+                    className="border-border rounded-md border p-2"
+                  >
+                    <p className="text-xs leading-5 font-medium">
+                      {item.topic}
+                    </p>
+                    {item.positions.length > 0 ? (
+                      <ul className="text-muted-foreground mt-1 list-disc space-y-0.5 pl-4 text-xs leading-5">
+                        {item.positions.map((position, positionIndex) => (
+                          <li key={positionIndex}>{position}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    <p
+                      className={cn(
+                        "mt-1 text-xs leading-5",
+                        item.resolution
+                          ? "text-foreground"
+                          : "text-amber-600 dark:text-amber-500",
+                      )}
+                    >
+                      {item.resolution
+                        ? `Settled: ${item.resolution}`
+                        : "Not resolved"}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+          <Section title="Open questions" items={consensus.openQuestions} />
+        </div>
+      ) : null}
+
+      {result.summary ? (
+        <section className="space-y-1">
+          <h4 className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
+            Synthesis
+          </h4>
+          <p className="text-xs leading-5 whitespace-pre-wrap">
+            {result.summary}
+          </p>
+        </section>
+      ) : null}
+
+      <Section title="Claims" items={result.claims} />
+      <Section title="Failed checks" items={result.failedChecks} tone="warn" />
+      <Section title="Limitations" items={result.limitations} />
+      <Section title="Recommended next" items={result.nextActions} />
+      <Section title="Evidence" items={result.evidence} />
+    </div>
+  );
+}
+
 function EntryDetail({ entry }: { entry: MeetingTranscriptEntry | null }) {
   if (!entry) {
     return (
@@ -118,6 +239,24 @@ function EntryDetail({ entry }: { entry: MeetingTranscriptEntry | null }) {
     );
   }
   const args = formatArgs(entry.args);
+  // A closing position is a validated JSON contract, not something anyone
+  // wants to read as JSON. When it parses, render it; when it does not, the
+  // raw text below is still the honest fallback.
+  const result = entry.kind === "answer" ? parseMeetingResult(entry.text) : null;
+  if (result) {
+    return (
+      <div className="space-y-4 p-4">
+        <div className="space-y-1">
+          <p className="text-foreground text-xs font-medium">{entry.title}</p>
+          <p className="text-muted-foreground text-[11px]">
+            Closing position
+            {result.status ? ` · ${result.status.replace(/_/g, " ")}` : ""}
+          </p>
+        </div>
+        <ResultDetail result={result} />
+      </div>
+    );
+  }
   return (
     <div className="space-y-4 p-4">
       <div className="space-y-1">

@@ -171,3 +171,69 @@ class TestAnswersStillRoute:
 
         assert request_id.startswith(SETUP_CONFIRMATION_PREFIX)
         assert not request_id.startswith(SETUP_CLARIFICATION_PREFIX)
+
+
+class TestTheLengthLimitOpenAIEnforces:
+    """The second provider constraint that becomes durable damage.
+
+    Anthropic caps nothing here, so a request id embedding a full cycle id
+    passed every local check and every Claude turn. OpenAI's Responses API
+    rejects a ``call_id`` over 64 characters, so the first GPT turn *after* the
+    card failed with ``Invalid 'input[N].call_id': string too long`` — 74
+    characters, on an unrelated request, unrecoverable from inside the thread.
+    """
+
+    @pytest.mark.parametrize(
+        "builder",
+        [
+            lambda decision, nonce: supervisor._council_preflight_message(decision, _plan(), _recommendation(), request_nonce=nonce),
+            lambda decision, nonce: supervisor._council_adjustment_message(decision, request_nonce=nonce),
+            lambda decision, nonce: supervisor._design_authoring_message(decision, note="n", question="q", request_nonce=nonce),
+            lambda decision, nonce: supervisor._design_clarification_message(decision, note="n", question="q", request_nonce=nonce),
+            lambda decision, nonce: supervisor._present_artifact_messages(decision, note="n", artifact_uri="/mnt/user-data/outputs/x.md", request_nonce=nonce),
+        ],
+    )
+    def test_every_emitted_card_id_fits_the_limit(self, builder):
+        """A realistic cycle id is a UUID; that is what overflowed."""
+        from deerflow.dbtl.branches import BranchDecision, SupervisorBranch
+        from deerflow.dbtl.routing import RouteKind, RouteSource, RoutingDecision
+
+        decision = BranchDecision(
+            branch=SupervisorBranch.CYCLE_CONTINUATION,
+            route=RoutingDecision(kind=RouteKind.CYCLE_CONTINUATION, source=RouteSource.EXPLICIT_CHOICE),
+            cycle_id="cycle-f5fad897-e43b-44b8-b2ae-7d9ba2f08fcf",
+        )
+        ai, _tool = builder(decision, "run-8d4e1f2a-0b6c-4a51-9f3d-7c2e5a1b8d90")
+        call_id = ai.tool_calls[0]["id"]
+        assert len(call_id) <= supervisor.MAX_CARD_REQUEST_ID_CHARS, call_id
+        assert TOOL_USE_ID.match(call_id), call_id
+
+    def test_the_id_still_distinguishes_two_cycles(self):
+        first = supervisor.card_request_id(COUNCIL_PREFLIGHT_PREFIX, "cycle-aaaaaaaa-1111-2222-3333-444444444444", "run-1")
+        second = supervisor.card_request_id(COUNCIL_PREFLIGHT_PREFIX, "cycle-aaaaaaaa-1111-2222-3333-555555555555", "run-1")
+        # The readable head is identical after truncation, so only the digest
+        # keeps these apart — which is exactly why it hashes the full id.
+        assert first != second
+
+    def test_the_id_is_stable_for_the_same_card(self):
+        args = (COUNCIL_PREFLIGHT_PREFIX, "cycle-1", "run-1")
+        assert supervisor.card_request_id(*args) == supervisor.card_request_id(*args)
+
+
+def _plan():
+    from deerflow.dbtl.agent_selector import AgentCandidate
+    from deerflow.dbtl.capabilities import Capability
+    from deerflow.dbtl.council import plan_council
+    from deerflow.dbtl.stage_spec import resolve_stage_spec
+
+    return plan_council(
+        resolve_stage_spec("design", domain_profile="generic"),
+        (AgentCandidate(name="designer", capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN})),),
+        model="gpt-5.6-sol",
+    )
+
+
+def _recommendation():
+    from deerflow.dbtl.council import recommend_depth
+
+    return recommend_depth("Design the drought cycle.")

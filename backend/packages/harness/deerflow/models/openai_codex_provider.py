@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
+#: How much of a provider error body to keep. The log gets the fuller view for
+#: diagnosis; the exception message is bounded because it reaches the user's
+#: chat, where a wall of JSON buries the one sentence that explains the failure.
+_ERROR_BODY_LOG_CHARS = 4_000
+_ERROR_BODY_MESSAGE_CHARS = 600
+
 
 def _build_usage_metadata(oai_usage: dict) -> dict:
     """Convert Codex/Responses API usage dict to LangChain usage_metadata format.
@@ -252,6 +258,21 @@ class CodexChatModel(BaseChatModel):
 
         with httpx.Client(timeout=300) as client:
             with client.stream("POST", f"{CODEX_BASE_URL}/responses", headers=headers, json=payload) as resp:
+                if resp.is_error:
+                    # A streamed error response arrives unread, so the default
+                    # `raise_for_status()` reports only "400 Bad Request" — a
+                    # status with no cause, which is what a whole debugging
+                    # session gets spent on. Read the body first and attach the
+                    # provider's own explanation to the exception.
+                    resp.read()
+                    detail = resp.text.strip()
+                    if detail:
+                        logger.warning("Codex API %s response body: %s", resp.status_code, detail[:_ERROR_BODY_LOG_CHARS])
+                        raise httpx.HTTPStatusError(
+                            f"{resp.status_code} from Codex: {detail[:_ERROR_BODY_MESSAGE_CHARS]}",
+                            request=resp.request,
+                            response=resp,
+                        )
                 resp.raise_for_status()
                 for line in resp.iter_lines():
                     data = self._parse_sse_data_line(line)

@@ -561,7 +561,14 @@ Each participant lane is clickable and opens
 participant's steps: reasoning turns, tool calls paired with their output, and
 the closing position, with a timeline on the left and the selected step's
 request/output on the right. `src/core/tasks/meeting-transcript.ts` is the pure
-layer for it — pairing a tool result to the call that asked for it (position is
+layer for it. `parseMeetingResult` renders a participant's closing position as
+sections rather than the validated JSON it is transmitted as — **contested
+items before the synthesis**, because where the meeting disagreed is what tells
+a reader whether the synthesis is a conclusion or an average, and it is
+worthless once they have read the synthesis as settled. An unresolved
+disagreement keeps its empty resolution and renders as "Not resolved"; prose or
+a malformed payload degrades to the raw text rather than costing the reader the
+result. The transcript layer also handles pairing a tool result to the call that asked for it (position is
 the only honest join; the recorded step shape carries a tool name but no call
 id), keeping a result whose requesting turn was compacted away, marking a
 still-running call `pending` rather than rendering it as an empty success, and
