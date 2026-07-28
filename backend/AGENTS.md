@@ -1795,6 +1795,32 @@ project id/root, so its sandbox mounts the same human-visible project workspace.
 Units run concurrently and emit the normal task-started/completed/failed stream
 events.
 
+**A stage worker is graded on its final message, so it needs a deadline it can
+meet.** The turn axis is enforced by `recursion_limit`, which raises
+`GraphRecursionError` from the middle of a tool loop; the executor then recovers
+"the last `AIMessage` carrying text", and mid-loop that is prose or nothing. So
+a worker that spent its budget could never satisfy `extract_result_payload`
+however well it investigated — which is exactly how a whole Design council
+failed, three seats at a time, every rejection reading "returned prose instead
+of a structured result". `agents/middlewares/finalization_deadline_middleware.py`
+closes that axis the way the token and loop guards already close theirs: it
+warns at `DEFAULT_RESERVE_CALLS` remaining, then strips `tool_calls` on the last
+call so the loop ends with a real answer. `_model_call_budget` halves
+`budget.max_turns` because `recursion_limit` counts super-steps and a
+tool-calling turn costs two, so a deadline computed from the raw number would
+fire after the run had already aborted.
+
+The one thing this middleware must **not** do is report a `stop_reason`. That
+channel feeds `CAPPED_STOP_REASONS`, which makes `is_trustworthy` false —
+correct for a run that blew through a safety limit, wrong for one that was
+warned and answered on time, and folding the two together would discard the
+evidence this exists to recover. It therefore defines no `consume_stop_reason`
+(the executor enrols guards by duck-typing on that name) and surfaces
+`forced_any()` instead, which `collect_results` folds into the result's
+`limitations` so a reviewer still sees that the investigation was cut short.
+Attaching it uses `SubagentExecutor(extra_middlewares=...)`, appended after the
+shared subagent chain.
+
 Only trustworthy structured outcomes produce a review package. The package is
 written atomically under
 `<project_root>/outputs/dbtl/<cycle-hash>/<stage>/` with a content-addressed

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from deerflow.dbtl.agent_selector import Assignment, SelectionResult, capability_brief, select_agents
@@ -63,6 +63,12 @@ class DispatchOutcome:
     text: str | None
     stop_reason: str | None = None
     error: str | None = None
+    #: The worker was stopped to make it write its answer. Not a
+    #: ``stop_reason``: a run that met a deadline it was warned about is finished
+    #: work, and routing it through the cap channel would discard the evidence.
+    #: It still narrows what the worker could examine, so it is recorded as a
+    #: limitation the human reviewer sees on the result.
+    forced_finalization: bool = False
 
 
 class WorkerDispatcher(Protocol):
@@ -149,6 +155,8 @@ class StageExecutionOutcome:
             "satisfies_gate": self.satisfies_gate,
         }
 
+
+_FORCED_FINALIZATION_LIMITATION = "This worker was stopped at its turn deadline and wrote its result from the work it had completed by then; it may not have examined everything it intended to."
 
 _RESULT_CONTRACT = """
 Answer with a single JSON object and nothing else:
@@ -262,14 +270,18 @@ def collect_results(plan: StageExecutionPlan, outcomes: Sequence[DispatchOutcome
             continue
         try:
             payload = extract_result_payload(outcome.text)
-            results.append(
-                parse_worker_result(
-                    payload,
-                    capability=unit.capability,
-                    agent_name=unit.agent_name,
-                    stop_reason=outcome.stop_reason,
-                )
+            parsed = parse_worker_result(
+                payload,
+                capability=unit.capability,
+                agent_name=unit.agent_name,
+                stop_reason=outcome.stop_reason,
             )
+            if outcome.forced_finalization:
+                parsed = replace(
+                    parsed,
+                    limitations=(*parsed.limitations, _FORCED_FINALIZATION_LIMITATION),
+                )
+            results.append(parsed)
         except WorkerResultRejected as exc:
             logger.info("dbtl stage worker %s returned an unusable result: %s", unit.unit_id, exc)
             rejected.append(f"{unit.unit_id}: {exc}")

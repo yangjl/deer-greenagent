@@ -23,6 +23,10 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.middlewares.finalization_deadline_middleware import (
+    DEFAULT_RESERVE_CALLS,
+    FinalizationDeadlineMiddleware,
+)
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.dbtl.agent_selector import AgentCandidate, build_candidates
 from deerflow.dbtl.cycle_state import StageStatus, stage_for_state
@@ -114,6 +118,44 @@ def _compact_design_history(prior_runs: Sequence[dict[str, Any]]) -> list[dict[s
             }
         )
     return compact
+
+
+def _model_call_budget(max_turns: int) -> int:
+    """How many model calls fit in a turn budget.
+
+    ``max_turns`` is passed to LangGraph as ``recursion_limit``, which counts
+    *super-steps*: an agent turn that calls a tool costs two (the model node and
+    the tool node). So the model gets to speak roughly half as often as the turn
+    budget suggests, and a deadline computed from the raw number would fire
+    after the run had already been aborted. Floor-divide, then keep enough room
+    for the reserve plus the answer itself.
+    """
+    return max(DEFAULT_RESERVE_CALLS + 1, int(max_turns) // 2)
+
+
+_FAILURE_REASON_CHARS = 300
+_MAX_FAILURE_REASONS = 6
+
+
+def _failure_reasons(results: Sequence[dict[str, Any]]) -> list[str]:
+    """One actionable line per worker that produced no usable evidence.
+
+    A capped run and a contract violation look identical from the outside and
+    need opposite fixes — raise the budget versus fix the prompt — so the cap is
+    named separately rather than folded into the summary text.
+    """
+    lines: list[str] = []
+    for item in results:
+        if item.get("is_trustworthy"):
+            continue
+        unit = str(item.get("unit_id") or item.get("capability") or "worker")
+        detail = _bounded_text(item.get("summary"), max_chars=_FAILURE_REASON_CHARS) or "No reason was recorded."
+        cap = str(item.get("stop_reason") or "")
+        suffix = f" (stopped by the {cap.replace('_', ' ')} guardrail)" if cap else ""
+        lines.append(f"- {unit}: {detail}{suffix}")
+        if len(lines) >= _MAX_FAILURE_REASONS:
+            break
+    return lines
 
 
 def _stage_worker_config(base_config, budget: WorkerBudget):
@@ -237,7 +279,13 @@ def _design_chair_unit(
             "- Otherwise return status completed with an operational design synthesis, explicit success and rejection criteria, and a recommendation to present it for human review.",
             "- You may recommend readiness, but you cannot submit, approve, or advance the stage.",
             "",
-            "Return one JSON object and nothing else:",
+            "Result rules (these are validated, not stylistic):",
+            "- Every entry in claims must be traceable to an entry in evidence_refs. A claim with no evidence rejects the whole result, so cite the council position it came from or move it to summary.",
+            "- An evidence_refs entry needs a kind of artifact, workspace_file, dataset, or external, plus a non-empty reference. A council position is kind 'external' with the position's unit id as its reference.",
+            '- quality_checks[].passed must be a JSON boolean, not the string "true".',
+            "- needs_input requires a non-empty clarification_question; every other status requires it to be omitted or null.",
+            "",
+            "Return one JSON object and nothing else. The arrays below are shown empty only to give the shape; fill them in:",
             """{
   "status": "completed" | "needs_input" | "blocked" | "failed",
   "summary": "the council synthesis",
@@ -502,6 +550,14 @@ class LiveStageAdapter:
                 app_config=self._app_config,
             )
             trace_id = str(metadata.get("trace_id") or "") or None
+            # A stage worker is graded on its final message, but the turn budget
+            # is enforced by ``recursion_limit``, which aborts from inside a tool
+            # loop — so a worker that spends its budget could never land the JSON
+            # its result is parsed from. The deadline reserves the last few model
+            # calls for writing that answer.
+            deadline = FinalizationDeadlineMiddleware(
+                max_model_calls=_model_call_budget(budget.max_turns),
+            )
             executor = SubagentExecutor(
                 config=worker_config,
                 tools=tools,
@@ -523,6 +579,7 @@ class LiveStageAdapter:
                 project_id=project_id,
                 project_root=project_root,
                 token_budget_max_tokens=budget.max_tokens,
+                extra_middlewares=[deadline],
             )
             await emit(
                 {
@@ -567,6 +624,7 @@ class LiveStageAdapter:
                     unit_id=unit.unit_id,
                     text=result.result,
                     stop_reason=result.stop_reason,
+                    forced_finalization=deadline.forced_any(),
                 )
 
             error = result.error or f"Subagent ended with status {result.status.value}."
@@ -928,7 +986,18 @@ class LiveStageAdapter:
             # a file path makes the reader open a file to learn anything at all.
             note = artifact_digest or f"Ran {len(results)} bounded {stage} worker(s) and attached a review package at {artifact_uri}."
         else:
-            note = f"Ran {len(results)} bounded {stage} worker(s) and recorded every outcome, but none produced usable evidence, so no review artifact was attached."
+            # No package is written when nothing is trustworthy, so the review
+            # Markdown that normally carries "Work units not included" never
+            # reaches disk. Without the reasons here the only visible symptom is
+            # "none produced usable evidence", which reads as three bad workers
+            # and hides the one thing a person can act on — the contract
+            # violation, the cap, or the crash that actually happened.
+            note = "\n".join(
+                [
+                    f"Ran {len(results)} bounded {stage} worker(s) and recorded every outcome, but none produced usable evidence, so no review artifact was attached.",
+                    *(["", "Why each worker did not count:", *_failure_reasons(results)] if results else []),
+                ]
+            )
         return LiveStageResult(
             stage=stage,
             cycle_id=cycle_id,

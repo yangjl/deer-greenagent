@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 import uuid
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import Context, copy_context
@@ -418,6 +418,7 @@ class SubagentExecutor:
         project_id: str | None = None,
         project_root: str | None = None,
         token_budget_max_tokens: int | None = None,
+        extra_middlewares: Sequence[Any] | None = None,
     ):
         """Initialize the executor.
 
@@ -477,6 +478,10 @@ class SubagentExecutor:
         self.project_id = project_id
         self.project_root = project_root
         self.token_budget_max_tokens = token_budget_max_tokens
+        # Appended after the shared subagent chain so a caller-supplied guard
+        # wraps the built-ins rather than being wrapped by them. Kept as a
+        # tuple so a caller cannot mutate the chain after construction.
+        self.extra_middlewares = tuple(extra_middlewares or ())
 
         self._base_tools = _filter_tools(
             tools,
@@ -535,6 +540,8 @@ class SubagentExecutor:
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
+        if self.extra_middlewares:
+            middlewares = [*middlewares, *self.extra_middlewares]
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware) so _aexecute can read
         # each after the run and surface whichever cap fired. Duck-typed
