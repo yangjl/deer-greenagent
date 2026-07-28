@@ -467,7 +467,14 @@ designNotes` and are handed to the council as the owner's decisions rather
   the request's own `clarification_type`: `design_decision` continues the
   selected cycle, `cycle_setup` returns to the setup branch (naming **no** cycle
   id — setup has not created a record, and claiming a continuation of some other
-  cycle would misroute it), and anything unrecognized stays ordinary. Adding a
+  cycle would misroute it), `council_preflight` continues the selected cycle
+  **and carries the chosen depth** as `dbtl_council_depth` (the backend reads
+  the depth from this same per-request context, so a reply carrying only the
+  scope would re-raise the card it just answered; an unrecognized value is
+  omitted rather than guessed at, and the backend falls back to its own
+  recommendation), and anything unrecognized stays ordinary. The preflight card
+  itself needs no bespoke component — it is a native `select` human-input
+  request whose roster rides in the Markdown `context`. Adding a
   new `clarification_type` on the backend means adding its case here too; the
   backend also recovers the intent from the card it emitted, so a stale frontend
   degrades rather than breaking, but the two should agree.

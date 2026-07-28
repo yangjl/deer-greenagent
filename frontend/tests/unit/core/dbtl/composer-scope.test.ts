@@ -324,6 +324,41 @@ describe("per-request scope", () => {
 });
 
 describe("humanInputRunContext", () => {
+  const preflight = {
+    source: "ask_clarification",
+    clarification_type: "council_preflight",
+  };
+
+  it("carries the chosen depth with the request that convenes the council", () => {
+    // The backend reads the depth from this same per-request context, so a
+    // reply carrying only the cycle scope would re-raise the card it answered.
+    expect(humanInputRunContext(preflight, "cyc-9", "heavy")).toEqual({
+      dbtl_supervisor_enabled: true,
+      dbtl_explicit_choice: "continue_cycle",
+      dbtl_selected_cycle_id: "cyc-9",
+      dbtl_council_depth: "heavy",
+    });
+  });
+
+  it("omits a depth it does not recognize rather than guessing one", () => {
+    // The backend then falls back to its own recommendation, which is a much
+    // smaller failure than running an exhaustive council nobody asked for.
+    const context = humanInputRunContext(preflight, "cyc-9", "exhaustive");
+
+    expect(context.dbtl_council_depth).toBeUndefined();
+    expect(context.dbtl_selected_cycle_id).toBe("cyc-9");
+  });
+
+  it("still answers the preflight when no cycle is selected", () => {
+    // The council belongs to a cycle the server already resolved; losing the
+    // client-side selection must not strand the answer in ordinary chat.
+    const context = humanInputRunContext(preflight, null, "light");
+
+    expect(context.dbtl_supervisor_enabled).toBe(true);
+    expect(context.dbtl_council_depth).toBe("light");
+    expect(context.dbtl_explicit_choice).toBeUndefined();
+  });
+
   it("returns a design question to the cycle whose council raised it", () => {
     expect(
       humanInputRunContext(

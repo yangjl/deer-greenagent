@@ -55,6 +55,13 @@ from deerflow.dbtl.branches import (
     SupervisorContext,
     resolve_branch,
 )
+from deerflow.dbtl.council import (
+    CouncilDepth,
+    council_depth_from_config,
+    depth_policy,
+    recommend_depth,
+    request_context,
+)
 from deerflow.dbtl.routing import ExplicitChoice
 from deerflow.dbtl.setup_questions import (
     SetupQuestion,
@@ -509,6 +516,92 @@ def _render_continuation(decision: BranchDecision, note: str) -> str:
     return f"This request is scoped to {cycle}.\n\n{note}\n\nThis run cannot satisfy a review gate. Design and Data reconciliation advance only through the project's human review records."
 
 
+COUNCIL_PREFLIGHT_PREFIX = "dbtl-council:"
+
+
+def _render_council_roster(plan) -> str:
+    """The roster as a person reads it, not as JSON.
+
+    The card carries the structured payload too, but the text has to stand on
+    its own: it is what a reader sees in a plain transcript, in an IM channel,
+    and in the run record long after the card stopped being interactive.
+    """
+    lines = [f"**{plan.seats[0].model}** · {len(plan.seats)} workers"]
+    for seat in plan.seats:
+        stand_in = " _(no specialist declared — a general-purpose agent is standing in)_" if seat.via_generalist else ""
+        tools = "inherits the assistant's tools" if seat.inherits_all_tools else ", ".join(seat.tools)
+        lines.append(f"- **{seat.role_label}** — `{seat.agent_name}`{stand_in}  \n  {seat.brief}  \n  Tools: {tools}")
+    return "\n".join(lines)
+
+
+def _council_preflight_message(
+    decision: BranchDecision,
+    plan,
+    recommendation,
+    *,
+    request_nonce: str,
+) -> tuple[AIMessage, ToolMessage]:
+    """Show who will sit on the council, and let the human set the depth.
+
+    Emitted before any worker is dispatched, so the choice is real. The depth
+    options and the roster ride on the artifact as structured data; the text
+    below is the same information for anyone who cannot see the card.
+    """
+    cycle = decision.cycle_id or "selected-cycle"
+    digest = sha256(f"{cycle}:{request_nonce}".encode()).hexdigest()[:16]
+    request_id = f"{COUNCIL_PREFLIGHT_PREFIX}{cycle}:{digest}"
+    note = _render_council_roster(plan)
+    question = f"How much debate should this design get? {recommendation.reason}"
+    options = [
+        {
+            "id": policy.depth.value,
+            "label": policy.label,
+            "description": policy.description,
+        }
+        for policy in (depth_policy(item) for item in CouncilDepth)
+    ]
+    return (
+        AIMessage(
+            id=f"{request_id}:call",
+            content="",
+            tool_calls=[
+                {
+                    "name": "ask_clarification",
+                    "args": {
+                        "question": question,
+                        "context": note,
+                        "clarification_type": "council_preflight",
+                    },
+                    "id": request_id,
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(
+            id=request_id,
+            name="ask_clarification",
+            tool_call_id=request_id,
+            content=f"{note}\n\n{question}",
+            artifact={
+                "human_input": {
+                    "version": 1,
+                    "kind": "human_input_request",
+                    "source": "ask_clarification",
+                    "request_id": request_id,
+                    "clarification_type": "council_preflight",
+                    "title": "Before the Design council convenes",
+                    "question": question,
+                    "context": note,
+                    "input_mode": "select",
+                    "options": options,
+                    "council_plan": plan.as_dict(),
+                    "recommended_depth": recommendation.depth.value,
+                }
+            },
+        ),
+    )
+
+
 def _design_clarification_message(
     decision: BranchDecision,
     *,
@@ -692,8 +785,8 @@ def build_supervisor_graph(
     async def clarification(state: dict, config: RunnableConfig) -> dict:
         decision = decide(state)
         source_request, _ = _routing_input(state)
-        raw_context = config.get("context") or {}
-        request_nonce = str(raw_context.get("run_id") or "") if isinstance(raw_context, dict) else ""
+        raw_context = request_context(config)
+        request_nonce = str(raw_context.get("run_id") or "")
         questions = await writer(source_request, decision.missing_fields)
         return {
             "messages": list(
@@ -713,8 +806,8 @@ def build_supervisor_graph(
         if acknowledgement is not None:
             return {"messages": [AIMessage(content=acknowledgement)]}
         source_request, _choice = _routing_input(state)
-        raw_context = config.get("context") or {}
-        request_nonce = str(raw_context.get("run_id") or "") if isinstance(raw_context, dict) else ""
+        raw_context = request_context(config)
+        request_nonce = str(raw_context.get("run_id") or "")
         return {
             "messages": list(
                 _setup_confirmation_message(
@@ -744,6 +837,30 @@ def build_supervisor_graph(
                     )
                 ]
             }
+        raw_context = request_context(config)
+        if council_depth_from_config(config) is None and not _has_emitted_card(state, COUNCIL_PREFLIGHT_PREFIX):
+            preview = getattr(stage_adapter, "preview_council", None)
+            plan = None
+            if callable(preview):
+                plan = preview(
+                    project_id=context.project_id,
+                    cycle_id=decision.cycle_id,
+                    request_text=request_text,
+                    config=config,
+                )
+                if isawaitable(plan):
+                    plan = await plan
+            if plan is not None and plan.dispatchable:
+                return {
+                    "messages": list(
+                        _council_preflight_message(
+                            decision,
+                            plan,
+                            recommend_depth(request_text),
+                            request_nonce=str(raw_context.get("run_id") or ""),
+                        )
+                    )
+                }
         result = stage_adapter.execute(
             project_id=context.project_id,
             cycle_id=decision.cycle_id,
@@ -755,8 +872,8 @@ def build_supervisor_graph(
             result = await result
         clarification_question = getattr(result, "clarification_question", None)
         if isinstance(clarification_question, str) and clarification_question:
-            raw_context = config.get("context") or {}
-            request_nonce = str(raw_context.get("run_id") or "") if isinstance(raw_context, dict) else ""
+            raw_context = request_context(config)
+            request_nonce = str(raw_context.get("run_id") or "")
             return {
                 "messages": list(
                     _design_clarification_message(
@@ -769,8 +886,8 @@ def build_supervisor_graph(
             }
         artifact_uri = getattr(result, "artifact_uri", None)
         if isinstance(artifact_uri, str) and artifact_uri:
-            raw_context = config.get("context") or {}
-            request_nonce = str(raw_context.get("run_id") or "") if isinstance(raw_context, dict) else ""
+            raw_context = request_context(config)
+            request_nonce = str(raw_context.get("run_id") or "")
             return {
                 "messages": list(
                     _present_artifact_messages(
@@ -833,18 +950,17 @@ def supervisor_context_from_config(config: RunnableConfig) -> SupervisorContext:
     from deerflow.agents.lead_agent.agent import _get_runtime_config
 
     cfg = _get_runtime_config(config)
-    raw_context = config.get("context") or {}
-    request_context = raw_context if isinstance(raw_context, dict) else {}
+    raw_context = request_context(config)
 
     project_id = cfg.get("project_id")
-    selected = request_context.get(SELECTED_CYCLE_CONTEXT_KEY)
+    selected = raw_context.get(SELECTED_CYCLE_CONTEXT_KEY)
     cycle_count = cfg.get("dbtl_project_cycle_count")
     has_unfinished = cfg.get("dbtl_has_unfinished_cycles")
     return SupervisorContext(
         project_id=str(project_id) if project_id else None,
         project_name=str(cfg.get("project_name") or ""),
         selected_cycle_id=str(selected) if selected else None,
-        explicit_choice=_resolve_explicit_choice(request_context.get(EXPLICIT_CHOICE_CONTEXT_KEY)),
+        explicit_choice=_resolve_explicit_choice(raw_context.get(EXPLICIT_CHOICE_CONTEXT_KEY)),
         project_cycle_count=cycle_count if isinstance(cycle_count, int) and cycle_count >= 0 else None,
         has_unfinished_cycles=has_unfinished if isinstance(has_unfinished, bool) else None,
     )

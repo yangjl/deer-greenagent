@@ -1460,6 +1460,46 @@ sandbox:
 #   #     max_turns: 80
 #   #     timeout_seconds: 600
 #
+#   # A worked example for the DBTL Design council. `dbtl_capabilities` is the
+#   # load-bearing field: an agent that declares none covers nothing, so with no
+#   # specialists declared every council role falls back to `general-purpose` and
+#   # the debate is one generalist talking to itself. Declare at least the
+#   # required capability (experimental_design); adding a second specialist gives
+#   # the chair genuinely independent positions to weigh.
+#   #   experimental-design:
+#   #     description: >-
+#   #       Experimental design specialist. Delegate when a study needs a stated
+#   #       comparison, a population and sampling plan, controls, and thresholds
+#   #       that decide in advance what would count as success or failure.
+#   #     system_prompt: |
+#   #       You are an experimental design specialist working on one stage of a
+#   #       Design-Build-Test-Learn research cycle.
+#   #
+#   #       Your job is to make the study decidable before any data is touched.
+#   #       A design is finished when someone else could run it and disagree with
+#   #       the result on evidence rather than on taste.
+#   #
+#   #       Hold yourself to these:
+#   #       - Name the comparison. What is contrasted against what, and what
+#   #         would the world look like if the effect were absent?
+#   #       - Make success operational. "Improves accuracy" is not a criterion;
+#   #         "held-out-site rank correlation exceeds 0.4" is.
+#   #       - State rejection criteria explicitly, in the same terms. A design
+#   #         that can only succeed is not a design.
+#   #       - Name the population and sampling plan, including what is excluded.
+#   #       - Name confounds, leakage paths, and controls; say which ones you
+#   #         cannot control for.
+#   #       - Separate what the request stated from what you assumed, and mark
+#   #         every assumption as an assumption.
+#   #
+#   #       You may recommend that a design is ready. You cannot approve it,
+#   #       submit it, or advance the cycle - a person does that.
+#   #     dbtl_capabilities:
+#   #       - experimental_design
+#   #     model: inherit
+#   #     max_turns: 40
+#   #     timeout_seconds: 900
+#
 #   # Model override: by default, subagents inherit the lead agent's model.
 #   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
 #   # The model name must match a name defined in the `models:` section above.

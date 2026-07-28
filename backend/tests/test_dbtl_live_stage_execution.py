@@ -304,6 +304,221 @@ async def test_a_live_design_run_persists_workers_and_a_reviewable_package(
 
 
 @pytest.mark.asyncio
+async def test_the_red_team_convenes_even_when_several_specialists_are_declared(
+    tmp_path: Path,
+) -> None:
+    """Several specialists are several *positions*, not an adversarial one.
+
+    Declaring a second specialist used to cancel the red team, so a project
+    that configured its council more carefully got a weaker one: agreeing
+    experts and no one whose job is to attack the design. The guarantee is a
+    floor on the debate, not a headcount.
+    """
+    repo = FakeRepo(_cycle())
+    dispatcher = FakeDispatcher(text=_structured_result())
+    adapter = LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="designer",
+                capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN}),
+            ),
+            AgentCandidate(
+                name="geneticist",
+                capabilities=frozenset({Capability.QUANTITATIVE_GENETICS}),
+            ),
+        ),
+        dispatcher=dispatcher,
+    )
+
+    result = await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    # Two specialist positions, then the red team, then the chair.
+    assert len(dispatcher.calls) == 3
+    assert len(dispatcher.calls[0][0]) == 2
+    assert "red team" in dispatcher.calls[1][0][0].prompt
+    assert "independent council positions" in dispatcher.calls[2][0][0].prompt
+    assert result.worker_count == 4
+
+    capabilities = [item["capability"] for item in repo.recorded[0]["results"]]
+    assert "design_red_team" in capabilities
+    assert capabilities[-1] == "design_council_chair"
+
+
+@pytest.mark.asyncio
+async def test_the_previewed_roster_matches_the_council_that_actually_runs(
+    tmp_path: Path,
+) -> None:
+    """The preflight card is only worth showing if it is true.
+
+    `plan_council` is what a person reviews before the council convenes; the
+    adapter is what convenes it. They are computed separately today, so this
+    pins them against each other — a card that promised two specialists and a
+    chair while the run dispatched something else would be worse than no card.
+    """
+    from deerflow.dbtl.council import CouncilDepth, plan_council
+    from deerflow.dbtl.stage_spec import resolve_stage_spec
+
+    candidates = (
+        AgentCandidate(
+            name="designer",
+            capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN}),
+        ),
+        AgentCandidate(
+            name="geneticist",
+            capabilities=frozenset({Capability.QUANTITATIVE_GENETICS}),
+        ),
+    )
+    repo = FakeRepo(_cycle())
+    dispatcher = FakeDispatcher(text=_structured_result())
+    adapter = LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: candidates,
+        dispatcher=dispatcher,
+    )
+
+    await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    plan = plan_council(
+        resolve_stage_spec("design", domain_profile="generic"),
+        candidates,
+        depth=CouncilDepth.MEDIUM,
+        model="test-model",
+    )
+
+    dispatched = [unit for call in dispatcher.calls for unit in call[0]]
+    assert [unit.agent_name for unit in dispatched] == [seat.agent_name for seat in plan.seats]
+    assert len(dispatched) == len(plan.seats)
+    # The last dispatch is the chair in both accounts, and it is the only one
+    # whose output becomes the stage's answer.
+    assert dispatched[-1].capability == "design_council_chair"
+    assert plan.seats[-1].counts_toward_stage_output
+    assert sum(seat.counts_toward_stage_output for seat in plan.seats) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_confirmed_depth_changes_the_council_that_is_dispatched(
+    tmp_path: Path,
+) -> None:
+    """Depth is the human's dial, and it has to reach the workers.
+
+    A card that offered light/medium/heavy and then ran the same council
+    regardless would be worse than not offering the choice.
+    """
+    candidates = (
+        AgentCandidate(name="designer", capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN})),
+        AgentCandidate(name="geneticist", capabilities=frozenset({Capability.QUANTITATIVE_GENETICS})),
+    )
+
+    async def _run(depth: str | None) -> FakeDispatcher:
+        dispatcher = FakeDispatcher(text=_structured_result())
+        adapter = LiveStageAdapter(
+            repo=FakeRepo(_cycle()),
+            app_config=SimpleNamespace(),
+            candidate_provider=lambda: candidates,
+            dispatcher=dispatcher,
+        )
+        config = _runtime_config(tmp_path)
+        if depth is not None:
+            config["context"]["dbtl_council_depth"] = depth
+        await adapter.execute(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            request_text="Draft the Design package.",
+            state={},
+            config=config,
+        )
+        return dispatcher
+
+    light = await _run("light")
+    heavy = await _run("heavy")
+
+    light_units = [unit for call in light.calls for unit in call[0]]
+    heavy_units = [unit for call in heavy.calls for unit in call[0]]
+    assert len(light_units) < len(heavy_units)
+    # The budget reaches the workers too, not just the headcount.
+    assert light.calls[0][1].max_turns < heavy.calls[0][1].max_turns
+    # Whatever the depth, the debate keeps its shape.
+    for units in (light_units, heavy_units):
+        assert [unit.capability for unit in units][-2:] == ["design_red_team", "design_council_chair"]
+
+
+@pytest.mark.asyncio
+async def test_an_unrecognized_depth_degrades_instead_of_failing_the_cycle(
+    tmp_path: Path,
+) -> None:
+    # A stale client losing a preference is a far smaller failure than a cycle
+    # that cannot be designed, so an unknown value falls back rather than raises.
+    dispatcher = FakeDispatcher(text=_structured_result())
+    adapter = LiveStageAdapter(
+        repo=FakeRepo(_cycle()),
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (AgentCandidate(name="designer", capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN})),),
+        dispatcher=dispatcher,
+    )
+    config = _runtime_config(tmp_path)
+    config["context"]["dbtl_council_depth"] = "exhaustive"
+
+    result = await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=config,
+    )
+
+    assert result.produced_usable_evidence
+
+
+@pytest.mark.asyncio
+async def test_the_review_package_records_who_sat_on_the_council(
+    tmp_path: Path,
+) -> None:
+    # The reviewer approves a document; if the roster is not in the record, the
+    # budget they would reconstruct from the spec key is not the one the workers
+    # actually had.
+    repo = FakeRepo(_cycle())
+    adapter = LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (AgentCandidate(name="designer", capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN})),),
+        dispatcher=FakeDispatcher(text=_structured_result()),
+    )
+    config = _runtime_config(tmp_path)
+    config["context"]["dbtl_council_depth"] = "heavy"
+
+    await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=config,
+    )
+
+    document = tmp_path / repo.recorded[0]["artifact_uri"].removeprefix("/mnt/user-data/")
+    package = json.loads(next(document.parent.glob("design-package-rev3-*.json")).read_text())
+    council = package["council"]
+    assert council["depth"] == "heavy"
+    assert council["budget"]["max_turns"] == 80
+    assert [seat["role"] for seat in council["seats"]][-1] == "chair"
+    assert council["seats"][0]["agent_name"] == "designer"
+
+
+@pytest.mark.asyncio
 async def test_design_council_pauses_for_one_human_clarification_without_artifact(
     tmp_path: Path,
 ) -> None:

@@ -201,6 +201,30 @@ Breeding-workspace note:
   and never submits or approves the human gate. The
   presentation icon beside Cycles opens a client-only Phase 7 three-case demo
   and never mutates durable records.
+- The council's composition is inspectable before it convenes.
+  `deerflow.dbtl.council` computes the roster as values — one seat per worker,
+  naming its agent, role (independent position, red team, chair), model, tools,
+  and whether a generalist is standing in for a missing specialist. The first
+  Design request of a cycle raises a `council_preflight` `ask_clarification`
+  card carrying that roster plus a light/medium/heavy depth choice; **no worker
+  is dispatched until a person answers it**. Depth sets how many independent
+  positions are heard and what each may spend, and `medium` reproduces the
+  pre-depth budget exactly; no depth can drop the red team or the chair.
+  `recommend_depth` suggests one from named phrases in the request rather than
+  a model's opinion, and stakes beat brevity. The confirmed depth travels in
+  the request's own context (`dbtl_council_depth`, next-request-only like the
+  selected cycle) and the executor scopes the stage spec by it, so the previewed
+  roster and the dispatched one are the same computation — pinned by a test that
+  runs the real adapter. Depth and effective budget are recorded in the review
+  package, because the budget a reviewer would reconstruct from `stage_spec_key`
+  is the spec's, not the one those workers had. An agent that declares no
+  `subagents.custom_agents.<name>.dbtl_capabilities` covers nothing, so a
+  deployment with none declared runs every council role as `general-purpose` —
+  `config.example.yaml` ships a worked `experimental-design` specialist.
+  `council.request_context` is the single reader of per-request context: a
+  run request carries `context` at the top level, but LangGraph relocates it to
+  `configurable["context"]` before a node sees it, so code running on both sides
+  must look in both places or silently read nothing on one of them.
 
 ## Commands: Root vs. Module
 
