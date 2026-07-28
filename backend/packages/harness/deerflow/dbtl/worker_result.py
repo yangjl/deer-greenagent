@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from deerflow.dbtl.consensus import Consensus, parse_consensus
+
 MAX_SUMMARY_CHARS = 4_000
 MAX_ITEM_CHARS = 1_000
 MAX_ITEMS = 50
@@ -121,6 +123,11 @@ class StageWorkerResult:
     recommended_next_actions: tuple[str, ...] = ()
     clarification_question: str | None = None
     stop_reason: str | None = None
+    #: Where the council converged and where it did not. Only a chair fills
+    #: this in; every other worker leaves it ``None``. Optional rather than
+    #: required because the contract is shared by all five stages, and a Build
+    #: worker has no council to report on.
+    consensus: Consensus | None = None
 
     def __post_init__(self) -> None:
         if not self.summary.strip():
@@ -167,6 +174,10 @@ class StageWorkerResult:
             "stop_reason": self.stop_reason,
             "was_capped": self.was_capped,
             "is_trustworthy": self.is_trustworthy,
+            # Omitted rather than serialized as null for the four workers in
+            # five that have no council to report on: an explicit null in a
+            # Build package invites a reader to wonder what went missing.
+            **({"consensus": self.consensus.as_dict()} if self.consensus is not None else {}),
         }
 
 
@@ -304,6 +315,11 @@ def parse_worker_result(
         recommended_next_actions=_string_tuple(payload.get("recommended_next_actions"), "recommended_next_actions"),
         clarification_question=(raw_clarification.strip()[:MAX_ITEM_CHARS] if isinstance(raw_clarification, str) else None),
         stop_reason=stop_reason,
+        # Permissive: a malformed consensus costs the structured view, not the
+        # result. The chair's prose summary is still the binding synthesis, and
+        # rejecting a whole Design attempt over a misshapen sub-object would
+        # trade the thing that works for the thing that reads nicely.
+        consensus=parse_consensus(payload.get("consensus")),
     )
 
 

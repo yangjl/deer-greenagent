@@ -109,6 +109,56 @@ def _render_result(result: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _render_consensus(results: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Where the council converged and where it did not.
+
+    Read off the chair's result rather than passed in separately, so the
+    document cannot describe a consensus the recorded chair never reported.
+    """
+    consensus: Mapping[str, Any] | None = None
+    for result in results:
+        candidate = result.get("consensus")
+        if isinstance(candidate, Mapping):
+            consensus = candidate
+            break
+    if consensus is None:
+        return []
+
+    lines = ["", "## Where the council landed"]
+
+    if consensus.get("unanimous"):
+        # Not an accusation, and not hidden either. Every position and the red
+        # team agreeing on everything is possible; it is also what a debate
+        # nobody really had looks like, and the reviewer decides which.
+        lines += [
+            "",
+            "> Every position agreed and no disagreement was recorded. That can be right, but it is also what a debate that did not really happen looks like — read the positions below before accepting it.",
+        ]
+
+    agreements = [str(item).strip() for item in _as_list(consensus.get("agreements")) if str(item).strip()]
+    if agreements:
+        lines += ["", "**Agreed**", *_bullets(agreements)]
+
+    disagreements = [item for item in _as_list(consensus.get("disagreements")) if isinstance(item, Mapping)]
+    if disagreements:
+        lines += ["", "**Disagreed**"]
+        for item in disagreements:
+            topic = str(item.get("topic") or "").strip()
+            positions = [str(value).strip() for value in _as_list(item.get("positions")) if str(value).strip()]
+            resolution = str(item.get("resolution") or "").strip()
+            lines += ["", f"*{topic}*" if topic else "*Contested*"]
+            lines += [f"  - {value}" for value in positions]
+            # An unsettled disagreement is named as such rather than left to be
+            # inferred from a missing line.
+            lines += [f"  - **Resolved:** {resolution}" if resolution else "  - **Not resolved.** This is left for the reviewer to settle."]
+
+    open_questions = [str(item).strip() for item in _as_list(consensus.get("open_questions")) if str(item).strip()]
+    if open_questions:
+        lines += ["", "**Only the project owner can decide**", *_bullets(open_questions)]
+
+    return lines
+
+
 def render_review_markdown(
     payload: Mapping[str, Any],
     *,
@@ -167,6 +217,11 @@ def render_review_markdown(
             "These were dispatched but excluded from the package:",
             *_bullets(rejected),
         ]
+
+    # Before the positions, not after them. Where the council disagreed is what
+    # tells a reader whether the synthesis below is a conclusion or an average,
+    # and it is worthless once they have already read the synthesis as settled.
+    lines += _render_consensus(results)
 
     if not results:
         lines += ["", "No positions were recorded for this stage."]

@@ -30,6 +30,7 @@ from deerflow.agents.middlewares.finalization_deadline_middleware import (
 )
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.dbtl.agent_selector import AgentCandidate, Assignment, SelectionResult, build_candidates
+from deerflow.dbtl.consensus import CONSENSUS_CONTRACT
 from deerflow.dbtl.council import (
     CouncilPlan,
     council_depth_from_config,
@@ -473,6 +474,8 @@ def _design_chair_unit(
   "clarification_question": "required only for needs_input",
   "provenance": {"inputs_examined": [], "tools_used": []}
 }""",
+            "",
+            CONSENSUS_CONTRACT,
         ]
     )
     return WorkUnit(
