@@ -86,11 +86,20 @@ def stage_file_name(
     revision: object,
     content_hash: str,
 ) -> str:
-    """One output file's name. `kind` is "review" (Markdown) or "package" (JSON)."""
+    """One output file's name.
+
+    ``kind`` is "review" (Markdown, the document the approval binds to),
+    "slides" (the HTML deck the meeting's outcome is presented from), or
+    "package" (JSON, the machine record). Anything unrecognized falls back to
+    the JSON package shape rather than raising: a new caller getting an
+    oddly-named file is a smaller failure than a stage that cannot write its
+    evidence.
+    """
     stage_slug = slugify(stage) or "stage"
-    is_review = kind == "review"
-    kind_slug = "review" if is_review else "package"
-    extension = "md" if is_review else "json"
+    kind_slug, extension = {
+        "review": ("review", "md"),
+        "slides": ("slides", "html"),
+    }.get(kind, ("package", "json"))
 
     parts = [stage_slug, kind_slug]
     if revision is not None:

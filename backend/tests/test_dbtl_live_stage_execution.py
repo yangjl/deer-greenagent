@@ -16,7 +16,7 @@ from deerflow.agents.dbtl.stage_execution import (
 from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_runner import DispatchOutcome
-from deerflow.dbtl.stage_spec import WorkerBudget
+from deerflow.dbtl.stage_spec import WorkerBudget, resolve_stage_spec
 from deerflow.subagents.config import SubagentConfig
 
 
@@ -54,6 +54,7 @@ class FakeRepo:
         self.lineage: list[dict] = []
         self.learn_syntheses: list[dict] = []
         self.replay: dict | None = None
+        self.worker_runs: list[dict] = []
 
     async def get_cycle(self, cycle_id: str, *, project_id: str):
         if self.cycle is None or cycle_id != self.cycle["id"] or project_id != self.cycle["project_id"]:
@@ -79,7 +80,7 @@ class FakeRepo:
         }
 
     async def list_worker_runs(self, cycle_id: str, *, project_id: str, stage: str):
-        return []
+        return list(self.worker_runs)
 
     async def get_stage_execution_replay(self, cycle_id: str, *, project_id: str, idempotency_key: str):
         return self.replay
@@ -801,3 +802,313 @@ async def test_a_replayed_run_returns_the_durable_result_without_dispatch(
     assert result.produced_usable_evidence
     assert "already recorded" in result.note
     assert dispatcher.calls == []
+
+
+def _design_adapter(repo: FakeRepo, dispatcher: FakeDispatcher) -> LiveStageAdapter:
+    return LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="designer",
+                capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN}),
+            ),
+        ),
+        dispatcher=dispatcher,
+    )
+
+
+def _with_design_package(cycle: dict) -> dict:
+    cycle["title"] = "Genomic selection in maize"
+    cycle["artifacts"] = [
+        {
+            "stage_attempt_id": "attempt-design",
+            "artifact_type": "design_brief",
+            "uri": "/mnt/user-data/outputs/dbtl/cycle-1/design/design-review-rev3-abc123.md",
+            "content_hash": "b" * 64,
+            "revision": 1,
+        }
+    ]
+    return cycle
+
+
+@pytest.mark.asyncio
+async def test_a_design_already_on_the_table_is_not_debated_again(
+    tmp_path: Path,
+) -> None:
+    """A Design stage stays in_progress until someone submits it for review.
+
+    Before this rule, every later message in the cycle convened the whole
+    meeting again over a design that was already sitting there waiting.
+    """
+    repo = FakeRepo(_with_design_package(_cycle()))
+    dispatcher = FakeDispatcher(text=_structured_result())
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="How does this handle the drought sites?",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert dispatcher.calls == []
+    assert repo.recorded == []
+    assert result.worker_count == 0
+    assert "design-review-rev3-abc123.md" in result.note
+    assert "run the meeting again" in result.note
+
+
+@pytest.mark.asyncio
+async def test_asking_for_another_meeting_convenes_one(tmp_path: Path) -> None:
+    repo = FakeRepo(_with_design_package(_cycle()))
+    dispatcher = FakeDispatcher(text=_structured_result())
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Run the meeting again with the drought sites in scope.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert dispatcher.calls
+    assert result.worker_count == 3
+
+
+@pytest.mark.asyncio
+async def test_a_change_request_still_reopens_the_debate_without_being_asked(
+    tmp_path: Path,
+) -> None:
+    """``changes_requested`` *is* the request to argue again."""
+    cycle = _with_design_package(_cycle(status="changes_requested"))
+    repo = FakeRepo(cycle)
+    dispatcher = FakeDispatcher(text=_structured_result())
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Here is the design.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert dispatcher.calls
+    assert result.worker_count == 3
+
+
+def _paused_meeting_runs() -> list[dict]:
+    return [
+        {
+            "unit_id": "dbtl-x-1-experimental_design",
+            "capability": "experimental_design",
+            "status": "completed",
+            "result": {
+                "status": "completed",
+                "summary": "Argue for a matched-model benchmark.",
+                "claims": ["The benchmark is restricted."],
+                "limitations": [],
+                "evidence_refs": [{"kind": "external", "reference": "position-1"}],
+            },
+        },
+        {
+            "unit_id": "dbtl-x-chair",
+            "capability": "design_council_chair",
+            "status": "needs_input",
+            "result": {
+                "status": "needs_input",
+                "summary": "The positions converge on one gating decision.",
+                "clarification_question": "Toy benchmark or credible simulator?",
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_answering_the_chair_resumes_it_instead_of_re_running_the_meeting(
+    tmp_path: Path,
+) -> None:
+    repo = FakeRepo(_cycle())
+    repo.worker_runs = _paused_meeting_runs()
+    dispatcher = FakeDispatcher(text=_structured_result())
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="A credible simulator.",
+        state={},
+        config=_runtime_config(tmp_path),
+        clarification_answer="A credible simulator.",
+    )
+
+    # One worker, and it is the chair. No positions, no red team: they already
+    # argued and their results are durable.
+    assert len(dispatcher.calls) == 1
+    units = dispatcher.calls[0][0]
+    assert [unit.capability for unit in units] == ["design_council_chair"]
+    assert result.worker_count == 1
+    assert result.produced_usable_evidence
+
+    prompt = units[0].prompt
+    # The owner's words travel verbatim, and so does the question they answer.
+    assert "A credible simulator." in prompt
+    assert "Toy benchmark or credible simulator?" in prompt
+    assert "Argue for a matched-model benchmark." in prompt
+
+    notes = repo.recorded[0]["results"]
+    assert notes[0]["counts_toward_stage_output"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_answer_with_no_outstanding_question_does_not_resume(
+    tmp_path: Path,
+) -> None:
+    """A stray card reply after a completed synthesis is not a resume."""
+    repo = FakeRepo(_cycle())
+    repo.worker_runs = [
+        {
+            "unit_id": "dbtl-x-chair",
+            "capability": "design_council_chair",
+            "status": "completed",
+            "result": {"status": "completed", "summary": "Done."},
+        }
+    ]
+    dispatcher = FakeDispatcher(text=_structured_result())
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Something else.",
+        state={},
+        config=_runtime_config(tmp_path),
+        clarification_answer="Something else.",
+    )
+
+    assert result.worker_count == 3
+
+
+@pytest.mark.asyncio
+async def test_every_round_writes_a_slide_deck_beside_the_review_package(
+    tmp_path: Path,
+) -> None:
+    repo = FakeRepo(_cycle())
+    dispatcher = FakeDispatcher(text=_structured_result())
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert result.deck_uri is not None
+    deck = tmp_path / result.deck_uri.removeprefix("/mnt/user-data/")
+    assert deck.suffix == ".html"
+    assert deck.exists()
+    assert deck.parent == (tmp_path / result.artifact_uri.removeprefix("/mnt/user-data/")).parent
+    rendered = deck.read_text()
+    assert rendered.startswith("<!doctype html>")
+    # It presents the record; it never becomes the record.
+    assert "Nothing here approves anything" in rendered
+    assert result.artifact_uri.endswith(".md")
+    assert repo.recorded[0]["artifact_uri"] == result.artifact_uri
+
+
+@pytest.mark.asyncio
+async def test_a_paused_meeting_still_gets_a_deck(tmp_path: Path) -> None:
+    """The round that asks for a decision is the one that most needs a deck."""
+    repo = FakeRepo(_cycle())
+    dispatcher = FakeDispatcher(
+        text=json.dumps(
+            {
+                "status": "needs_input",
+                "summary": "One decision is required.",
+                "artifact_refs": [],
+                "claims": [],
+                "evidence_refs": [],
+                "limitations": [],
+                "quality_checks": [{"name": "scope stated", "passed": True, "detail": ""}],
+                "recommended_next_actions": [],
+                "clarification_question": "Toy benchmark or credible simulator?",
+                "consensus": {
+                    "agreements": ["The lineage is restricted."],
+                    "disagreements": [],
+                    "open_questions": [],
+                },
+                "provenance": {"inputs_examined": []},
+            }
+        )
+    )
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert result.clarification_question == "Toy benchmark or credible simulator?"
+    assert result.artifact_uri is None
+    assert result.deck_uri is not None
+    rendered = (tmp_path / result.deck_uri.removeprefix("/mnt/user-data/")).read_text()
+    assert "Toy benchmark or credible simulator?" in rendered
+    assert "Needs your decision" in rendered
+
+
+def test_a_configured_meeting_model_beats_the_composers(tmp_path: Path) -> None:
+    """A meeting convened from an expensive chat should not cost that much."""
+    app_config = SimpleNamespace(
+        dbtl=SimpleNamespace(council_model_name="cheap-model"),
+        models=[SimpleNamespace(name="cheap-model"), SimpleNamespace(name="test-model")],
+    )
+    adapter = LiveStageAdapter(
+        repo=FakeRepo(_cycle()),
+        app_config=app_config,
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="designer",
+                capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN}),
+            ),
+        ),
+        dispatcher=FakeDispatcher(text=_structured_result()),
+    )
+
+    plan = adapter._plan_council(
+        resolve_stage_spec("design"),
+        config=_runtime_config(tmp_path),
+        request_text="Draft the Design package.",
+        attempt_id="attempt",
+    )
+
+    assert {seat.model for seat in plan.seats} == {"cheap-model"}
+
+
+def test_an_unconfigured_meeting_model_falls_back_rather_than_failing(
+    tmp_path: Path,
+) -> None:
+    app_config = SimpleNamespace(
+        dbtl=SimpleNamespace(council_model_name="typo-model"),
+        models=[SimpleNamespace(name="test-model")],
+    )
+    adapter = LiveStageAdapter(
+        repo=FakeRepo(_cycle()),
+        app_config=app_config,
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="designer",
+                capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN}),
+            ),
+        ),
+        dispatcher=FakeDispatcher(text=_structured_result()),
+    )
+
+    plan = adapter._plan_council(
+        resolve_stage_spec("design"),
+        config=_runtime_config(tmp_path),
+        request_text="Draft the Design package.",
+        attempt_id="attempt",
+    )
+
+    assert {seat.model for seat in plan.seats} == {"test-model"}

@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import platform
+import re
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -41,6 +42,7 @@ from deerflow.dbtl.council import (
     plan_from_proposal,
     recommend_depth,
 )
+from deerflow.dbtl.council_deck import render_council_deck
 from deerflow.dbtl.council_proposal import (
     CouncilProposal,
     build_proposal_prompt,
@@ -101,6 +103,10 @@ class LiveStageResult:
     #: council ran and hit a decision only its owner can make — here no council
     #: ran, and the supervisor raises a different card for it.
     authoring_request: str | None = None
+    #: A slide deck presenting what the meeting concluded. Never the reviewed
+    #: document — ``artifact_uri`` is what an approval binds to, and a second
+    #: approvable-looking file is how a gate ends up bound to a summary.
+    deck_uri: str | None = None
 
     @property
     def satisfies_gate(self) -> bool:
@@ -579,6 +585,106 @@ def _refinement_positions(max_positions: int, *, change_request: str | None) -> 
     return max(2, min(max_positions, 2))
 
 
+#: Ways of asking for the meeting to be held again. Deterministic, like every
+#: other DBTL routing signal: the person whose request was read as "convene four
+#: workers" deserves to see the words that did it.
+_NEW_DEBATE_PATTERN = re.compile(
+    r"\b(?:re-?run|re-?open|redo|repeat|rehold)\b[^.\n]{0,40}\b(?:meeting|debate|discussion|council|round)\b"
+    r"|\b(?:run|hold|convene|start|open|schedule)\b[^.\n]{0,40}\b(?:another|a new|a second|again)\b[^.\n]{0,20}\b(?:meeting|debate|discussion|council|round)\b"
+    r"|\b(?:another|a second|a new|one more)\s+(?:round|meeting|debate|discussion)\b"
+    r"|\b(?:meet|debate|discuss|argue)\s+(?:it\s+)?again\b"
+    r"|\b(?:meeting|debate|discussion|council)\s+again\b",
+    re.IGNORECASE,
+)
+
+
+def _wants_new_debate(request_text: str) -> bool:
+    """Whether the request asks for the meeting to be convened again.
+
+    The default is *not* to convene. A Design stage stays ``in_progress`` until
+    a person submits it for review, so before this rule every later message in
+    the cycle re-ran the whole meeting — the owner would answer one question and
+    watch four fresh workers argue the design they had just been handed.
+    Convening several workers is expensive and slow enough that it should be
+    something a person asked for.
+    """
+    return bool(_NEW_DEBATE_PATTERN.search((request_text or "").strip()))
+
+
+def _unreviewed_design_package(cycle: dict[str, Any]) -> dict[str, Any] | None:
+    """A Design package this cycle already has and nobody has contested.
+
+    ``changes_requested`` deliberately yields ``None``: a reviewer asking for
+    changes *is* the request to argue again, and it already carries what to
+    argue about. Everything else — a package sitting there waiting to be
+    submitted — is work that is done until a person says otherwise.
+    """
+    attempt = _stage_attempt(cycle, "design")
+    if not isinstance(attempt, dict) or str(attempt.get("status") or "") != StageStatus.IN_PROGRESS.value:
+        return None
+    attempt_id = str(attempt.get("id") or "")
+    if not attempt_id:
+        return None
+    artifacts = cycle.get("artifacts")
+    if not isinstance(artifacts, Sequence) or isinstance(artifacts, str):
+        return None
+    newest: dict[str, Any] | None = None
+    for item in artifacts:
+        if not isinstance(item, dict) or str(item.get("stage_attempt_id") or "") != attempt_id:
+            continue
+        if newest is None or int(item.get("revision") or 0) > int(newest.get("revision") or 0):
+            newest = item
+    if newest is None:
+        return None
+    return {"uri": str(newest.get("uri") or ""), "revision": int(newest.get("revision") or 0)}
+
+
+def _pending_design_question(prior_runs: Sequence[dict[str, Any]]) -> str | None:
+    """The question the meeting's chair last asked and nobody has answered yet.
+
+    Read from the newest chair run only. An older unanswered question that a
+    later completed synthesis moved past is not pending, and resuming on it
+    would put the meeting back in front of a decision it already made.
+    """
+    for item in reversed(list(prior_runs)):
+        if str(item.get("capability") or "") != "design_council_chair":
+            continue
+        payload = item.get("result")
+        payload = payload if isinstance(payload, dict) else {}
+        question = str(payload.get("clarification_question") or "").strip()
+        return question or None
+    return None
+
+
+#: How much of an already-argued position the resuming chair is shown. Generous:
+#: it is re-reading what it weighed before, not summarising it for a person.
+_RESUMED_POSITION_CHARS = 6_000
+_MAX_RESUMED_POSITIONS = 8
+
+
+def _prior_positions(prior_runs: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The positions already argued, for a chair resuming after a question."""
+    positions: list[dict[str, Any]] = []
+    for item in prior_runs:
+        capability = str(item.get("capability") or "")
+        if capability == "design_council_chair":
+            continue
+        payload = item.get("result")
+        payload = payload if isinstance(payload, dict) else {}
+        positions.append(
+            {
+                "unit_id": str(item.get("unit_id") or ""),
+                "capability": capability,
+                "status": str(item.get("status") or payload.get("status") or ""),
+                "summary": _bounded_text(payload.get("summary"), max_chars=_RESUMED_POSITION_CHARS),
+                "claims": [str(value) for value in list(payload.get("claims") or [])[:12]],
+                "limitations": [str(value) for value in list(payload.get("limitations") or [])[:6]],
+                "evidence_refs": list(payload.get("evidence_refs") or [])[:12],
+            }
+        )
+    return positions[-_MAX_RESUMED_POSITIONS:]
+
+
 def _approved_design_brief(cycle: dict[str, Any]) -> dict[str, Any] | None:
     """The Design package a human approved, for the stages that implement it.
 
@@ -757,6 +863,124 @@ def _design_chair_unit(
     )
 
 
+def _resumed_chair_unit(
+    council: CouncilPlan | None,
+    *,
+    attempt_id: str,
+    stage_context: str,
+    positions: Sequence[Mapping[str, Any]],
+    question: str,
+    answer: str,
+    round_number: int,
+    settings: Mapping[str, ParticipantSettings] | None = None,
+) -> WorkUnit | None:
+    """The chair, resuming the meeting it paused — no new positions dispatched.
+
+    A chair that returns ``needs_input`` has not failed and has not finished; it
+    is waiting. Re-running the whole meeting on the answer spends a second
+    meeting's budget re-arguing the parts nobody questioned, and it reads to the
+    owner as the meeting ignoring them and starting over. The positions it
+    weighed are already durable, so the answer plus those positions is enough to
+    finish the synthesis.
+
+    Returns ``None`` when there is no seat to resume into, so the caller falls
+    back to convening normally rather than dropping the turn.
+    """
+    if not positions:
+        return None
+    seat = next((item for item in (council.seats if council is not None else ()) if item.role is CouncilRole.CHAIR), None)
+    if seat is None:
+        return None
+    prompt = "\n".join(
+        [
+            "You chair the design meeting for this DBTL research cycle, and you are resuming it.",
+            "",
+            "You previously paused and asked the project owner one question:",
+            f"    {question}",
+            "",
+            "They answered, quoted exactly:",
+            '"""',
+            answer,
+            '"""',
+            "",
+            "Their answer is a decision, not a suggestion. Treat it as settled and synthesize on top of it.",
+            "The meeting has not been re-run: the positions below are the ones you already weighed.",
+            "Do not ask the same question again, and do not re-open the parts of the debate their answer does not touch.",
+            "",
+            "Project context:",
+            stage_context,
+            "",
+            WORKSPACE_PATH_NOTE,
+            "",
+            "Independent meeting positions already argued:",
+            json.dumps(list(positions), sort_keys=True, ensure_ascii=False),
+            "",
+            "Debate instructions:",
+            "- Compare disagreements, assumptions, risks, and evidence across the positions.",
+            "- Do not average incompatible positions; explain the tradeoff.",
+            "- Return status completed with an operational design synthesis, explicit success and rejection criteria, and a recommendation to present it for human review.",
+            "- Return needs_input only if their answer created a genuinely new decision that only they can make. Repeating the answered question is not that.",
+            "- You may recommend readiness, but you cannot submit, approve, or advance the stage.",
+            "",
+            "Result rules (these are validated, not stylistic):",
+            "- Every entry in claims must be traceable to an entry in evidence_refs. A claim with no evidence rejects the whole result, so cite the meeting position it came from or move it to summary.",
+            "- An evidence_refs entry needs a kind of artifact, workspace_file, dataset, or external, plus a non-empty reference. A meeting position is kind 'external' with the position's unit id as its reference.",
+            '- quality_checks[].passed must be a JSON boolean, not the string "true".',
+            "- needs_input requires a non-empty clarification_question; every other status requires it to be omitted or null.",
+            "",
+            "Return one JSON object and nothing else. The arrays below are shown empty only to give the shape; fill them in:",
+            """{
+  "status": "completed" | "needs_input" | "blocked" | "failed",
+  "summary": "the meeting synthesis",
+  "artifact_refs": [],
+  "claims": [],
+  "evidence_refs": [],
+  "limitations": [],
+  "quality_checks": [{"name": "check", "passed": true, "detail": ""}],
+  "recommended_next_actions": [],
+  "clarification_question": "required only for needs_input",
+  "provenance": {"inputs_examined": [], "tools_used": []}
+}""",
+            "",
+            CONSENSUS_CONTRACT,
+        ]
+    )
+    return _unit_with_settings(
+        WorkUnit(
+            unit_id=f"{attempt_id}-chair",
+            capability="design_council_chair",
+            agent_name=seat.agent_name,
+            prompt=prompt,
+            via_generalist=seat.via_generalist,
+            model=seat.model,
+            role="chair",
+            focus="resumes the meeting on the owner's answer",
+            round=round_number,
+            max_tokens=seat.max_tokens,
+            reasoning=seat.reasoning,
+        ),
+        (settings or {}).get("chair"),
+        prefill=ROLE_BRIEFS[CouncilRole.CHAIR],
+    )
+
+
+def _resumed_selection(unit: WorkUnit, *, positions: Sequence[Mapping[str, Any]]) -> SelectionResult:
+    """Record that a resume happened, and that no new positions were seated.
+
+    Without this the package would list one worker and no explanation, which
+    reads as a meeting that lost its participants rather than one that finished
+    the synthesis it had already started.
+    """
+    return SelectionResult(
+        assignments=(),
+        notes=(
+            "Resumed the existing meeting: the project owner answered the chair's question, so the chair completed the synthesis it had paused.",
+            f"No new positions were dispatched; the chair re-weighed {len(positions)} position(s) already recorded for this cycle.",
+            f"Chair: {unit.agent_name} ({unit.model or 'inherited model'}).",
+        ),
+    )
+
+
 def _design_red_team_unit(
     outcome: StageExecutionOutcome,
     *,
@@ -884,6 +1108,61 @@ def _write_stage_package(
     return uri, document_hash, digest
 
 
+def _write_council_deck(
+    *,
+    project_root: str,
+    cycle: dict[str, Any],
+    results: Sequence[Mapping[str, Any]],
+    round_number: int,
+    package_path: str,
+    clarification_question: str,
+) -> str | None:
+    """Write the meeting's outcome as a slide deck, beside the review package.
+
+    Deliberately **not** registered as a durable artifact and never returned as
+    the reviewed document: an approval must bind to the review Markdown, and a
+    second approvable-looking file is exactly how a gate ends up bound to a
+    summary of the evidence instead of the evidence. This is a presentation of
+    a record that already exists.
+
+    Returns ``None`` rather than raising. A deck that cannot be written costs a
+    convenience; letting it fail the turn would cost the meeting whose results
+    are already committed by the time this runs.
+    """
+    try:
+        document = render_council_deck(
+            cycle_title=str(cycle.get("title") or ""),
+            stage_title="Design meeting",
+            round_number=round_number,
+            results=results,
+            package_path=package_path,
+            clarification_question=clarification_question,
+        ).encode("utf-8")
+    except Exception:  # noqa: BLE001 - a presentation must not break the record
+        logger.warning("Could not render the design meeting slide deck.", exc_info=True)
+        return None
+
+    try:
+        root = Path(project_root).expanduser().resolve()
+        ensure_project_dirs(root)
+        stage_dir = stage_output_dir(
+            cycle_id=str(cycle["id"]),
+            cycle_title=str(cycle.get("title") or ""),
+            stage="design",
+        )
+        relative = stage_dir / stage_file_name(
+            stage="design",
+            kind="slides",
+            revision=cycle.get("db_revision"),
+            content_hash=hashlib.sha256(document).hexdigest(),
+        )
+        _atomic_write(project_outputs_dir(root) / relative, document)
+    except Exception:  # noqa: BLE001 - same reason
+        logger.warning("Could not write the design meeting slide deck.", exc_info=True)
+        return None
+    return f"/mnt/user-data/outputs/{relative.as_posix()}"
+
+
 def _atomic_write(destination: Path, content: bytes) -> None:
     """Write via a temp file in the same directory, then rename."""
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -957,6 +1236,27 @@ class LiveStageAdapter:
         if not models:
             return ()
         return tuple(str(getattr(item, "name", "") or "") for item in models if getattr(item, "name", None))
+
+    def _council_model(self) -> str:
+        """The configured default model for meeting seats, if any.
+
+        Validated against the configured model list: an operator typo must not
+        become a model name the dispatcher then fails to build. An unrecognized
+        value degrades to the old inherit-the-composer behaviour and says so,
+        because refusing to convene the meeting over a config typo is a far
+        worse trade than running it on the wrong model once.
+        """
+        configured = str(getattr(getattr(self._app_config, "dbtl", None), "council_model_name", None) or "").strip()
+        if not configured:
+            return ""
+        known = self._known_models()
+        if known and configured not in known:
+            logger.warning(
+                "dbtl.council_model_name %r is not a configured model; meeting seats fall back to the composer's model.",
+                configured,
+            )
+            return ""
+        return configured
 
     async def _propose_roster(
         self,
@@ -1076,10 +1376,17 @@ class LiveStageAdapter:
         otherwise from the request itself. An unrecognized value degrades to the
         recommendation rather than raising: a stale client losing a preference
         is a much smaller failure than a cycle that cannot be designed.
+
+        The model a seat runs on defaults to ``dbtl.council_model_name`` rather
+        than to the composer's. Inheriting the composer meant a meeting convened
+        from an expensive chat quietly ran every unassigned seat on that model —
+        the person had chosen a model to *talk* to, not a budget for four
+        workers to argue on. A seat that names its own model still wins, and the
+        setup card can still override any of them.
         """
         depth = council_depth_from_config(config) or recommend_depth(request_text).depth
         metadata = dict(config.get("metadata", {}) or {})
-        model = str(metadata.get("model_name") or "").strip() or "inherited"
+        model = self._council_model() or str(metadata.get("model_name") or "").strip() or "inherited"
         return plan_council(
             spec,
             self._candidates(),
@@ -1372,6 +1679,7 @@ class LiveStageAdapter:
         authored_design: str | None = None,
         council_adjustment: str | None = None,
         participant_settings: Mapping[str, ParticipantSettings] | None = None,
+        clarification_answer: str | None = None,
     ) -> LiveStageResult:
         if not project_id or not cycle_id:
             return LiveStageResult(
@@ -1512,6 +1820,36 @@ class LiveStageAdapter:
                 logger.warning("Could not read cycle activity for the Design council's refinement context.", exc_info=True)
         change_request = _change_request(activity)
         design_round = _design_round(activity)
+
+        # Answering the chair's question resumes the meeting; it does not
+        # convene a new one. Only a question that is actually outstanding
+        # resumes, so a stray card reply after a completed synthesis falls
+        # through to the ordinary rules below rather than re-running the chair.
+        pending_question = _pending_design_question(prior_design_runs) if stage == "design" else None
+        resumed_answer = (clarification_answer or "").strip() if pending_question else ""
+        resumed_positions = _prior_positions(prior_design_runs) if resumed_answer else []
+
+        # Nothing outstanding, a package already on the table, and no request to
+        # argue again: hold. A Design stage stays ``in_progress`` until a person
+        # submits it for review, so without this every later message in the
+        # cycle convened the whole meeting over again.
+        if stage == "design" and not resumed_answer and authored_design is None:
+            settled = _unreviewed_design_package(cycle)
+            if settled is not None and not _wants_new_debate(request_text):
+                return LiveStageResult(
+                    stage=stage,
+                    cycle_id=cycle_id,
+                    note="\n".join(
+                        [
+                            "This cycle already has a design from the last meeting, and nobody has asked for changes to it, so no new meeting was convened.",
+                            "",
+                            f"The design under review: {settled['uri']}",
+                            "",
+                            'From here you can approve it, request changes, or reject it in the Design review sheet — or say "run the meeting again" if you want the participants to argue it afresh.',
+                        ]
+                    ),
+                )
+
         stage_context = json.dumps(
             {
                 "request": request_text,
@@ -1548,6 +1886,12 @@ class LiveStageAdapter:
                 # this specific sentence, and a paraphrase is the failure mode
                 # the refinement round exists to fix.
                 "human_change_request": change_request,
+                # The question the chair asked and the owner's own words back.
+                # Verbatim for the same reason the change request is: the
+                # synthesis is being built on this answer, and a paraphrase of a
+                # decision is not the decision.
+                "chair_question_answered": pending_question if resumed_answer else None,
+                "human_answer": resumed_answer or None,
                 "design_round": design_round,
             },
             sort_keys=True,
@@ -1594,7 +1938,21 @@ class LiveStageAdapter:
             project_root=project_root,
         )
         proposal: CouncilProposal | None = None
-        if stage == "design" and council_plan is not None:
+        resumed_chair: WorkUnit | None = None
+        if stage == "design" and council_plan is not None and resumed_positions:
+            resumed_chair = _resumed_chair_unit(
+                council_plan,
+                attempt_id=attempt_id,
+                stage_context=stage_context,
+                positions=resumed_positions,
+                question=str(pending_question or ""),
+                answer=resumed_answer,
+                round_number=design_round,
+                settings=participant_settings,
+            )
+        # A resume seats nobody new, so there is no roster to draw. Asking for
+        # one anyway would spend a model call on a council that will not convene.
+        if stage == "design" and council_plan is not None and resumed_chair is None:
             proposal = await self._propose_roster(
                 request_text=request_text,
                 stage_context=stage_context,
@@ -1611,7 +1969,14 @@ class LiveStageAdapter:
                 # that runs is the one they were shown.
                 adjustment=council_adjustment,
             )
-        if proposal is not None:
+        if resumed_chair is not None:
+            resume_plan = StageExecutionPlan(
+                spec=spec,
+                selection=_resumed_selection(resumed_chair, positions=resumed_positions),
+                units=(resumed_chair,),
+            )
+            outcome = collect_results(resume_plan, await dispatcher((resumed_chair,), budget=spec.budget))
+        elif proposal is not None:
             # The roster replaces selection's units rather than sitting beside
             # them: two sources of seats would let the package describe a
             # council that did not run, which is the failure the roster work
@@ -1653,7 +2018,13 @@ class LiveStageAdapter:
             )
         unit_result_pairs = list(zip(outcome.plan.units, outcome.results, strict=True))
         chair_result = None
-        if stage == "design" and outcome.plan.dispatchable:
+        if resumed_chair is not None:
+            # The chair is the only worker that ran, so it is also the result the
+            # stage is graded on. No red team: it already argued, and dispatching
+            # a fresh one here would be the second debate this path exists to
+            # avoid.
+            chair_result = outcome.results[0] if outcome.results else None
+        elif stage == "design" and outcome.plan.dispatchable:
             # Unconditional: several specialists are several *positions*, not an
             # adversarial one. Skipping the red team once a second specialist
             # existed gave a better-configured council a weaker debate.
@@ -1812,7 +2183,26 @@ class LiveStageAdapter:
             )
 
         clarification_question = chair_result.clarification_question if chair_result is not None and chair_result.status is WorkerStatus.NEEDS_INPUT else None
-        if clarification_question:
+
+        # Written after the record, from the record. Every round ends with a
+        # deck whether the chair concluded or paused — a meeting that stopped to
+        # ask something is exactly when a person needs the agreements and the
+        # open split on one screen.
+        deck_uri = None
+        if stage == "design" and chair_result is not None:
+            deck_uri = await asyncio.to_thread(
+                _write_council_deck,
+                project_root=project_root,
+                cycle=cycle,
+                results=results,
+                round_number=design_round,
+                package_path=artifact_uri or "",
+                clarification_question=clarification_question or "",
+            )
+
+        if clarification_question and resumed_chair is not None:
+            note = "The meeting chair resumed on your answer and still needs one more decision before it can write the design up for review. No participants were re-run."
+        elif clarification_question:
             note = f"Ran {len(results) - 1} independent Design council position(s) and a chair synthesis. The council paused before creating a review package because one human decision is required."
         elif artifact_uri:
             # The digest carries what the council concluded. A reply that is only
@@ -1839,4 +2229,5 @@ class LiveStageAdapter:
             produced_usable_evidence=produced_usable_evidence,
             artifact_uri=artifact_uri,
             clarification_question=clarification_question,
+            deck_uri=deck_uri,
         )

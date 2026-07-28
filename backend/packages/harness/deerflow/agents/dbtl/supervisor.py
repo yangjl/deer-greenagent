@@ -994,13 +994,20 @@ def _present_artifact_messages(
     note: str,
     artifact_uri: str,
     request_nonce: str,
+    deck_uri: str | None = None,
 ) -> tuple[AIMessage, ToolMessage]:
-    """Use the same present-files turn shape as the lead agent."""
+    """Use the same present-files turn shape as the lead agent.
+
+    The reviewed document leads and the slide deck follows it. Order is the
+    whole point: the first path is what an approval binds to, and a deck listed
+    first would be the one a reader opens and reviews.
+    """
     cycle = decision.cycle_id or "selected-cycle"
-    tool_call_id = card_request_id(PRESENT_ARTIFACT_PREFIX, cycle, request_nonce, artifact_uri)
+    filepaths = [path for path in (artifact_uri, deck_uri) if path]
+    tool_call_id = card_request_id(PRESENT_ARTIFACT_PREFIX, cycle, request_nonce, *filepaths)
     tool_call = {
         "name": "present_files",
-        "args": {"filepaths": [artifact_uri]},
+        "args": {"filepaths": filepaths},
         "id": tool_call_id,
         "type": "tool_call",
     }
@@ -1241,6 +1248,13 @@ def build_supervisor_graph(
             # The roster the person approved was drawn with this note, so the
             # one that runs has to be drawn with it too.
             execute_kwargs["council_adjustment"] = adjustment
+        design_answer = _card_answer(state, DESIGN_CLARIFICATION_PREFIX)
+        if design_answer is not None and design_answer[1].strip():
+            # The answer to the chair's own question. Passed explicitly rather
+            # than inferred from the request text, which is the same string but
+            # says nothing about what it is answering: the adapter resumes the
+            # paused meeting on it instead of convening a new one.
+            execute_kwargs["clarification_answer"] = design_answer[1]
         participant_settings = _confirmed_participant_settings(state, _adapter_known_models(stage_adapter))
         if participant_settings:
             # The dials the person set on the participant cards travel with
@@ -1262,19 +1276,39 @@ def build_supervisor_graph(
                     )
                 )
             }
+        deck_uri = getattr(result, "deck_uri", None)
+        deck_uri = deck_uri if isinstance(deck_uri, str) and deck_uri else None
         clarification_question = getattr(result, "clarification_question", None)
         if isinstance(clarification_question, str) and clarification_question:
             raw_context = request_context(config)
             request_nonce = str(raw_context.get("run_id") or "")
+            # The deck goes in front of the question, not after it: what the
+            # meeting agreed and where it split is the context the decision is
+            # made from, and a person asked to decide first and read second is
+            # being asked to guess.
+            deck_messages = (
+                list(
+                    _present_artifact_messages(
+                        decision,
+                        note="Here is where the meeting got to — what the participants agreed, and where they are still split.",
+                        artifact_uri=deck_uri,
+                        request_nonce=request_nonce,
+                    )
+                )
+                if deck_uri
+                else []
+            )
             return {
-                "messages": list(
-                    _design_clarification_message(
+                "messages": [
+                    *deck_messages,
+                    *_design_clarification_message(
                         decision,
                         note=result.note,
                         question=clarification_question,
                         request_nonce=request_nonce,
-                    )
-                )
+                    ),
+                ],
+                **({"artifacts": [deck_uri]} if deck_uri else {}),
             }
         artifact_uri = getattr(result, "artifact_uri", None)
         if isinstance(artifact_uri, str) and artifact_uri:
@@ -1287,9 +1321,10 @@ def build_supervisor_graph(
                         note=result.note,
                         artifact_uri=artifact_uri,
                         request_nonce=request_nonce,
+                        deck_uri=deck_uri,
                     )
                 ),
-                "artifacts": [artifact_uri],
+                "artifacts": [path for path in (artifact_uri, deck_uri) if path],
             }
         return {"messages": [AIMessage(content=_render_continuation(decision, result.note))]}
 

@@ -2078,6 +2078,51 @@ new artifact; chat text is not a typed review record. DBTL workers also do not
 implicitly inherit every enabled skill: an explicit specialist skill whitelist
 is preserved, while a `None` whitelist becomes `[]` for the bounded stage run.
 
+**A meeting convenes when a person asks for one.** A Design stage stays
+`in_progress` until someone submits it for review, so before this every later
+cycle-scoped message re-ran the whole council over a design already sitting on
+the table. Three rules, all in `stage_execution`:
+
+- `_unreviewed_design_package` **holds**: a package on the attempt plus no
+  `changes_requested` review means nothing is dispatched and the reply points at
+  the review sheet. `_wants_new_debate` is the deterministic override (the same
+  named-phrase style as `recommend_depth`), and a `changes_requested` attempt is
+  deliberately excluded from the hold — that verdict *is* the request to argue
+  again, and it already carries what to argue about.
+- `_resumed_chair_unit` **resumes**: an answer to the chair's own `needs_input`
+  question dispatches the chair alone over `_prior_positions` (the durable
+  worker runs), carrying the question and the owner's words verbatim, and skips
+  the roster proposal entirely — there is no roster to draw for a council that
+  will not convene. `_pending_design_question` reads only the *newest* chair
+  run, so a stray card reply after a completed synthesis is not a resume. The
+  supervisor passes the answer as an explicit `clarification_answer` rather than
+  letting the adapter infer it from request text: the answer and an ordinary
+  cycle request are the same string.
+- `dbtl.council_model_name` sets the **default model for seats that do not name
+  one**. Inheriting the composer's model meant a meeting convened from an
+  expensive chat ran every unassigned seat on it — a model chosen to talk to,
+  not a budget for four workers. `_council_model` validates it against the
+  configured list and falls back with a warning rather than failing the meeting
+  on an operator typo. A seat's own model and the setup card's per-participant
+  override both still win.
+
+**Every round writes a slide deck.** `deerflow.dbtl.council_deck` is a pure
+renderer over the recorded chair result: agreements → contested →
+needs-your-decision → synthesis → limitations → next, the same
+disagreement-before-synthesis ordering as `review_markdown`. One self-contained
+HTML file (inline CSS/JS, no network, `@media print` page breaks) written by
+`_write_council_deck` beside the package as `design-slides-rev<N>-<hash>.html`
+(`review_paths.stage_file_name` gained the `slides` kind). It is a renderer
+rather than a worker prompt because a model asked to summarise a meeting can
+smooth a contested point into a bullet. It is **not** registered as a durable
+artifact and is listed *after* the review Markdown in `present_files`: an
+approval must bind to the reviewed document, and a deck listed first is the one
+a reader opens and reviews. `LiveStageResult.deck_uri` carries it; a paused
+meeting gets one too, presented ahead of the `ask_clarification` card, since the
+round that asks for a decision is the one that most needs its context on screen.
+Failure to render or write returns `None` and logs — the deck is a presentation
+of a record already committed, so it must never fail the turn.
+
 **A card's tool-call id must satisfy every provider it may be replayed to.**
 `supervisor.card_request_id` builds every card/present-files id as
 `<prefix><cycle-token>__<digest>` and caps it at `MAX_CARD_REQUEST_ID_CHARS`

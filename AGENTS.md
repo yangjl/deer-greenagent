@@ -211,6 +211,40 @@ Breeding-workspace note:
   Markdown) says "meeting"/"participants", while internal identifiers
   (`council_preflight`, `dbtl-council__`, `council_plan`, module names) keep
   the council vocabulary so the protocol and history stay stable.
+- **A meeting is convened when a person asks for one, and only then.** Three
+  rules in `deerflow.agents.dbtl.stage_execution` replace the old "any Design
+  request runs the whole council". (1) *Hold*: a Design stage stays
+  `in_progress` until someone submits it for review, so a package already on
+  the table and no `changes_requested` review means the next cycle-scoped
+  request convenes nobody and points at the review sheet instead;
+  `_wants_new_debate` is a deterministic phrase check ("run the meeting again")
+  that overrides it, and a `changes_requested` review still re-opens the debate
+  without being asked, because that verdict *is* the request to argue again.
+  (2) *Resume*: answering the chair's `needs_input` question dispatches the
+  chair alone (`_resumed_chair_unit`) over the positions already recorded, with
+  the question and the owner's words carried verbatim — re-running the full
+  council spent a second meeting's budget re-arguing what nobody questioned and
+  read to the owner as being ignored. The supervisor passes the answer as an
+  explicit `clarification_answer`, since the answer and an ordinary request are
+  the same string. (3) *Model*: `dbtl.council_model_name` sets the default model
+  for seats that do not name one; inheriting the composer's meant a meeting
+  convened from an expensive chat quietly ran four workers on that model. An
+  unconfigured name warns and falls back rather than failing the meeting.
+  Known limitation: a held Design answers any cycle-scoped message with the
+  same pointer, so ordinary questions about the design are not routed to the
+  lead agent.
+- **Every round ends with a slide deck.** `deerflow.dbtl.council_deck` renders
+  the recorded chair result as one self-contained HTML deck (inline CSS/JS, no
+  network, print-friendly) written beside the review package as
+  `design-slides-rev<N>-<hash>.html`. Slide order is agreements → contested →
+  needs-your-decision → synthesis, the same "disagreement before synthesis"
+  rule the review Markdown follows. It is a **renderer, not a worker**: it has
+  no sentence of its own, so it cannot smooth a contested point away. It is
+  deliberately not registered as a durable artifact and is presented *after*
+  the review Markdown in `present_files`, because an approval must bind to the
+  reviewed document and a deck listed first is the one a reader reviews. A
+  paused meeting gets a deck too, shown ahead of the `ask_clarification` card:
+  the round that asks for a decision is the one that most needs it.
 - The preflight card is also the meeting's setup form.
   `deerflow.dbtl.council_settings` renders one **editable participant card per
   seat** (`council_participants` on the artifact), prefilled with the roster

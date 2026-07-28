@@ -45,6 +45,17 @@ class DbtlConfig(BaseModel):
         ),
     )
 
+    council_model_name: str | None = Field(
+        default=None,
+        description=(
+            "Default model for design-meeting participants whose seat does not name one. "
+            "null keeps the previous behaviour, which is to inherit whatever model the composer is set to — "
+            "so a meeting convened from an expensive chat runs every unassigned seat on that expensive model. "
+            "Set this to the model a routine meeting should cost; a seat may still name a different one, "
+            "and the owner can override any seat on the meeting setup card."
+        ),
+    )
+
     @property
     def mutations_enabled(self) -> bool:
         return self.mode in {"manual", "graph_enabled"}
