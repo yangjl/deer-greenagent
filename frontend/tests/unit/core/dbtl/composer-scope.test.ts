@@ -488,3 +488,28 @@ describe("no scope menu: the assistant judges by default", () => {
     });
   });
 });
+
+describe("design authoring replies", () => {
+  it("returns the written design to the cycle that asked for it", () => {
+    const context = humanInputRunContext(
+      { source: "ask_clarification", clarification_type: "design_authoring" },
+      "cycle-9",
+    );
+
+    expect(context.dbtl_selected_cycle_id).toBe("cycle-9");
+    expect(context.dbtl_supervisor_enabled).toBe(true);
+  });
+
+  it("never carries a depth of its own", () => {
+    // The server stamped the depth on the card it emitted and reads it back
+    // from there. A client-supplied depth here would be a second, weaker
+    // source of truth for a decision that must not drift.
+    const context = humanInputRunContext(
+      { source: "ask_clarification", clarification_type: "design_authoring" },
+      "cycle-9",
+      "human_input",
+    );
+
+    expect(context.dbtl_council_depth).toBeUndefined();
+  });
+});

@@ -206,10 +206,24 @@ Breeding-workspace note:
   naming its agent, role (independent position, red team, chair), model, tools,
   and whether a generalist is standing in for a missing specialist. The first
   Design request of a cycle raises a `council_preflight` `ask_clarification`
-  card carrying that roster plus a light/medium/heavy depth choice; **no worker
-  is dispatched until a person answers it**. Depth sets how many independent
+  card carrying that roster plus a four-way depth choice; **no worker is
+  dispatched until a person answers it**. Depth sets how many independent
   positions are heard and what each may spend, and `medium` reproduces the
   pre-depth budget exactly; no depth can drop the red team or the chair.
+  `human_input` ("Write it myself") is the exception and a different kind of
+  setting: it seats nobody, and instead raises a `design_authoring` card whose
+  answer is recorded verbatim as the Design review package, with **zero** worker
+  runs and an explicit human attribution on the document — synthesizing a worker
+  entry would put a person's words behind an agent's name in the audit record.
+  Because it also produces an empty roster, callers must ask
+  `CouncilPlan.human_authored` **before** `dispatchable`: both are false here,
+  and the other one means the council cannot answer the question. Nothing
+  recommends this depth — declining to consult anyone is a statement about who
+  owns the answer, not a judgement a rule table should make. The authoring card
+  carries its own `council_depth` and the supervisor reads it back from the card
+  the server emitted, because the client sends a scope with every request and
+  falls back to `ordinary` for a card it does not special-case; without that the
+  answer turn would convene the council the owner just declined.
   `recommend_depth` suggests one from named phrases in the request rather than
   a model's opinion, and stakes beat brevity. The confirmed depth travels in
   the request's own context (`dbtl_council_depth`, next-request-only like the

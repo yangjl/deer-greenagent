@@ -91,8 +91,16 @@ ROLE_BRIEFS: Mapping[CouncilRole, str] = MappingProxyType(
 
 
 class CouncilDepth(StrEnum):
-    """How much debate the question is worth."""
+    """How much debate the question is worth.
 
+    ``HUMAN_INPUT`` is not simply the smallest of these. The other three are
+    judgements about how much scrutiny a question deserves; this one says the
+    person already holds the answer and wants it recorded rather than argued.
+    That is why it is the only depth that seats nobody, and why nothing
+    recommends it.
+    """
+
+    HUMAN_INPUT = "human_input"
     LIGHT = "light"
     MEDIUM = "medium"
     HEAVY = "heavy"
@@ -133,6 +141,17 @@ class DepthPolicy:
 #: default behaves exactly as it did.
 DEPTH_POLICIES: Mapping[CouncilDepth, DepthPolicy] = MappingProxyType(
     {
+        CouncilDepth.HUMAN_INPUT: DepthPolicy(
+            depth=CouncilDepth.HUMAN_INPUT,
+            label="Write it myself",
+            description="No agent is consulted. You write the design and it is recorded for review exactly as you wrote it. For a design you have already settled, or one only you can make.",
+            max_positions=0,
+            # Carried for shape only; nothing is dispatched at this depth. The
+            # values stay legal because ``WorkerBudget`` refuses non-positive
+            # limits, and a budget nobody spends is better left obviously small
+            # than set to something a reader might mistake for an allowance.
+            budget=WorkerBudget(max_workers=1, max_turns=1, max_tokens=1, timeout_seconds=1),
+        ),
         CouncilDepth.LIGHT: DepthPolicy(
             depth=CouncilDepth.LIGHT,
             label="Light debate",
@@ -274,6 +293,18 @@ class CouncilPlan:
         return bool(self.seats) and not self.unmet_capabilities
 
     @property
+    def human_authored(self) -> bool:
+        """Whether the empty roster is a choice rather than a failure.
+
+        ``dispatchable`` is false for both an unmet capability and the
+        Human Input depth, and they mean opposite things: one is "this council
+        cannot answer the question", the other is "the person is answering it".
+        Rendering the first message for the second would tell someone their
+        deliberate choice had gone wrong, so callers must ask this **first**.
+        """
+        return self.depth is CouncilDepth.HUMAN_INPUT
+
+    @property
     def position_count(self) -> int:
         return sum(1 for seat in self.seats if seat.role is CouncilRole.POSITION)
 
@@ -315,6 +346,11 @@ class CouncilPlan:
         if depth is self.depth:
             return self
         policy = depth_policy(depth)
+        if depth is CouncilDepth.HUMAN_INPUT:
+            # Not a trim. The red team and chair are preserved explicitly at
+            # every other depth, and keeping them here would dispatch two
+            # workers for the one setting whose whole point is that none run.
+            return replace(self, depth=depth, seats=(), budget=policy.budget)
         positions = tuple(seat for seat in self.seats if seat.role is CouncilRole.POSITION)
         others = tuple(seat for seat in self.seats if seat.role is not CouncilRole.POSITION)
         return replace(
@@ -330,6 +366,7 @@ class CouncilPlan:
             "depth": self.depth.value,
             "depth_label": depth_policy(self.depth).label,
             "dispatchable": self.dispatchable,
+            "human_authored": self.human_authored,
             "position_count": self.position_count,
             "seats": [seat.as_dict() for seat in self.seats],
             "budget": {
@@ -362,13 +399,26 @@ def plan_council(
     depth = CouncilDepth(depth)
     policy = depth_policy(depth)
     tools_map = {str(name): tuple(str(tool) for tool in tools) for name, tools in (tools_by_agent or {}).items()}
+    known = tuple(dict.fromkeys(item.name for item in candidates if item.available))
+
+    if depth is CouncilDepth.HUMAN_INPUT:
+        # Selection is skipped entirely rather than run and discarded. Running
+        # it would let an unmet capability populate ``unmet_capabilities`` on a
+        # plan that was never going to dispatch, and the preflight card would
+        # then warn someone about a shortfall that cannot affect them.
+        return CouncilPlan(
+            stage_spec_key=spec.spec_key,
+            depth=depth,
+            seats=(),
+            budget=policy.budget,
+            known_agents=known,
+        )
 
     # Selection reads its worker ceiling off the spec, so give it a spec whose
     # budget is the one this depth actually grants.
     scoped = replace(spec, budget=policy.budget)
     selection: SelectionResult = select_agents(scoped, candidates)
 
-    known = tuple(dict.fromkeys(item.name for item in candidates if item.available))
     if not selection.satisfied:
         return CouncilPlan(
             stage_spec_key=spec.spec_key,

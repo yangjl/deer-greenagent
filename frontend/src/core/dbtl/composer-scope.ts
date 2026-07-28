@@ -271,8 +271,15 @@ export function humanInputRunContext(
         ...(depth ? { dbtl_council_depth: depth } : {}),
       };
     }
-    // A design question belongs to the cycle whose council raised it.
-    if (request.clarification_type === "design_decision") {
+    // A design question belongs to the cycle whose council raised it, and so
+    // does a design the owner wrote in place of one. Notably the authoring
+    // reply carries no depth: the server put it on the card it emitted and
+    // reads it back from there, so a client that has forgotten the choice
+    // cannot accidentally convene the council the owner declined.
+    if (
+      request.clarification_type === "design_decision" ||
+      request.clarification_type === "design_authoring"
+    ) {
       return selectedCycleId
         ? runContextPayload({ kind: "cycle", cycleId: selectedCycleId })
         : runContextPayload(ORDINARY_REQUEST_CONTEXT);

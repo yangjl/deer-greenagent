@@ -28,7 +28,7 @@ from deerflow.agents.middlewares.finalization_deadline_middleware import (
     FinalizationDeadlineMiddleware,
 )
 from deerflow.authz.principal import normalize_authz_attributes
-from deerflow.dbtl.agent_selector import AgentCandidate, build_candidates
+from deerflow.dbtl.agent_selector import AgentCandidate, SelectionResult, build_candidates
 from deerflow.dbtl.council import (
     CouncilPlan,
     council_depth_from_config,
@@ -70,6 +70,11 @@ class LiveStageResult:
     produced_usable_evidence: bool = False
     artifact_uri: str | None = None
     clarification_question: str | None = None
+    #: The council is set to Human Input and is waiting for the person to write
+    #: the design. Distinct from ``clarification_question``, which means a
+    #: council ran and hit a decision only its owner can make — here no council
+    #: ran, and the supervisor raises a different card for it.
+    authoring_request: str | None = None
 
     @property
     def satisfies_gate(self) -> bool:
@@ -141,6 +146,9 @@ def _model_call_budget(max_turns: int) -> int:
 
 _FAILURE_REASON_CHARS = 300
 _MAX_FAILURE_REASONS = 6
+
+_HUMAN_AUTHORING_QUESTION = "Write the design for this cycle. What is the question, what will you measure, on what population and over what seasons, and what result would make you reject it?"
+_HUMAN_AUTHORING_NOTE = "This council is set to **Write it myself**, so no agent was consulted and no worker ran. Your answer is recorded as the Design review package exactly as you write it; you still review and approve it yourself."
 
 
 def _failure_reasons(results: Sequence[dict[str, Any]]) -> list[str]:
@@ -356,6 +364,7 @@ def _write_stage_package(
     outcome: StageExecutionOutcome,
     idempotency_key: str,
     council: CouncilPlan | None = None,
+    authored_design: str | None = None,
 ) -> tuple[str, str, str]:
     """Write the review package and return the URI/hash of the reviewed document.
 
@@ -384,6 +393,13 @@ def _write_stage_package(
         # Without it the budget a reviewer reconstructs from `stage_spec_key`
         # would not be the budget the workers actually had.
         payload["council"] = council.as_dict()
+    if authored_design:
+        # Kept as its own key rather than folded into ``results``: a synthetic
+        # worker entry would put a person's words behind an agent's name in the
+        # audit record, which is the one thing the roster work exists to make
+        # impossible.
+        payload["authored_design"] = authored_design
+        payload["authored_by"] = "human"
     encoded = (json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     data_hash = hashlib.sha256(encoded).hexdigest()
 
@@ -744,6 +760,68 @@ class LiveStageAdapter:
 
         return await asyncio.gather(*(run_one(unit) for unit in units))
 
+    async def _record_human_authored_design(
+        self,
+        *,
+        spec,
+        cycle: dict[str, Any],
+        council: CouncilPlan,
+        authored_design: str | None,
+        project_root: str,
+        project_id: str,
+        cycle_id: str,
+        user_id: str,
+        execution_key: str,
+    ) -> LiveStageResult:
+        """Record a design the person wrote, or ask them to write it.
+
+        No worker runs, no synthetic result, no agent attribution. The package
+        is still a package — same path, same content addressing, same refusal to
+        satisfy the gate — because the reviewer's job does not change just
+        because the author was human.
+        """
+        text = (authored_design or "").strip()
+        if not text:
+            return LiveStageResult(
+                stage=spec.stage,
+                cycle_id=cycle_id,
+                note=_HUMAN_AUTHORING_NOTE,
+                authoring_request=_HUMAN_AUTHORING_QUESTION,
+            )
+
+        empty_outcome = StageExecutionOutcome(
+            plan=StageExecutionPlan(spec=spec, selection=SelectionResult(), units=()),
+        )
+        artifact_uri, artifact_hash, digest = _write_stage_package(
+            project_root=project_root,
+            cycle=cycle,
+            outcome=empty_outcome,
+            idempotency_key=execution_key,
+            council=council,
+            authored_design=text,
+        )
+        await self._repo.record_worker_runs(
+            cycle_id=cycle_id,
+            project_id=project_id,
+            stage=spec.stage,
+            stage_spec_key=spec.spec_key,
+            results=[],
+            actor_user_id=user_id,
+            expected_db_revision=int(cycle["db_revision"]),
+            idempotency_key=execution_key,
+            artifact_type="design_brief",
+            artifact_uri=artifact_uri,
+            artifact_content_hash=artifact_hash,
+        )
+        return LiveStageResult(
+            stage=spec.stage,
+            cycle_id=cycle_id,
+            note=digest,
+            worker_count=0,
+            produced_usable_evidence=True,
+            artifact_uri=artifact_uri,
+        )
+
     async def execute(
         self,
         *,
@@ -752,6 +830,7 @@ class LiveStageAdapter:
         request_text: str,
         state: dict[str, Any],
         config: RunnableConfig,
+        authored_design: str | None = None,
     ) -> LiveStageResult:
         if not project_id or not cycle_id:
             return LiveStageResult(
@@ -921,6 +1000,21 @@ class LiveStageAdapter:
             # dispatched one the same computation: selection reads its worker
             # ceiling off the spec, and so does the dispatch budget.
             spec = replace(spec, budget=council_plan.budget)
+            if council_plan.human_authored:
+                # Asked *before* ``dispatchable``, which is false here for a
+                # completely different reason. Reaching the fan-out at this depth
+                # would convene the council the person just declined.
+                return await self._record_human_authored_design(
+                    spec=spec,
+                    cycle=cycle,
+                    council=council_plan,
+                    authored_design=authored_design,
+                    project_root=project_root,
+                    project_id=project_id,
+                    cycle_id=cycle_id,
+                    user_id=str(user_id),
+                    execution_key=execution_key,
+                )
         dispatcher = self._dispatcher or self._production_dispatcher(
             config=config,
             state=state,

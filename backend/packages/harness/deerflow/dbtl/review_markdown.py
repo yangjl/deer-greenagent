@@ -141,6 +141,21 @@ def render_review_markdown(
             "> This package **does not satisfy** the review gate. A person must read it and decide; nothing here advances the cycle on its own.",
         ]
 
+    authored = str(payload.get("authored_design") or "").strip()
+    if authored:
+        # Said before the text, not after it. A reader who scrolls into an
+        # unattributed design in a file called "review package" will assume a
+        # council wrote it, and the empty worker table further down is far too
+        # weak a signal to correct that.
+        lines += [
+            "",
+            "## Design",
+            "",
+            "This design was **written by the project owner**, not produced by a council. No agent was consulted and no worker ran for this attempt.",
+            "",
+            authored,
+        ]
+
     results = [r for r in _as_list(payload.get("results")) if isinstance(r, Mapping)]
     rejected = [str(item).strip() for item in _as_list(payload.get("rejected")) if str(item).strip()]
 

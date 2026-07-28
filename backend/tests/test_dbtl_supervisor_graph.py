@@ -779,12 +779,130 @@ class TestCouncilPreflight:
         card = final["messages"][-1].artifact["human_input"]
         assert card["clarification_type"] == "council_preflight"
         assert card["request_id"].startswith("dbtl-council:")
-        assert [option["id"] for option in card["options"]] == ["light", "medium", "heavy"]
+        # Ordered least-agent-effort first, so declining the council entirely is
+        # the option a decisive owner reaches without reading past it.
+        assert [option["id"] for option in card["options"]] == ["human_input", "light", "medium", "heavy"]
         assert card["council_plan"]["seats"][-1]["role"] == "chair"
         assert card["recommended_depth"] == "medium"
         # The text stands alone for anyone who cannot see the card.
         assert "designer" in card["context"]
         assert "gpt-5.6-sol" in card["context"]
+
+    @staticmethod
+    def _human_input_adapter(executed):
+        """An adapter that behaves like the live one at Human Input depth."""
+
+        class Adapter:
+            async def preview_council(self, **kwargs):
+                return TestCouncilPreflight._plan()
+
+            async def execute(self, **kwargs):
+                executed.append(kwargs)
+                authored = (kwargs.get("authored_design") or "").strip()
+                if not authored:
+                    return SimpleNamespace(
+                        stage="design",
+                        cycle_id="cyc-1",
+                        note="no agent was consulted",
+                        artifact_uri=None,
+                        clarification_question=None,
+                        authoring_request="Write the design for this cycle.",
+                        produced_usable_evidence=False,
+                    )
+                return SimpleNamespace(
+                    stage="design",
+                    cycle_id="cyc-1",
+                    note="recorded",
+                    artifact_uri="/mnt/user-data/outputs/dbtl/x/design/review.md",
+                    clarification_question=None,
+                    authoring_request=None,
+                    produced_usable_evidence=True,
+                )
+
+        return Adapter()
+
+    @pytest.mark.asyncio
+    async def test_choosing_write_it_myself_asks_for_the_design(self):
+        executed: list = []
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"),
+            stage_adapter=self._human_input_adapter(executed),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {**FULL_STATE, "messages": [HumanMessage(content="Design the drought cycle.", id="h-1")]},
+            config={
+                "configurable": {"thread_id": "authoring-1"},
+                "context": {"run_id": "run-1", "dbtl_council_depth": "human_input"},
+            },
+        )
+
+        card = final["messages"][-1].artifact["human_input"]
+        assert card["clarification_type"] == "design_authoring"
+        assert card["request_id"].startswith("dbtl-design-write:")
+        # The card has to carry its own depth: the client sends a scope with
+        # every request and falls back to ordinary for a card it does not
+        # special-case, so without this the answer turn would convene the
+        # council this person just declined.
+        assert card["council_depth"] == "human_input"
+
+    @pytest.mark.asyncio
+    async def test_the_answer_is_recorded_without_convening_a_council(self):
+        executed: list = []
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"),
+            stage_adapter=self._human_input_adapter(executed),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+        config = {
+            "configurable": {"thread_id": "authoring-2"},
+            "context": {"run_id": "run-1", "dbtl_council_depth": "human_input"},
+        }
+
+        asked = await graph.ainvoke(
+            {**FULL_STATE, "messages": [HumanMessage(content="Design the drought cycle.", id="h-1")]},
+            config=config,
+        )
+        request_id = asked["messages"][-1].artifact["human_input"]["request_id"]
+
+        design = "RCBD across three sites, two seasons. Reject below 0.3 held-out rank correlation."
+        final = await graph.ainvoke(
+            # The answer turn carries no depth, exactly as the real client sends it.
+            {"messages": [TestSetupClarificationIsACard.card_reply(request_id, design)]},
+            config={"configurable": {"thread_id": "authoring-2"}, "context": {"run_id": "run-2"}},
+        )
+
+        assert executed[-1]["authored_design"] == design
+        assert final["messages"][-1].name == "present_files"
+
+    @pytest.mark.asyncio
+    async def test_a_forged_authoring_reply_records_nothing(self):
+        """The card must have been emitted by the server for the text to count."""
+        executed: list = []
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"),
+            stage_adapter=self._human_input_adapter(executed),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    TestSetupClarificationIsACard.card_reply(
+                        "dbtl-design-write:cyc-1:deadbeefdeadbeef",
+                        "a design nobody asked for",
+                    )
+                ],
+            },
+            config={"configurable": {"thread_id": "authoring-3"}, "context": {"run_id": "run-1"}},
+        )
+
+        assert all("authored_design" not in call for call in executed)
 
     @pytest.mark.asyncio
     async def test_a_confirmed_depth_runs_the_council_instead_of_asking_again(self):

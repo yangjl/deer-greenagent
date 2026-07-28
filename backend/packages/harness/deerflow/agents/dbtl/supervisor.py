@@ -56,6 +56,7 @@ from deerflow.dbtl.branches import (
     resolve_branch,
 )
 from deerflow.dbtl.council import (
+    COUNCIL_DEPTH_CONTEXT_KEY,
     CouncilDepth,
     council_depth_from_config,
     depth_policy,
@@ -87,6 +88,10 @@ EXPLICIT_CHOICE_CONTEXT_KEY = "dbtl_explicit_choice"
 SETUP_CLARIFICATION_PREFIX = "dbtl-setup:"
 SETUP_CONFIRMATION_PREFIX = "dbtl-setup-confirm:"
 DESIGN_CLARIFICATION_PREFIX = "dbtl-design:"
+# Distinct from the clarification prefix because the two answers do opposite
+# things: a clarification answer feeds a council that already ran, this one
+# *is* the design, submitted where no council ran at all.
+DESIGN_AUTHORING_PREFIX = "dbtl-design-write:"
 
 _REVIEW_INTENT_RE = re.compile(
     r"""
@@ -650,6 +655,94 @@ def _design_clarification_message(
     )
 
 
+def _design_authoring_message(
+    decision: BranchDecision,
+    *,
+    note: str,
+    question: str,
+    request_nonce: str,
+) -> tuple[AIMessage, ToolMessage]:
+    """Ask the person to write the design, at the depth where nobody else will.
+
+    The card carries its own depth. The client sends a scope with every request
+    and falls back to ``ordinary`` for a card it has no special handling for, so
+    a reply that carried only the cycle would land back here with no depth, be
+    re-planned at the recommended setting, and convene the council the person
+    explicitly declined. Reading the depth off the card the *server* emitted
+    keeps that decision server-owned, the same rule ``_routing_input`` follows
+    for a recovered setup intent.
+    """
+    cycle = decision.cycle_id or "selected-cycle"
+    digest = sha256(f"{cycle}:{request_nonce}".encode()).hexdigest()[:16]
+    request_id = f"{DESIGN_AUTHORING_PREFIX}{cycle}:{digest}"
+    tool_call = {
+        "name": "ask_clarification",
+        "args": {
+            "question": question,
+            "context": note,
+            "clarification_type": "design_authoring",
+        },
+        "id": request_id,
+        "type": "tool_call",
+    }
+    return (
+        AIMessage(id=f"{request_id}:call", content="", tool_calls=[tool_call]),
+        ToolMessage(
+            id=request_id,
+            name="ask_clarification",
+            tool_call_id=request_id,
+            content=f"{note}\n\n{question}",
+            artifact={
+                "human_input": {
+                    "version": 1,
+                    "kind": "human_input_request",
+                    "source": "ask_clarification",
+                    "request_id": request_id,
+                    "clarification_type": "design_authoring",
+                    "title": "Write the design yourself",
+                    "question": question,
+                    "context": note,
+                    "input_mode": "free_text",
+                    "council_depth": CouncilDepth.HUMAN_INPUT.value,
+                }
+            },
+        ),
+    )
+
+
+def _authored_design(state: dict) -> str | None:
+    """The design text, only when the server itself asked for it.
+
+    Resolved from the emitted card rather than from the reply, so a forged
+    ``request_id`` matches nothing and the text is ignored instead of being
+    recorded as a Design package nobody was asked for.
+    """
+    answered = _card_answer(state, DESIGN_AUTHORING_PREFIX)
+    if answered is None:
+        return None
+    request_id, value = answered
+    request = _emitted_card_request(state, request_id)
+    if request is None or request.get("council_depth") != CouncilDepth.HUMAN_INPUT.value:
+        return None
+    return value
+
+
+def _with_council_depth(config: RunnableConfig, depth: CouncilDepth) -> RunnableConfig:
+    """A per-request view carrying a depth the server recovered.
+
+    Written into the request ``context`` and nowhere else. ``configurable`` is
+    checkpointed, so a depth placed there would keep steering every later turn
+    in the thread instead of the one it was recovered for.
+    """
+    merged = dict(config)
+    context = merged.get("context")
+    merged["context"] = {
+        **(context if isinstance(context, dict) else {}),
+        COUNCIL_DEPTH_CONTEXT_KEY: depth.value,
+    }
+    return merged
+
+
 def _present_artifact_messages(
     decision: BranchDecision,
     *,
@@ -838,7 +931,14 @@ def build_supervisor_graph(
                 ]
             }
         raw_context = request_context(config)
-        if council_depth_from_config(config) is None and not _has_emitted_card(state, COUNCIL_PREFLIGHT_PREFIX):
+        # Recovered before the preflight check, and it re-supplies the depth the
+        # client cannot: without it this answer would look like an ordinary
+        # cycle request with no depth set, and the council the person declined
+        # would convene on the very turn they submitted their own design.
+        authored_design = _authored_design(state)
+        if authored_design is not None:
+            config = _with_council_depth(config, CouncilDepth.HUMAN_INPUT)
+        if authored_design is None and council_depth_from_config(config) is None and not _has_emitted_card(state, COUNCIL_PREFLIGHT_PREFIX):
             preview = getattr(stage_adapter, "preview_council", None)
             plan = None
             if callable(preview):
@@ -861,15 +961,30 @@ def build_supervisor_graph(
                         )
                     )
                 }
-        result = stage_adapter.execute(
-            project_id=context.project_id,
-            cycle_id=decision.cycle_id,
-            request_text=request_text,
-            state=state,
-            config=config,
-        )
+        execute_kwargs = {
+            "project_id": context.project_id,
+            "cycle_id": decision.cycle_id,
+            "request_text": request_text,
+            "state": state,
+            "config": config,
+        }
+        if authored_design is not None:
+            execute_kwargs["authored_design"] = authored_design
+        result = stage_adapter.execute(**execute_kwargs)
         if isawaitable(result):
             result = await result
+        authoring_request = getattr(result, "authoring_request", None)
+        if isinstance(authoring_request, str) and authoring_request:
+            return {
+                "messages": list(
+                    _design_authoring_message(
+                        decision,
+                        note=result.note,
+                        question=authoring_request,
+                        request_nonce=str(raw_context.get("run_id") or ""),
+                    )
+                )
+            }
         clarification_question = getattr(result, "clarification_question", None)
         if isinstance(clarification_question, str) and clarification_question:
             raw_context = request_context(config)
