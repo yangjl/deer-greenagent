@@ -960,6 +960,25 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return False
 
     @staticmethod
+    def _lark_broker_active(user_id: str | None = None) -> bool:
+        """Whether this user's sandbox should use the lark-cli broker (Pattern B).
+
+        True only when the Lark pack is installed AND the remote provisioner
+        reports a configured broker image. When true, the provisioner keeps the
+        credentials in a sidecar and the sandbox gets only a shim, so the
+        Gateway-side credential-mount overlay must not run either.
+        """
+        try:
+            if not AioSandboxProvider._lark_integration_active(user_id):
+                return False
+            from deerflow.integrations.lark_cli import sandbox_lark_broker_active
+
+            return sandbox_lark_broker_active()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning(f"Could not determine Lark broker state: {e}")
+            return False
+
+    @staticmethod
     def _get_lark_cli_runtime_mounts(*, user_id: str | None = None) -> list[tuple[str, str, bool]]:
         """Mount the per-user lark-cli config/data dirs used by Settings auth.
 
@@ -1970,6 +1989,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         effective_user_id = self._effective_acquire_user_id(user_id)
         extra_mounts = self._get_extra_mounts(thread_id, user_id=effective_user_id)
         provision_lark_cli_runtime = self._lark_integration_active(effective_user_id)
+        provision_lark_cli_broker = self._lark_broker_active(effective_user_id)
 
         # Enforce replicas: only warm-pool containers count toward eviction budget.
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
@@ -1984,6 +2004,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             extra_mounts=extra_mounts or None,
             user_id=effective_user_id,
             provision_lark_cli_runtime=provision_lark_cli_runtime,
+            provision_lark_cli_broker=provision_lark_cli_broker,
         )
 
         # Wait for sandbox to be ready
@@ -2002,6 +2023,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         effective_user_id = self._effective_acquire_user_id(user_id)
         extra_mounts = await asyncio.to_thread(self._get_extra_mounts, thread_id, user_id=effective_user_id)
         provision_lark_cli_runtime = await asyncio.to_thread(self._lark_integration_active, effective_user_id)
+        provision_lark_cli_broker = await asyncio.to_thread(self._lark_broker_active, effective_user_id)
 
         # Enforce replicas: only warm-pool containers count toward eviction budget.
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
@@ -2017,6 +2039,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             extra_mounts=extra_mounts or None,
             user_id=effective_user_id,
             provision_lark_cli_runtime=provision_lark_cli_runtime,
+            provision_lark_cli_broker=provision_lark_cli_broker,
         )
 
         # Wait for sandbox to be ready without blocking the event loop.
