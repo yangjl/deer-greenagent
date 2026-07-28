@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0020_webhook_dedupe"
+HEAD = "0021_run_cancel_request"
 
 
 def _url(tmp_path: Path) -> str:
