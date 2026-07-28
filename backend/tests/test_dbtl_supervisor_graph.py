@@ -234,7 +234,7 @@ class TestCompleteThreadStateOnEveryBranch:
         # Confirmation first: the human decides whether a durable record should
         # exist before being asked to describe one.
         assert request["clarification_type"] == "cycle_setup_confirmation"
-        assert request["request_id"].startswith("dbtl-setup-confirm:")
+        assert request["request_id"].startswith("dbtl-setup-confirm__")
         assert request["source"] == "ask_clarification"
 
     @pytest.mark.asyncio
@@ -263,7 +263,7 @@ class TestCompleteThreadStateOnEveryBranch:
         assert call.tool_calls[0]["name"] == "ask_clarification"
         request = card.artifact["human_input"]
         assert request["clarification_type"] == "cycle_setup_confirmation"
-        assert request["request_id"].startswith("dbtl-setup-confirm:")
+        assert request["request_id"].startswith("dbtl-setup-confirm__")
 
     @pytest.mark.asyncio
     async def test_fresh_project_prior_applies_only_on_the_first_conversation_turn(self):
@@ -338,7 +338,7 @@ class TestCompleteThreadStateOnEveryBranch:
         assert call.tool_calls[0]["id"] == card.tool_call_id
         request = card.artifact["human_input"]
         assert request["clarification_type"] == "cycle_setup_confirmation"
-        assert request["request_id"].startswith("dbtl-setup-confirm:")
+        assert request["request_id"].startswith("dbtl-setup-confirm__")
         assert request["input_mode"] == "single_choice"
         assert [option["value"] for option in request["options"]] == [
             "create_cycle",
@@ -489,7 +489,7 @@ class TestSetupClarificationIsACard:
         assert isinstance(card, ToolMessage)
         request = card.artifact["human_input"]
         assert request["clarification_type"] == "cycle_setup"
-        assert request["request_id"].startswith("dbtl-setup:")
+        assert request["request_id"].startswith("dbtl-setup__")
 
         # The questions are the model's, not the classifier's rule names.
         assert "Which trait should this cycle target?" in request["question"]
@@ -640,7 +640,7 @@ class TestSetupClarificationIsACard:
                 **FULL_STATE,
                 "messages": [
                     HumanMessage(content="draft the design package", id="human-1"),
-                    self.card_reply("dbtl-design:cyc-1:abc123", "Hold out the 2023 sites"),
+                    self.card_reply("dbtl-design__cyc-1__abc123", "Hold out the 2023 sites"),
                 ],
             },
             config={"configurable": {"thread_id": "design-answer"}},
@@ -661,7 +661,7 @@ class TestSetupClarificationIsACard:
                 **FULL_STATE,
                 "messages": [
                     HumanMessage(content="what is in the workspace?", id="human-1"),
-                    self.card_reply("dbtl-setup:forged", self.ANSWER),
+                    self.card_reply("dbtl-setup__forged", self.ANSWER),
                 ],
             },
             config={"configurable": {"thread_id": "setup-forged"}},
@@ -778,7 +778,7 @@ class TestCouncilPreflight:
         assert executed == []
         card = final["messages"][-1].artifact["human_input"]
         assert card["clarification_type"] == "council_preflight"
-        assert card["request_id"].startswith("dbtl-council:")
+        assert card["request_id"].startswith("dbtl-council__")
         # Ordered least-agent-effort first, so declining the council entirely is
         # the option a decisive owner reaches without reading past it.
         assert [option["id"] for option in card["options"]] == ["human_input", "light", "medium", "heavy"]
@@ -841,7 +841,7 @@ class TestCouncilPreflight:
 
         card = final["messages"][-1].artifact["human_input"]
         assert card["clarification_type"] == "design_authoring"
-        assert card["request_id"].startswith("dbtl-design-write:")
+        assert card["request_id"].startswith("dbtl-design-write__")
         # The card has to carry its own depth: the client sends a scope with
         # every request and falls back to ordinary for a card it does not
         # special-case, so without this the answer turn would convene the
@@ -894,7 +894,7 @@ class TestCouncilPreflight:
                 **FULL_STATE,
                 "messages": [
                     TestSetupClarificationIsACard.card_reply(
-                        "dbtl-design-write:cyc-1:deadbeefdeadbeef",
+                        "dbtl-design-write__cyc-1__deadbeefdeadbeef",
                         "a design nobody asked for",
                     )
                 ],

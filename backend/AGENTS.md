@@ -1661,8 +1661,8 @@ approved. The structured questions also ride on the card artifact as
 **Setup and Design interactions use DeerFlow's native Human Input Card, and a
 card is only half the feature.** Setup clarification, setup confirmation, and
 the Design council's `needs_input` all use the existing `ask_clarification`
-AI-tool / ToolMessage pair. Their request-id prefixes are `dbtl-setup:`,
-`dbtl-setup-confirm:`, and `dbtl-design:` because they resume differently: a
+AI-tool / ToolMessage pair. Their request-id prefixes are `dbtl-setup__`,
+`dbtl-setup-confirm__`, and `dbtl-design__` because they resume differently: a
 design answer feeds a running stage, a setup answer re-routes a request that has
 started nothing, and a confirmation answer either opens the design questions
 (approval) or receives a deterministic no-write acknowledgement, while the

@@ -85,13 +85,26 @@ EXPLICIT_CHOICE_CONTEXT_KEY = "dbtl_explicit_choice"
 # what a resuming turn matches on, so the two must stay distinguishable: a
 # Design-council answer feeds a running stage, a setup answer re-routes a
 # request that has not started anything yet.
-SETUP_CLARIFICATION_PREFIX = "dbtl-setup:"
-SETUP_CONFIRMATION_PREFIX = "dbtl-setup-confirm:"
-DESIGN_CLARIFICATION_PREFIX = "dbtl-design:"
+# The separator is ``__`` rather than ``:`` because these strings become
+# ``tool_use.id`` values, and Anthropic validates those against
+# ``^[a-zA-Z0-9_-]+$``. A colon is accepted locally and written to the
+# checkpoint, then rejects *every later turn in the thread* when the history is
+# replayed — one turn after the card, on an unrelated request, naming message 0.
+#
+# ``__`` also keeps the set collision-free under ``startswith``: the pairs that
+# share a stem (``dbtl-setup`` / ``dbtl-setup-confirm``, ``dbtl-design`` /
+# ``dbtl-design-write``) diverge at ``_`` versus ``-``, so a reply to the longer
+# card cannot be consumed by the branch waiting on the shorter one.
+SETUP_CLARIFICATION_PREFIX = "dbtl-setup__"
+SETUP_CONFIRMATION_PREFIX = "dbtl-setup-confirm__"
+DESIGN_CLARIFICATION_PREFIX = "dbtl-design__"
 # Distinct from the clarification prefix because the two answers do opposite
 # things: a clarification answer feeds a council that already ran, this one
 # *is* the design, submitted where no council ran at all.
-DESIGN_AUTHORING_PREFIX = "dbtl-design-write:"
+DESIGN_AUTHORING_PREFIX = "dbtl-design-write__"
+# Not a card: the id of the ``present_files`` pair that delivers a finished
+# package. Same provider constraint, same failure mode.
+PRESENT_ARTIFACT_PREFIX = "dbtl-present__"
 
 _REVIEW_INTENT_RE = re.compile(
     r"""
@@ -521,7 +534,7 @@ def _render_continuation(decision: BranchDecision, note: str) -> str:
     return f"This request is scoped to {cycle}.\n\n{note}\n\nThis run cannot satisfy a review gate. Design and Data reconciliation advance only through the project's human review records."
 
 
-COUNCIL_PREFLIGHT_PREFIX = "dbtl-council:"
+COUNCIL_PREFLIGHT_PREFIX = "dbtl-council__"
 
 
 def _render_council_roster(plan) -> str:
@@ -554,7 +567,7 @@ def _council_preflight_message(
     """
     cycle = decision.cycle_id or "selected-cycle"
     digest = sha256(f"{cycle}:{request_nonce}".encode()).hexdigest()[:16]
-    request_id = f"{COUNCIL_PREFLIGHT_PREFIX}{cycle}:{digest}"
+    request_id = f"{COUNCIL_PREFLIGHT_PREFIX}{cycle}__{digest}"
     note = _render_council_roster(plan)
     question = f"How much debate should this design get? {recommendation.reason}"
     options = [
@@ -616,7 +629,7 @@ def _design_clarification_message(
 ) -> tuple[AIMessage, ToolMessage]:
     cycle = decision.cycle_id or "selected-cycle"
     digest = sha256(f"{cycle}:{request_nonce}:{question}".encode()).hexdigest()[:16]
-    request_id = f"dbtl-design:{cycle}:{digest}"
+    request_id = f"{DESIGN_CLARIFICATION_PREFIX}{cycle}__{digest}"
     tool_call = {
         "name": "ask_clarification",
         "args": {
@@ -674,7 +687,7 @@ def _design_authoring_message(
     """
     cycle = decision.cycle_id or "selected-cycle"
     digest = sha256(f"{cycle}:{request_nonce}".encode()).hexdigest()[:16]
-    request_id = f"{DESIGN_AUTHORING_PREFIX}{cycle}:{digest}"
+    request_id = f"{DESIGN_AUTHORING_PREFIX}{cycle}__{digest}"
     tool_call = {
         "name": "ask_clarification",
         "args": {
@@ -753,7 +766,7 @@ def _present_artifact_messages(
     """Use the same present-files turn shape as the lead agent."""
     cycle = decision.cycle_id or "selected-cycle"
     digest = sha256(f"{cycle}:{request_nonce}:{artifact_uri}".encode()).hexdigest()[:16]
-    tool_call_id = f"dbtl-present:{cycle}:{digest}"
+    tool_call_id = f"{PRESENT_ARTIFACT_PREFIX}{cycle}__{digest}"
     tool_call = {
         "name": "present_files",
         "args": {"filepaths": [artifact_uri]},
