@@ -373,6 +373,13 @@ async def file_thread_into_requested_project(
         if project is None:
             logger.warning("Ignoring request to file thread %s into unreachable project %s", sanitize_log_param(thread_id), sanitize_log_param(requested))
             return
+        # ``set_conversation_scope`` no-ops on a missing threads_meta row, and
+        # generic row creation now happens inside the attached run worker —
+        # after this filing runs. A brand-new conversation being filed on its
+        # first run therefore needs its row created here (pre-admission, so a
+        # slow store delays only the HTTP request, never a pending cancel).
+        if await thread_store.get(thread_id, user_id=owner_user_id) is None:
+            await thread_store.create(thread_id, user_id=owner_user_id)
         await thread_store.set_conversation_scope(
             thread_id,
             workspace_id=project.get("workspace_id"),

@@ -189,6 +189,17 @@ class _WorkspaceRepo:
 class _FilingStore:
     def __init__(self) -> None:
         self.filed: list[tuple[str, str | None, str | None, str | None]] = []
+        self.created: list[tuple[str, str | None]] = []
+
+    async def get(self, thread_id, user_id=None):
+        return None
+
+    async def create(self, thread_id, *, user_id=None, **_kwargs):
+        # Filing a brand-new conversation creates its threads_meta row first:
+        # generic row creation moved into the attached run worker, which runs
+        # after filing, and set_conversation_scope no-ops on a missing row.
+        self.created.append((thread_id, user_id))
+        return {"thread_id": thread_id, "user_id": user_id}
 
     async def set_conversation_scope(self, thread_id, *, workspace_id, project_id, user_id=None):
         self.filed.append((thread_id, workspace_id, project_id, user_id))
