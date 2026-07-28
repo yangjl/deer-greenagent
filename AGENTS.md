@@ -235,6 +235,28 @@ Breeding-workspace note:
   `subagents.custom_agents.<name>.dbtl_capabilities` covers nothing, so a
   deployment with none declared runs every council role as `general-purpose` —
   `config.example.yaml` ships a worked `experimental-design` specialist.
+  The roster itself is **proposed for the question, then validated**.
+  `deerflow.dbtl.council_proposal` parses a one-shot `nostream` reply into seats
+  that carry a *focus* and a *brief* — what each seat argues from — which is
+  what makes three seats disagree even when all three resolve to
+  `general-purpose`, the case every deployment without registered specialists
+  lands in. Parsing is fail-closed **per seat**: an unregistered agent, an
+  unconfigured model, an unknown capability, or a seat with no brief is refused
+  with a reason and never swapped for the generalist, because that silent swap
+  is the original bug arriving through the feature meant to fix it. One bad seat
+  does not discard the good ones, duplicate briefs collapse (two seats arguing
+  the same thing read as corroboration rather than repetition), and positions are
+  capped by the chosen **depth**, not by how many seats capability selection
+  happened to fill — inheriting selection's limit would cap a heavy council at
+  one position in exactly the deployment this exists for. A proposal *replaces*
+  selection's units rather than sitting beside them, so the package cannot
+  describe a council that did not run; the refusals ride in `selection.notes`,
+  since a seat that was asked for and refused is otherwise indistinguishable
+  from one never considered. Every failure — no drafting model, a provider
+  outage, an unparseable reply — degrades to capability selection, which is what
+  ran before proposals existed: a worse council, not a failed one. `WorkUnit`
+  gained `model`, so a seat may name its own; before this every seat ran on
+  whatever the composer was set to.
   `council.request_context` is the single reader of per-request context: a
   run request carries `context` at the top level, but LangGraph relocates it to
   `configurable["context"]` before a node sees it, so code running on both sides

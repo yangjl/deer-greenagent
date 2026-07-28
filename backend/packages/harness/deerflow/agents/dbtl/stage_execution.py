@@ -18,6 +18,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
+from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 
@@ -28,17 +29,24 @@ from deerflow.agents.middlewares.finalization_deadline_middleware import (
     FinalizationDeadlineMiddleware,
 )
 from deerflow.authz.principal import normalize_authz_attributes
-from deerflow.dbtl.agent_selector import AgentCandidate, SelectionResult, build_candidates
+from deerflow.dbtl.agent_selector import AgentCandidate, Assignment, SelectionResult, build_candidates
 from deerflow.dbtl.council import (
     CouncilPlan,
     council_depth_from_config,
+    depth_policy,
     plan_council,
     recommend_depth,
+)
+from deerflow.dbtl.council_proposal import (
+    CouncilProposal,
+    build_proposal_prompt,
+    parse_council_proposal,
 )
 from deerflow.dbtl.cycle_state import StageStatus, stage_for_state
 from deerflow.dbtl.review_markdown import render_review_markdown, render_stage_digest
 from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
 from deerflow.dbtl.stage_runner import (
+    RESULT_CONTRACT,
     AsyncWorkerDispatcher,
     DispatchOutcome,
     StageExecutionOutcome,
@@ -170,6 +178,119 @@ def _failure_reasons(results: Sequence[dict[str, Any]]) -> list[str]:
         if len(lines) >= _MAX_FAILURE_REASONS:
             break
     return lines
+
+
+RosterWriter = Callable[[str], Any]
+
+
+def make_llm_roster_writer() -> RosterWriter | None:
+    """The production roster writer: one non-graph model call, tagged nostream.
+
+    Returns ``None`` when no drafting model is configured, which the adapter
+    reads as "fall back to capability selection". The same fail-soft contract as
+    the setup-question writer: a roster is an improvement on selection, and no
+    failure here may cost a cycle its Design stage. The call goes through
+    ``run_oneshot_llm``, so its prompt and raw JSON never enter the thread.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        app_config = get_app_config()
+    except Exception:  # noqa: BLE001 - config trouble degrades the roster, not the run
+        return None
+    model_name = getattr(getattr(app_config, "dbtl", None), "setup_draft_model_name", None)
+    if not model_name:
+        return None
+
+    async def write(prompt: str) -> str:
+        from deerflow.utils.oneshot_llm import run_oneshot_llm
+
+        return await run_oneshot_llm(
+            system_instruction="You assemble expert panels for research design. Reply with JSON only.",
+            user_content=prompt,
+            run_name="dbtl_council_roster",
+            app_config=app_config,
+            model_name=model_name,
+        )
+
+    return write
+
+
+def _proposed_selection(proposal: CouncilProposal) -> SelectionResult:
+    """Record a proposed roster in the shape the package already understands.
+
+    The review package reads ``selection`` to say who ran, and a reviewer
+    comparing two attempts should not have to know which of them used a
+    proposal. The seat's focus and the refusals ride in ``notes`` — a seat that
+    was asked for and refused is exactly the thing a reviewer needs to see,
+    since its absence is otherwise indistinguishable from never having been
+    considered.
+    """
+    return SelectionResult(
+        assignments=tuple(
+            Assignment(
+                capability=seat.capability,
+                agent_name=seat.agent_name,
+                via_generalist=seat.agent_name == "general-purpose",
+            )
+            for seat in proposal.positions
+        ),
+        used_generalist_for=tuple(seat.capability for seat in proposal.positions if seat.agent_name == "general-purpose"),
+        notes=(
+            "Roster proposed for this request rather than selected by capability.",
+            *(f"Seat: {seat.focus} ({seat.agent_name}, {seat.model or 'inherited model'})" for seat in proposal.positions),
+            *(f"Refused: {reason}" for reason in proposal.rejected),
+            *proposal.notes,
+        ),
+    )
+
+
+def _proposed_units(
+    proposal: CouncilProposal,
+    spec: StageSpec,
+    *,
+    attempt_id: str,
+    context: str,
+) -> tuple[WorkUnit, ...]:
+    """Turn a validated roster into work units.
+
+    The seat's own brief replaces the generic capability sentence. That is the
+    whole point: with no specialists registered every seat resolves to the same
+    agent, and identical prompts to identical agents produce corroboration
+    rather than debate. Different briefs disagree even when the agent does not
+    change.
+    """
+    units: list[WorkUnit] = []
+    for index, seat in enumerate(proposal.positions, start=1):
+        prompt = "\n".join(
+            [
+                f"You are contributing to the {spec.title} stage of a DBTL research cycle.",
+                "",
+                f"Stage purpose: {spec.purpose}",
+                f"Your seat on the council: {seat.focus}",
+                f"What you argue from: {seat.brief}",
+                "",
+                "You are one of several independent positions and you cannot see the others.",
+                "Argue your own case as strongly as the evidence allows; a chair will weigh it against the rest.",
+                "Do not hedge toward what you imagine the others will say.",
+                "",
+                "Project context:",
+                context.strip() or "(none supplied)",
+                "",
+                RESULT_CONTRACT,
+            ]
+        )
+        units.append(
+            WorkUnit(
+                unit_id=f"{attempt_id}-{index}-{seat.capability.value}",
+                capability=seat.capability.value,
+                agent_name=seat.agent_name,
+                prompt=prompt,
+                via_generalist=seat.agent_name == "general-purpose",
+                model=seat.model,
+            )
+        )
+    return tuple(units)
 
 
 def _stage_worker_config(base_config, budget: WorkerBudget):
@@ -474,12 +595,16 @@ class LiveStageAdapter:
         candidate_provider: CandidateProvider | None = None,
         dispatcher: AsyncWorkerDispatcher | None = None,
         runtime_config: RunnableConfig | None = None,
+        roster_writer: RosterWriter | None = None,
     ) -> None:
         self._repo = repo
         self._app_config = app_config
         self._candidate_provider = candidate_provider
         self._dispatcher = dispatcher
         self._runtime_config = runtime_config
+        # Injected so a test can drive a roster without a model, and so an
+        # absent writer degrades to capability selection rather than to nothing.
+        self._roster_writer = roster_writer
 
     def _runtime(self, config: RunnableConfig) -> dict[str, Any]:
         merged = _runtime_view(self._runtime_config) if self._runtime_config is not None else {}
@@ -499,6 +624,58 @@ class LiveStageAdapter:
             available,
             declared_capabilities=declared,
         )
+
+    def _known_models(self) -> tuple[str, ...]:
+        app_config = self._app_config
+        models = getattr(app_config, "models", None) if app_config is not None else None
+        if not models:
+            return ()
+        return tuple(str(getattr(item, "name", "") or "") for item in models if getattr(item, "name", None))
+
+    async def _propose_roster(
+        self,
+        *,
+        request_text: str,
+        stage_context: str,
+        max_positions: int,
+    ) -> CouncilProposal | None:
+        """Ask for a roster written for this question. Never fatal.
+
+        The call is a ``nostream`` one-shot, so its prompt and raw JSON stay out
+        of the conversation. Any failure — no writer configured, a provider
+        outage, an unparseable reply — returns ``None`` and the caller falls
+        back to capability selection, which is what ran before proposals
+        existed. Raising here would trade a better council for no council.
+        """
+        writer = self._roster_writer
+        if writer is None:
+            return None
+        known_agents = tuple(dict.fromkeys(item.name for item in self._candidates() if item.available))
+        if not known_agents:
+            return None
+        prompt = build_proposal_prompt(
+            request_text=request_text,
+            stage_context=stage_context,
+            known_agents=known_agents,
+            known_models=self._known_models(),
+            max_positions=max_positions,
+        )
+        try:
+            reply = writer(prompt)
+            if isawaitable(reply):
+                reply = await reply
+        except Exception:
+            logger.warning("The Design council roster could not be proposed; falling back to capability selection.", exc_info=True)
+            return None
+        proposal = parse_council_proposal(
+            str(reply or ""),
+            known_agents=known_agents,
+            known_models=self._known_models(),
+            max_positions=max_positions,
+        )
+        if proposal.rejected:
+            logger.info("Design council roster seats refused: %s", "; ".join(proposal.rejected))
+        return proposal if proposal.usable else None
 
     async def preview_council(
         self,
@@ -652,7 +829,11 @@ class LiveStageAdapter:
                 )
             worker_config = _stage_worker_config(base_config, budget)
             parent_model = metadata.get("model_name")
-            effective_model = resolve_subagent_model_name(
+            # A seat that named its own model wins over the composer's. The name
+            # was validated against the configured set when the roster was
+            # parsed, so an unrecognized one cannot arrive here; falling back to
+            # the parent keeps an unset seat behaving exactly as before.
+            effective_model = unit.model or resolve_subagent_model_name(
                 worker_config,
                 str(parent_model) if parent_model else None,
                 app_config=self._app_config,
@@ -1021,13 +1202,34 @@ class LiveStageAdapter:
             project_id=project_id,
             project_root=project_root,
         )
-        outcome = await arun_stage(
-            spec,
-            self._candidates(),
-            dispatcher,
-            attempt_id=attempt_id,
-            context=stage_context,
-        )
+        proposal: CouncilProposal | None = None
+        if stage == "design" and council_plan is not None:
+            proposal = await self._propose_roster(
+                request_text=request_text,
+                stage_context=stage_context,
+                # The depth's ceiling, not how many seats capability selection
+                # managed to fill. Selection is limited by which specialists
+                # happen to be registered, and inheriting that limit here would
+                # cap a heavy council at one position in exactly the
+                # generalist-only deployment this feature exists for.
+                max_positions=depth_policy(council_plan.depth).max_positions,
+            )
+        if proposal is not None:
+            # The roster replaces selection's units rather than sitting beside
+            # them: two sources of seats would let the package describe a
+            # council that did not run, which is the failure the roster work
+            # exists to prevent.
+            units = _proposed_units(proposal, spec, attempt_id=attempt_id, context=stage_context)
+            plan = StageExecutionPlan(spec=spec, selection=_proposed_selection(proposal), units=units)
+            outcome = collect_results(plan, await dispatcher(units, budget=spec.budget))
+        else:
+            outcome = await arun_stage(
+                spec,
+                self._candidates(),
+                dispatcher,
+                attempt_id=attempt_id,
+                context=stage_context,
+            )
         unit_result_pairs = list(zip(outcome.plan.units, outcome.results, strict=True))
         chair_result = None
         if stage == "design" and outcome.plan.dispatchable:

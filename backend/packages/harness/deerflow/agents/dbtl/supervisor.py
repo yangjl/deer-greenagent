@@ -1118,7 +1118,7 @@ def make_project_supervisor(config: RunnableConfig):
     # ``make_lead_agent`` re-freezes the same mode (idempotent) and builds the
     # full middleware chain, so the ordinary branch is the production agent.
     lead_agent = make_lead_agent(config)
-    from deerflow.agents.dbtl.stage_execution import LiveStageAdapter
+    from deerflow.agents.dbtl.stage_execution import LiveStageAdapter, make_llm_roster_writer
     from deerflow.persistence.dbtl import DbtlCycleRepository
     from deerflow.persistence.engine import get_session_factory
 
@@ -1134,6 +1134,7 @@ def make_project_supervisor(config: RunnableConfig):
             repo=DbtlCycleRepository(session_factory),
             app_config=runtime_app_config,
             runtime_config=config,
+            roster_writer=make_llm_roster_writer(),
         ),
     )
     return graph.compile()

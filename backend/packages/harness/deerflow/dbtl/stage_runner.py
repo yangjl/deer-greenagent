@@ -47,6 +47,11 @@ class WorkUnit:
     agent_name: str
     prompt: str
     via_generalist: bool = False
+    #: The model this seat should run on, or ``None`` to inherit the parent
+    #: run's. A chair synthesizing a research design and a worker surveying
+    #: files are not the same task, and before this every seat ran on whatever
+    #: the composer happened to be set to.
+    model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,7 +163,7 @@ class StageExecutionOutcome:
 
 _FORCED_FINALIZATION_LIMITATION = "This worker was stopped at its turn deadline and wrote its result from the work it had completed by then; it may not have examined everything it intended to."
 
-_RESULT_CONTRACT = """
+RESULT_CONTRACT = """
 Answer with a single JSON object and nothing else:
 
 {
@@ -203,7 +208,7 @@ def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> st
         "- You cannot approve this stage. A person reviews your output before the cycle advances.",
         "- If two sources disagree, report the disagreement; do not pick a winner on your own.",
         "",
-        _RESULT_CONTRACT,
+        RESULT_CONTRACT,
     ]
     return "\n".join(lines)
 
