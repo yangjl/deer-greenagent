@@ -244,12 +244,9 @@ export function HumanInputCard({
   const textInputId = useId();
   // The wizard owns the whole answer when the backend sent stepped questions,
   // so the card's own text box would be a second, conflicting way to reply.
-  // A card that also carries native form fields renders as a form instead:
-  // the setup questions ride along only as inspectable structure.
-  const setupQuestions =
-    request.setup_questions?.length && request.input_mode !== "form"
-      ? request.setup_questions
-      : null;
+  const setupQuestions = request.setup_questions?.length
+    ? request.setup_questions
+    : null;
   const formFieldIdBase = useId();
   const formErrorId = `${formFieldIdBase}-error`;
   const isForm = request.input_mode === "form";
@@ -506,11 +503,6 @@ export function HumanInputCard({
                         </>
                       ) : null}
                     </label>
-                    {field.description ? (
-                      <p className="text-muted-foreground text-xs leading-5">
-                        {field.description}
-                      </p>
-                    ) : null}
                     <FormFieldInput
                       controlId={controlId}
                       disabled={isDisabled}

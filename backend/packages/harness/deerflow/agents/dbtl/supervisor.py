@@ -288,57 +288,6 @@ def _render_review_intent_guidance(
     )
 
 
-def _setup_question_form_fields(questions: Sequence[SetupQuestion]) -> list[dict]:
-    """Project the setup questions onto the native form-field protocol.
-
-    The wizard's contract survives the projection: the model's proposal is a
-    prefilled ``default`` the scientist corrects rather than composes, and the
-    provenance sentence keeps grounded answers ("from your request") visually
-    distinct from invented ones ("suggested"). Option questions become strict
-    selects, so a trailing free-text field preserves the wizard's "Other"
-    escape hatch — a scientist must never be forced into the model's menu.
-    """
-    fields: list[dict] = []
-    for item in questions:
-        provenance = "From your request." if item.grounded else "Suggested — correct it if wrong."
-        description = " ".join(part for part in (item.why, provenance) if part)
-        field: dict = {
-            "name": item.id,
-            "label": item.question,
-            "required": False,
-            "description": description,
-        }
-        if item.options:
-            recommended = next((option for option in item.options if option.id == item.recommended_option_id), None)
-            field["type"] = "select"
-            field["options"] = [
-                {
-                    "id": option.id,
-                    "label": option.label,
-                    "value": option.label,
-                    **({"description": option.description} if option.description else {}),
-                }
-                for option in item.options
-            ]
-            if recommended is not None:
-                field["default"] = recommended.label
-        else:
-            field["type"] = "textarea"
-            if item.recommendation:
-                field["default"] = item.recommendation
-        fields.append(field)
-    if fields and all(field["name"] != "additional_notes" for field in fields):
-        fields.append(
-            {
-                "name": "additional_notes",
-                "label": "Anything else to correct or add?",
-                "type": "textarea",
-                "required": False,
-            }
-        )
-    return fields
-
-
 def _setup_clarification_message(
     decision: BranchDecision,
     context: SupervisorContext,
@@ -361,7 +310,6 @@ def _setup_clarification_message(
     """
     note = "I proposed an answer to each — correct the ones that are wrong."
     question = render_questions(questions) or f"Please provide:\n{_bullets(decision.missing_fields)}"
-    form_fields = _setup_question_form_fields(questions)
     digest = sha256(f"{context.project_id}:{request_nonce}:{source_request}".encode()).hexdigest()[:16]
     request_id = f"{SETUP_CLARIFICATION_PREFIX}{digest}"
     tool_call = {
@@ -387,11 +335,7 @@ def _setup_clarification_message(
             content=f"{note}\n\n{question}",
             artifact={
                 "human_input": {
-                    # Native form mode (version 2) when the questions project
-                    # onto typed fields; a card with no questions keeps the
-                    # legacy free-text shape. The reply stays a v1 text
-                    # summary either way, so setup-branch routing is unchanged.
-                    "version": 2 if form_fields else 1,
+                    "version": 1,
                     "kind": "human_input_request",
                     "source": "ask_clarification",
                     "request_id": request_id,
@@ -399,8 +343,7 @@ def _setup_clarification_message(
                     "title": "Designing this DBTL cycle",
                     "question": question,
                     "context": note,
-                    "input_mode": "form" if form_fields else "free_text",
-                    **({"fields": form_fields} if form_fields else {}),
+                    "input_mode": "free_text",
                     "source_request": source_request,
                     "missing_fields": list(decision.missing_fields),
                     # The structured form of what the question text renders, so

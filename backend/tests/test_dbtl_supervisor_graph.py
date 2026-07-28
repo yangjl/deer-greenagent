@@ -509,41 +509,6 @@ class TestSetupClarificationIsACard:
         assert request["setup_questions"][0]["grounded"] is False
 
     @pytest.mark.asyncio
-    async def test_the_questions_card_is_a_native_form_with_prefilled_proposals(self):
-        """Setup questions ride the native form protocol (fork extension).
-
-        Each question projects to a typed field whose ``default`` is the
-        model's proposal (correct, don't compose), whose ``description``
-        carries the why plus provenance, and a trailing free-text field
-        preserves the wizard's "Other" escape hatch.
-        """
-        asked = await self.ask("setup-form")
-        final = await self.approve(asked, "setup-form-2")
-
-        request = final["messages"][-1].artifact["human_input"]
-        assert request["version"] == 2
-        assert request["input_mode"] == "form"
-
-        fields = {field["name"]: field for field in request["fields"]}
-        assert list(fields) == ["trait", "scope", "additional_notes"]
-
-        trait = fields["trait"]
-        assert trait["type"] == "textarea"
-        assert trait["default"] == "plant height"
-        assert trait["required"] is False
-        # Invented proposal → labeled as suggestion, with the why retained.
-        assert "Suggested" in trait["description"]
-        assert "Design cannot pin an outcome" in trait["description"]
-
-        scope = fields["scope"]
-        assert scope["default"] == "all populations in the project"
-        assert "From your request." in scope["description"]
-
-        notes = fields["additional_notes"]
-        assert notes["type"] == "textarea"
-        assert notes["required"] is False
-
-    @pytest.mark.asyncio
     async def test_a_suggestion_is_never_presented_as_something_the_user_said(self):
         """These answers become a durable record; provenance is the safeguard."""
         asked = await self.ask("setup-provenance")

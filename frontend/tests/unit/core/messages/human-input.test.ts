@@ -556,66 +556,6 @@ test("buildInitialHumanInputFormValues seeds checkbox fields to false", () => {
   });
 });
 
-test("a server-proposed default seeds the control so the user corrects it", () => {
-  // DBTL setup questions arrive as fields whose `default` is the model's
-  // proposal — the scientist corrects rather than composes.
-  const request = extractHumanInputRequest(
-    toolMessage({
-      ...formPayload,
-      fields: [
-        {
-          name: "trait",
-          label: "Which trait?",
-          type: "textarea",
-          required: false,
-          default: "plant height",
-          description: "Suggested — correct it if wrong.",
-        },
-        {
-          name: "method",
-          label: "Method",
-          type: "select",
-          required: false,
-          default: "DESeq2",
-          options: [
-            { id: "o1", label: "DESeq2", value: "DESeq2" },
-            { id: "o2", label: "edgeR", value: "edgeR" },
-          ],
-        },
-      ],
-    }),
-  )!;
-
-  expect(request.fields?.[0]?.defaultValue).toBe("plant height");
-  expect(request.fields?.[0]?.description).toBe(
-    "Suggested — correct it if wrong.",
-  );
-  expect(buildInitialHumanInputFormValues(request.fields ?? [])).toEqual({
-    trait: "plant height",
-    method: "DESeq2",
-  });
-});
-
-test("a select default naming no real option is dropped, not invented", () => {
-  const request = extractHumanInputRequest(
-    toolMessage({
-      ...formPayload,
-      fields: [
-        {
-          name: "method",
-          label: "Method",
-          type: "select",
-          required: false,
-          default: "limma",
-          options: [{ id: "o1", label: "DESeq2", value: "DESeq2" }],
-        },
-      ],
-    }),
-  )!;
-
-  expect(buildInitialHumanInputFormValues(request.fields ?? [])).toEqual({});
-});
-
 test("summary renders an untouched checkbox as an explicit no", () => {
   const request = extractHumanInputRequest(
     toolMessage({
