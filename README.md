@@ -793,6 +793,11 @@ where both sides are guaranteed to share the same thread user-data directories
 can set `sandbox.thread_data_mounts: true` to skip that per-upload sandbox
 acquire and sync. Leave the field unset for automatic detection; setting it
 incorrectly can make uploaded files unavailable inside the sandbox.
+<<<<<<< HEAD
+=======
+
+This is the difference between a chatbot with tool access and an agent with an actual execution environment.
+>>>>>>> 9c7cd4ca... feat(sandbox): add thread data mount override for upload sync (#4536)
 
 # Backend
 cd backend
