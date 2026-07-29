@@ -113,6 +113,20 @@ make format             # Format code with ruff
 make migrate-rev MSG="..."  # Autogenerate a new alembic revision (see Schema Migrations section)
 ```
 
+The repository-root `scripts/dbtl_manual.py` provides a test-only manual DBTL
+checkpoint pipeline, exposed through root `make dbtl-manual-*` targets. It
+derives an isolated `graph_enabled` config from the developer config, forces the
+unified SQLite backend, and captures that database together with its isolated
+human-visible project tree. Capture refuses active run/action rows; restore
+requires the Gateway to be stopped, validates database/project hashes and
+SQLite integrity, and backs up the previous isolated live state.
+`make dbtl-manual-dev` holds an advisory runtime lock that restore also acquires,
+so restore fails closed even across network namespaces where a port probe cannot
+see the live Gateway. Its data stays under gitignored
+`.deer-flow/manual-dbtl/`; it must not become a production DBTL skip flag or
+route. Focused coverage lives in
+`tests/test_dbtl_manual_pipeline.py`.
+
 All Gateway development launchers exclude `tests/**` from Uvicorn's reload
 watcher. Keep that exclusion aligned across root local development,
 backend-only development, and Docker development so test edits do not interrupt

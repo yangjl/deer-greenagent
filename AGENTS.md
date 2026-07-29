@@ -246,9 +246,10 @@ Breeding-workspace note:
   Known limitation: a held Design answers any cycle-scoped message with the
   same pointer, so ordinary questions about the design are not routed to the
   lead agent.
-- **Every round ends with a slide deck.** `deerflow.dbtl.council_deck` renders
-  the recorded chair result as one self-contained HTML deck (inline CSS/JS, no
-  network, print-friendly) written beside the review package as
+- **Every round with a real chair outcome ends with a slide deck.**
+  `deerflow.dbtl.council_deck` renders a trustworthy completed chair result or
+  an uncapped `needs_input` result as one self-contained HTML deck (inline
+  CSS/JS, no network, print-friendly) written beside the review package as
   `design-slides-rev<N>-<hash>.html`. Slide order is agreements → contested →
   needs-your-decision → synthesis, the same "disagreement before synthesis"
   rule the review Markdown follows. It is a **renderer, not a worker**: it has
@@ -257,7 +258,10 @@ Breeding-workspace note:
   the review Markdown in `present_files`, because an approval must bind to the
   reviewed document and a deck listed first is the one a reader reviews. A
   paused meeting gets a deck too, shown ahead of the `ask_clarification` card:
-  the round that asks for a decision is the one that most needs it.
+  the round that asks for a decision is the one that most needs it. A
+  failed/blocked/capped chair result remains recorded for audit but creates no
+  deck or feedback surface; otherwise a provider outage is presented as a
+  concluded meeting.
 - **A paused chair may offer a structured choice, and the deck renders it.**
   `deerflow.dbtl.decision_request` adds an optional `decision_request` beside
   `clarification_question`: two to five options, each with a stable slug id, a
@@ -319,6 +323,10 @@ Breeding-workspace note:
   instructions are quoted **verbatim** into that seat's
   prompt — an instructions box echoed back byte-identical to its prefill is
   the writer's text, not the owner's, and is never attributed to them).
+  The dispatcher pins that effective per-seat model onto the
+  `SubagentConfig` handed to the executor; applying it only to tools and UI
+  labels while leaving the executor at `inherit` would silently call the
+  composer's provider instead.
   Legacy replies can still carry a token value, but every Design depth has
   `token_limit_enforced=false`, so that value is recorded without restoring a
   guardrail that can discard the chair's synthesis.
@@ -459,6 +467,10 @@ make support-bundle  # Generate redacted troubleshooting summary, AI issue draft
 make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
+make dbtl-manual-init                          # Create the isolated DBTL manual-test profile
+make dbtl-manual-dev                           # Run the full stack against that profile
+make dbtl-manual-capture SCENARIO=chair-choice # Capture its quiet DB + project state
+make dbtl-manual-restore SCENARIO=chair-choice # Restore it after `make stop`
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
 make start       # Start all services in production mode (local, optimized)
 make stop        # Stop all running services
@@ -490,6 +502,17 @@ Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and 
 Gateway development launchers exclude `backend/tests/` from Uvicorn's reload
 watcher. Test edits must not restart the live Gateway; runtime source and
 configuration changes remain hot-reloaded.
+
+The local DBTL manual pipeline lives in `scripts/dbtl_manual.py` and stores all
+generated state under gitignored `.deer-flow/manual-dbtl/`. Its generated
+profile forces unified SQLite plus an isolated `projects.root`, enables the
+graph and Design-deck feedback, and disables background memory/scheduler/channel
+writers. A scenario is a matched SQLite backup + project tree + integrity
+manifest captured only at a quiescent human-decision boundary. Restore refuses
+while Gateway port 8001 is listening, validates both hashes, backs up the prior
+isolated live pair, and never touches the normal configured database or project
+root. This is a developer acceleration tool, not a production stage bypass; see
+`docs/dbtl-manual-test-pipeline.md`.
 
 ## Where to Go Next
 

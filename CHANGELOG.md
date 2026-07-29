@@ -157,6 +157,10 @@ This section accumulates work toward the **2.1.0** milestone
 - **tooling:** A Hermes-like terminal workbench (`deerflow` CLI) backed by
   `DeerFlowClient`, plus a redacted community support-bundle generator. ([#3760],
   [#3886])
+- **tooling:** Add a local DBTL manual-test checkpoint pipeline that captures an
+  isolated unified SQLite database together with its bound project artifacts,
+  then safely restores quiet human-decision boundaries for repeated full-stack
+  review and Design-deck testing without adding a product stage bypass.
 - **setup:** The setup wizard now asks whether OpenAI-compatible gateway models
   support thinking, and a Volcengine Coding Plan quick-setup path was added.
   ([#3428], [#4141])

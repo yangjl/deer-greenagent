@@ -110,6 +110,29 @@ make up
 Run `make help` for all commands. See [Install.md](./Install.md) for detailed
 installation guidance.
 
+### Faster manual DBTL testing
+
+Developers iterating on DBTL review or Design-deck interactions can capture a
+quiet human-decision checkpoint once, then restore its isolated SQLite database
+and project artifacts together instead of rerunning the expensive meeting.
+
+```bash
+make dbtl-manual-init
+make dbtl-manual-dev
+# Stop at a completed run or human-input boundary:
+make dbtl-manual-capture SCENARIO=chair-choice
+
+make stop
+
+make dbtl-manual-dev
+make dbtl-manual-restore SCENARIO=chair-choice
+
+```
+
+The pipeline is local and gitignored; it does not add a product stage bypass.
+See the [Manual DBTL testing runbook](./docs/dbtl-manual-test-pipeline.md) for
+the repeatable checklist, checkpoint strategy, safety rules, and troubleshooting.
+
 ## Configuration
 
 Runtime configuration lives at the repository root:
