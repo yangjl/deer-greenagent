@@ -147,6 +147,7 @@ export function MessageListItem({
   threadId,
   artifactPaths = [],
   showCopyButton = true,
+  showWorkspaceChanges = false,
   canEdit = false,
   isEditPending = false,
   onEditAndRegenerate,
@@ -159,6 +160,7 @@ export function MessageListItem({
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
+  showWorkspaceChanges?: boolean;
   canEdit?: boolean;
   isEditPending?: boolean;
   onEditAndRegenerate?: (replacementText: string) => void | Promise<boolean>;
@@ -215,6 +217,7 @@ export function MessageListItem({
         threadId={threadId}
         artifactPaths={artifactPaths}
         runId={runId}
+        showWorkspaceChanges={showWorkspaceChanges}
         editState={
           isHuman && isEditing
             ? {
@@ -364,6 +367,7 @@ function MessageContent_({
   threadId,
   artifactPaths,
   runId,
+  showWorkspaceChanges = false,
   editState,
 }: {
   className?: string;
@@ -372,6 +376,7 @@ function MessageContent_({
   threadId: string;
   artifactPaths: readonly string[];
   runId?: string;
+  showWorkspaceChanges?: boolean;
   editState?: {
     draft: string;
     disabled: boolean;
@@ -582,7 +587,7 @@ function MessageContent_({
         components={components}
       />
       <CitationSourcesPanel sources={citationSources} />
-      {message.type === "ai" && (
+      {message.type === "ai" && showWorkspaceChanges && (
         <WorkspaceChangeBadge
           threadId={threadId}
           runId={runId}
