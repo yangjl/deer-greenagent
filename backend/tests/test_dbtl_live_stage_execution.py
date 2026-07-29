@@ -867,6 +867,42 @@ async def test_a_failed_fanout_is_recorded_but_does_not_create_review_evidence(
     assert repo.recorded[0]["artifact_uri"] is None
 
 
+@pytest.mark.asyncio
+async def test_a_provider_outage_does_not_create_a_conclusion_deck_or_feedback_surface(
+    tmp_path: Path,
+) -> None:
+    """A failed chair record is an audit event, not a meeting outcome."""
+    repo = FakeRepo(_cycle())
+    dispatcher = FakeDispatcher(error=("Codex API error: server_is_overloaded: Our servers are currently overloaded."))
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Start the Design meeting.",
+        state={},
+        config={
+            **_runtime_config(tmp_path),
+            "context": {
+                **_runtime_config(tmp_path)["context"],
+                "dbtl_council_depth": "light",
+            },
+        },
+    )
+
+    assert result.worker_count == 3
+    assert not result.produced_usable_evidence
+    assert result.artifact_uri is None
+    assert result.clarification_question is None
+    assert result.deck_uri is None
+    assert result.feedback_surface_id is None
+    assert repo.surfaces == []
+    assert all(item["status"] == "failed" for item in repo.recorded[0]["results"])
+    assert not list(tmp_path.rglob("design-review-*.md"))
+    assert not list(tmp_path.rglob("design-slides-*.html"))
+    assert "none produced usable evidence" in result.note
+    assert "server_is_overloaded" in result.note
+
+
 class _CappedPilotDispatcher:
     """Reproduce the live failure: capped positions and prose from the chair."""
 
@@ -953,7 +989,7 @@ async def test_medium_keeps_rejecting_the_same_capped_prose(
 
 
 @pytest.mark.asyncio
-async def test_light_pilot_can_reach_human_review_from_cycle_metadata_when_tools_are_unavailable(
+async def test_light_pilot_does_not_invent_a_review_package_when_the_chair_returns_no_output(
     tmp_path: Path,
 ) -> None:
     repo = FakeRepo(_cycle())
@@ -971,10 +1007,11 @@ async def test_light_pilot_can_reach_human_review_from_cycle_metadata_when_tools
         config=config,
     )
 
-    assert result.produced_usable_evidence
-    assert result.artifact_uri
-    assert "Research question: Which hybrids retain yield under drought?" in repo.recorded[0]["results"][-1]["summary"]
-    assert repo.recorded[0]["results"][-1]["provenance"]["source_stop_reason"] == "failed"
+    assert not result.produced_usable_evidence
+    assert result.artifact_uri is None
+    assert result.deck_uri is None
+    assert repo.surfaces == []
+    assert repo.recorded[0]["results"][-1]["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -1329,7 +1366,7 @@ async def test_an_answer_with_no_outstanding_question_does_not_resume(
 
 
 @pytest.mark.asyncio
-async def test_every_round_writes_a_slide_deck_beside_the_review_package(
+async def test_a_completed_round_writes_a_slide_deck_beside_the_review_package(
     tmp_path: Path,
 ) -> None:
     repo = FakeRepo(_cycle())
@@ -1424,6 +1461,87 @@ def test_a_configured_meeting_model_beats_the_composers(tmp_path: Path) -> None:
     )
 
     assert {seat.model for seat in plan.seats} == {"cheap-model"}
+
+
+@pytest.mark.asyncio
+async def test_a_selected_seat_model_is_pinned_on_the_subagent_executor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The UI label and the model that executes the seat must be the same."""
+    from enum import Enum
+
+    import deerflow.subagents as subagents_module
+    import deerflow.subagents.executor as executor_module
+    import deerflow.tools as tools_module
+
+    captured: dict[str, object] = {}
+
+    class FakeStatus(Enum):
+        PENDING = "pending"
+        COMPLETED = "completed"
+
+    class FakeResult:
+        def __init__(self, *, task_id, trace_id, status):
+            self.task_id = task_id
+            self.trace_id = trace_id
+            self.status = status
+            self.result = None
+            self.error = None
+            self.stop_reason = None
+            self.token_usage_records = []
+            self.usage_reported = True
+
+    class CapturingExecutor:
+        def __init__(self, *, config, parent_model, **kwargs):
+            captured["config_model"] = config.model
+            captured["parent_model"] = parent_model
+            self.trace_id = "trace-seat-model"
+
+        def execute(self, prompt, holder):
+            holder.status = FakeStatus.COMPLETED
+            holder.result = _structured_result()
+            return holder
+
+    monkeypatch.setattr(
+        subagents_module,
+        "get_subagent_config",
+        lambda *args, **kwargs: SubagentConfig(
+            name="experimental-design",
+            description="designer",
+            model="inherit",
+        ),
+    )
+    monkeypatch.setattr(subagents_module, "SubagentExecutor", CapturingExecutor)
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(executor_module, "SubagentResult", FakeResult)
+    monkeypatch.setattr(executor_module, "SubagentStatus", FakeStatus)
+
+    adapter = _design_adapter(FakeRepo(_cycle()), FakeDispatcher())
+    config = _runtime_config(tmp_path)
+    config["metadata"]["model_name"] = "gpt-5.6-sol"
+    dispatcher = adapter._production_dispatcher(
+        config=config,
+        state={},
+        project_id="project-1",
+        project_root=str(tmp_path),
+    )
+    outcomes = await dispatcher(
+        (
+            WorkUnit(
+                unit_id="seat-1",
+                capability="experimental_design",
+                agent_name="experimental-design",
+                prompt="Return the design.",
+                model="claude-opus-5",
+            ),
+        ),
+        budget=resolve_stage_spec("design").budget,
+    )
+
+    assert outcomes[0].error is None
+    assert captured["config_model"] == "claude-opus-5"
+    assert captured["parent_model"] == "gpt-5.6-sol"
 
 
 def test_an_unconfigured_meeting_model_falls_back_rather_than_failing(

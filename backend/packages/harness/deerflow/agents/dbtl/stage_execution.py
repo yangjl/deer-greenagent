@@ -247,6 +247,12 @@ def _light_pilot_chair_fallback(
         return result
 
     raw_text = _bounded_text(dispatch.text if dispatch is not None else "", max_chars=2_000)
+    if not raw_text:
+        # Cycle metadata is context, not a meeting. If the chair never returned
+        # anything, a provider/executor/sandbox failure cannot be converted into
+        # a server-authored conclusion merely because Light permits a bounded
+        # draft. Keep the failed record and let the owner retry the meeting.
+        return result
     worker_draft = result.summary if result.status is WorkerStatus.COMPLETED else raw_text
     question = _bounded_text(cycle.get("research_question"), max_chars=800) or "(not stated)"
     objective = _bounded_text(cycle.get("objective"), max_chars=800) or "(not stated)"
@@ -1836,6 +1842,12 @@ class LiveStageAdapter:
                 str(parent_model) if parent_model else None,
                 app_config=self._app_config,
             )
+            # Pin the same effective model onto the executor config. Previously
+            # only tool loading and stream labels used ``unit.model`` while the
+            # executor still resolved ``model="inherit"`` from the composer's
+            # parent model, so the UI could say Claude while the worker called
+            # Codex.
+            worker_config = replace(worker_config, model=effective_model)
             tools = get_available_tools(
                 model_name=effective_model,
                 groups=metadata.get("tool_groups"),
@@ -2735,14 +2747,16 @@ class LiveStageAdapter:
         non_chair_pairs = [(unit, result) for unit, result in unit_result_pairs if unit.role != "chair"]
         failed_participant_count = sum(1 for _unit, result in non_chair_pairs if not result.is_trustworthy)
 
-        # Written after the record, from the record. Every round ends with a
-        # deck whether the chair concluded or paused — a meeting that stopped to
-        # ask something is exactly when a person needs the agreements and the
-        # open split on one screen.
+        # Written after the record, from the record. A completed or deliberately
+        # paused chair result is a meeting outcome; a failed/blocked chair result
+        # is only an audit record. Rendering the latter as a deck makes a
+        # provider outage look like a concluded meeting and creates a feedback
+        # surface for a decision that does not exist.
+        chair_has_presentable_outcome = chair_result is not None and (chair_result.is_trustworthy or (chair_result.status is WorkerStatus.NEEDS_INPUT and not chair_result.was_capped))
         deck_uri = None
         deck = None
         surface_plan = None
-        if stage == "design" and chair_result is not None:
+        if stage == "design" and chair_has_presentable_outcome:
             surface_plan = await self._plan_feedback_surface(
                 cycle_id=cycle_id,
                 project_id=project_id,

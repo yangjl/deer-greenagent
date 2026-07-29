@@ -1871,18 +1871,21 @@ other execution tools are withheld so a pilot does not spend its time
 reconstructing packages or surveying the environment.
 
 Light also has a fail-soft **review** boundary, not a fail-open gate.
-`_light_pilot_chair_fallback` runs only when its chair fails or is capped. It
-creates a new server-attributed `system:light-pilot-fallback` result from the
-cycle's research question, objective, success criterion, and any recoverable
-chair output. It never relabels the capped worker as complete: the source agent,
-stop reason, missing data/tools, and strict-contract failure are recorded in
-provenance and limitations. The package's `pilot_review` block says whether
-strict evidence completed and that pre-existing data/tools were not required;
-the Markdown leads with the same warning. This synthetic bounded result is
-enough to attach a Design artifact and make it eligible for authenticated human
-approval, which can advance the cycle to Data reconciliation. It does not
-approve itself. Medium and Heavy retain their research-sized contexts, tools,
-budgets, and strict evidence requirement.
+`_light_pilot_chair_fallback` runs only when a capped or contract-invalid chair
+returned non-empty recoverable text. It creates a new server-attributed
+`system:light-pilot-fallback` result from that actual chair draft plus the
+cycle's research question, objective, and success criterion. A provider,
+credential, executor, or sandbox failure that returns no chair output is not a
+pilot design: the failed record remains auditable and no package, deck, or
+feedback surface is created. The fallback never relabels the capped worker as
+complete: the source agent, stop reason, missing data/tools, and strict-contract
+failure are recorded in provenance and limitations. The package's
+`pilot_review` block says whether strict evidence completed and that pre-existing
+data/tools were not required; the Markdown leads with the same warning. This
+synthetic bounded result is enough to attach a Design artifact and make it
+eligible for authenticated human approval, which can advance the cycle to Data
+reconciliation. It does not approve itself. Medium and Heavy retain their
+research-sized contexts, tools, budgets, and strict evidence requirement.
 
 The one thing this middleware must **not** do is report a `stop_reason`. That
 channel feeds `CAPPED_STOP_REASONS`, which makes `is_trustworthy` false —
@@ -2157,10 +2160,14 @@ bound to server-emitted council cards. Three additional rules live in
   not a budget for four workers. `_council_model` validates it against the
   configured list and falls back with a warning rather than failing the meeting
   on an operator typo. A seat's own model and the setup card's per-participant
-  override both still win.
+  override both still win. `_dispatch_units` pins that effective name onto the
+  `SubagentConfig` passed to `SubagentExecutor`; using it only for tool loading
+  and stream labels while leaving `model="inherit"` would make the UI report one
+  model while the worker actually calls the composer's provider.
 
-**Every round writes a slide deck.** `deerflow.dbtl.council_deck` is a pure
-renderer over the recorded chair result: agreements → contested →
+**Every round with a real chair outcome writes a slide deck.**
+`deerflow.dbtl.council_deck` is a pure renderer over a trustworthy completed
+chair result or an uncapped `needs_input` result: agreements → contested →
 needs-your-decision → synthesis → limitations → next, the same
 disagreement-before-synthesis ordering as `review_markdown`. One self-contained
 HTML file (inline CSS/JS, no network, `@media print` page breaks) written by
@@ -2173,6 +2180,10 @@ approval must bind to the reviewed document, and a deck listed first is the one
 a reader opens and reviews. `LiveStageResult.deck_uri` carries it; a paused
 meeting gets one too, presented ahead of the `ask_clarification` card, since the
 round that asks for a decision is the one that most needs its context on screen.
+Failed, blocked, and capped chair records remain durable worker evidence but
+must not produce a deck or feedback surface: record existence is not a meeting
+outcome, and rendering a provider failure would falsely present an unfinished
+task as a conclusion.
 Failure to render or write returns `None` and logs — the deck is a presentation
 of a record already committed, so it must never fail the turn.
 

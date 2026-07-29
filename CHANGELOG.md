@@ -219,6 +219,15 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **DBTL:** Treat failed, blocked, or capped Design chairs as audit records
+  rather than meeting outcomes. Provider outages no longer generate a
+  conclusion deck or register a feedback surface for an unfinished meeting;
+  completed and intentionally paused (`needs_input`) chairs retain their decks.
+  Light pilot fallback now requires actual recoverable chair output instead of
+  manufacturing a review package from cycle metadata alone.
+- **DBTL:** Pin each participant card's selected model onto the subagent
+  executor configuration. Meeting seats no longer display/load tools for one
+  model while silently invoking the composer's inherited provider.
 - **DBTL:** Consume project-rail cycle selection after its one scoped request
   and route ordinary read/explain follow-ups through the lead agent, preventing
   questions about a Design result from restarting its council.
