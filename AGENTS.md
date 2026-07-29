@@ -245,6 +245,33 @@ Breeding-workspace note:
   reviewed document and a deck listed first is the one a reader reviews. A
   paused meeting gets a deck too, shown ahead of the `ask_clarification` card:
   the round that asks for a decision is the one that most needs it.
+- **A paused chair may offer a structured choice, and the deck renders it.**
+  `deerflow.dbtl.decision_request` adds an optional `decision_request` beside
+  `clarification_question`: two to five options, each with a stable slug id, a
+  label, and a value stating what choosing it means. Prose is enough to resume
+  a chair and not enough to audit — "family holdout" and "family holdout, but
+  only if sample size allows" are the same free-text field — so the structured
+  answer is what a record can bind to. Three rules hold it together. The
+  **question is not the payload's to state**: parsing takes the recorded
+  `clarification_question` and overwrites whatever the payload repeated, so the
+  card and the audit record cannot describe different questions. A **refusal
+  costs the cards, never the question**: an unknown option id, a single option,
+  or a recommendation naming nothing returns a reason and the deck falls back to
+  free text, rather than failing a whole meeting over a misshapen sub-object or
+  dropping it silently. And **only a paused chair may offer options** — a
+  `completed` result carrying them is describing a decision already taken.
+  The deck renders them as a real `fieldset`/radio group with the question as
+  its legend, and **nothing is preselected, including the recommendation**: a
+  default that becomes the answer is a decision nobody made. The recommendation
+  is labelled as the chair's recorded view, with a bordered badge rather than
+  colour alone. Every control ships **disabled** and the deck says "Open this
+  deck in DeerFlow to respond." — the persisted file must be inert wherever it
+  is opened from, and activation is the authenticated parent's job. Deck
+  navigation now yields to a focused control (space selects a radio) while the
+  deck's own arrow buttons keep working. See
+  [docs/plans/2026-07-28-design-deck-feedback-plan.md](docs/plans/2026-07-28-design-deck-feedback-plan.md)
+  for the surface descriptor, bridge, and review bindings this is the first
+  phase of; **no deck can yet record anything**.
 - The preflight card is also the meeting's setup form.
   `deerflow.dbtl.council_settings` renders one **editable participant card per
   seat** (`council_participants` on the artifact), prefilled with the roster

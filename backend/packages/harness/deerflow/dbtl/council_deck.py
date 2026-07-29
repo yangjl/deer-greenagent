@@ -35,6 +35,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
 from deerflow.dbtl.consensus import Consensus, parse_consensus
+from deerflow.dbtl.decision_request import DecisionRequest
 
 #: Bounds. A slide that scrolls is a document, and the point of the deck is that
 #: each screen holds one thought.
@@ -108,6 +109,43 @@ def _disagreement_body(consensus: Consensus) -> str:
     return f'<div class="contested-grid">{"".join(cards)}</div>'
 
 
+#: What the persisted file says instead of accepting an answer. It is the whole
+#: security posture in one sentence: this copy cannot record anything, wherever
+#: it was opened from.
+INERT_NOTICE = "Open this deck in DeerFlow to respond."
+
+
+def _decision_cards(request: DecisionRequest) -> str:
+    """The chair's options as a real radio group, shipped disabled.
+
+    A fieldset with a legend rather than styled divs, because this is a
+    mutually-exclusive choice and assistive technology has to be told that
+    rather than shown it. Nothing is preselected — not even the recommended
+    option — so the record cannot contain a choice the owner never made.
+    """
+    cards: list[str] = []
+    for option in request.options:
+        input_id = f"{request.id}--{option.id}"
+        recommended = ""
+        if option.id == request.recommended_option_id:
+            # Labelled, never checked: the chair's view is evidence the owner
+            # reads, not a default that answers for them.
+            recommended = '<span class="badge">Recommended</span>'
+        description = f'<span class="option-detail">{html.escape(_text(option.description))}</span>' if option.description else ""
+        cards.append(
+            f'<div class="option">'
+            f'<input type="radio" id="{html.escape(input_id)}" name="{html.escape(request.id)}" value="{html.escape(option.id)}" disabled>'
+            f'<label for="{html.escape(input_id)}">'
+            f'<span class="option-label">{html.escape(_text(option.label, limit=200))}{recommended}</span>'
+            f'<span class="option-value">{html.escape(_text(option.value))}</span>'
+            f"{description}"
+            f"</label>"
+            f"</div>"
+        )
+    recommendation = f'<p class="recommendation"><span>Why the chair leans this way</span> {html.escape(_text(request.recommendation))}</p>' if request.recommendation else ""
+    return f'<fieldset class="decision" disabled><legend>{html.escape(_text(request.question, limit=600))}</legend><div class="options">{"".join(cards)}</div></fieldset>{recommendation}<p class="inert">{html.escape(INERT_NOTICE)}</p>'
+
+
 def _decision_items(consensus: Consensus | None, clarification_question: str) -> list[str]:
     """What the meeting is asking a person for, most urgent first."""
     items: list[str] = []
@@ -127,6 +165,7 @@ def render_council_deck(
     results: Sequence[Mapping[str, object]],
     package_path: str = "",
     clarification_question: str = "",
+    decision_request: DecisionRequest | None = None,
     generated_at: datetime | None = None,
 ) -> str:
     """The meeting's outcome as one self-contained HTML slide deck."""
@@ -164,13 +203,18 @@ def render_council_deck(
             body=(_disagreement_body(consensus) if consensus is not None else '<p class="empty">The chair reported no structured consensus, so nothing can be shown here without inventing it. The written synthesis is the record.</p>'),
         )
     )
-    if decisions:
+    cards = _decision_cards(decision_request) if decision_request is not None and decision_request.renders_as_cards else ""
+    if cards or decisions:
+        # The options replace the question's own bullet, not the rest of the
+        # list: a contested topic the chair left open still needs settling
+        # whether or not this one question came with choices.
+        remaining = [item for item in decisions if item != _text(clarification_question)] if cards else decisions
         slides.append(
             _slide(
                 kind="decide",
                 eyebrow="Only you can settle these",
                 title="Needs your decision",
-                body=_list_body(decisions, empty=""),
+                body=cards + (_list_body(remaining, empty="") if remaining else ""),
             )
         )
     if summary:
@@ -244,6 +288,25 @@ _DECK_TEMPLATE = """<!doctype html>
   .verdict--open {{ color: var(--warn); }}
   .verdict--settled span {{ color: var(--accent); }}
   .slide--decide li {{ font-size: 1.15rem; }}
+  .decision {{ margin: 0 0 1.1rem; padding: 0; border: 0; }}
+  .decision legend {{ padding: 0; margin-bottom: .9rem; font-size: 1.2rem; font-weight: 600; }}
+  .options {{ display: grid; gap: .65rem; }}
+  .option {{ display: flex; gap: .7rem; align-items: flex-start; border: 1px solid var(--line); border-radius: 10px;
+    padding: .8rem .95rem; background: var(--card); }}
+  .option input {{ margin: .3rem 0 0; flex: none; width: 1.05rem; height: 1.05rem; accent-color: var(--accent); }}
+  .option label {{ display: grid; gap: .2rem; }}
+  .option-label {{ font-weight: 600; font-size: 1.02rem; }}
+  .option-value {{ color: var(--fg); font-size: .97rem; }}
+  .option-detail {{ color: var(--muted); font-size: .9rem; }}
+  /* Not colour alone: the badge keeps its border and text in every theme and in
+     print, where an accent tint is the first thing to disappear. */
+  .badge {{ margin-left: .55rem; padding: .08rem .5rem; border: 1px solid currentColor; border-radius: 999px;
+    color: var(--accent); font-size: .68rem; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; vertical-align: middle; }}
+  .decision[disabled] .option {{ opacity: .92; }}
+  .recommendation {{ margin: 0 0 .9rem; color: var(--muted); font-size: .93rem; }}
+  .recommendation span {{ display: block; font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; }}
+  .inert {{ margin: 0; padding: .55rem .8rem; border: 1px dashed var(--line); border-radius: 8px;
+    color: var(--muted); font-size: .88rem; }}
   .gate {{ margin-top: 1.5rem; color: var(--muted); font-size: .9rem; border-left: 2px solid var(--line); padding-left: .85rem; }}
   .bar {{ position: fixed; left: 0; bottom: 0; width: 100%; display: flex; align-items: center; gap: 1rem;
     padding: .7rem 1.4rem; border-top: 1px solid var(--line); background: var(--bg); font-size: .82rem; color: var(--muted); }}
@@ -279,7 +342,19 @@ _DECK_TEMPLATE = """<!doctype html>
     at.textContent = String(index + 1);
     fill.style.width = ((index + 1) / slides.length * 100) + '%';
   }}
+  // Space selects a focused radio and an arrow key moves between them, so a
+  // deck that always paged would make the choice unusable by keyboard the
+  // moment these controls are live.
+  var INTERACTIVE = /^(input|textarea|select|button|a)$/i;
+  function inControl(target) {{
+    if (!target) {{ return false; }}
+    // The deck's own arrows are buttons; keeping the keyboard working after
+    // someone clicks one is the whole point of the navigation bar.
+    if (target.closest && target.closest('.bar')) {{ return false; }}
+    return INTERACTIVE.test(target.nodeName || '') || target.isContentEditable;
+  }}
   document.addEventListener('keydown', function (event) {{
+    if (inControl(event.target)) {{ return; }}
     if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {{ show(index + 1); }}
     else if (event.key === 'ArrowLeft' || event.key === 'PageUp') {{ show(index - 1); }}
     else if (event.key === 'Home') {{ show(0); }}

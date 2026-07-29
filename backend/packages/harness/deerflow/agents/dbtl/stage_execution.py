@@ -57,6 +57,7 @@ from deerflow.dbtl.council_settings import (
     owner_instruction_lines,
 )
 from deerflow.dbtl.cycle_state import StageStatus, stage_for_state
+from deerflow.dbtl.decision_request import DECISION_REQUEST_CONTRACT
 from deerflow.dbtl.review_markdown import render_review_markdown, render_stage_digest
 from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
 from deerflow.dbtl.stage_runner import (
@@ -1052,6 +1053,8 @@ def _design_chair_unit(
 }""",
             "",
             CONSENSUS_CONTRACT,
+            "",
+            DECISION_REQUEST_CONTRACT,
         ]
     )
     unit = WorkUnit(
@@ -1163,6 +1166,8 @@ def _resumed_chair_unit(
 }""",
             "",
             CONSENSUS_CONTRACT,
+            "",
+            DECISION_REQUEST_CONTRACT,
         ]
     )
     return _unit_with_settings(

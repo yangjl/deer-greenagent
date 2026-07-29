@@ -19,12 +19,16 @@ is_trustworthy` folds the two together so callers cannot forget.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
 from deerflow.dbtl.consensus import Consensus, parse_consensus
+from deerflow.dbtl.decision_request import DecisionRequest, parse_decision_request
+
+logger = logging.getLogger(__name__)
 
 MAX_SUMMARY_CHARS = 4_000
 MAX_ITEM_CHARS = 1_000
@@ -131,6 +135,11 @@ class StageWorkerResult:
     #: required because the contract is shared by all five stages, and a Build
     #: worker has no council to report on.
     consensus: Consensus | None = None
+    #: The bounded choice behind ``clarification_question``, when the chair
+    #: offered one. Always optional: a question that needs a number or an
+    #: explanation has no options to offer, and a malformed one is dropped
+    #: rather than allowed to take the question down with it.
+    decision_request: DecisionRequest | None = None
 
     def __post_init__(self) -> None:
         if not self.summary.strip():
@@ -143,6 +152,10 @@ class StageWorkerResult:
             raise WorkerResultRejected("A result that makes claims must reference the evidence behind them.")
         if self.status is WorkerStatus.NEEDS_INPUT and not (self.clarification_question and self.clarification_question.strip()):
             raise WorkerResultRejected("A needs_input result must provide one non-empty 'clarification_question'.")
+        # Options with no question behind them would render as a decision the
+        # chair never asked for, and a person would answer it.
+        if self.decision_request is not None and not (self.clarification_question and self.clarification_question.strip()):
+            raise WorkerResultRejected("A decision request must accompany the question it offers options for.")
 
     @property
     def was_capped(self) -> bool:
@@ -182,6 +195,7 @@ class StageWorkerResult:
             # five that have no council to report on: an explicit null in a
             # Build package invites a reader to wonder what went missing.
             **({"consensus": self.consensus.as_dict()} if self.consensus is not None else {}),
+            **({"decision_request": self.decision_request.as_dict()} if self.decision_request is not None else {}),
         }
 
 
@@ -364,6 +378,19 @@ def parse_worker_result(
     claims, claim_evidence = _claim_tuple(payload.get("claims"))
     evidence_refs = _dedupe_evidence((*_evidence_tuple(payload.get("evidence_refs")), *claim_evidence))
 
+    clarification_question = raw_clarification.strip()[:MAX_ITEM_CHARS] if isinstance(raw_clarification, str) else None
+    # Only a paused chair is asking, so only a paused chair may offer options.
+    # A completed result carrying them is describing a decision already taken.
+    decision_request = None
+    if status is WorkerStatus.NEEDS_INPUT and clarification_question:
+        decision = parse_decision_request(payload.get("decision_request"), question=clarification_question)
+        if decision.refusal:
+            # Deliberately not fatal: the question survives and the deck falls
+            # back to free text. Logged so a reviewer can tell a chair that
+            # offered no options from one whose options were rejected.
+            logger.warning("Discarding a malformed decision request from %s: %s", agent_name, decision.refusal)
+        decision_request = decision.request
+
     return StageWorkerResult(
         status=status,
         summary=summary.strip()[:MAX_SUMMARY_CHARS],
@@ -376,13 +403,14 @@ def parse_worker_result(
         provenance=dict(provenance),
         quality_checks=_quality_tuple(payload.get("quality_checks")),
         recommended_next_actions=_string_tuple(payload.get("recommended_next_actions"), "recommended_next_actions"),
-        clarification_question=(raw_clarification.strip()[:MAX_ITEM_CHARS] if isinstance(raw_clarification, str) else None),
+        clarification_question=clarification_question,
         stop_reason=stop_reason,
         # Permissive: a malformed consensus costs the structured view, not the
         # result. The chair's prose summary is still the binding synthesis, and
         # rejecting a whole Design attempt over a misshapen sub-object would
         # trade the thing that works for the thing that reads nicely.
         consensus=parse_consensus(payload.get("consensus")),
+        decision_request=decision_request,
     )
 
 

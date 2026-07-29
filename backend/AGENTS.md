@@ -2176,6 +2176,55 @@ round that asks for a decision is the one that most needs its context on screen.
 Failure to render or write returns `None` and logs — the deck is a presentation
 of a record already committed, so it must never fail the turn.
 
+**A paused chair may return a structured `decision_request`, and the deck renders
+it as an inert choice.** `deerflow.dbtl.decision_request` defines
+`DecisionOption`/`DecisionRequest` plus `parse_decision_request(raw, *,
+question)`, which **never raises** and returns a `DecisionParse` carrying either
+a request or a `refusal` string. Bounds: 2–5 options (`MIN_OPTIONS`/`MAX_OPTIONS`
+— card mode needs a real choice and more than a handful is a form), unique option
+ids matching a conservative slug pattern, and per-field character caps. Text is
+truncated, but an **over-long or malformed id is refused rather than truncated**,
+because truncating would silently merge two distinct options into one answer.
+The `question` argument is authoritative and overwrites the payload's own copy:
+the card a person answers must be the copy the audit record keeps. `DecisionParse`
+distinguishes three states callers care about — parsed, refused-with-reason, and
+nothing-to-parse (absent is not a refusal, since a chair that asked a plain
+question did nothing wrong).
+
+`parse_worker_result` attaches it **only** when `status is NEEDS_INPUT` and a
+non-empty `clarification_question` survived; a refusal is logged and dropped, so
+a misshapen sub-object costs the option cards and never the meeting.
+`StageWorkerResult.__post_init__` additionally rejects a decision request with no
+question behind it — options with no question would render as a decision the
+chair never asked for, and a person would answer it. `as_dict` omits the key when
+absent, matching `consensus`. `DECISION_REQUEST_CONTRACT` is appended to both the
+first-pass and resumed chair prompts beside `CONSENSUS_CONTRACT`.
+
+`render_council_deck(..., decision_request=...)` renders a real
+`fieldset`/`legend`/radio group rather than styled divs, because a
+mutually-exclusive choice has to be *told* to assistive technology, not shown.
+**Nothing is preselected, including `recommended_option_id`** — that option gets a
+bordered `Recommended` badge (not colour alone, which is the first thing to
+disappear in print) and the chair's reasoning is labelled as its recorded view.
+Every control carries `disabled` and the slide ends with `INERT_NOTICE` ("Open
+this deck in DeerFlow to respond."): the persisted file is safe to open from a
+download, an attachment, or a hostile frame, and activation belongs to an
+authenticated parent that does not exist yet. Options replace only the question's
+own bullet on that slide; unresolved contested topics and open questions still
+list below them. The deck's keydown handler now returns early for a focused
+`input`/`textarea`/`select`/`button`/`a`/contenteditable — space selects a radio,
+so a deck that always paged would make the choice unusable by keyboard — while
+`closest('.bar')` exempts the deck's own arrows so clicking one does not kill
+keyboard navigation. Tests: `tests/test_dbtl_decision_request.py`,
+`tests/test_dbtl_deck_decision_cards.py`.
+
+This is phase 0–2 of
+[docs/plans/2026-07-28-design-deck-feedback-plan.md](../docs/plans/2026-07-28-design-deck-feedback-plan.md).
+The durable feedback-surface descriptor, the authenticated read model, the
+sandboxed parent bridge, and the in-deck submit/review transitions are **not
+implemented**; no deck can record anything, and the Design review sheet remains
+the only place a human review is written.
+
 **A card's tool-call id must satisfy every provider it may be replayed to.**
 `supervisor.card_request_id` builds every card/present-files id as
 `<prefix><cycle-token>__<digest>` and caps it at `MAX_CARD_REQUEST_ID_CHARS`
