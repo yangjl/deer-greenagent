@@ -876,6 +876,19 @@ export interface Translations {
     };
   };
 
+  // DBTL
+  dbtl: {
+    pathStrip: {
+      label: string;
+      invalidated: string;
+      backfilled: string;
+      record: string;
+    };
+    designSheet: {
+      readOnly: string;
+    };
+  };
+
   // Login / Auth
   login: {
     signInTitle: string;

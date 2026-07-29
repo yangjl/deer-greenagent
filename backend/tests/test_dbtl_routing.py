@@ -9,6 +9,8 @@ who already said what they wanted.
 
 from __future__ import annotations
 
+import pytest
+
 from deerflow.dbtl.routing import (
     ExplicitChoice,
     RouteKind,
@@ -94,6 +96,42 @@ def test_typing_start_a_cycle_is_deterministic_even_with_existing_cycles() -> No
     assert decision.classifier is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "strat a new cycle for the drought work",
+        "Sttart a DBTL cycle please.",
+        "star a new research cycle",
+        "creat a new cycle",
+        "opne a new cycle",
+        "begni a new dbtl cycle",
+    ],
+)
+def test_a_misspelled_start_request_is_still_a_typed_start(text: str) -> None:
+    """A slip in the verb must not silently demote an explicit instruction.
+
+    Missing this rung drops the request to the classifier, which may well call
+    it ordinary — so the person who asked, in words, to start a cycle is simply
+    ignored.
+    """
+    decision = route_request(_request(text=text))
+    assert decision.kind is RouteKind.CYCLE_SETUP
+    assert decision.source is RouteSource.EXPLICIT_REQUEST
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "start the analysis",
+        "start the gateway",
+        "create a chart of the yields",
+    ],
+)
+def test_a_start_that_names_no_cycle_is_not_a_typed_start(text: str) -> None:
+    decision = route_request(_request(text=text))
+    assert decision.source is not RouteSource.EXPLICIT_REQUEST
+
+
 # ── Precedence 3: the selected cycle ─────────────────────────────────────
 
 
@@ -124,6 +162,32 @@ def test_a_question_about_a_selected_cycle_stays_ordinary_chat() -> None:
     assert decision.source is RouteSource.CLASSIFIER
     assert decision.classifier is not None
     assert any(hit.rule_id == "ordinary.explain" for hit in decision.classifier.rule_hits)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Waht parameters did the design stage capture?",
+        "wat did the meeting decide about the drought sites",
+        "Hwo does this handle the missing phenotypes?",
+        "Explian the design stage output.",
+        "Descrbie what the meeting captured.",
+        "Summarise the meeting please.",  # British spelling, already supported
+        "Sohw me the design package.",
+        "lsit the declared datasets",
+    ],
+)
+def test_a_misspelled_question_about_a_selected_cycle_stays_ordinary(text: str) -> None:
+    """A typo in a read-only question must not convene a meeting.
+
+    This is the expensive direction: missing the ordinary rule promotes a
+    question into a cycle continuation, which can spend a whole council's
+    budget answering something the lead agent should have read out.
+    """
+    decision = route_request(_request(text=text, selected_cycle_id="cycle-3"))
+
+    assert decision.kind is RouteKind.ORDINARY
+    assert decision.source is RouteSource.CLASSIFIER
 
 
 # ── Precedence 4: the current project ────────────────────────────────────

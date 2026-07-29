@@ -482,6 +482,54 @@ def _terminal_seat_event(
 
 RosterWriter = Callable[[str], Any]
 
+#: Same shape as :data:`RosterWriter`: an async callable from prompt to raw text.
+IntentInterpreter = Callable[[str], Any]
+
+#: The deterministic phrases stay the fast path and the audit anchor; this
+#: interpreter reads only the requests they did not match. Human chat input is
+#: kept verbatim in the record but may carry typos and paraphrases, and those
+#: must not change what the request *means* — production-grade determinism is a
+#: rule for code, data, and figures, not for reading a chatbox.
+_DEBATE_INTENT_INSTRUCTION = (
+    "You read one project-owner chat message and decide whether it asks to run the design meeting (debate/council) again. "
+    "The message may contain typos, misspellings, or paraphrases; judge the intent, not the spelling. "
+    "Reply with exactly one word: CONVENE if the message asks to re-run, restart, redo, or hold the meeting again; HOLD for anything else (questions about the design, review remarks, unrelated requests). "
+    "If you are unsure, reply HOLD."
+)
+
+
+def make_llm_intent_interpreter() -> IntentInterpreter | None:
+    """The production debate-intent interpreter: one nostream model call.
+
+    Returns ``None`` when no drafting model is configured, which the adapter
+    reads as "the deterministic phrases are the whole answer". The same
+    fail-soft contract as the roster writer: interpretation is an improvement
+    on the phrase table, and no failure here may cost the owner their design —
+    an unreadable verdict holds the package on the table, it never convenes.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        app_config = get_app_config()
+    except Exception:  # noqa: BLE001 - config trouble degrades interpretation, not the run
+        return None
+    model_name = getattr(getattr(app_config, "dbtl", None), "setup_draft_model_name", None)
+    if not model_name:
+        return None
+
+    async def interpret(prompt: str) -> str:
+        from deerflow.utils.oneshot_llm import run_oneshot_llm
+
+        return await run_oneshot_llm(
+            system_instruction=_DEBATE_INTENT_INSTRUCTION,
+            user_content=prompt,
+            run_name="dbtl_debate_intent",
+            app_config=app_config,
+            model_name=model_name,
+        )
+
+    return interpret
+
 
 def make_llm_roster_writer() -> RosterWriter | None:
     """The production roster writer: one non-graph model call, tagged nostream.
@@ -781,11 +829,17 @@ def _refinement_positions(max_positions: int, *, change_request: str | None) -> 
     return max(2, min(max_positions, 2))
 
 
+#: One-slip misspellings of "restart" (dropped, transposed, or swapped letter),
+#: recognized the same narrow way the classifier recognizes "similate": each is
+#: an enumerated literal, never a fuzzy match, so the trigger stays auditable.
+#: "restate" is deliberately absent — it is a real word asking to rephrase.
+_RESTART_TYPOS = r"restat|restar|restrat|retsart|rstart|resart|retart"
+
 #: Ways of asking for the meeting to be held again. Deterministic, like every
 #: other DBTL routing signal: the person whose request was read as "convene four
 #: workers" deserves to see the words that did it.
 _NEW_DEBATE_PATTERN = re.compile(
-    r"\b(?:re-?run|re-?open|redo|repeat|rehold)\b[^.\n]{0,40}\b(?:meeting|debate|discussion|council|round)\b"
+    r"\b(?:re-?run|re-?open|re-?start|re-?try|re-?launch|re-?convene|re-?do|repeat|rehold|" + _RESTART_TYPOS + r")\b[^.\n]{0,40}\b(?:meeting|debate|discussion|council|round)\b"
     r"|\b(?:run|hold|convene|start|open|schedule)\b[^.\n]{0,40}\b(?:another|a new|a second|again)\b[^.\n]{0,20}\b(?:meeting|debate|discussion|council|round)\b"
     r"|\b(?:another|a second|a new|one more)\s+(?:round|meeting|debate|discussion)\b"
     r"|\b(?:meet|debate|discuss|argue)\s+(?:it\s+)?again\b"
@@ -1531,6 +1585,7 @@ class LiveStageAdapter:
         dispatcher: AsyncWorkerDispatcher | None = None,
         runtime_config: RunnableConfig | None = None,
         roster_writer: RosterWriter | None = None,
+        intent_interpreter: IntentInterpreter | None = None,
     ) -> None:
         self._repo = repo
         self._app_config = app_config
@@ -1540,11 +1595,46 @@ class LiveStageAdapter:
         # Injected so a test can drive a roster without a model, and so an
         # absent writer degrades to capability selection rather than to nothing.
         self._roster_writer = roster_writer
+        # Injected for the same reason; absent, the deterministic phrase table
+        # is the whole re-run decision, which is exactly the pre-LLM behavior.
+        self._intent_interpreter = intent_interpreter
 
     def _runtime(self, config: RunnableConfig) -> dict[str, Any]:
         merged = _runtime_view(self._runtime_config) if self._runtime_config is not None else {}
         merged.update(_runtime_view(config))
         return merged
+
+    async def _interpreted_wants_new_debate(self, request_text: str) -> bool:
+        """LLM reading of a re-run request the deterministic phrases missed.
+
+        The owner's message is passed verbatim — typos included — because the
+        record keeps what was said while interpretation absorbs the errors.
+        Only an explicit CONVENE verdict convenes; an absent interpreter, a
+        provider failure, or any other reply holds, so routing never depends on
+        provider health and a misread can cost at most one rephrase, never a
+        council's budget.
+        """
+        text = (request_text or "").strip()
+        if self._intent_interpreter is None or not text:
+            return False
+        prompt = "\n".join(
+            [
+                "A design meeting already produced a design that is awaiting human review.",
+                "The project owner sent this message (verbatim, may contain typos):",
+                "",
+                text,
+            ]
+        )
+        try:
+            reply = await self._intent_interpreter(prompt)
+        except Exception:  # noqa: BLE001 - interpretation failure must hold, never crash the turn
+            logger.warning("Debate-intent interpretation failed; holding the design on the table.", exc_info=True)
+            return False
+        verdict = str(reply or "").strip().split()
+        wants = bool(verdict) and verdict[0].strip(".,!:;\"'").upper() == "CONVENE"
+        if wants:
+            logger.info("Debate-intent interpreter read a cycle-scoped request as asking to re-run the design meeting.")
+        return wants
 
     def _candidates(self) -> Sequence[AgentCandidate]:
         if self._candidate_provider is not None:
@@ -2337,10 +2427,12 @@ class LiveStageAdapter:
         # Nothing outstanding, a package already on the table, and no request to
         # argue again: hold. A Design stage stays ``in_progress`` until a person
         # submits it for review, so without this every later message in the
-        # cycle convened the whole meeting over again.
+        # cycle convened the whole meeting over again. The deterministic
+        # phrases decide first and free; the interpreter reads only what they
+        # did not match, so a typo or paraphrase still means what it meant.
         if stage == "design" and not resumed_answer and authored_design is None:
             settled = _unreviewed_design_package(cycle)
-            if settled is not None and not _wants_new_debate(request_text):
+            if settled is not None and not _wants_new_debate(request_text) and not await self._interpreted_wants_new_debate(request_text):
                 return LiveStageResult(
                     stage=stage,
                     cycle_id=cycle_id,

@@ -1108,6 +1108,18 @@ export const enUS: Translations = {
       emptyDescription: "Credits and acknowledgements will show here.",
     },
   },
+  dbtl: {
+    pathStrip: {
+      label: "Cycle path",
+      invalidated: "Invalidated by a later return to Design",
+      backfilled: "Reconstructed from review history",
+      record: "Path record",
+    },
+    designSheet: {
+      readOnly:
+        "This sheet is for inspection only. Design is submitted and decided in the meeting's registered slide deck.",
+    },
+  },
   login: {
     signInTitle: "Sign in to your account",
     createAccountTitle: "Create a new account",

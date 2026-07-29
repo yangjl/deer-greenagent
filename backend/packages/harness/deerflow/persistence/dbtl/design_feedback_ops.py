@@ -532,6 +532,30 @@ class DesignFeedbackOpsMixin:
                 )
             )
             if existing is not None:
+                same_failed_retry = bool(
+                    action_group == "chair_response"
+                    and existing.status == "failed"
+                    and existing.id == submission_id
+                    and existing.action_kind == action_kind
+                    and list(existing.selected_card_ids or []) == card_ids
+                    and (existing.human_comment or "") == comment
+                    and existing.expected_evidence == expected_evidence
+                    and existing.expected_deck_hash == expected_deck_hash
+                )
+                if same_failed_retry:
+                    # A resumed chair worker is itself durable audit work, so a
+                    # failed attempt advances the cycle revision even though it
+                    # produces no successor deck. Retrying the exact same
+                    # payload under the same client submission id may bind to
+                    # that freshly-read revision; changing the answer, deck,
+                    # evidence, or id is still a conflict. This is a retry of
+                    # one decision, not a second answer or a stale rebase.
+                    existing.payload_hash = payload_hash
+                    existing.expected_db_revision = expected_db_revision
+                    existing.status = "pending"
+                    existing.failure_code = None
+                    await session.commit()
+                    return self._surface_payload(surface), self._action_payload(existing), True
                 if existing.payload_hash != payload_hash:
                     raise DesignFeedbackConflict("This feedback step was already answered with a different payload.")
                 return self._surface_payload(surface), self._action_payload(existing), True
@@ -640,8 +664,17 @@ class DesignFeedbackOpsMixin:
         project_id: str,
         cycle_id: str,
         stage_attempt_id: str | None = None,
+        mode: str | None = None,
     ) -> dict[str, Any] | None:
-        """The newest surface for a cycle, for pointing a stale deck forward."""
+        """The newest surface for a cycle, for pointing a stale deck forward.
+
+        ``mode`` narrows that to one kind of surface. Callers deciding whether a
+        deck may still *act* must pass ``stage_review``: supersession records
+        what a person was most recently shown, and a later deck that grants
+        nothing — a round that produced no package renders ``read_only`` — must
+        not be read as revoking the reviewable package's own deck, or a Design
+        awaiting a verdict becomes undecidable.
+        """
         async with self._sf() as session:  # type: ignore[attr-defined]
             statement = select(DbtlDesignFeedbackSurfaceRow).where(
                 DbtlDesignFeedbackSurfaceRow.project_id == project_id,
@@ -649,5 +682,7 @@ class DesignFeedbackOpsMixin:
             )
             if stage_attempt_id is not None:
                 statement = statement.where(DbtlDesignFeedbackSurfaceRow.stage_attempt_id == stage_attempt_id)
+            if mode is not None:
+                statement = statement.where(DbtlDesignFeedbackSurfaceRow.mode == mode)
             row = await session.scalar(statement.order_by(DbtlDesignFeedbackSurfaceRow.created_at.desc(), DbtlDesignFeedbackSurfaceRow.id.desc()).limit(1))
             return self._surface_payload(row) if row is not None else None

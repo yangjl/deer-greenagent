@@ -19,6 +19,7 @@ from deerflow.agents.dbtl.stage_execution import (
     _summarize_token_usage,
     _token_limit_for_worker,
     _tools_for_stage_budget,
+    _wants_new_debate,
 )
 from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.capabilities import Capability
@@ -1220,7 +1221,12 @@ async def test_a_replayed_run_returns_the_durable_result_without_dispatch(
     assert dispatcher.calls == []
 
 
-def _design_adapter(repo: FakeRepo, dispatcher: FakeDispatcher) -> LiveStageAdapter:
+def _design_adapter(
+    repo: FakeRepo,
+    dispatcher: FakeDispatcher,
+    *,
+    intent_interpreter=None,
+) -> LiveStageAdapter:
     return LiveStageAdapter(
         repo=repo,
         app_config=SimpleNamespace(),
@@ -1231,7 +1237,23 @@ def _design_adapter(repo: FakeRepo, dispatcher: FakeDispatcher) -> LiveStageAdap
             ),
         ),
         dispatcher=dispatcher,
+        intent_interpreter=intent_interpreter,
     )
+
+
+class FakeIntentInterpreter:
+    """Records the prompts it saw and replies with a fixed verdict."""
+
+    def __init__(self, reply: str = "HOLD", error: Exception | None = None) -> None:
+        self.reply = reply
+        self.error = error
+        self.prompts: list[str] = []
+
+    async def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        if self.error is not None:
+            raise self.error
+        return self.reply
 
 
 def _with_design_package(cycle: dict) -> dict:
@@ -1275,6 +1297,52 @@ async def test_a_design_already_on_the_table_is_not_debated_again(
     assert "run the meeting again" in result.note
 
 
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "restart the meeting",
+        "Restart the design meeting with the drought sites in scope.",
+        "Please restart the debate.",
+        "Can you relaunch the council?",
+        "retry the meeting",
+        "rerun the meeting",
+        "re-open the discussion",
+        "redo the round",
+        "hold another meeting",
+        "start a new debate",
+        "debate it again",
+        # Common one-slip typos of "restart", same precedent as the
+        # classifier's narrowly recognized "similate" misspelling.
+        "restat the meeting",
+        "Restar the meeting please.",
+        "restrat the design meeting",
+        "retsart the meeting",
+        "rstart the debate",
+        "resart the council",
+        "retart the meeting",
+    ],
+)
+def test_asking_to_restart_the_meeting_counts_as_a_new_debate(request_text: str) -> None:
+    """ "Restart" and its neighbours are how people actually ask for a re-run."""
+    assert _wants_new_debate(request_text)
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "How does this handle the drought sites?",
+        "The gateway restarted during the meeting.",
+        "Please restart the gateway.",
+        "We should retry the field trial next season.",
+        "Could you restate the discussion outcome?",
+        "restat the gateway",
+        "",
+    ],
+)
+def test_ordinary_requests_do_not_convene_a_meeting(request_text: str) -> None:
+    assert not _wants_new_debate(request_text)
+
+
 @pytest.mark.asyncio
 async def test_asking_for_another_meeting_convenes_one(tmp_path: Path) -> None:
     repo = FakeRepo(_with_design_package(_cycle()))
@@ -1290,6 +1358,110 @@ async def test_asking_for_another_meeting_convenes_one(tmp_path: Path) -> None:
 
     assert dispatcher.calls
     assert result.worker_count == 3
+
+
+@pytest.mark.asyncio
+async def test_a_paraphrased_rerun_request_convenes_via_the_interpreter(tmp_path: Path) -> None:
+    """The record keeps the owner's words verbatim; interpretation absorbs the errors.
+
+    A phrasing (or typo) the deterministic pattern never anticipated still
+    convenes when the intent interpreter reads it as a re-run request.
+    """
+    repo = FakeRepo(_with_design_package(_cycle()))
+    dispatcher = FakeDispatcher(text=_structured_result())
+    interpreter = FakeIntentInterpreter(reply="CONVENE")
+
+    request_text = "That meeting died on the provider outage — give it anothr go."
+    result = await _design_adapter(repo, dispatcher, intent_interpreter=interpreter).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text=request_text,
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert dispatcher.calls
+    assert result.worker_count == 3
+    # The interpreter was shown the owner's original words, unrepaired.
+    assert any(request_text in prompt for prompt in interpreter.prompts)
+
+
+@pytest.mark.asyncio
+async def test_the_interpreter_holding_keeps_the_design_on_the_table(tmp_path: Path) -> None:
+    repo = FakeRepo(_with_design_package(_cycle()))
+    dispatcher = FakeDispatcher(text=_structured_result())
+    interpreter = FakeIntentInterpreter(reply="HOLD")
+
+    result = await _design_adapter(repo, dispatcher, intent_interpreter=interpreter).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="How does this handle the drought sites?",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert dispatcher.calls == []
+    assert result.worker_count == 0
+    assert "design-review-rev3-abc123.md" in result.note
+
+
+@pytest.mark.asyncio
+async def test_an_interpreter_failure_fails_soft_to_holding(tmp_path: Path) -> None:
+    """Routing must never depend on provider health; an outage holds, not crashes."""
+    repo = FakeRepo(_with_design_package(_cycle()))
+    dispatcher = FakeDispatcher(text=_structured_result())
+    interpreter = FakeIntentInterpreter(error=RuntimeError("provider overloaded"))
+
+    result = await _design_adapter(repo, dispatcher, intent_interpreter=interpreter).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="please give the meeting anothr go",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert dispatcher.calls == []
+    assert result.worker_count == 0
+    assert "design-review-rev3-abc123.md" in result.note
+
+
+@pytest.mark.asyncio
+async def test_a_gibberish_interpreter_reply_holds(tmp_path: Path) -> None:
+    """Only an explicit CONVENE verdict spends a council's budget."""
+    repo = FakeRepo(_with_design_package(_cycle()))
+    dispatcher = FakeDispatcher(text=_structured_result())
+    interpreter = FakeIntentInterpreter(reply="Well, it depends on what the owner meant...")
+
+    result = await _design_adapter(repo, dispatcher, intent_interpreter=interpreter).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="hmm maybe we shold think about it more",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert dispatcher.calls == []
+    assert result.worker_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_deterministic_match_never_consults_the_interpreter(tmp_path: Path) -> None:
+    """The phrase check is the fast path; a literal match spends no model call."""
+    repo = FakeRepo(_with_design_package(_cycle()))
+    dispatcher = FakeDispatcher(text=_structured_result())
+    interpreter = FakeIntentInterpreter(reply="HOLD")
+
+    result = await _design_adapter(repo, dispatcher, intent_interpreter=interpreter).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Run the meeting again with the drought sites in scope.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert dispatcher.calls
+    assert result.worker_count == 3
+    assert interpreter.prompts == []
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,7 @@ Run all commands from the repository root.
 | List saved states and resumable URLs | `make dbtl-manual-list` |
 | Stop the application | `make stop` |
 | Restore a saved state | `make dbtl-manual-restore SCENARIO=<name>` |
+| Swap a saved state without restarting the stack | `make dbtl-manual-restore-hot SCENARIO=<name>` |
 
 The normal daily loop is:
 
@@ -40,6 +41,20 @@ make dbtl-manual-dev
 
 # 3. Open the URL printed by restore and perform the focused manual check.
 ```
+
+Once the stack is already running, the fast loop replaces steps 1 and 2:
+
+```bash
+# From a second terminal, with `make dbtl-manual-dev` still attached elsewhere:
+make dbtl-manual-restore-hot SCENARIO=awaiting-review
+
+# Then hard-refresh the browser (Cmd+Shift+R / Ctrl+Shift+R) and repeat the check.
+```
+
+The hot swap recycles only the Gateway. The frontend and proxy keep running, so
+you skip the dependency sync and the cold Next.js start that dominate
+`make dbtl-manual-dev`. Repeating one review action becomes seconds rather than
+minutes.
 
 `make dbtl-manual-dev` stays attached to the terminal. Keep it running while
 testing and press Ctrl+C when finished. You can run capture/list commands from a
@@ -218,6 +233,50 @@ The tool never reads from or writes to the normal database/project root after
 the profile is generated. Restore operates only under
 `.deer-flow/manual-dbtl/live`.
 
+The isolated profile persists `run_events` in that same SQLite database. Those
+rows are the paginated chat-history read model; keeping only LangGraph
+checkpoints is insufficient because a Gateway restart would otherwise leave the
+conversation state intact while making the visible transcript appear empty.
+Restoring an older scenario whose event feed is empty backfills that feed from
+the latest checkpoint before the Gateway opens the database.
+
+### Hot restore while the stack keeps running
+
+`make dbtl-manual-restore-hot SCENARIO=<name>` performs the same swap under the
+running stack:
+
+```bash
+make dbtl-manual-restore-hot SCENARIO=awaiting-review
+```
+
+It inverts the cold path's rule and **requires** the manual stack to be running;
+if nothing is listening on Gateway port 8001 it refuses and points at the
+ordinary cold `restore`. Everything else is unchanged: it verifies the
+scenario's database and project-tree hashes plus SQLite integrity, backs the
+previous isolated live pair up under `restore-backups/`, swaps the pair
+together, and never touches the normal configured database or project root.
+
+Only the Gateway holds the isolated SQLite file, so after the swap the tool
+touches one watched backend source file, lets the Gateway's `uvicorn --reload`
+watcher recycle that process, and polls the Gateway until it answers again
+(bounded at about 30 seconds). The frontend and nginx are never restarted.
+**Hard-refresh the browser** afterwards so it drops the previous scenario's
+cached state.
+
+This is safe because of the same quiescence guard capture uses: the hot swap
+refuses if the live database has a pending/running agent run, a queued/running
+scheduled run, or an in-flight Design feedback action, and it re-checks that
+immediately before replacing the files. A quiet human-decision boundary is the
+only moment the state under a live process may be exchanged.
+
+Use the cold path instead when:
+
+- the stack is not running (there is no Gateway to reload);
+- you want a guaranteed-clean process, for example after a dependency change, a
+  configuration change outside the reload watcher, or a suspected leaked
+  in-process cache; or
+- the readiness poll times out and tells you to fall back.
+
 ## Recommended test sequence
 
 For each implementation, test in increasing scope:
@@ -237,6 +296,56 @@ The checkpoint run validates recent behavior from a known state. The uncached
 smoke test validates that earlier stages can still produce that state.
 
 ## Suggested manual checks for deck input
+
+### Progressive-gate Phase 0
+
+Do not use a `chair_feedback` or `read_only` deck for this check. Phase 0 starts
+one step later, from a registered `stage_review` deck whose Design stage is
+already `awaiting_review` and whose verdict controls still offer **Approve**,
+**Request changes**, and **Reject**. If those controls are absent or already
+show a receipt, the checkpoint is consumed and must not be captured as
+`design-awaiting-verdict`.
+
+At the quiet boundary immediately before the verdict, capture the scenario and
+record what the tester should see:
+
+```bash
+make dbtl-manual-capture \
+  SCENARIO=design-awaiting-verdict \
+  PATH_HEAD=design \
+  ROUTES=approve,request_changes,reject \
+  NEXT_ACTION=approve \
+  REPLACE=1
+```
+
+Then complete the Phase 0 acceptance pass:
+
+1. Approve from that registered deck. A paused-chair answer is not the verdict.
+2. Open either the Design or Build stage inspection sheet from the project
+   rail. At the top, verify `Design 1 → Build 1`, with Build bold as the current
+   head, and record the visible `Path record: dst-…` identifier.
+3. Hard-refresh, reopen the project and stage sheet, and verify the same path
+   and path-record identifier.
+4. Try the consumed verdict again from the same deck. Verify it stays disabled
+   or returns its existing receipt, and that no second `Design 1` appears.
+5. Capture the quiet result:
+
+   ```bash
+   make dbtl-manual-capture \
+     SCENARIO=design-1-path-recorded \
+     PATH_HEAD=build \
+     NEXT_ACTION=refresh-and-replay
+   ```
+
+6. For the revisit check, restore or create a Test-validity boundary that can
+   choose `return_to_design`. Record that decision, reopen the stage sheet, and
+   verify the old passed Design/Build items are struck through and `Design 2`
+   is current. This is intentionally a Test route; a chair response or a
+   Design `request_changes` verdict is not a downstream-design revisit.
+
+`make dbtl-manual-list` prints the expectation metadata for newly captured
+scenarios. Existing checkpoints created before this metadata was added remain
+restorable, but should be recaptured before being used as Phase 0 evidence.
 
 ### Paused chair
 
@@ -309,7 +418,29 @@ make stop
 make dbtl-manual-restore SCENARIO=<name>
 ```
 
-Do not delete `runtime.lock` to bypass the refusal.
+Do not delete `runtime.lock` to bypass the refusal. If the stack is running and
+you only want the next scenario, use `make dbtl-manual-restore-hot SCENARIO=<name>`
+instead of stopping it.
+
+### Hot restore says the manual stack is not running
+
+The hot path exists to recycle a live Gateway, so it requires one. Start the
+stack with `make dbtl-manual-dev`, or use the ordinary cold path:
+
+```bash
+make dbtl-manual-restore SCENARIO=<name>
+make dbtl-manual-dev
+```
+
+### Hot restore says the Gateway did not answer in time
+
+The scenario is already in place; only the reload confirmation failed. Stop the
+stack and start it again against the swapped state:
+
+```bash
+make stop
+make dbtl-manual-dev
+```
 
 ### Capture says a run or action is active
 

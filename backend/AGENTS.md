@@ -127,6 +127,32 @@ see the live Gateway. Its data stays under gitignored
 route. Focused coverage lives in
 `tests/test_dbtl_manual_pipeline.py`.
 
+**Only the Gateway holds the database, so only the Gateway has to move.**
+`restore --hot` (`make dbtl-manual-restore-hot`) exists because the cold loop's
+cost is not the restore — a scenario swap is one file copy and two hashes —
+but the `make dbtl-manual-dev` that follows it, which re-runs dependency sync
+and a cold Next.js start to bring back a frontend that never needed to stop. The
+hot path therefore **inverts only the running-stack rule** (it requires the
+stack to be up, and does not take the advisory lock, because the running
+launcher holds it) and keeps every other guarantee: both content hashes, the
+integrity check, and the `restore-backups/` copy of the prior live pair. It
+recycles the Gateway by touching `backend/app/__init__.py` — a permanently
+empty package marker inside the reload watcher's tree, chosen so a bumped mtime
+can never be mistaken for a content change — then polls until the Gateway
+answers. The developer hard-refreshes the browser.
+
+Two properties are load-bearing. **Quiescence is re-checked immediately before
+the swap**, not merely at entry: `_assert_no_active_work` (the same guard
+`capture` uses, over the same `ACTIVE_TABLE_STATUSES`) runs twice, because
+backing up the previous live pair takes real time and a run admitted in that
+window must not have its database replaced underneath it. And **the readiness
+poll cannot prove a restart happened**: uvicorn keeps the listening socket in
+the parent process, so the port never stops accepting while the child recycles
+and there is no observable down edge to wait for — hence a settle window before
+polling, the insistence on a hard refresh, and the standing advice to use the
+cold path when a guaranteed-clean process matters. A timed-out wait leaves the
+scenario already swapped in, since the swap commits before the reload.
+
 All Gateway development launchers exclude `tests/**` from Uvicorn's reload
 watcher. Keep that exclusion aligned across root local development,
 backend-only development, and Docker development so test edits do not interrupt
@@ -936,6 +962,7 @@ This invokes `alembic revision --autogenerate` against the live ORM models. Revi
 - `migrations/versions/0004_run_ownership.py` — `runs` multi-worker ownership + the `uq_runs_thread_active` partial unique index, with a `_dedupe_active_runs_per_thread()` pre-step so `CREATE UNIQUE INDEX` cannot fail on a field DB that already has duplicate active rows per thread
 - `migrations/versions/0007_scheduled_run_active_index.py` — the `uq_scheduled_task_run_active` partial unique index (at most one queued/running `scheduled_task_runs` row per `task_id`), with a `_dedupe_active_scheduled_runs_per_task()` pre-step (keeps the newest active row per task, supersedes the rest to `interrupted` with an explanatory `error` + `finished_at`) mirroring 0004; chains after `0006_agents`
 - `migrations/versions/0019_thread_operation_kind.py` — adds `runs.operation_kind` for durable non-run thread reservations; chains after `0018_allow_parallel_top_level_cycles`
+- `migrations/versions/0024_dbtl_stage_transitions.py` — the append-only stage-graph path history (`dbtl_stage_transitions`), backfilled with one synthetic `backfilled=true` row per already-passed design/build/learn review and test validity route; a drifted schema (table already present) is deliberately not backfilled. Chains after `0023_dbtl_design_feedback_actions`
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch decision + locking
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps)
 
@@ -2142,15 +2169,50 @@ composer state let the still-selected rail cycle silently re-arm the next
 request. The backend also treats a deterministic read/explain question as
 ordinary chat when it arrives with a selected cycle but no explicit
 `continue_cycle` choice. An explicit cycle scope still wins, as do answers
-bound to server-emitted council cards. Three additional rules live in
+bound to server-emitted council cards.
+
+**A typo must not change what a request means, on any rung.** Chat is not a
+production artifact: the record keeps the owner's words verbatim while
+interpretation absorbs the errors. Both routing rungs that read text absorb
+one-slip misspellings deterministically, enumerated as literals (never fuzzy
+matches) so the rung stays auditable — `routing._START_VERB_TYPOS` for the
+typed-start verbs (a slip there skips rung 2, hands the request to the
+classifier, and tells someone who asked in words to start a cycle that nothing
+happened) and `classifier._EXPLAIN_TYPOS` / `_READ_TYPOS` for the `ordinary.*`
+openers. The latter are *negative* rules, which makes them the safe direction to
+absorb: recognizing a typo there can only make the classifier more
+conservative, while missing one promotes a read-only question into cycle work
+that may spend a whole council's budget. Both typo groups still require their
+existing context (a start verb must name a cycle/DBTL; an opener must lead the
+message), so a misspelled verb alone trips nothing. `route_request` itself stays
+pure and sync — an LLM on that path would add a model call to every project
+turn, and its expensive misread (promoting a question into cycle work) is
+already caught downstream by the adapter's hold. The LLM readings live where a
+misread is cheap and human-gated: the preflight depth (`interpret_depth`) and
+the held-design re-run decision (`_interpreted_wants_new_debate`). Rung 5's
+proposal classifier is still purely rule-based.
+
+Three additional rules live in
 `stage_execution`:
 
 - `_unreviewed_design_package` **holds**: a package on the attempt plus no
   `changes_requested` review means nothing is dispatched and the reply points at
   the review sheet. `_wants_new_debate` is the deterministic override (the same
-  named-phrase style as `recommend_depth`), and a `changes_requested` attempt is
+  named-phrase style as `recommend_depth`; its verb group also enumerates
+  one-slip "restart" typos — `_RESTART_TYPOS` — the same narrow way the
+  classifier recognizes "similate"), and a `changes_requested` attempt is
   deliberately excluded from the hold — that verdict *is* the request to argue
-  again, and it already carries what to argue about.
+  again, and it already carries what to argue about. Requests the phrases do
+  not match get one more reading: `_interpreted_wants_new_debate` sends the
+  owner's verbatim text (typos included — the record keeps what was said,
+  interpretation absorbs the errors) to the injected `intent_interpreter`
+  (`make_llm_intent_interpreter`, a nostream one-shot on
+  `dbtl.setup_draft_model_name`, the same fail-soft seam contract as the
+  roster writer). Only a reply whose first word is CONVENE convenes; an
+  absent interpreter, provider failure, or any other reply holds, so routing
+  never depends on provider health and a misread costs one rephrase, never a
+  council's budget. The deterministic match is checked first and skips the
+  model call entirely.
 - `_resumed_chair_unit` **resumes**: an answer to the chair's own `needs_input`
   question dispatches the chair alone over `_prior_positions` (the durable
   worker runs), carrying the question and the owner's words verbatim, and skips
@@ -2388,7 +2450,27 @@ artifact revision, or deck hash conflicts without rebasing.
 
 Chair answers use the recorded option/value or exact free text, bind to the
 supervisor-emitted `human_input_request_id`, and start the run only in the
-originating thread. Stage review remains two explicit transitions:
+originating thread. Once the run is admitted, the router also appends one
+server-owned visible `llm.ai.response` to that thread's durable event feed.
+Its bounded `dbtl_meeting_progress` snapshot is built from the Design stage's
+recorded worker rows: completed independent/red-team participants plus the
+resuming chair. This is the chat-first fallback for deck-started background
+runs, which do not share the open page's live `task_*` stream; the frontend
+polls the existing stage-worker read endpoint to settle the chair lane. Failure
+to publish the progress card is fail-soft and cannot roll back an already
+admitted chair run.
+
+Supervisor branches create their `ask_clarification` and `present_files`
+message pairs as graph output rather than model/tool callbacks. `RunJournal`'s
+root-chain reconciliation therefore persists both visible allowlisted AI turns
+and their ToolMessages after the current run input, deduplicating identities
+already seen through callbacks. For `present_files`, it also records the
+server-authored filepaths in `run.delivery`; otherwise a background chair can
+successfully write and register its final review deck while durable chat reports
+zero presented artifacts. Retained messages before the current input are never
+reconciled.
+
+Stage review remains two explicit transitions:
 `submit_for_review`, then one of `approve`, `request_changes`, or `reject`.
 Reviews bind canonical evidence and deck hashes and separately retain selected
 card ids, the nullable human comment, and the labelled server rationale
@@ -2396,10 +2478,74 @@ projection. Request changes queues the existing focused refinement with the
 selected issue ids and comment. Lifecycle logs use the
 `design_feedback.*` vocabulary and omit comments and raw deck content.
 
+The chair action is not complete merely because `start_run` returned. A failed
+chair worker is valid stage audit data, so its parent run can finish with
+`success` while producing no successor feedback surface. The authenticated
+surface read repairs that stranded `resume_started` action to `failed` once the
+run is terminal and the old chair surface is still current. A retry must keep
+the same client submission id, action, selected cards, comment, evidence, and
+deck hash. It may rebind only `expected_db_revision`, because recording the
+failed worker itself advanced the cycle revision; any substantive payload
+change remains a conflict. This preserves one human answer while making a
+provider outage recoverable. The authenticated read includes that failed
+action's selected cards and comment; on remount the parent sends them back as
+initialization state so the inert HTML restores the exact retryable answer
+instead of defaulting to an empty or different draft.
+
 `dbtl.design_deck_feedback=false` is the rollback switch. Descriptor and review
 records are retained when it is off; consumed surfaces never reopen. Historical
 decks without a descriptor, direct/downloaded decks, stale evidence, and
 superseded surfaces remain inert.
+
+**Being superseded is not the same as being revoked.** Supersession records what
+somebody was most recently *shown*, so `is_current` is derived from the absence
+of any successor. Authority is a different question, and conflating the two made
+a Design undecidable: a round that produces no package renders a `read_only`
+deck, that deck superseded the `stage_review` deck bound to the package still
+awaiting a verdict, and — because actionability required `is_current` — no
+surface anywhere could record the decision. The read model therefore asks
+`latest_design_feedback_surface(..., mode="stage_review")`: a review deck may
+act while no newer *review* deck exists for the same stage attempt and its
+evidence still matches, while every other mode stays live only until anything
+supersedes it. The audit record is untouched — the older row still reports
+`is_current: false` and names its successor. Since the Design stage sheet is now
+inspection-only, the registered deck is the sole surface that can record a
+Design verdict, which is what makes this failure total rather than inconvenient.
+Tests: `test_dbtl_design_feedback_surface.py::TestRegenerationSupersedesRatherThanMutates`
+and `test_dbtl_design_feedback_router.py::test_a_read_only_deck_does_not_report_the_reviewable_deck_as_replaced`.
+
+The generic stage-review request (`POST .../stages/{stage}/review`) takes
+`rationale` as **optional**, mirroring the deck path: a blank one is stored as a
+labelled server projection with `rationale_source: server_projection`, so a
+reader can always tell the server's sentence from the reviewer's. A **rejection
+still requires the reviewer's own words** (422 otherwise) — it ends the attempt,
+and a generated sentence there tells the next reader nothing.
+
+**Progressive-gate Phase 0: the cycle is a recorded walk over a D/B/T/L stage
+graph** (plan: `docs/plans/2026-07-29-progressive-dbtl-gate-plan.md`).
+`deerflow.dbtl.stage_routes` is the pure authority for legal edges: the graph's
+nodes are Design, Build, Test, Learn only, and reconciliation is never a
+destination — where Phase 7's post-Test chooser offered "return to
+reconciliation", the re-expression is a **blocked Build edge carrying the
+unreconciled-rows reason**. The production Test-validity write path consults
+this authority before applying its legacy recommendation; the old
+`return_to_reconciliation` value is refused without changing cycle state.
+`TransitionOpsMixin`
+(`persistence/dbtl/transition_ops.py`) appends one `dbtl_stage_transitions`
+row inside the same transaction as each gate decision — design/build/learn
+review verdicts, Test validity routes, and cycle closure — so a committed
+decision and its path edge cannot disagree; reconciliation reviews append
+nothing, because data work is not a path event. ORM update/delete of a path row
+is refused: corrections append another edge rather than rewriting history.
+Writes are unconditional;
+`dbtl.progressive_gate` (default false, `config_version` 33) gates only the
+read model: `GET .../dbtl/cycles/{id}` gains a `transitions` array and
+`/api/features` reports `dbtl.progressive_gate` for the frontend's read-only
+path strip. Toggling the flag therefore never creates an audit gap. Tests:
+`test_dbtl_stage_routes.py` (route-legality matrix + Phase 7 golden mapping),
+`test_dbtl_stage_transitions.py` (append per gate, immutability, replay safety,
+real Test→Design revisit, scoping), `test_migration_0024_stage_transitions.py`
+(idempotent backfill + drift + rollback).
 
 **A card's tool-call id must satisfy every provider it may be replayed to.**
 `supervisor.card_request_id` builds every card/present-files id as

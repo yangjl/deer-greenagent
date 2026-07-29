@@ -9,6 +9,7 @@ export * from "./hooks";
 export * from "./knowledge-api";
 export * from "./knowledge-hooks";
 export * from "./knowledge-view";
+export * from "./path-strip";
 export * from "./proposal-hooks";
 export * from "./proposal-view";
 export * from "./proposals-api";

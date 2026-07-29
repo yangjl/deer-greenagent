@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Code2Icon,
   CopyIcon,
@@ -60,6 +61,7 @@ import {
   SafeStreamdown,
   toStreamdownComponents,
 } from "@/core/streamdown/components";
+import { threadHistoryQueryKey } from "@/core/threads/hooks";
 import {
   canBrowserPreviewFile,
   checkCodeFile,
@@ -80,6 +82,14 @@ import { useArtifacts } from "./context";
 import { artifactMarkdownPlugins } from "./markdown-preview-plugins";
 
 const WRITE_FILE_PREVIEW_REFRESH_INTERVAL_MS = 3000;
+const DESIGN_CHAIR_POLL_INTERVAL_MS = 750;
+const DESIGN_CHAIR_MAX_POLLS = 800;
+
+type DeckProgress = {
+  surfaceId: string;
+  state: "submitting" | "running" | "completed" | "failed";
+  note: string;
+};
 
 export function ArtifactFileDetail({
   className,
@@ -464,6 +474,7 @@ export function ArtifactFilePreview({
   projectId?: string | null;
   threadId?: string;
 }) {
+  const queryClient = useQueryClient();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const scrollPositionRef = useRef({ x: 0, y: 0 });
   const scrollMessageKey = useMemo(
@@ -471,9 +482,11 @@ export function ArtifactFilePreview({
     [scrollKey],
   );
   const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string>();
+  const [deckProgress, setDeckProgress] = useState<DeckProgress | null>(null);
   const deckChannelRef = useRef<string | null>(null);
   const deckSurfaceRef = useRef<DesignFeedbackSurface | null>(null);
   const deckSubmissionIdRef = useRef<string | null>(null);
+  const deckChairPollingSurfaceRef = useRef<string | null>(null);
   const citationSources = useMemo(
     () =>
       language === "markdown" ? extractCitationSources(content ?? "") : [],
@@ -552,6 +565,104 @@ export function ArtifactFilePreview({
       );
     };
 
+    const refreshConversation = () => {
+      void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+      void queryClient.invalidateQueries({
+        queryKey: threadHistoryQueryKey(threadId),
+      });
+      void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+    };
+
+    const waitForChairOutcome = async (surfaceId: string, channel: string) => {
+      if (deckChairPollingSurfaceRef.current === surfaceId) {
+        return;
+      }
+      deckChairPollingSurfaceRef.current = surfaceId;
+      setDeckProgress({
+        surfaceId,
+        state: "running",
+        note: "The Design chair is running. The follow-up deck will appear in this conversation.",
+      });
+      try {
+        for (let poll = 0; poll < DESIGN_CHAIR_MAX_POLLS; poll += 1) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, DESIGN_CHAIR_POLL_INTERVAL_MS),
+          );
+          if (cancelled) return;
+          try {
+            const refreshed = await fetchDesignFeedbackSurface({
+              projectId,
+              surfaceId,
+              viewerThreadId: threadId,
+            });
+            if (cancelled) return;
+            deckSurfaceRef.current = refreshed;
+
+            if (
+              refreshed.receipt?.status === "failed" &&
+              refreshed.allowed_actions.some((action) =>
+                action.startsWith("chair_"),
+              )
+            ) {
+              const note =
+                refreshed.note ||
+                "The chair could not produce a follow-up deck. Your answer is still here — try again.";
+              setDeckProgress({
+                surfaceId,
+                state: "failed",
+                note,
+              });
+              send(surfaceId, channel, {
+                type: "failed",
+                note,
+              });
+              return;
+            }
+
+            if (
+              !refreshed.is_current ||
+              (refreshed.newest_surface_id !== null &&
+                refreshed.newest_surface_id !== surfaceId)
+            ) {
+              const note =
+                refreshed.note ||
+                "The meeting continued. Its follow-up deck is now in the conversation.";
+              refreshConversation();
+              setDeckProgress({
+                surfaceId,
+                state: "completed",
+                note,
+              });
+              send(surfaceId, channel, {
+                type: "accepted",
+                note,
+              });
+              return;
+            }
+          } catch {
+            // A transient read failure says nothing about the run. Keep waiting;
+            // the original write and its idempotency key remain authoritative.
+          }
+        }
+
+        const note =
+          "The chair is taking longer than expected. Your answer is still here; you can try sending it again.";
+        setDeckProgress({
+          surfaceId,
+          state: "failed",
+          note,
+        });
+        send(surfaceId, channel, {
+          type: "failed",
+          note,
+        });
+      } finally {
+        if (deckChairPollingSurfaceRef.current === surfaceId) {
+          deckChairPollingSurfaceRef.current = null;
+        }
+      }
+    };
+
     const handleMessage = async (event: MessageEvent) => {
       if (
         event.source !== iframeRef.current?.contentWindow ||
@@ -579,26 +690,60 @@ export function ArtifactFilePreview({
           const channel = uuid();
           deckChannelRef.current = channel;
           deckSurfaceRef.current = surface;
+          if (
+            surface.receipt?.status === "failed" &&
+            surface.receipt.client_submission_id
+          ) {
+            // A remount must retry under the action ledger's original id.
+            // Generating a new UUID would turn the same answer into a second
+            // answer and the backend would correctly refuse it.
+            deckSubmissionIdRef.current = surface.receipt.client_submission_id;
+          }
           const bytesMatch = await verifyBytes(surface.deck_content_hash);
           if (cancelled) return;
           send(surfaceId, channel, {
             type: "initialize",
             allowedActions: bytesMatch ? surface.allowed_actions : [],
+            selectedOptionIds:
+              bytesMatch && surface.receipt?.status === "failed"
+                ? surface.receipt.selected_card_ids
+                : undefined,
+            comment:
+              bytesMatch && surface.receipt?.status === "failed"
+                ? (surface.receipt.human_comment ?? "")
+                : undefined,
             note: bytesMatch
               ? surface.note
               : "This preview does not match the registered deck bytes.",
           });
+          if (bytesMatch && surface.receipt?.status === "resume_started") {
+            // A deck may be closed or remounted while its background chair run
+            // is active. Resume both the visible progress state and successor
+            // polling from the authenticated receipt; otherwise the old deck
+            // looks inert and the conversation never learns that the follow-up
+            // deck arrived.
+            refreshConversation();
+            void waitForChairOutcome(surfaceId, channel);
+          } else {
+            setDeckProgress(null);
+          }
         } catch (error) {
           if (cancelled) return;
           const channel = uuid();
           deckChannelRef.current = channel;
+          const note =
+            error instanceof Error
+              ? error.message
+              : "This deck could not be verified.";
+          setDeckProgress({
+            surfaceId,
+            state: "failed",
+            note,
+          });
           send(surfaceId, channel, {
             type: "initialize",
             allowedActions: [],
-            note:
-              error instanceof Error
-                ? error.message
-                : "This deck could not be verified.",
+            note,
           });
         }
         return;
@@ -611,6 +756,11 @@ export function ArtifactFilePreview({
       if (intent?.type !== "submit_intent") return;
 
       const submissionId = (deckSubmissionIdRef.current ??= uuid());
+      setDeckProgress({
+        surfaceId,
+        state: "submitting",
+        note: "Recording your Design feedback…",
+      });
       send(surfaceId, channel, { type: "pending" });
       try {
         const result = await applyDesignFeedbackAction({
@@ -637,7 +787,30 @@ export function ArtifactFilePreview({
               result.receipt?.message ??
               "Submitted. Choose the final Design verdict.",
           });
+          setDeckProgress({
+            surfaceId,
+            state: "completed",
+            note:
+              result.receipt?.message ??
+              "Submitted. Choose the final Design verdict.",
+          });
+        } else if (
+          result.status === "resume_started" &&
+          intent.action.kind.startsWith("chair_")
+        ) {
+          // This REST action starts a run outside the page's normal LangGraph
+          // stream, so waiting for the POST alone would freeze the old deck
+          // while the conversation never learns that a successor exists. Poll
+          // the authenticated read model until it either exposes the next deck
+          // or releases this exact answer for retry.
+          refreshConversation();
+          await waitForChairOutcome(surfaceId, channel);
         } else {
+          setDeckProgress({
+            surfaceId,
+            state: "completed",
+            note: result.receipt?.message ?? "Recorded.",
+          });
           send(surfaceId, channel, {
             type: "accepted",
             note: result.receipt?.message ?? "Recorded.",
@@ -665,6 +838,45 @@ export function ArtifactFilePreview({
                   refreshed.note ||
                   "This deck changed or was already answered. Open the latest feedback deck.",
               });
+              setDeckProgress({
+                surfaceId,
+                state: "failed",
+                note:
+                  refreshed.note ||
+                  "This deck changed or was already answered. Open the latest feedback deck.",
+              });
+              return;
+            }
+            if (
+              refreshed.receipt?.status === "failed" &&
+              refreshed.allowed_actions.some((action) =>
+                action.startsWith("chair_"),
+              )
+            ) {
+              if (refreshed.receipt.client_submission_id) {
+                deckSubmissionIdRef.current =
+                  refreshed.receipt.client_submission_id;
+              }
+              // A failed chair run may be retried only with the exact audited
+              // answer. Restore it from the authenticated action ledger
+              // instead of leaving a changed draft trapped in a permanent
+              // payload-conflict loop.
+              send(surfaceId, channel, {
+                type: "initialize",
+                allowedActions: refreshed.allowed_actions,
+                selectedOptionIds: refreshed.receipt.selected_card_ids ?? [],
+                comment: refreshed.receipt.human_comment ?? "",
+                note:
+                  error.message +
+                  " The original recorded answer has been restored for retry.",
+              });
+              setDeckProgress({
+                surfaceId,
+                state: "failed",
+                note:
+                  error.message +
+                  " The original recorded answer has been restored for retry.",
+              });
               return;
             }
           } catch {
@@ -672,12 +884,18 @@ export function ArtifactFilePreview({
             // against a new revision merely because refresh also failed.
           }
         }
+        const note =
+          error instanceof Error
+            ? error.message
+            : "That Design feedback could not be recorded.";
+        setDeckProgress({
+          surfaceId,
+          state: "failed",
+          note,
+        });
         send(surfaceId, channel, {
           type: "failed",
-          note:
-            error instanceof Error
-              ? error.message
-              : "That Design feedback could not be recorded.",
+          note,
         });
       }
     };
@@ -692,8 +910,9 @@ export function ArtifactFilePreview({
       deckChannelRef.current = null;
       deckSurfaceRef.current = null;
       deckSubmissionIdRef.current = null;
+      deckChairPollingSurfaceRef.current = null;
     };
-  }, [content, language, projectId, threadId]);
+  }, [content, language, projectId, queryClient, threadId]);
 
   useEffect(() => {
     if (language !== "html") {
@@ -736,18 +955,38 @@ export function ArtifactFilePreview({
   }
   if (language === "html") {
     return (
-      <iframe
-        ref={iframeRef}
-        className="size-full"
-        title="Artifact preview"
-        // allow-scripts is needed for the scroll-restoration injected
-        // script (appendHtmlPreviewScrollRestoration) which communicates
-        // via postMessage. allow-same-origin is deliberately omitted: the
-        // opaque origin prevents access to parent.document and cookies,
-        // and postMessage(..., "*") works fine from it.
-        sandbox="allow-scripts allow-forms"
-        src={htmlPreviewUrl}
-      />
+      <div className="flex size-full min-h-0 flex-col">
+        {deckProgress && (
+          <div
+            className={cn(
+              "flex shrink-0 items-center gap-2 border-b px-4 py-2 text-sm",
+              deckProgress.state === "failed"
+                ? "border-destructive/30 bg-destructive/10 text-destructive"
+                : "bg-muted/60 text-foreground",
+            )}
+            role="status"
+            aria-live="polite"
+          >
+            {(deckProgress.state === "submitting" ||
+              deckProgress.state === "running") && (
+              <LoaderIcon className="size-4 shrink-0 animate-spin" />
+            )}
+            <span>{deckProgress.note}</span>
+          </div>
+        )}
+        <iframe
+          ref={iframeRef}
+          className="min-h-0 flex-1"
+          title="Artifact preview"
+          // allow-scripts is needed for the scroll-restoration injected
+          // script (appendHtmlPreviewScrollRestoration) which communicates
+          // via postMessage. allow-same-origin is deliberately omitted: the
+          // opaque origin prevents access to parent.document and cookies,
+          // and postMessage(..., "*") works fine from it.
+          sandbox="allow-scripts allow-forms"
+          src={htmlPreviewUrl}
+        />
+      </div>
     );
   }
   return null;

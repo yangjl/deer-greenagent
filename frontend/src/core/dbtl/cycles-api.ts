@@ -42,7 +42,10 @@ export interface DesignFeedbackSurface {
   current_db_revision: number | null;
   current_stage_status: string | null;
   receipt: {
+    client_submission_id?: string;
     status: string;
+    selected_card_ids?: string[];
+    human_comment?: string | null;
     receipt?: { message?: string; run_id?: string; db_revision?: number };
   } | null;
   note: string;
@@ -254,7 +257,12 @@ export async function reviewStage(input: {
   cycleId: string;
   stage: DbtlStage;
   decision: ReviewDecision;
-  rationale: string;
+  /**
+   * Optional server-side, except for `reject`, which is refused without one.
+   * A blank rationale is filled by a labelled server projection rather than
+   * being invented, so a caller may honestly leave it empty.
+   */
+  rationale?: string;
   expectedDbRevision: number;
   idempotencyKey: string;
 }): Promise<CycleRecord> {
@@ -262,7 +270,7 @@ export async function reviewStage(input: {
     `${base(input.projectId)}/cycles/${encodeURIComponent(input.cycleId)}/stages/${input.stage}/review`,
     {
       decision: input.decision,
-      rationale: input.rationale,
+      rationale: input.rationale ?? "",
       expected_db_revision: input.expectedDbRevision,
       idempotency_key: input.idempotencyKey,
     },

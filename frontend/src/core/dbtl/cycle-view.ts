@@ -69,6 +69,39 @@ export interface CycleWorkItem {
   created_at: string;
 }
 
+/** The four stages the progressive gate's transition graph walks. */
+export type DbtlGraphStage = "design" | "build" | "test" | "learn";
+
+/**
+ * One recorded routing decision on a cycle's stage graph.
+ *
+ * Served on the cycle detail payload only when the backend's
+ * `dbtl.progressive_gate` flag is on. Rows are an ordered walk (`seq` is
+ * 1-based); `backfilled` marks a synthetic row reconstructed by migration
+ * rather than clicked by a person.
+ */
+export interface DbtlStageTransition {
+  id: string;
+  cycle_id: string;
+  seq: number;
+  from_stage: DbtlGraphStage;
+  from_attempt: number | null;
+  stage_attempt_id: string | null;
+  chosen_route: string;
+  to_stage: string;
+  assessed_difficulty: string | null;
+  human_override: string | null;
+  offered_routes: string[] | null;
+  decided_by: string;
+  decision_surface_id: string | null;
+  evidence_hash: string | null;
+  dataset_fingerprint: string | null;
+  stage_spec_version: string | null;
+  policy_version: string | null;
+  backfilled: boolean;
+  decided_at: string;
+}
+
 export interface CycleRecord {
   id: string;
   project_id: string;
@@ -87,6 +120,8 @@ export interface CycleRecord {
   stages: StageRecord[];
   artifacts?: CycleArtifact[];
   work_items?: CycleWorkItem[];
+  /** Present only when the backend's `dbtl.progressive_gate` flag is on. */
+  transitions?: DbtlStageTransition[];
 }
 
 export interface ActivityEvent {

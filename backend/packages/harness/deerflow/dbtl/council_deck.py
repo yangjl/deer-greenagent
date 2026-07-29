@@ -339,6 +339,14 @@ _BRIDGE_TEMPLATE = """
       if (settled) { return; }
       channel = typeof data.channel === 'string' && data.channel ? data.channel : null;
       allowed = Array.isArray(data.allowedActions) ? data.allowedActions.slice(0, 8) : [];
+      if (Array.isArray(data.selectedOptionIds)) {
+        choices.forEach(function (choice) {
+          choice.checked = data.selectedOptionIds.indexOf(choice.value) !== -1;
+        });
+      }
+      if (comment && typeof data.comment === 'string') {
+        comment.value = data.comment;
+      }
       submitting = false;
       var live = !!channel && allowed.length > 0;
       setEnabled(live);

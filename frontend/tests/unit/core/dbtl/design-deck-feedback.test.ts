@@ -278,6 +278,8 @@ describe("toDeckMessage", () => {
     const message = toDeckMessage(SURFACE_ID, CHANNEL, {
       type: "initialize",
       allowedActions: ["chair_option"],
+      selectedOptionIds: ["nam_ril_panel"],
+      comment: "Restore this answer.",
       note: "Choose an option.",
     });
 
@@ -286,6 +288,8 @@ describe("toDeckMessage", () => {
     expect(message.surfaceId).toBe(SURFACE_ID);
     expect(message.channel).toBe(CHANNEL);
     expect(message.type).toBe("initialize");
+    expect(message.selectedOptionIds).toEqual(["nam_ril_panel"]);
+    expect(message.comment).toBe("Restore this answer.");
   });
 
   it("carries no endpoint, token, or credential", () => {

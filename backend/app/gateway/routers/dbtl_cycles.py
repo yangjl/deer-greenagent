@@ -19,10 +19,18 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from langchain_core.messages import AIMessage
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_config, get_dbtl_cycle_repo, get_thread_store, get_workspace_repo
+from app.gateway.deps import (
+    get_config,
+    get_dbtl_cycle_repo,
+    get_run_event_store,
+    get_run_store,
+    get_thread_store,
+    get_workspace_repo,
+)
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 from app.gateway.memory_scope_service import resolve_scope_bindings
 from app.gateway.project_scope import ensure_project_root
@@ -49,6 +57,101 @@ logger = logging.getLogger(__name__)
 
 StageName = Literal["design", "reconciliation", "build", "test", "learn"]
 CycleWeight = Literal["full", "light", "retroactive"]
+
+
+async def _post_design_meeting_progress(
+    request: Request,
+    *,
+    project_id: str,
+    cycle_id: str,
+    thread_id: str,
+    run_id: str,
+    surface_id: str,
+    design_round: int,
+    choice_label: str,
+    comment: str,
+    prior_workers: list[dict[str, Any]],
+) -> None:
+    """Put the deck-started meeting back into the primary chat channel."""
+    recorded = f"Recorded decision: **{choice_label}**."
+    if comment:
+        recorded += f"\n\nComment: {comment}"
+    participants: list[dict[str, Any]] = []
+    prior_chair: dict[str, Any] | None = None
+    for worker in prior_workers:
+        result = worker.get("result") if isinstance(worker.get("result"), dict) else {}
+        capability = str(worker.get("capability") or "")
+        if capability == "design_council_chair":
+            prior_chair = worker
+            continue
+        role = "red_team" if capability == "design_red_team" else "position"
+        participants.append(
+            {
+                "id": str(worker.get("unit_id") or worker.get("id") or uuid4()),
+                "role": role,
+                "role_label": "Red team" if role == "red_team" else "Independent position",
+                "agent_name": str(worker.get("agent_name") or "Design participant"),
+                "via_generalist": bool(worker.get("via_generalist")),
+                "model": str((result.get("execution") or {}).get("model") or ""),
+                "status": "failed" if worker.get("status") == "failed" else "completed",
+                "summary": str(result.get("summary") or "")[:600],
+                "total_tokens": int((result.get("token_usage") or {}).get("total_tokens") or 0),
+            }
+        )
+    prior_chair_result = prior_chair.get("result") if prior_chair and isinstance(prior_chair.get("result"), dict) else {}
+    participants.append(
+        {
+            "id": str((prior_chair or {}).get("unit_id") or f"dbtl-meeting-chair__{surface_id}"),
+            "role": "chair",
+            "role_label": "Chair",
+            "agent_name": str((prior_chair or {}).get("agent_name") or "Design chair"),
+            "via_generalist": bool((prior_chair or {}).get("via_generalist")),
+            "model": str((prior_chair_result.get("execution") or {}).get("model") or ""),
+            "status": "in_progress",
+            "summary": "Revisiting the synthesis with the project owner’s recorded decision.",
+            "total_tokens": 0,
+        }
+    )
+    meeting_snapshot = {
+        "version": 1,
+        "project_id": project_id,
+        "cycle_id": cycle_id,
+        "surface_id": surface_id,
+        "run_id": run_id,
+        "round": design_round,
+        "state": "synthesizing",
+        "choice_label": choice_label,
+        "comment": comment,
+        "prior_chair_unit_id": str((prior_chair or {}).get("unit_id") or ""),
+        "participants": participants,
+    }
+    message = AIMessage(
+        id=f"dbtl-meeting-progress__{surface_id}__{run_id}",
+        content=(f"The Design meeting is continuing.\n\n{recorded}\n\nThe chair is working on the synthesis. I’ll post the follow-up deck in this conversation when it is ready."),
+        additional_kwargs={
+            "dbtl_meeting_progress": meeting_snapshot,
+            "design_feedback_surface_id": surface_id,
+            "run_id": run_id,
+        },
+    )
+    try:
+        await get_run_event_store(request).put_if_absent(
+            thread_id=thread_id,
+            run_id=run_id,
+            event_type="llm.ai.response",
+            category="message",
+            content=message.model_dump(),
+            metadata={
+                "caller": "lead_agent",
+                "dbtl_meeting_progress": True,
+            },
+        )
+    except Exception:  # noqa: BLE001 - the admitted chair run must not be rolled back
+        logger.exception(
+            "Failed to publish Design meeting progress to thread %s for run %s",
+            thread_id,
+            run_id,
+        )
 
 
 class CycleCreateRequest(BaseModel):
@@ -97,16 +200,27 @@ class StageReviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     decision: Literal["approve", "request_changes", "reject"]
-    rationale: str = Field(min_length=1, max_length=10_000)
+    # Optional, matching the registered-deck path: a reviewer who has nothing
+    # to add should not have to invent a sentence to record a decision. The
+    # server writes a labelled projection when it is blank, and
+    # ``rationale_source`` says which of the two the record holds.
+    rationale: str = Field(default="", max_length=10_000)
     expected_db_revision: int = Field(ge=1)
     idempotency_key: str = Field(min_length=1, max_length=128)
 
     @field_validator("rationale")
     @classmethod
-    def rationale_must_have_text(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("A review decision requires a rationale.")
+    def rationale_is_trimmed(cls, value: str) -> str:
         return value.strip()
+
+
+#: Written when a reviewer records a verdict without adding words of their own.
+#: Labelled ``rationale_source: server_projection`` so a reader can always tell
+#: a generated sentence from the reviewer's.
+_DEFAULT_REVIEW_RATIONALE: dict[str, str] = {
+    "approve": "Approved against the evidence revision shown at the time of the decision.",
+    "request_changes": "Returned to work for revision; no rationale text was recorded.",
+}
 
 
 class DesignFeedbackEvidence(BaseModel):
@@ -269,11 +383,16 @@ async def list_cycles(project_id: str, request: Request, repo=Depends(get_dbtl_c
 
 @router.get("/projects/{project_id}/dbtl/cycles/{cycle_id}")
 @require_permission("threads", "read")
-async def get_cycle(project_id: str, cycle_id: str, request: Request, repo=Depends(get_dbtl_cycle_repo)):
+async def get_cycle(project_id: str, cycle_id: str, request: Request, repo=Depends(get_dbtl_cycle_repo), config: AppConfig = Depends(get_config)):
     await _require_project(project_id, request)
     cycle = await repo.get_cycle(cycle_id, project_id=project_id)
     if cycle is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cycle not found")
+    if config.dbtl.progressive_gate:
+        # The read model for the path strip. Records accumulate regardless of
+        # the flag; only their exposure is gated, so turning the flag on shows
+        # the history that was already being kept.
+        cycle["transitions"] = await repo.list_stage_transitions(cycle_id=cycle_id, project_id=project_id)
     return cycle
 
 
@@ -304,8 +423,53 @@ async def _design_feedback_read_model(
     cycle = await repo.get_cycle(resolved_cycle_id, project_id=project_id)
     actions = await repo.design_feedback_actions(surface_id, project_id=project_id)
     latest_action = actions[-1] if actions else None
+    # A chair answer starts a background run. A provider/executor failure can
+    # still leave that parent run terminal-successful because the failed worker
+    # is an audited stage outcome rather than an exception. If the run is
+    # terminal and produced no successor feedback surface, the answer did not
+    # yield a chair outcome. Release the same payload-bound action for retry
+    # instead of leaving the only deck permanently consumed.
+    if surface["mode"] == "chair_feedback" and surface["is_current"] and latest_action and latest_action.get("action_group") == "chair_response" and latest_action.get("status") == "resume_started" and latest_action.get("run_id"):
+        try:
+            run = await get_run_store(request).get(
+                str(latest_action["run_id"]),
+                user_id=user_id,
+            )
+        except Exception:  # noqa: BLE001 - an unreadable run cannot prove failure
+            run = None
+        raw_status = (run or {}).get("status") if isinstance(run, dict) else None
+        run_status = str(getattr(raw_status, "value", raw_status) or "")
+        if run_status in {"success", "error", "timeout", "interrupted"}:
+            message = "The Design chair could not produce a follow-up deck from that run. Your recorded choice is still here; try sending it again."
+            latest_action = await repo.update_design_feedback_action(
+                str(latest_action["client_submission_id"]),
+                project_id=project_id,
+                status="failed",
+                receipt={
+                    "kind": latest_action.get("action_kind"),
+                    "run_id": latest_action.get("run_id"),
+                    "run_status": run_status,
+                    "message": message,
+                },
+                failure_code="resume_no_feedback_surface",
+            )
+    # Whether this deck may still act. Supersession records what somebody was
+    # most recently *shown*, which is not the same question: a later round that
+    # produced no package renders a ``read_only`` deck, and reading that as
+    # revoking the reviewable package's own deck leaves a Design awaiting a
+    # verdict with no surface that can record one. A stage_review deck is live
+    # while no newer stage_review deck exists for the same attempt; every other
+    # mode is live only while nothing at all supersedes it.
+    surface_is_live = bool(surface["is_current"])
     evidence_matches = True
     if surface["mode"] == "stage_review":
+        newest_review = await repo.latest_design_feedback_surface(
+            project_id=project_id,
+            cycle_id=resolved_cycle_id,
+            stage_attempt_id=surface.get("stage_attempt_id"),
+            mode="stage_review",
+        )
+        surface_is_live = newest_review is None or str(newest_review["surface_id"]) == surface_id
         attempt_artifacts = [item for item in (cycle or {}).get("artifacts", []) if item.get("stage_attempt_id") == surface.get("stage_attempt_id")]
         artifact = max(
             attempt_artifacts,
@@ -328,10 +492,15 @@ async def _design_feedback_read_model(
         except Exception:  # noqa: BLE001 - inability to prove scope means inert
             viewer_matches = False
 
-    if dbtl_config.design_deck_feedback and dbtl_config.mutations_enabled and getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE and viewer_matches and surface["is_current"] and evidence_matches and cycle is not None:
+    if dbtl_config.design_deck_feedback and dbtl_config.mutations_enabled and getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE and viewer_matches and surface_is_live and evidence_matches and cycle is not None:
         stage = next((item for item in cycle["stages"] if item["stage"] == "design"), None)
         stage_status = str((stage or {}).get("status") or "")
         groups = {str(item["action_group"]): item for item in actions}
+        if latest_action is not None:
+            # Recovery above may have changed this row after ``actions`` was
+            # loaded; the read model must use the reconciled status immediately
+            # rather than requiring one more poll to become actionable.
+            groups[str(latest_action["action_group"])] = latest_action
         if surface["mode"] == "chair_feedback" and surface.get("human_input_request_id"):
             chair = groups.get("chair_response")
             if chair is None or chair.get("status") == "failed":
@@ -347,7 +516,7 @@ async def _design_feedback_read_model(
         interactive = bool(allowed_actions)
 
     note = ""
-    if not surface["is_current"]:
+    if not surface_is_live:
         note = "A newer Design round replaced this deck."
     elif not evidence_matches:
         note = "The Design evidence changed after this deck was rendered. Regenerate the feedback deck."
@@ -362,6 +531,9 @@ async def _design_feedback_read_model(
     }:
         receipt = latest_action.get("receipt")
         note = str(receipt.get("message")) if isinstance(receipt, dict) and receipt.get("message") else "This feedback step has already been recorded."
+    elif latest_action and latest_action.get("status") == "failed":
+        receipt = latest_action.get("receipt")
+        note = str(receipt.get("message")) if isinstance(receipt, dict) and receipt.get("message") else "The previous attempt did not produce a follow-up deck. Try sending your answer again."
 
     logger.info(
         "design_feedback.surface_opened",
@@ -583,6 +755,11 @@ async def apply_design_feedback_action(
             visible_answer = answer
             if body.action.kind == "chair_option" and body.comment.strip():
                 visible_answer = f"{answer}\n\nComment: {body.comment.strip()}"
+            prior_workers = await repo.list_worker_runs(
+                cycle_id,
+                project_id=project_id,
+                stage="design",
+            )
             record = await start_run(
                 RunCreateRequest(
                     input={
@@ -607,6 +784,19 @@ async def apply_design_feedback_action(
                 ),
                 body.originating_thread_id,
                 request,
+            )
+            choice_label = str((option or {}).get("label") or answer) if body.action.kind == "chair_option" else answer
+            await _post_design_meeting_progress(
+                request,
+                project_id=project_id,
+                cycle_id=cycle_id,
+                thread_id=body.originating_thread_id,
+                run_id=record.run_id,
+                surface_id=surface_id,
+                design_round=int(surface.get("design_round") or 1),
+                choice_label=choice_label,
+                comment=body.comment.strip(),
+                prior_workers=prior_workers,
             )
             receipt = {
                 "kind": body.action.kind,
@@ -886,17 +1076,32 @@ async def review_stage(
     project, user_id = await _require_project(project_id, request)
     _require_mutations_enabled(request, config)
     _require_human_reviewer(request)
+    # A rejection still requires the reviewer's own words — it ends the attempt,
+    # and "rejected" with a generated sentence tells the next reader nothing.
+    # The other two verdicts may take a labelled server projection, exactly as
+    # the registered deck path already does.
+    if body.decision == "reject" and not body.rationale:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Rejecting a stage requires a rationale.")
+    rationale = body.rationale or _DEFAULT_REVIEW_RATIONALE[body.decision]
     try:
         return await repo.review_stage(
             cycle_id=cycle_id,
             project_id=project_id,
             stage=stage,
             decision=body.decision,
-            rationale=body.rationale,
+            rationale=rationale,
             expected_db_revision=body.expected_db_revision,
             reviewer_user_id=user_id,
             reviewer_project_role=str(project["current_user_role"]),
             idempotency_key=body.idempotency_key,
+            design_feedback_provenance={
+                "input_source": "design_sheet",
+                "human_comment": body.rationale or None,
+                "rationale_projection": rationale,
+                # Says whether the recorded reasoning is the reviewer's or the
+                # server's, so a later reader is never misled about who wrote it.
+                "rationale_source": "human" if body.rationale else "server_projection",
+            },
         )
     except Exception as exc:  # noqa: BLE001
         raise _translate(exc) from exc

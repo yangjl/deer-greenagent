@@ -256,11 +256,20 @@ _MAKE_ARTIFACT_VERBS = r"create|make|draw|plot|generate|write|build|add"
 _MAKE_ARTIFACT_NOUNS = r"chart|plot|graph|figure|table|script|file|report|note|summary|readme|csv|bar\s+plot"
 _MAKE_ARTIFACT_PATTERN = rf"^\s*(?:please\s+)?(?:{_MAKE_ARTIFACT_VERBS})\s+(?:me\s+)?(?:a|an|the|some)?\s*(?:small\s+|simple\s+|quick\s+)?(?:{_MAKE_ARTIFACT_NOUNS})"
 
+# One-slip misspellings of the question and read openers, enumerated the same
+# narrow way "similate" is above. These rules veto, so a slip costs the veto and
+# promotes a read-only question into cycle work — with a selected cycle that can
+# spend a whole council's budget answering something the lead agent should have
+# read out. Typos of a *negative* rule are therefore the safe direction to
+# absorb: recognizing one can only make the classifier more conservative.
+_EXPLAIN_TYPOS = r"explian|explaine|expalin|descrbie|descibe|desribe|summarise|summrise|summarize|waht|wat|hwat|wht|hwo|hwy|whi|whos|whne|wehre"
+_READ_TYPOS = r"raed|read|opne|oepn|sohw|shwo|lsit|lits|dispaly|pritn|prnit|fnid|serach|sercha"
+
 # Negative rules veto rather than subtract, because they identify a *request
 # shape* (one artifact, one file, one answer) rather than a weak signal.
 _ORDINARY_SHAPE_RULES: tuple[tuple[str, str], ...] = (
-    ("ordinary.explain", r"^\s*(?:please\s+)?(?:explain|describe|summari[sz]e|what|why|how|who|when|where)\b"),
-    ("ordinary.read", r"^\s*(?:please\s+)?(?:read|open|show|list|display|print|cat|find|search)\b"),
+    ("ordinary.explain", r"^\s*(?:please\s+)?(?:explain|describe|summari[sz]e|what|why|how|who|when|where|" + _EXPLAIN_TYPOS + r")\b"),
+    ("ordinary.read", r"^\s*(?:please\s+)?(?:read|open|show|list|display|print|cat|find|search|" + _READ_TYPOS + r")\b"),
     ("ordinary.file_edit", r"^\s*(?:please\s+)?(?:fix|rename|move|copy|delete|convert|format|refactor|clean\s+up|update)\b"),
     ("ordinary.make_artifact", _MAKE_ARTIFACT_PATTERN),
 )

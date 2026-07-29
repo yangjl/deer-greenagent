@@ -44,7 +44,18 @@ Design–Build–Test–Learn (DBTL) governance.
   final verdict there. The authenticated parent verifies the exact deck and
   evidence hashes before enabling controls; downloaded, stale, or wrong-thread
   copies remain read-only. Approval language in ordinary chat does not mutate
-  the gate or rerun the council.
+  the gate or rerun the council. When a chair-resume run ends without producing
+  a follow-up deck—for example, after a provider outage—the original choice and
+  comment remain in place and the same answer becomes retryable instead of
+  leaving Design permanently stuck. Because the resumed chair runs in the
+  background, DeerFlow also writes a durable Design-meeting card into the main
+  conversation. It reconstructs the independent position and red-team lanes
+  from the recorded worker results, shows the chair synthesizing, and updates
+  from the durable worker endpoint when the chair reports; the slide deck does
+  not become a second conversation surface. Each durable lane opens the
+  participant’s complete recorded report. When synthesis finishes, the review
+  Markdown and registered approval/request-changes/reject deck are delivered as
+  normal chat artifacts.
 - **One native setup interaction** — DBTL setup and confirmation are emitted
   through DeerFlow's existing `ask_clarification` Human Input Card in the chat
   transcript. Internal model prompts, structured drafting responses, subagent
@@ -116,17 +127,42 @@ Developers iterating on DBTL review or Design-deck interactions can capture a
 quiet human-decision checkpoint once, then restore its isolated SQLite database
 and project artifacts together instead of rerunning the expensive meeting.
 
+Set it up and capture a checkpoint once:
+
 ```bash
 make dbtl-manual-init
 make dbtl-manual-dev
 # Stop at a completed run or human-input boundary:
 make dbtl-manual-capture SCENARIO=chair-choice
+```
 
+Progressive-gate checkpoints can also record the state the tester expects:
+
+```bash
+make dbtl-manual-capture SCENARIO=design-awaiting-verdict \
+  PATH_HEAD=design ROUTES=approve,request_changes,reject NEXT_ACTION=approve
+```
+
+Then repeat that decision as often as you like. Leave `make dbtl-manual-dev`
+attached in its own terminal and swap scenarios from a second one:
+
+```bash
+make dbtl-manual-restore-hot SCENARIO=chair-choice
+# Then hard-refresh the browser.
+```
+
+This takes seconds because only the Gateway is recycled; the frontend and proxy
+keep running. It refuses unless the stack is up and the isolated database is
+quiet — no in-flight run or review action — and otherwise keeps every restore
+safety check.
+
+Restore with the stack stopped when you want a guaranteed-clean process, or
+after changing dependencies or config the reload watcher does not see:
+
+```bash
 make stop
-
-make dbtl-manual-dev
 make dbtl-manual-restore SCENARIO=chair-choice
-
+make dbtl-manual-dev
 ```
 
 The pipeline is local and gitignored; it does not add a product stage bypass.

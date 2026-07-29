@@ -358,6 +358,67 @@ class TestToolCallbacks:
 
 class TestFinalToolMessageReconciliation:
     @pytest.mark.anyio
+    async def test_root_chain_end_reconciles_graph_created_present_files_pair(
+        self,
+        journal_setup,
+    ):
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        user = HumanMessage(content="Continue the meeting", id="human-current")
+        j.record_input({"messages": [user]})
+        ai = AIMessage(
+            id="dbtl-present__cycle-1__abc:call",
+            content="The synthesis is ready for review.",
+            tool_calls=[
+                {
+                    "id": "dbtl-present__cycle-1__abc",
+                    "name": "present_files",
+                    "args": {
+                        "filepaths": [
+                            "/mnt/user-data/outputs/design-review.md",
+                            "/mnt/user-data/outputs/design-slides.html",
+                        ]
+                    },
+                    "type": "tool_call",
+                }
+            ],
+        )
+        tool = ToolMessage(
+            id="dbtl-present__cycle-1__abc",
+            content="Successfully presented files",
+            tool_call_id="dbtl-present__cycle-1__abc",
+            name="present_files",
+        )
+
+        j.on_chain_end(
+            {"messages": [user, ai, tool]},
+            run_id=uuid4(),
+        )
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert [row["event_type"] for row in messages] == [
+            "llm.human.input",
+            "llm.ai.response",
+            "llm.tool.result",
+        ]
+        assert messages[1]["content"]["tool_calls"][0]["name"] == "present_files"
+        assert j.get_delivery_content() == {
+            "presented": 2,
+            "paths": [
+                "/mnt/user-data/outputs/design-review.md",
+                "/mnt/user-data/outputs/design-slides.html",
+            ],
+            "by_tool": {
+                "present_files": [
+                    "/mnt/user-data/outputs/design-review.md",
+                    "/mnt/user-data/outputs/design-slides.html",
+                ]
+            },
+        }
+
+    @pytest.mark.anyio
     async def test_root_chain_end_reconciles_graph_created_clarification_after_current_input(
         self,
         journal_setup,

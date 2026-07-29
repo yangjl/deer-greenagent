@@ -71,6 +71,8 @@ export interface DeckStateMessage {
   channel: string;
   type: DeckStateMessageType;
   allowedActions?: DeckActionKind[];
+  selectedOptionIds?: string[];
+  comment?: string;
   note?: string;
 }
 
@@ -236,7 +238,13 @@ export function reduceDeckState(state: DeckSurfaceState, event: DeckStateEvent):
 export function toDeckMessage(
   surfaceId: string,
   channel: string,
-  body: { type: DeckStateMessageType; allowedActions?: DeckActionKind[]; note?: string },
+  body: {
+    type: DeckStateMessageType;
+    allowedActions?: DeckActionKind[];
+    selectedOptionIds?: string[];
+    comment?: string;
+    note?: string;
+  },
 ): DeckStateMessage {
   return {
     source: DECK_MESSAGE_SOURCE,

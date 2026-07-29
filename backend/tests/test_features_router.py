@@ -31,6 +31,8 @@ def _app_with_config(
             mode=dbtl_mode,
             mutations_enabled=dbtl_mode in {"manual", "graph_enabled"},
             graph_execution_enabled=dbtl_mode == "graph_enabled",
+            design_deck_feedback=True,
+            progressive_gate=False,
             policy_version="greenagent-dbtl-v2-draft",
         ),
     )
@@ -49,6 +51,8 @@ def test_features_reports_agents_api_enabled() -> None:
             "mode": "audit_only",
             "mutations_enabled": False,
             "graph_execution_enabled": False,
+            "design_deck_feedback": True,
+            "progressive_gate": False,
             "reason": "DBTL records are available for inspection, but all DBTL mutations and graph execution are disabled.",
         },
     }

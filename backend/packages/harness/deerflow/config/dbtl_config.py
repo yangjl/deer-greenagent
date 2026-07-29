@@ -39,6 +39,15 @@ class DbtlConfig(BaseModel):
         description=("Use authenticated Design feedback decks for chair answers and Design review. Set false to restore the visible Design Human Input card and Design stage sheet without deleting surfaces, actions, reviews, or artifacts."),
     )
 
+    progressive_gate: bool = Field(
+        default=False,
+        description=(
+            "Enable the progressive-gate read model: the stage-transition path strip and, in later phases, "
+            "per-transition difficulty assessment and the route-chooser deck. Off restores the uniform "
+            "four-stage display. Transition records accumulate either way, so toggling this never creates an audit gap."
+        ),
+    )
+
     setup_draft_model_name: str | None = Field(
         default=None,
         description=(

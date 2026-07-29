@@ -159,12 +159,14 @@ async function mockProjectScope(page: Page) {
     }),
   );
   // Served verbatim: the bytes the app renders are the bytes it must hash.
-  await page.route(`**/api/threads/${THREAD_ID}/artifacts${DECK_PATH}`, (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "text/html; charset=utf-8",
-      body: deckHtml,
-    }),
+  await page.route(
+    `**/api/threads/${THREAD_ID}/artifacts${DECK_PATH}`,
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html; charset=utf-8",
+        body: deckHtml,
+      }),
   );
 }
 
@@ -221,7 +223,10 @@ test.describe("design deck feedback, end to end", () => {
         body: JSON.stringify({
           status: "recorded",
           replayed: false,
-          receipt: { message: "Recorded. The meeting is resuming.", db_revision: 8 },
+          receipt: {
+            message: "Recorded. The meeting is resuming.",
+            db_revision: 8,
+          },
         }),
       });
     });
@@ -242,9 +247,7 @@ test.describe("design deck feedback, end to end", () => {
       .fill("Induction bias is acceptable for this family.");
     await deck.locator("[data-deck-submit]").click();
 
-    await expect
-      .poll(() => posted.length, { timeout: 10_000 })
-      .toBe(1);
+    await expect.poll(() => posted.length, { timeout: 10_000 }).toBe(1);
 
     const body = posted[0]!.postDataJSON() as Record<string, unknown>;
     expect(body.action).toEqual({
@@ -275,7 +278,10 @@ test.describe("design deck feedback, end to end", () => {
     await mockProjectScope(page);
     // Same surface, different bytes: the shape a substituted or edited artifact
     // would take. Nothing else about the response says anything is wrong.
-    await deckSurfaceRoute(page, surface({ deck_content_hash: "0".repeat(64) }));
+    await deckSurfaceRoute(
+      page,
+      surface({ deck_content_hash: "0".repeat(64) }),
+    );
 
     let attempted = 0;
     await page.route(ACTIONS_URL, (route) => {
@@ -385,7 +391,9 @@ test.describe("design deck feedback, end to end", () => {
         return route.fulfill({
           status: 503,
           contentType: "application/json",
-          body: JSON.stringify({ detail: "The meeting service is unavailable." }),
+          body: JSON.stringify({
+            detail: "The meeting service is unavailable.",
+          }),
         });
       }
       return route.fulfill({
@@ -412,7 +420,9 @@ test.describe("design deck feedback, end to end", () => {
     );
     // The draft is the person's, not the failed request's.
     await expect(deck.locator("[data-deck-submit]")).toBeEnabled();
-    await expect(deck.locator("#inbreeding-route--doubled_haploid")).toBeChecked();
+    await expect(
+      deck.locator("#inbreeding-route--doubled_haploid"),
+    ).toBeChecked();
     await expect(deck.locator("[data-deck-comment]")).toHaveValue(
       "Keep this text.",
     );
@@ -425,6 +435,152 @@ test.describe("design deck feedback, end to end", () => {
     // A retry replays one answer; two ids would be two answers to one question.
     expect(submissionIds).toHaveLength(2);
     expect(submissionIds[0]).toBe(submissionIds[1]);
+  });
+
+  test("a chair run that produces no follow-up deck returns the recorded choice for retry", async ({
+    page,
+  }) => {
+    await mockProjectScope(page);
+    let reads = 0;
+    await deckSurfaceRoute(page, () => {
+      reads += 1;
+      return reads === 1
+        ? surface()
+        : surface({
+            receipt: {
+              status: "failed",
+              failure_code: "resume_no_feedback_surface",
+              receipt: {
+                message:
+                  "The Design chair could not produce a follow-up deck. Try sending it again.",
+              },
+            },
+            note: "The Design chair could not produce a follow-up deck. Try sending it again.",
+          });
+    });
+    await page.route(ACTIONS_URL, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "resume_started",
+          run_id: "run-chair-failed",
+          replayed: false,
+          receipt: { message: "Recorded. The Design chair is resuming." },
+        }),
+      }),
+    );
+
+    const deck = await openDeckArtifact(page);
+    await expect(deck.locator("[data-deck-submit]")).toBeEnabled();
+    await pageToDecision(deck);
+    await deck.locator("#inbreeding-route--doubled_haploid").check();
+    await deck.locator("[data-deck-comment]").fill("Keep this answer.");
+    await deck.locator("[data-deck-submit]").click();
+
+    await expect(deck.locator("[data-deck-status]")).toHaveText(
+      "The Design chair could not produce a follow-up deck. Try sending it again.",
+      { timeout: 10_000 },
+    );
+    await expect(deck.locator("[data-deck-submit]")).toBeEnabled();
+    await expect(
+      deck.locator("#inbreeding-route--doubled_haploid"),
+    ).toBeChecked();
+    await expect(deck.locator("[data-deck-comment]")).toHaveValue(
+      "Keep this answer.",
+    );
+  });
+
+  test("a reopened deck visibly resumes polling an active chair run", async ({
+    page,
+  }) => {
+    await mockProjectScope(page);
+    let successorReady = false;
+    await deckSurfaceRoute(page, () =>
+      surface({
+        is_current: !successorReady,
+        newest_surface_id: successorReady ? "dfs-follow-up" : null,
+        allowed_actions: [],
+        interactive: false,
+        receipt: {
+          status: "resume_started",
+          receipt: {
+            message: "Recorded. The Design chair is resuming.",
+            run_id: "run-chair-active",
+          },
+        },
+        note: "",
+      }),
+    );
+
+    await openDeckArtifact(page);
+
+    await expect(page.getByRole("status")).toHaveText(
+      "The Design chair is running. The follow-up deck will appear in this conversation.",
+    );
+    successorReady = true;
+    await expect(page.getByRole("status")).toHaveText(
+      "The meeting continued. Its follow-up deck is now in the conversation.",
+      { timeout: 10_000 },
+    );
+  });
+
+  test("a reopened failed chair deck restores the exact audited answer", async ({
+    page,
+  }) => {
+    await mockProjectScope(page);
+    let submissionId = "";
+    await deckSurfaceRoute(
+      page,
+      surface({
+        receipt: {
+          client_submission_id: "submission-recorded",
+          status: "failed",
+          selected_card_ids: ["doubled_haploid"],
+          human_comment: "Use the recorded choice.",
+          failure_code: "resume_no_feedback_surface",
+          receipt: {
+            message:
+              "The Design chair could not produce a follow-up deck. Try sending it again.",
+          },
+        },
+        note: "The Design chair could not produce a follow-up deck. Try sending it again.",
+      }),
+    );
+    await page.route(ACTIONS_URL, (route) => {
+      const body = route.request().postDataJSON() as {
+        client_submission_id: string;
+      };
+      submissionId = body.client_submission_id;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "recorded",
+          replayed: true,
+          receipt: { message: "Recorded on retry." },
+        }),
+      });
+    });
+
+    const deck = await openDeckArtifact(page);
+    await pageToDecision(deck);
+
+    await expect(
+      deck.locator("#inbreeding-route--doubled_haploid"),
+    ).toBeChecked();
+    await expect(
+      deck.locator("#inbreeding-route--selfing_f5_f6"),
+    ).not.toBeChecked();
+    await expect(deck.locator("[data-deck-comment]")).toHaveValue(
+      "Use the recorded choice.",
+    );
+    await expect(deck.locator("[data-deck-submit]")).toBeEnabled();
+    await deck.locator("[data-deck-submit]").click();
+    await expect(deck.locator("[data-deck-status]")).toHaveText(
+      "Recorded on retry.",
+    );
+    expect(submissionId).toBe("submission-recorded");
   });
 
   test("an unverifiable surface leaves the deck inert with the reason", async ({

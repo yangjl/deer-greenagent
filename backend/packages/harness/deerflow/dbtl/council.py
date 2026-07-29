@@ -39,11 +39,13 @@ do is testable without a model, a sandbox, or a registry.
 
 from __future__ import annotations
 
+import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from types import MappingProxyType
+from typing import Any
 
 from deerflow.dbtl.agent_selector import (
     AgentCandidate,
@@ -53,6 +55,8 @@ from deerflow.dbtl.agent_selector import (
 )
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_spec import StageSpec, WorkerBudget
+
+logger = logging.getLogger(__name__)
 
 
 class UnknownAgent(ValueError):
@@ -675,4 +679,77 @@ def recommend_depth(request_text: str) -> DepthRecommendation:
     return DepthRecommendation(
         depth=DEFAULT_DEPTH,
         reason="Nothing in the request pointed to an unusually quick or unusually high-stakes question, so it opens on the usual setting.",
+    )
+
+
+#: Same seam shape as the stage adapter's writers: async, prompt in, raw text out.
+DepthInterpreter = Callable[[str], Any]
+
+#: The depths an interpreter may name. ``HUMAN_INPUT`` is deliberately absent:
+#: it says the person already holds the answer and wants it recorded rather
+#: than argued, which is a statement about who owns the decision and not a
+#: judgement a reader of the request may make on their behalf.
+_INTERPRETABLE_DEPTHS: Mapping[str, CouncilDepth] = MappingProxyType(
+    {
+        CouncilDepth.LIGHT.value: CouncilDepth.LIGHT,
+        CouncilDepth.MEDIUM.value: CouncilDepth.MEDIUM,
+        CouncilDepth.HEAVY.value: CouncilDepth.HEAVY,
+    }
+)
+
+DEPTH_INTENT_INSTRUCTION = (
+    "You read one project-owner chat message and judge how much debate the design meeting owes it. "
+    "The message may contain typos, misspellings, or paraphrases; judge the intent, not the spelling. "
+    "Reply with exactly one word. LIGHT if it reads as a first look, pilot, quick check, or throwaway exploration. "
+    "HEAVY if the work has to hold up outside the project (publication, thesis, regulatory, production, multi-season validation). "
+    "MEDIUM for anything else, and whenever you are unsure."
+)
+
+
+async def interpret_depth(
+    request_text: str,
+    *,
+    interpreter: DepthInterpreter | None,
+) -> DepthRecommendation:
+    """The depth recommendation, with a reading for what the phrases missed.
+
+    The phrase table decides first and free, and a hit is returned untouched —
+    it is the audit anchor, and a named phrase is something a person can argue
+    with. Only a request that matched nothing is passed to the interpreter, and
+    it is passed **verbatim**: the record keeps what the owner wrote while
+    interpretation absorbs the typos.
+
+    Fail-soft in every direction. No interpreter, a provider failure, or a reply
+    naming anything other than a recommendable depth all keep the deterministic
+    result, so the card always opens on a usable setting. This is a suggestion a
+    person confirms, so the cost of a misread is one dropdown change.
+    """
+    deterministic = recommend_depth(request_text)
+    text = (request_text or "").strip()
+    if interpreter is None or not text or deterministic.rule_hits:
+        return deterministic
+
+    prompt = "\n".join(
+        [
+            "The project owner sent this message (verbatim, may contain typos):",
+            "",
+            text,
+        ]
+    )
+    try:
+        reply = await interpreter(prompt)
+    except Exception:  # noqa: BLE001 - interpretation failure keeps the default, never fails the card
+        logger.warning("Depth interpretation failed; the preflight card opens on the deterministic default.", exc_info=True)
+        return deterministic
+
+    words = str(reply or "").strip().split()
+    if not words:
+        return deterministic
+    named = words[0].strip(".,!:;\"'").lower()
+    depth = _INTERPRETABLE_DEPTHS.get(named)
+    if depth is None or depth is deterministic.depth:
+        return deterministic
+    return DepthRecommendation(
+        depth=depth,
+        reason=f"Nothing in the wording matched a known phrase, but the request reads as a {depth.value} meeting.",
     )

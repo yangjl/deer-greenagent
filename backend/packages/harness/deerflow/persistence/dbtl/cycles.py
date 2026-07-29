@@ -37,8 +37,10 @@ from deerflow.dbtl.cycle_state import (
     initial_stage_statuses,
     is_terminal,
     next_cycle_state,
+    stage_for_state,
     validate_cycle_class,
 )
+from deerflow.dbtl.stage_routes import GRAPH_STAGES
 from deerflow.persistence.dbtl.build_test_ops import BuildTestOpsMixin
 from deerflow.persistence.dbtl.design_feedback_ops import DesignFeedbackOpsMixin
 from deerflow.persistence.dbtl.knowledge_ops import KnowledgeOpsMixin
@@ -52,6 +54,7 @@ from deerflow.persistence.dbtl.model import (
 )
 from deerflow.persistence.dbtl.reconciliation_ops import RECONCILIATION_KIND, ReconciliationOpsMixin
 from deerflow.persistence.dbtl.sql import projection_hash
+from deerflow.persistence.dbtl.transition_ops import TransitionOpsMixin
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -80,7 +83,7 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOpsMixin, ReconciliationOpsMixin):
+class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOpsMixin, ReconciliationOpsMixin, TransitionOpsMixin):
     """Read and mutate durable DBTL cycles for one deployment.
 
     Phase 6's data-readiness operations live in
@@ -566,8 +569,20 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
             if live_children:
                 raise DbtlWorkflowRefused("Remove this cycle's active child cycles first.")
 
+            # The stage being worked when the cycle closed; a checkpoint state
+            # (ready_for_build) closes from the stage whose gate it follows.
+            closing_stage = stage_for_state(cycle.state) or ("build" if cycle.state == "ready_for_build" else None)
             cycle.state = "abandoned"
             self._commit_revision(cycle, self._statuses(stages))
+            if closing_stage in GRAPH_STAGES:
+                await self._append_stage_transition(
+                    session,
+                    cycle=cycle,
+                    from_stage=closing_stage,
+                    chosen_route="close_cycle",
+                    decided_by=actor_user_id,
+                    stage_attempt=next((row for row in stages if row.stage == closing_stage), None),
+                )
             await self._record_event(
                 session,
                 cycle=cycle,
@@ -776,6 +791,16 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                     rationale_projection=provenance.get("rationale_projection"),
                     rationale_source=provenance.get("rationale_source"),
                 )
+            )
+            await self._append_stage_transition(
+                session,
+                cycle=cycle,
+                from_stage=stage,
+                chosen_route=str(verdict),
+                decided_by=reviewer_user_id,
+                stage_attempt=attempt_row,
+                evidence_hash=evidence.content_hash,
+                decision_surface_id=(provenance.get("feedback_surface_id") if provenance else None),
             )
             await self._record_event(
                 session,

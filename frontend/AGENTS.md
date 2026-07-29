@@ -184,7 +184,17 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
   `cycle-stage-sheet.tsx` — evidence, open blockers **and the form that records
   one**, the submit/review panel with a required rationale, and the activity
   timeline with actor and revision — using the existing right-side inspection
-  pattern. Blocker creation lives in that sheet, not the rail: a durable record
+  pattern. **Design is the exception: its sheet is inspection-only.** It keeps
+  the path strip (including the latest durable `dst-…` path-record id for
+  manual evidence), review package, evidence, open blockers with their recording
+  form, and the activity timeline, but carries no submit control and no
+  Approve/Request changes/Reject panel, and says so. Design is submitted and
+  decided in the meeting's registered slide deck and nowhere else — project
+  chat records no verdict; the two former Design branches (deck handoff and
+  legacy) collapsed into one read-only body, and `dbtl.design_deck_feedback`
+  now only decides whether the deck pointer is shown beside that notice.
+  Every other stage keeps its controls
+  unchanged. Blocker creation lives in that sheet, not the rail: a durable record
   is written from the surface that shows the evidence it refers to. The Cycles
   auto-minimizes when no cycle is live; an explicit click on the section header
   overrides that default. The transient DBTL feature request does not render a
@@ -704,11 +714,38 @@ cross into the iframe. A failed request keeps the DOM draft and client
 submission id, while a 409 refresh that proves revision change or consumption
 latches the deck stale instead of rebasing.
 
+Chair answers start a background run outside the page's normal LangGraph
+stream. After `resume_started`, `ArtifactFilePreview` therefore keeps the deck
+pending and polls the authenticated surface read model. A successor surface
+settles the old deck and invalidates durable thread/history queries so the new
+deck appears in the originating conversation. A terminal run with no successor
+returns `failed` plus the original allowed chair action; the bridge re-enables
+the still-mounted controls without clearing the selected option, comment, or
+client submission id, so the retry remains one payload-bound answer. On a
+reload—or after a 409 caused by changing that failed answer—the authenticated
+receipt supplies the original selected option/comment in the next
+`initialize` message, and the deck restores them before re-enabling controls.
+The persisted HTML still carries no answer and remains inert outside DeerFlow.
+
+That background path must still speak through the main chat. The Gateway writes
+one visible `llm.ai.response` carrying a bounded
+`additional_kwargs.dbtl_meeting_progress` snapshot after it admits the chair
+run. `message-list-item.tsx` renders it as
+`DesignMeetingProgressCard`, reconstructing the already-reported independent
+and red-team lanes from durable stage-worker rows and showing the chair as
+synthesizing. The card polls the existing stage-workers read endpoint until the
+new chair row completes or fails, so a reload does not depend on the live
+`task_*` stream. Each durable lane opens the shared
+`MeetingParticipantInspector`; the worker endpoint supplies the complete
+structured closing report, while unavailable intermediate step events remain
+uninvented. Keep this separate from `DebatePanel`: that panel is the rich
+live-run view with inspectable step events, while this card is the durable
+fallback for a run started by the authenticated deck parent.
+
 The Design gate is deliberately two-step in the same deck: submit first, then
 refresh and show the three verdicts. A deck-backed Human Input request stays in
 thread state for supervisor recovery but `MessageList` suppresses the duplicate
 card and `hasOpenHumanInputRequest` leaves the ordinary composer unlocked.
 With `design_deck_feedback` enabled, the project rail says **Open feedback
-deck** and the Design stage sheet is a handoff only; Reconciliation, Build,
-Test, and Learn sheets are unchanged. Setting
-`dbtl.design_deck_feedback=false` restores the old Design controls.
+deck** and the Design stage sheet points at it; Reconciliation, Build,
+Test, and Learn sheets are unchanged.

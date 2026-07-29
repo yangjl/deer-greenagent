@@ -1058,6 +1058,17 @@ export const zhCN: Translations = {
       emptyDescription: "相关的致谢信息会展示在这里。",
     },
   },
+  dbtl: {
+    pathStrip: {
+      label: "循环路径",
+      invalidated: "已因后续返回设计阶段而失效",
+      backfilled: "根据评审历史重建",
+      record: "路径记录",
+    },
+    designSheet: {
+      readOnly: "该面板仅供查看。设计的提交与决定发生在会议已注册的幻灯片中。",
+    },
+  },
   login: {
     signInTitle: "登录你的账号",
     createAccountTitle: "创建新账号",

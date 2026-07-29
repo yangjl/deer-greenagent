@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
-_RECONCILED_TOOL_MESSAGE_NAMES = frozenset({"ask_clarification"})
+_RECONCILED_TOOL_MESSAGE_NAMES = frozenset({"ask_clarification", "present_files"})
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"})
 
 
@@ -251,6 +251,7 @@ class RunJournal(BaseCallbackHandler):
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._current_run_tool_call_names: dict[str, str] = {}
+        self._persisted_ai_message_identities: set[str] = set()
         self._persisted_tool_message_identities: set[str] = set()
         self._input_message_identities: set[str] = set()
 
@@ -491,6 +492,9 @@ class RunJournal(BaseCallbackHandler):
                         "llm_call_index": call_index,
                     },
                 )
+                identity = self._message_identity(message)
+                if identity:
+                    self._persisted_ai_message_identities.add(identity)
                 persisted_any = True
                 if rid not in self._counted_message_llm_run_ids:
                     self._record_message_summary(message, caller=caller)
@@ -638,6 +642,25 @@ class RunJournal(BaseCallbackHandler):
             self._persisted_tool_message_identities.add(identity)
         self._record_message_summary(message)
 
+    def _persist_ai_response_message(
+        self,
+        message: AIMessage,
+        *,
+        caller: str,
+    ) -> None:
+        """Persist a visible graph-authored assistant turn missed by LLM callbacks."""
+        self._put(
+            event_type=LLM_AI_RESPONSE_EVENT.event_type,
+            category=LLM_AI_RESPONSE_EVENT.category,
+            content=message.model_dump(),
+            metadata={"caller": caller},
+        )
+        identity = self._message_identity(message)
+        if identity:
+            self._persisted_ai_message_identities.add(identity)
+        self._remember_current_run_tool_calls(message, caller=caller)
+        self._record_message_summary(message, caller=caller)
+
     def _final_output_messages(self, outputs: Any) -> list[Any]:
         if isinstance(outputs, Mapping):
             messages = outputs.get("messages", [])
@@ -659,6 +682,29 @@ class RunJournal(BaseCallbackHandler):
         identity = self._message_identity(message)
         return identity is not None and identity not in self._persisted_tool_message_identities
 
+    def _should_reconcile_ai_message(self, message: AIMessage) -> bool:
+        if message.additional_kwargs.get("hide_from_ui") is True:
+            return False
+        identity = self._message_identity(message)
+        if identity is None or identity in self._persisted_ai_message_identities:
+            return False
+        for tool_call in message.tool_calls:
+            name = self._tool_call_value(tool_call, "name")
+            if name in _RECONCILED_TOOL_MESSAGE_NAMES:
+                return True
+        return False
+
+    def _record_reconciled_present_files(self, message: AIMessage) -> None:
+        for tool_call in message.tool_calls:
+            if self._tool_call_value(tool_call, "name") != "present_files":
+                continue
+            args = self._tool_call_value(tool_call, "args")
+            if not isinstance(args, Mapping):
+                continue
+            filepaths = args.get("filepaths")
+            if isinstance(filepaths, list):
+                self._record_produced_artifacts(filepaths, "present_files")
+
     def _reconcile_final_tool_messages(self, outputs: Any) -> None:
         messages = self._final_output_messages(outputs)
         current_input_index = -1
@@ -669,18 +715,20 @@ class RunJournal(BaseCallbackHandler):
             if identity and identity in self._input_message_identities:
                 current_input_index = index
 
+        current_run_messages = messages[current_input_index + 1 :] if current_input_index >= 0 else messages
         if current_input_index >= 0:
-            for message in messages[current_input_index + 1 :]:
+            for message in current_run_messages:
                 if isinstance(message, AIMessage):
                     self._remember_current_run_tool_calls(
                         message,
                         caller="lead_agent",
                     )
 
-        for message in messages:
-            if not isinstance(message, ToolMessage):
-                continue
-            if self._should_reconcile_tool_message(message):
+        for message in current_run_messages:
+            if current_input_index >= 0 and isinstance(message, AIMessage) and self._should_reconcile_ai_message(message):
+                self._persist_ai_response_message(message, caller="lead_agent")
+                self._record_reconciled_present_files(message)
+            elif isinstance(message, ToolMessage) and self._should_reconcile_tool_message(message):
                 self._persist_tool_result_message(message, caller="lead_agent")
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:

@@ -7,11 +7,13 @@ import pytest
 from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.council import (
+    DEFAULT_DEPTH,
     DEPTH_POLICIES,
     CouncilDepth,
     CouncilRole,
     UnknownAgent,
     depth_policy,
+    interpret_depth,
     plan_council,
     recommend_depth,
 )
@@ -225,3 +227,86 @@ class TestRecommendingDepth:
     def test_the_recommendation_is_deterministic(self) -> None:
         text = "Publication-quality multi-season validation of the drought model."
         assert recommend_depth(text) == recommend_depth(text)
+
+
+class _FakeDepthInterpreter:
+    """Records prompts and replies with a fixed verdict."""
+
+    def __init__(self, reply: str = "MEDIUM", error: Exception | None = None) -> None:
+        self.reply = reply
+        self.error = error
+        self.prompts: list[str] = []
+
+    async def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        if self.error is not None:
+            raise self.error
+        return self.reply
+
+
+class TestInterpretingDepth:
+    """A typo must not change what the request means.
+
+    The phrase table stays the fast path and the audit anchor; the interpreter
+    reads only the requests it did not match. The card is confirmed by a human,
+    so a misread costs one dropdown change.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_misspelled_quick_look_still_reads_as_light(self) -> None:
+        interpreter = _FakeDepthInterpreter(reply="LIGHT")
+        text = "jsut a qiuck peek befre we commit"
+
+        outcome = await interpret_depth(text, interpreter=interpreter)
+
+        assert outcome.depth is CouncilDepth.LIGHT
+        # The owner's words reached the interpreter unrepaired.
+        assert any(text in prompt for prompt in interpreter.prompts)
+
+    @pytest.mark.asyncio
+    async def test_a_misspelled_publication_request_still_reads_as_heavy(self) -> None:
+        interpreter = _FakeDepthInterpreter(reply="HEAVY")
+
+        outcome = await interpret_depth("this goes in the manuscrpit for peer reveiw", interpreter=interpreter)
+
+        assert outcome.depth is CouncilDepth.HEAVY
+
+    @pytest.mark.asyncio
+    async def test_a_deterministic_hit_never_consults_the_interpreter(self) -> None:
+        interpreter = _FakeDepthInterpreter(reply="HEAVY")
+
+        outcome = await interpret_depth("Just a quick sanity check on this pilot.", interpreter=interpreter)
+
+        assert outcome.depth is CouncilDepth.LIGHT
+        assert interpreter.prompts == []
+
+    @pytest.mark.asyncio
+    async def test_an_interpreter_failure_keeps_the_deterministic_default(self) -> None:
+        interpreter = _FakeDepthInterpreter(error=RuntimeError("provider overloaded"))
+
+        outcome = await interpret_depth("somthing vaguely wordded", interpreter=interpreter)
+
+        assert outcome.depth is DEFAULT_DEPTH
+
+    @pytest.mark.asyncio
+    async def test_a_gibberish_reply_keeps_the_deterministic_default(self) -> None:
+        interpreter = _FakeDepthInterpreter(reply="well it rather depends")
+
+        outcome = await interpret_depth("somthing vaguely wordded", interpreter=interpreter)
+
+        assert outcome.depth is DEFAULT_DEPTH
+
+    @pytest.mark.asyncio
+    async def test_no_interpreter_is_the_pre_llm_behaviour(self) -> None:
+        text = "somthing vaguely wordded"
+
+        assert await interpret_depth(text, interpreter=None) == recommend_depth(text)
+
+    @pytest.mark.asyncio
+    async def test_the_interpreter_can_never_seat_nobody(self) -> None:
+        """``human_input`` says the person holds the answer; nothing recommends it."""
+        interpreter = _FakeDepthInterpreter(reply="HUMAN_INPUT")
+
+        outcome = await interpret_depth("somthing vaguely wordded", interpreter=interpreter)
+
+        assert outcome.depth is DEFAULT_DEPTH

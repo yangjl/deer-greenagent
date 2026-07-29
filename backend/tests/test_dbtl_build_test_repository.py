@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK
+from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK, ValidityRefused
 from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlWorkflowRefused
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
@@ -249,6 +249,50 @@ async def test_high_accuracy_and_leakage_routes_back_to_build(tmp_path: Path) ->
     statuses = {item["stage"]: item["status"] for item in result["cycle"]["stages"]}
     assert statuses["build"] == "changes_requested"
     assert statuses["test"] == "locked"
+
+
+async def test_legacy_return_to_reconciliation_is_refused_by_stage_graph(
+    tmp_path: Path,
+) -> None:
+    repo = await _repo(tmp_path)
+    await _awaiting_test_review(repo)
+    revision = await _revision(repo)
+
+    with pytest.raises(
+        ValidityRefused,
+        match="Reconciliation is not a cycle-stage destination",
+    ):
+        await repo.record_validity_assessment(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            metrics=[
+                {
+                    "name": "accuracy",
+                    "value": 0.94,
+                    "threshold": 0.70,
+                    "criterion": "gte",
+                }
+            ],
+            checks=_checks(leakage="failed"),
+            recommendation="return_to_reconciliation",
+            limitations=[],
+            rationale="The input matrix should be checked again.",
+            reviewer_user_id="reviewer-1",
+            reviewer_project_role="owner",
+            expected_db_revision=revision,
+            idempotency_key="legacy-reconciliation-route",
+        )
+
+    cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+    assert cycle is not None
+    assert cycle["state"] == "test"
+    assert cycle["db_revision"] == revision
+    assert (
+        await repo.list_stage_transitions(
+            cycle_id="cycle-1",
+            project_id="project-1",
+        )
+    )[-1]["to_stage"] == "test"
 
 
 async def test_missing_holdout_is_inconclusive_and_can_close(tmp_path: Path) -> None:

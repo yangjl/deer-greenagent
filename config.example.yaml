@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 32
+config_version: 33
 
 # ============================================================================
 # Logging
@@ -1229,6 +1229,10 @@ dbtl:
   # the registered feedback deck. Set false for the one-release rollback path;
   # durable deck responses and reviews are retained.
   design_deck_feedback: true
+  # Progressive-gate read model (Phase 0): show the stage-transition path strip
+  # for a cycle. Off restores the uniform four-stage display. Transition
+  # records accumulate either way, so toggling this never creates an audit gap.
+  progressive_gate: false
 
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider

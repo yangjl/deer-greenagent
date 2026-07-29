@@ -1,7 +1,7 @@
 # Progressive DBTL gates over a non-linear stage graph
 
-**Status:** Proposed (discussion settled 2026-07-29; vertical-slice acceptance
-plan added; no implementation started)
+**Status:** Phase 0 implemented; focused automated checks pass; manual
+vertical-slice acceptance and checkpoint recapture pending
 **Date:** 2026-07-29
 **Scope:** Replace the uniform post-meeting human gate with a progressive gate
 driven by a per-transition difficulty assessment; model a cycle as a recorded
@@ -204,6 +204,14 @@ Each phase is independently shippable, config-gated, and leaves the previous
 behavior reachable by flag for one release.
 
 ### Phase 0 — Stage-graph foundation + read-only path strip
+
+**Implementation status (2026-07-29):** code complete. The Test validity write
+path now consults `stage_routes`, transition rows refuse ORM update/delete,
+backfill replay and real Test→Design revisit are covered, checkpoint manifests
+can record their expected head/routes/next action, and the path strip exposes
+its latest `dst-…` record id. Acceptance remains open until the two named
+checkpoints below are recaptured from an actionable `stage_review` deck and the
+manual walkthrough is recorded.
 
 - Introduce `dbtl.progressive_gate` with default `false`. In this phase it gates
   only the new read model and path strip; Phase 1 puts new decision behavior

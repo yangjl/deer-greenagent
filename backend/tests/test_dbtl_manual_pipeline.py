@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 import yaml
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "dbtl_manual.py"
 SPEC = importlib.util.spec_from_file_location("dbtl_manual", SCRIPT_PATH)
@@ -37,7 +39,7 @@ def _source_config(path: Path) -> Path:
     return path
 
 
-def _create_live_database(path: Path, *, active_run: bool = False) -> None:
+def _create_live_database(path: Path, *, active_run: bool = False, feedback_action_status: str | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as conn:
         conn.executescript(
@@ -73,9 +75,20 @@ def _create_live_database(path: Path, *, active_run: bool = False) -> None:
                 mode TEXT NOT NULL,
                 superseded_by_surface_id TEXT
             );
+            CREATE TABLE dbtl_design_feedback_actions (
+                id TEXT PRIMARY KEY,
+                surface_id TEXT NOT NULL,
+                action_kind TEXT NOT NULL,
+                status TEXT NOT NULL
+            );
             """
         )
         conn.execute("INSERT INTO runs VALUES ('run-1', ?)", ("running" if active_run else "success",))
+        if feedback_action_status is not None:
+            conn.execute(
+                "INSERT INTO dbtl_design_feedback_actions VALUES ('action-1', 'surface-1', 'chair_option', ?)",
+                (feedback_action_status,),
+            )
         conn.execute("INSERT INTO projects VALUES ('project-1', 'Maize', 'maize', ?)", (str(path.parents[1] / "projects" / "Maize"),))
         conn.execute("INSERT INTO dbtl_cycles VALUES ('cycle-1', 'project-1', 'Drought design', 'design', 7)")
         conn.execute("INSERT INTO dbtl_stage_runs VALUES ('attempt-1', 'cycle-1', 'design', 'awaiting_review')")
@@ -94,6 +107,7 @@ def test_profile_is_isolated_and_disables_background_writers(tmp_path: Path) -> 
         "backend": "sqlite",
         "sqlite_dir": str((manual_root / "live" / "db").resolve()),
     }
+    assert generated["run_events"]["backend"] == "db"
     assert "checkpointer" not in generated
     assert generated["projects"]["root"] == str((manual_root / "live" / "projects").resolve())
     assert generated["dbtl"]["mode"] == "graph_enabled"
@@ -109,6 +123,82 @@ def test_profile_is_isolated_and_disables_background_writers(tmp_path: Path) -> 
     original = yaml.safe_load(source.read_text(encoding="utf-8"))
     assert original["database"]["backend"] == "postgres"
     assert original["channels"]["slack"]["enabled"] is True
+
+
+def test_existing_manual_profile_is_upgraded_to_persistent_history_without_force(tmp_path: Path) -> None:
+    source = _source_config(tmp_path / "config.yaml")
+    manual_root = tmp_path / ".deer-flow" / "manual-dbtl"
+    profile = dbtl_manual.initialize_profile(source_config=source, manual_root=manual_root)
+    generated = yaml.safe_load(profile.read_text(encoding="utf-8"))
+    generated["run_events"] = {"backend": "memory", "track_token_usage": True}
+    profile.write_text(yaml.safe_dump(generated), encoding="utf-8")
+
+    same_profile = dbtl_manual.initialize_profile(source_config=source, manual_root=manual_root)
+
+    upgraded = yaml.safe_load(same_profile.read_text(encoding="utf-8"))
+    assert same_profile == profile
+    assert upgraded["run_events"] == {"backend": "db", "track_token_usage": True}
+
+
+def test_legacy_empty_event_feed_is_backfilled_once_from_latest_checkpoint(tmp_path: Path) -> None:
+    database = tmp_path / "deerflow.db"
+    payload_type, payload = JsonPlusSerializer().dumps_typed(
+        {
+            "channel_values": {
+                "messages": [
+                    HumanMessage(content="earlier question", id="human-1"),
+                    AIMessage(content="earlier answer", id="ai-1"),
+                ]
+            }
+        }
+    )
+    with sqlite3.connect(database) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE threads_meta (
+                thread_id TEXT PRIMARY KEY,
+                user_id TEXT
+            );
+            CREATE TABLE checkpoints (
+                thread_id TEXT NOT NULL,
+                checkpoint_ns TEXT NOT NULL DEFAULT '',
+                checkpoint_id TEXT NOT NULL,
+                type TEXT,
+                checkpoint BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+            );
+            CREATE TABLE run_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                user_id TEXT,
+                event_type TEXT NOT NULL,
+                category TEXT NOT NULL,
+                content TEXT NOT NULL,
+                event_metadata TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (thread_id, seq)
+            );
+            INSERT INTO threads_meta VALUES ('thread-1', 'owner-1');
+            """
+        )
+        conn.execute(
+            "INSERT INTO checkpoints VALUES ('thread-1', '', 'checkpoint-1', ?, ?)",
+            (payload_type, payload),
+        )
+
+    assert dbtl_manual._backfill_checkpoint_history(database) == 2
+    assert dbtl_manual._backfill_checkpoint_history(database) == 0
+
+    with sqlite3.connect(database) as conn:
+        rows = conn.execute("SELECT user_id, event_type, seq, content, event_metadata FROM run_events ORDER BY seq").fetchall()
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        ("owner-1", "llm.human.input", 1),
+        ("owner-1", "llm.ai.response", 2),
+    ]
+    assert [json.loads(row[3])["id"] for row in rows] == ["human-1", "ai-1"]
+    assert all(json.loads(row[4])["manual_restore_seed"] is True for row in rows)
 
 
 @pytest.mark.parametrize(
@@ -129,6 +219,32 @@ def test_capture_refuses_a_database_with_active_runs(tmp_path: Path) -> None:
         dbtl_manual.capture_scenario(manual_root=manual_root, scenario="chair-choice")
 
 
+def test_capture_refuses_a_feedback_action_that_never_reached_its_run(tmp_path: Path) -> None:
+    """A `pending` deck action has an unknown outcome, so the checkpoint is not quiescent."""
+    manual_root = tmp_path / "manual"
+    _create_live_database(manual_root / "live" / "db" / "deerflow.db", feedback_action_status="pending")
+    (manual_root / "live" / "projects").mkdir(parents=True)
+
+    with pytest.raises(dbtl_manual.ManualPipelineError, match="dbtl_design_feedback_actions=1"):
+        dbtl_manual.capture_scenario(manual_root=manual_root, scenario="chair-choice")
+
+
+@pytest.mark.parametrize("status", ["resume_started", "accepted", "review_recorded"])
+def test_a_settled_feedback_action_does_not_block_the_pipeline_forever(tmp_path: Path, status: str) -> None:
+    """`resume_started` is terminal for the ledger; the run it launched is tracked in `runs`.
+
+    Counting it as active work wedged the whole pipeline: the row is never advanced,
+    so one answered chair question permanently refused every later capture and restore.
+    """
+    manual_root = tmp_path / "manual"
+    _create_live_database(manual_root / "live" / "db" / "deerflow.db", feedback_action_status=status)
+    (manual_root / "live" / "projects").mkdir(parents=True)
+
+    manifest = dbtl_manual.capture_scenario(manual_root=manual_root, scenario="chair-choice")
+
+    assert (manifest.parent / "deerflow.db").exists()
+
+
 def test_capture_keeps_database_and_project_files_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     manual_root = tmp_path / "manual"
     database = manual_root / "live" / "db" / "deerflow.db"
@@ -143,6 +259,10 @@ def test_capture_keeps_database_and_project_files_together(tmp_path: Path, monke
         manual_root=manual_root,
         scenario="awaiting-review",
         note="Ready to exercise deck verdicts.",
+        expected_path_head="design",
+        expected_assessment="standard",
+        offered_routes=["approve", "request_changes", "approve"],
+        next_action="Approve the registered Design deck.",
     )
 
     scenario_root = manual_root / "scenarios" / "awaiting-review"
@@ -155,6 +275,12 @@ def test_capture_keeps_database_and_project_files_together(tmp_path: Path, monke
     assert manifest["database_sha256"] == hashlib.sha256(captured_db.read_bytes()).hexdigest()
     assert manifest["alembic_version"] == "0023_dbtl_design_feedback_actions"
     assert manifest["note"] == "Ready to exercise deck verdicts."
+    assert manifest["expectations"] == {
+        "path_head": "design",
+        "assessment": "standard",
+        "offered_routes": ["approve", "request_changes"],
+        "next_action": "Approve the registered Design deck.",
+    }
     assert manifest["cycles"] == [
         {
             "cycle_id": "cycle-1",
@@ -235,6 +361,111 @@ def test_second_manual_launcher_reports_that_the_stack_is_already_running(tmp_pa
         with pytest.raises(dbtl_manual.ManualPipelineError, match="already running"):
             with dbtl_manual.manual_runtime_lock(manual_root=tmp_path, starting_stack=True):
                 pass
+
+
+def _captured_manual_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, scenario: str) -> Path:
+    manual_root = tmp_path / "manual"
+    database = manual_root / "live" / "db" / "deerflow.db"
+    projects = manual_root / "live" / "projects"
+    _create_live_database(database)
+    project_file = projects / "Maize" / "result.txt"
+    project_file.parent.mkdir(parents=True)
+    project_file.write_text("captured", encoding="utf-8")
+    monkeypatch.setattr(dbtl_manual, "_git_commit", lambda: "f" * 40)
+    dbtl_manual.capture_scenario(manual_root=manual_root, scenario=scenario)
+    return manual_root
+
+
+def test_hot_restore_refuses_when_the_manual_stack_is_not_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manual_root = _captured_manual_root(tmp_path, monkeypatch, scenario="chair-choice")
+    monkeypatch.setattr(dbtl_manual, "gateway_is_listening", lambda: False)
+    monkeypatch.setattr(dbtl_manual, "_touch_reload_trigger", lambda *args, **kwargs: pytest.fail("must not reload"))
+
+    with pytest.raises(dbtl_manual.ManualPipelineError, match="not running"):
+        dbtl_manual.restore_scenario(manual_root=manual_root, scenario="chair-choice", hot=True)
+
+
+def test_hot_restore_refuses_while_the_live_database_is_not_quiescent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manual_root = _captured_manual_root(tmp_path, monkeypatch, scenario="chair-choice")
+    database = manual_root / "live" / "db" / "deerflow.db"
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE runs SET status = 'running'")
+        conn.commit()
+    monkeypatch.setattr(dbtl_manual, "gateway_is_listening", lambda: True)
+    monkeypatch.setattr(dbtl_manual, "_touch_reload_trigger", lambda *args, **kwargs: pytest.fail("must not reload"))
+
+    with pytest.raises(dbtl_manual.ManualPipelineError, match="active run"):
+        dbtl_manual.restore_scenario(manual_root=manual_root, scenario="chair-choice", hot=True)
+
+    # The live state must be untouched by a refused hot swap.
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT status FROM runs").fetchone()[0] == "running"
+
+
+def test_hot_restore_swaps_the_pair_and_reloads_only_the_gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manual_root = _captured_manual_root(tmp_path, monkeypatch, scenario="design-complete")
+    database = manual_root / "live" / "db" / "deerflow.db"
+    project_file = manual_root / "live" / "projects" / "Maize" / "result.txt"
+    with sqlite3.connect(database) as conn:
+        conn.execute("UPDATE dbtl_cycles SET state = 'reconciliation'")
+        conn.commit()
+    project_file.write_text("changed later", encoding="utf-8")
+
+    trigger = tmp_path / "reload_trigger.py"
+    trigger.write_text("", encoding="utf-8")
+    reloaded: list[Path] = []
+    waited: list[bool] = []
+    monkeypatch.setattr(dbtl_manual, "gateway_is_listening", lambda: True)
+    monkeypatch.setattr(dbtl_manual, "_touch_reload_trigger", lambda path=trigger: (reloaded.append(path), path)[1])
+    monkeypatch.setattr(dbtl_manual, "_wait_for_gateway_ready", lambda **kwargs: waited.append(True))
+
+    result = dbtl_manual.restore_scenario(manual_root=manual_root, scenario="design-complete", hot=True)
+
+    assert result["hot"] is True
+    assert reloaded == [trigger]
+    assert waited == [True]
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("SELECT state FROM dbtl_cycles").fetchone()[0] == "design"
+    assert project_file.read_text(encoding="utf-8") == "captured"
+    backup_root = Path(result["backup_root"])
+    with sqlite3.connect(backup_root / "deerflow.db") as conn:
+        assert conn.execute("SELECT state FROM dbtl_cycles").fetchone()[0] == "reconciliation"
+    assert (backup_root / "projects" / "Maize" / "result.txt").read_text(encoding="utf-8") == "changed later"
+
+
+def test_cold_restore_still_refuses_while_running_and_never_reloads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manual_root = _captured_manual_root(tmp_path, monkeypatch, scenario="chair-choice")
+    monkeypatch.setattr(dbtl_manual, "gateway_is_listening", lambda: True)
+    monkeypatch.setattr(dbtl_manual, "_touch_reload_trigger", lambda *args, **kwargs: pytest.fail("must not reload"))
+
+    with pytest.raises(dbtl_manual.ManualPipelineError, match="make stop"):
+        dbtl_manual.restore_scenario(manual_root=manual_root, scenario="chair-choice")
+
+
+def test_gateway_readiness_probe_treats_an_unauthenticated_401_as_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    import urllib.error
+
+    def _unauthorized(*args: object, **kwargs: object) -> None:
+        raise urllib.error.HTTPError("http://127.0.0.1:8001/api/features", 401, "Unauthorized", {}, None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(dbtl_manual.urllib.request, "urlopen", _unauthorized)
+    assert dbtl_manual._gateway_is_ready() is True
+
+    def _refused(*args: object, **kwargs: object) -> None:
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(dbtl_manual.urllib.request, "urlopen", _refused)
+    assert dbtl_manual._gateway_is_ready() is False
+
+
+def test_the_reload_trigger_is_a_watched_backend_source_file() -> None:
+    trigger = dbtl_manual.RELOAD_TRIGGER_PATH
+    assert trigger.is_file(), trigger
+    backend = Path(dbtl_manual.REPO_ROOT) / "backend"
+    relative = trigger.relative_to(backend)
+    # The dev launcher excludes tests/**, .deer-flow, and sandbox from the watcher.
+    assert relative.parts[0] not in {"tests", ".deer-flow", "sandbox"}
+    assert trigger.read_bytes() == b"", "the trigger must stay empty; only its mtime is ever changed"
 
 
 def test_tampered_scenario_database_is_not_restored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

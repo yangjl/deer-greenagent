@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, event, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -13,6 +13,10 @@ from deerflow.persistence.base import Base
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+class DbtlStageTransitionImmutable(RuntimeError):
+    """A durable path edge cannot be updated or deleted."""
 
 
 class DbtlCycleRow(Base):
@@ -113,6 +117,74 @@ class DbtlStageAttemptRow(Base):
     __table_args__ = (
         UniqueConstraint("cycle_id", "stage", "attempt_number", name="uq_dbtl_stage_attempt"),
         Index("ix_dbtl_stage_project_cycle", "project_id", "cycle_id"),
+    )
+
+
+class DbtlStageTransitionRow(Base):
+    """One human-decided boundary on the cycle's stage-graph walk.
+
+    Append-only: the path history *is* this table ordered by ``seq``. A row
+    records who decided, what the agent assessed and recommended (later
+    phases), which routes were offered, and the evidence/dataset/spec/policy
+    bindings the decision was made against — so refreshing a browser or
+    restoring a checkpoint reconstructs the same path from durable records.
+    Reconciliation is not a stage: no transition row is ever written for data
+    work (progressive-gate plan §4).
+    """
+
+    __tablename__ = "dbtl_stage_transitions"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    cycle_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dbtl_cycles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    from_stage: Mapped[str] = mapped_column(String(24), nullable=False)
+    from_attempt: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stage_attempt_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    chosen_route: Mapped[str] = mapped_column(String(64), nullable=False)
+    to_stage: Mapped[str] = mapped_column(String(24), nullable=False)
+    # Phase 1 fields, nullable until the assessment exists: the agent's view
+    # and the human's override are both kept, so the record shows who decided.
+    assessed_difficulty: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    assessment_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    human_override: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    offered_routes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    decided_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_surface_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    evidence_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dataset_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    stage_spec_version: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    policy_version: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    backfilled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("0"))
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("cycle_id", "seq", name="uq_dbtl_stage_transition_seq"),
+        Index("ix_dbtl_stage_transitions_cycle_seq", "cycle_id", "seq"),
+    )
+
+
+@event.listens_for(DbtlStageTransitionRow, "before_update")
+def _refuse_stage_transition_update(*_args: object) -> None:
+    raise DbtlStageTransitionImmutable(
+        "DBTL stage transitions are append-only and cannot be updated."
+    )
+
+
+@event.listens_for(DbtlStageTransitionRow, "before_delete")
+def _refuse_stage_transition_delete(*_args: object) -> None:
+    raise DbtlStageTransitionImmutable(
+        "DBTL stage transitions are append-only and cannot be deleted."
     )
 
 

@@ -11,12 +11,19 @@ from sqlalchemy import func, select
 
 from deerflow.dbtl.cycle_state import StageStatus
 from deerflow.dbtl.reconciliation import dataset_fingerprint
+from deerflow.dbtl.stage_routes import (
+    UNRECONCILED_REASON,
+    RouteContext,
+    RouteSlug,
+    compute_stage_routes,
+)
 from deerflow.dbtl.stage_spec import resolve_stage_spec
 from deerflow.dbtl.validity import (
     DEFAULT_VALIDITY_PACK,
     HeadlineMetric,
     ValidityCheck,
     ValidityOutcome,
+    ValidityRefused,
     WorkflowRecommendation,
     evaluate_validity,
     validate_recommendation,
@@ -372,6 +379,23 @@ class BuildTestOpsMixin:
             if lineage is None:
                 raise DbtlWorkflowRefused("Test validity cannot be assessed without Build lineage.")
 
+            # Phase 0 makes the stage graph the route authority. The legacy
+            # validity contract still parses old recommendation names, but it
+            # may not authorize an edge the graph does not offer. In
+            # particular, Reconciliation is not a path destination:
+            # ``return_to_reconciliation`` is refused, and an unsettled matrix
+            # appears as a blocked Build edge instead.
+            reconciliation_settled = await self._reconciliation_is_settled(
+                session,
+                cycle_id=cycle_id,
+                attempts=attempts,
+            )
+            self._require_graph_route(
+                outcome=evaluation.outcome,
+                route=route,
+                reconciliation_settled=reconciliation_settled,
+            )
+
             bound_projection_hash = cycle.projection_hash
             self._apply_validity_route(
                 cycle,
@@ -429,6 +453,15 @@ class BuildTestOpsMixin:
                     authorization_reference=(f"manual-validity:{project_id}:{reviewer_user_id}"),
                 )
             )
+            await self._append_stage_transition(
+                session,
+                cycle=cycle,
+                from_stage="test",
+                chosen_route=route.value,
+                decided_by=reviewer_user_id,
+                stage_attempt=test,
+                evidence_hash=evidence.content_hash,
+            )
             await self._record_event(
                 session,
                 cycle=cycle,
@@ -454,6 +487,75 @@ class BuildTestOpsMixin:
                 "cycle": self._cycle_payload(cycle, stages),
                 "validity_assessment": self._assessment_payload(assessment),
             }
+
+    async def _reconciliation_is_settled(
+        self,
+        session,
+        *,
+        cycle_id: str,
+        attempts: dict[str, DbtlStageAttemptRow],
+    ) -> bool:
+        """Whether the current dataset still has an approved Build bridge."""
+        reconciliation = attempts["reconciliation"]
+        if (
+            reconciliation.status != StageStatus.APPROVED.value
+            or not reconciliation.approved_dataset_fingerprint
+        ):
+            return False
+        dataset_rows = list(
+            (
+                await session.execute(
+                    select(DbtlDatasetRow).where(
+                        DbtlDatasetRow.cycle_id == cycle_id
+                    )
+                )
+            ).scalars()
+        )
+        current = dataset_fingerprint(
+            [self._binding_from_row(item) for item in dataset_rows]
+        )
+        return reconciliation.approved_dataset_fingerprint == current
+
+    @staticmethod
+    def _require_graph_route(
+        *,
+        outcome: ValidityOutcome,
+        route: WorkflowRecommendation,
+        reconciliation_settled: bool,
+    ) -> None:
+        """Refuse legacy recommendations that are not legal graph edges."""
+        routes = compute_stage_routes(
+            RouteContext(
+                stage="test",
+                outcome=outcome.value,
+                reconciliation_settled=reconciliation_settled,
+            )
+        )
+        route_slug = {
+            WorkflowRecommendation.ADVANCE_TO_LEARN: RouteSlug.ADVANCE,
+            WorkflowRecommendation.REPEAT_TEST: RouteSlug.REVISE_HERE,
+            WorkflowRecommendation.RETURN_TO_BUILD: RouteSlug.RETURN_TO_BUILD,
+            WorkflowRecommendation.RETURN_TO_DESIGN: RouteSlug.RETURN_TO_DESIGN,
+            WorkflowRecommendation.CLOSE_CYCLE: RouteSlug.CLOSE_CYCLE,
+        }.get(route)
+        if route is WorkflowRecommendation.RETURN_TO_RECONCILIATION:
+            raise ValidityRefused(
+                "Reconciliation is not a cycle-stage destination. "
+                f"{UNRECONCILED_REASON}"
+            )
+        selected = next(
+            (candidate for candidate in routes if candidate.slug == route_slug),
+            None,
+        )
+        if selected is None:
+            raise ValidityRefused(
+                f"Recommendation {route.value!r} is not a legal route from "
+                f"{outcome.value!r} Test evidence."
+            )
+        if selected.blocked:
+            raise ValidityRefused(
+                selected.blocked_reason or f"Route {route.value!r} is blocked."
+            )
 
     @staticmethod
     def _review_decision_for_route(

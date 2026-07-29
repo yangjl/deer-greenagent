@@ -58,10 +58,11 @@ from deerflow.dbtl.branches import (
 )
 from deerflow.dbtl.council import (
     COUNCIL_DEPTH_CONTEXT_KEY,
+    DEPTH_INTENT_INSTRUCTION,
     CouncilDepth,
     council_depth_from_config,
     depth_policy,
-    recommend_depth,
+    interpret_depth,
     request_context,
 )
 from deerflow.dbtl.council_proposal import (
@@ -1137,6 +1138,39 @@ def _present_artifact_messages(
     )
 
 
+def make_llm_depth_interpreter():
+    """The production depth interpreter: one nostream model call, fail-soft.
+
+    Returns ``None`` when no drafting model is configured, which
+    :func:`interpret_depth` reads as "the phrase table is the whole answer".
+    Only requests the phrases did not match reach this, and the result is a
+    suggestion on a card a person confirms, so a misread costs one dropdown
+    change and never a meeting.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        app_config = get_app_config()
+    except Exception:  # noqa: BLE001 - config trouble keeps the deterministic default
+        return None
+    model_name = getattr(getattr(app_config, "dbtl", None), "setup_draft_model_name", None)
+    if not model_name:
+        return None
+
+    async def interpret(prompt: str) -> str:
+        from deerflow.utils.oneshot_llm import run_oneshot_llm
+
+        return await run_oneshot_llm(
+            system_instruction=DEPTH_INTENT_INSTRUCTION,
+            user_content=prompt,
+            run_name="dbtl_depth_intent",
+            app_config=app_config,
+            model_name=model_name,
+        )
+
+    return interpret
+
+
 def _make_llm_question_writer(context: SupervisorContext):
     """The production question writer: one non-graph model call, fail-soft.
 
@@ -1183,6 +1217,7 @@ def build_supervisor_graph(
     state_schema,
     stage_adapter,
     question_writer=None,
+    depth_interpreter=None,
 ) -> StateGraph:
     """Build (but do not compile) the supervisor graph.
 
@@ -1194,8 +1229,15 @@ def build_supervisor_graph(
     an async callable taking ``(request_text, missing_fields)`` and returning
     :class:`SetupQuestion` values. ``None`` uses the configured model, and any
     failure degrades to the deterministic gaps rather than blocking setup.
+
+    ``depth_interpreter`` is the seam for the preflight card's depth
+    recommendation: the phrase table decides first, and only a request it did
+    not match is read by the interpreter, so a typo does not silently open the
+    card on a depth the owner did not ask for. ``None`` uses the configured
+    model and every failure keeps the deterministic default.
     """
     writer = question_writer or _make_llm_question_writer(context)
+    depth_reader = depth_interpreter or make_llm_depth_interpreter()
 
     def decide(state: dict) -> BranchDecision:
         text, recovered_choice, recovered_cycle_id = _routing_input(state)
@@ -1350,7 +1392,7 @@ def build_supervisor_graph(
                         _council_preflight_message(
                             decision,
                             plan,
-                            recommend_depth(request_text),
+                            await interpret_depth(request_text, interpreter=depth_reader),
                             request_nonce=request_nonce,
                             model_options=_adapter_known_models(stage_adapter),
                         )
@@ -1619,7 +1661,7 @@ def make_project_supervisor(config: RunnableConfig):
     # ``make_lead_agent`` re-freezes the same mode (idempotent) and builds the
     # full middleware chain, so the ordinary branch is the production agent.
     lead_agent = make_lead_agent(config)
-    from deerflow.agents.dbtl.stage_execution import LiveStageAdapter, make_llm_roster_writer
+    from deerflow.agents.dbtl.stage_execution import LiveStageAdapter, make_llm_intent_interpreter, make_llm_roster_writer
     from deerflow.persistence.dbtl import DbtlCycleRepository
     from deerflow.persistence.engine import get_session_factory
 
@@ -1636,6 +1678,7 @@ def make_project_supervisor(config: RunnableConfig):
             app_config=runtime_app_config,
             runtime_config=config,
             roster_writer=make_llm_roster_writer(),
+            intent_interpreter=make_llm_intent_interpreter(),
         ),
     )
     return graph.compile()

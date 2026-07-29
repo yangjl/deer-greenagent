@@ -1068,6 +1068,63 @@ class TestCouncilPreflight:
         assert len(executed) == 1
 
     @pytest.mark.asyncio
+    async def test_a_misspelled_pilot_request_still_opens_the_card_on_light(self):
+        """A typo must not change the depth the card opens on.
+
+        The phrase table matches nothing in "jsut a qiuck pilto", so without
+        interpretation the card would open on medium and quietly recommend
+        several times the debate the owner asked for.
+        """
+        executed: list = []
+
+        async def interpreter(prompt: str) -> str:
+            assert "jsut a qiuck" in prompt  # verbatim, unrepaired
+            return "LIGHT"
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"),
+            stage_adapter=self._adapter(self._plan(), executed),
+            state_schema=SCHEMA,
+            depth_interpreter=interpreter,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {**FULL_STATE, "messages": [HumanMessage(content="jsut a qiuck pilto of the drought design", id="h-d1")]},
+            config={"configurable": {"thread_id": "preflight-depth-1"}},
+        )
+
+        assert executed == []
+        card = final["messages"][-1].artifact["human_input"]
+        assert card["clarification_type"] == "council_preflight"
+        assert card["recommended_option_id"] == "light"
+
+    @pytest.mark.asyncio
+    async def test_a_failing_depth_interpreter_still_opens_the_card(self):
+        """The card must always open on a usable setting; routing never depends on a provider."""
+        executed: list = []
+
+        async def interpreter(prompt: str) -> str:
+            raise RuntimeError("provider overloaded")
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"),
+            stage_adapter=self._adapter(self._plan(), executed),
+            state_schema=SCHEMA,
+            depth_interpreter=interpreter,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {**FULL_STATE, "messages": [HumanMessage(content="somthing vaguely wordded", id="h-d2")]},
+            config={"configurable": {"thread_id": "preflight-depth-2"}},
+        )
+
+        card = final["messages"][-1].artifact["human_input"]
+        assert card["clarification_type"] == "council_preflight"
+        assert card["recommended_option_id"] == "medium"
+
+    @pytest.mark.asyncio
     async def test_an_undispatchable_council_does_not_raise_a_card_it_cannot_honour(self):
         from deerflow.dbtl.council import CouncilDepth, plan_council
         from deerflow.dbtl.stage_spec import resolve_stage_spec

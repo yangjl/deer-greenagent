@@ -12,6 +12,7 @@ export interface DbtlFeature {
   mutations_enabled: boolean;
   graph_execution_enabled: boolean;
   design_deck_feedback?: boolean;
+  progressive_gate?: boolean;
   reason: string;
 }
 
@@ -20,6 +21,7 @@ const DISABLED_DBTL_FEATURE: DbtlFeature = {
   mutations_enabled: false,
   graph_execution_enabled: false,
   design_deck_feedback: false,
+  progressive_gate: false,
   reason:
     "The backend did not publish a DBTL safety contract, so workflow controls are disabled.",
 };

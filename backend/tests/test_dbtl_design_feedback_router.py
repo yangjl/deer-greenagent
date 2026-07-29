@@ -26,12 +26,14 @@ from deerflow.config.dbtl_config import DbtlConfig
 from deerflow.persistence.dbtl import DbtlCycleRepository
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 
 _USER_ID = UUID("11111111-2222-3333-4444-555555555555")
 _OTHER_USER_ID = UUID("99999999-8888-7777-6666-555555555555")
 
 DECK_HASH = "a" * 64
 OTHER_DECK_HASH = "b" * 64
+EVIDENCE_HASH = "c" * 64
 DECK_URI = "/mnt/user-data/outputs/dbtl/cycle/design/design-slides-rev1-aaaaaa.html"
 
 
@@ -64,6 +66,7 @@ def _make_app(workspace_repo, cycle_repo, *, mode: str = "manual", user_factory=
     app = make_authed_test_app(user_factory=user_factory)
     app.state.workspace_repo = workspace_repo
     app.state.dbtl_cycle_repo = cycle_repo
+    app.state.run_event_store = MemoryRunEventStore()
     app.state.dbtl_config_override = DbtlConfig(mode=mode)
     app.include_router(workspaces.router)
     app.include_router(dbtl_cycles.router)
@@ -160,6 +163,48 @@ def test_a_stale_surface_points_at_the_newest_one(tmp_path: Path) -> None:
         assert body["is_current"] is False
         assert body["superseded_by_surface_id"] == second["surface_id"]
         assert body["newest_surface_id"] == second["surface_id"]
+
+
+def test_a_read_only_deck_does_not_report_the_reviewable_deck_as_replaced(tmp_path: Path) -> None:
+    """Record and authority are different questions, and the note says so.
+
+    A later round that produced no package renders a ``read_only`` deck. The
+    audit record still shows it came after — ``is_current`` stays false — but
+    the reviewable deck is not reported as replaced, because nothing replaced
+    the package awaiting a verdict.
+    """
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        project_id = _seed_project(client)
+        cycle = _create_cycle(client, project_id)
+        artifact = client.post(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/artifacts",
+            json={
+                "stage": "design",
+                "artifact_type": "design_brief.v2",
+                "uri": "/mnt/user-data/outputs/design-review-rev1.md",
+                "content_hash": EVIDENCE_HASH,
+                "expected_db_revision": cycle["db_revision"],
+                "idempotency_key": "artifact-1",
+            },
+        ).json()
+        reviewable = anyio.run(
+            partial(
+                _register,
+                cycle_repo,
+                cycle,
+                mode="stage_review",
+                evidence_artifact_id=artifact["id"],
+                evidence_artifact_revision=artifact["revision"],
+                evidence_content_hash=EVIDENCE_HASH,
+            )
+        )
+        anyio.run(partial(_register, cycle_repo, cycle, mode="read_only", deck_content_hash=OTHER_DECK_HASH, design_round=2))
+
+        body = client.get(_url(project_id, cycle["id"], reviewable["surface_id"])).json()
+
+    assert body["is_current"] is False
+    assert body["note"] != "A newer Design round replaced this deck."
 
 
 def test_a_non_member_gets_a_not_found_rather_than_the_surface(tmp_path: Path) -> None:
@@ -281,6 +326,117 @@ def test_a_recorded_chair_option_starts_one_originating_thread_run(
     assert response.status_code == 200
     assert response.json()["status"] == "resume_started"
     assert response.json()["run_id"] == "run-resume-1"
+    messages = anyio.run(
+        partial(
+            client.app.state.run_event_store.list_messages,
+            "thread-1",
+            user_id=str(_USER_ID),
+        )
+    )
+    progress = messages[-1]["content"]
+    assert progress["id"].startswith("dbtl-meeting-progress__")
+    assert "Design meeting is continuing" in progress["content"]
+    assert "Recorded decision: **Family holdout**." in progress["content"]
+    assert "Keep one site external." in progress["content"]
+    meeting = progress["additional_kwargs"]["dbtl_meeting_progress"]
+    assert meeting["project_id"] == project_id
+    assert meeting["cycle_id"] == cycle["id"]
+    assert meeting["state"] == "synthesizing"
+    assert meeting["choice_label"] == "Family holdout"
+    assert meeting["participants"][-1]["role"] == "chair"
+    assert meeting["participants"][-1]["status"] == "in_progress"
+
+
+def test_a_terminal_chair_resume_without_a_followup_surface_reopens_the_same_answer(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A failed chair worker must not consume the only answer surface forever."""
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    started_runs: list[str] = []
+
+    async def fake_start_run(_body, _thread_id, _request):
+        started_runs.append("started")
+        return SimpleNamespace(run_id="run-resume-failed")
+
+    monkeypatch.setattr(dbtl_cycles, "start_run", fake_start_run)
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        project_id = _seed_project(client)
+        client.app.state.thread_store.get = AsyncMock(return_value={"thread_id": "thread-1", "project_id": project_id})
+        client.app.state.run_store = SimpleNamespace(
+            get=AsyncMock(
+                return_value={
+                    "run_id": "run-resume-failed",
+                    "status": "success",
+                }
+            )
+        )
+        cycle = _create_cycle(client, project_id)
+        surface = anyio.run(
+            partial(
+                _register,
+                cycle_repo,
+                cycle,
+                human_input_request_id="dbtl-design__request-retry",
+                decision_request={
+                    "question": "Which validation split?",
+                    "options": [
+                        {
+                            "id": "family",
+                            "label": "Family holdout",
+                            "value": "Use family holdout.",
+                        }
+                    ],
+                },
+            )
+        )
+        action_url = f"{_url(project_id, cycle['id'], surface['surface_id'])}/actions"
+
+        started = client.post(
+            action_url,
+            json={
+                "version": 1,
+                "action": {"kind": "chair_option", "option_ids": ["family"]},
+                "comment": "",
+                "client_submission_id": "submission-retry",
+                "originating_thread_id": "thread-1",
+                "expected_db_revision": cycle["db_revision"],
+                "expected_evidence": None,
+                "expected_deck_hash": DECK_HASH,
+            },
+        )
+        assert started.status_code == 200
+        assert started.json()["status"] == "resume_started"
+
+        reopened = client.get(f"{_url(project_id, cycle['id'], surface['surface_id'])}?viewer_thread_id=thread-1")
+
+    assert reopened.status_code == 200
+    body = reopened.json()
+    assert body["interactive"] is True
+    assert body["allowed_actions"] == ["chair_option"]
+    assert body["receipt"]["status"] == "failed"
+    assert body["receipt"]["failure_code"] == "resume_no_feedback_surface"
+    assert "try sending it again" in body["note"]
+
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        client.app.state.thread_store.get = AsyncMock(return_value={"thread_id": "thread-1", "project_id": project_id})
+        retried = client.post(
+            action_url,
+            json={
+                "version": 1,
+                "action": {"kind": "chair_option", "option_ids": ["family"]},
+                "comment": "",
+                "client_submission_id": "submission-retry",
+                "originating_thread_id": "thread-1",
+                "expected_db_revision": body["current_db_revision"],
+                "expected_evidence": None,
+                "expected_deck_hash": DECK_HASH,
+            },
+        )
+
+    assert retried.status_code == 200
+    assert retried.json()["status"] == "resume_started"
+    assert started_runs == ["started", "started"]
 
 
 def test_design_submission_and_approval_are_two_bound_deck_transitions(tmp_path: Path) -> None:

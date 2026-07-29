@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 This section accumulates work toward the **2.1.0** milestone
+
+- **DBTL:** A paused-chair answer no longer disappears into a terminal worker
+  failure. The feedback deck now follows the background resume run, refreshes
+  the originating conversation when a successor deck appears, and restores the
+  exact choice/comment for a payload-identical retry when the run produces no
+  follow-up surface. Reloading the deck—or accidentally changing that failed
+  answer—also restores the authenticated ledger's original option/comment
+  before controls are re-enabled, preventing a permanent different-payload
+  conflict.
+- **DBTL:** The Design stage sheet is inspection-only; the registered slide deck
+  is the only surface that records a Design verdict. A later deck that grants
+  nothing no longer hides the reviewable one — a `read_only` deck from a round
+  that produced no package used to supersede the `stage_review` deck bound to
+  the package awaiting a verdict, leaving the Design undecidable. Stage reviews
+  also accept a blank rationale, stored as a labelled server projection;
+  rejections still require the reviewer's own words.
+- **DBTL:** Progressive-gate Phase 0 — a cycle's gate decisions now append an
+  immutable stage-graph path history (`dbtl_stage_transitions`, migration
+  `0024`, backfilled from existing reviews). `deerflow.dbtl.stage_routes`
+  computes the legal Design/Build/Test/Learn edges (reconciliation is a
+  Build-edge precondition, never a destination), and `dbtl.progressive_gate`
+  (default off) exposes a read-only path strip and its latest durable path
+  record id on the cycle sheet. The production Test router now refuses the
+  legacy reconciliation destination through that graph authority, transition
+  rows refuse ORM update/delete, and manual checkpoints can record their
+  expected path head/routes/next action. Records accumulate regardless of the
+  flag, so enabling it later shows history that was already kept.
 ([milestone 2](https://github.com/bytedance/deer-flow/milestone/2)).
 
 ### ⚠ Breaking changes

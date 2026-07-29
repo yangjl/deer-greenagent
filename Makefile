@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup doctor support-bundle detect-thread-boundaries detect-blocking-io dbtl-manual-init dbtl-manual-refresh dbtl-manual-list dbtl-manual-capture dbtl-manual-restore dbtl-manual-dev dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
+.PHONY: help config config-upgrade check install setup doctor support-bundle detect-thread-boundaries detect-blocking-io dbtl-manual-init dbtl-manual-refresh dbtl-manual-list dbtl-manual-capture dbtl-manual-restore dbtl-manual-restore-hot dbtl-manual-dev dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -32,6 +32,7 @@ help:
 	@echo "  make dbtl-manual-list          - List captured DBTL manual-test checkpoints"
 	@echo "  make dbtl-manual-capture SCENARIO=name - Capture the isolated DB + project files"
 	@echo "  make dbtl-manual-restore SCENARIO=name - Restore a checkpoint (run make stop first)"
+	@echo "  make dbtl-manual-restore-hot SCENARIO=name - Swap a checkpoint under the running stack"
 	@echo "  make dbtl-manual-dev           - Start DeerFlow with the isolated DBTL profile"
 	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
@@ -83,12 +84,16 @@ dbtl-manual-list:
 	@$(DBTL_MANUAL) list
 
 dbtl-manual-capture: dbtl-manual-init
-	@if [ -z "$(SCENARIO)" ]; then echo 'usage: make dbtl-manual-capture SCENARIO=chair-choice [REPLACE=1]'; exit 2; fi
-	@$(DBTL_MANUAL) capture "$(SCENARIO)" $(if $(filter 1 true yes,$(REPLACE)),--replace,)
+	@if [ -z "$(SCENARIO)" ]; then echo 'usage: make dbtl-manual-capture SCENARIO=chair-choice [PATH_HEAD=design] [ASSESSMENT=standard] [ROUTES=advance,revise_here] [NEXT_ACTION=approve] [REPLACE=1]'; exit 2; fi
+	@$(DBTL_MANUAL) capture "$(SCENARIO)" $(if $(PATH_HEAD),--expected-path-head "$(PATH_HEAD)",) $(if $(ASSESSMENT),--expected-assessment "$(ASSESSMENT)",) $(if $(ROUTES),--offered-routes "$(ROUTES)",) $(if $(NEXT_ACTION),--next-action "$(NEXT_ACTION)",) $(if $(filter 1 true yes,$(REPLACE)),--replace,)
 
 dbtl-manual-restore: dbtl-manual-init
 	@if [ -z "$(SCENARIO)" ]; then echo 'usage: make dbtl-manual-restore SCENARIO=chair-choice'; exit 2; fi
 	@$(DBTL_MANUAL) restore "$(SCENARIO)"
+
+dbtl-manual-restore-hot: dbtl-manual-init
+	@if [ -z "$(SCENARIO)" ]; then echo 'usage: make dbtl-manual-restore-hot SCENARIO=chair-choice'; exit 2; fi
+	@$(DBTL_MANUAL) restore "$(SCENARIO)" --hot
 
 dbtl-manual-dev: dbtl-manual-init
 	@$(DBTL_MANUAL) dev

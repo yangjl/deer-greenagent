@@ -23,9 +23,11 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   CYCLE_STATE_LABELS,
   type DbtlStage,
+  type PathStripItem,
   STAGE_LABELS,
   STATUS_LABELS,
   artifactAttachmentReadiness,
+  derivePathStrip,
   canReviewStage,
   canSubmitReview,
   activityRevision,
@@ -49,6 +51,7 @@ import {
   useReviewStage,
   useSubmitStage,
 } from "@/core/dbtl";
+import { useI18n } from "@/core/i18n/hooks";
 import { uuid } from "@/core/utils/uuid";
 import { cn } from "@/lib/utils";
 
@@ -85,6 +88,71 @@ function Section({
   );
 }
 
+/**
+ * Read-only walk of the cycle's decided stage attempts (progressive gate,
+ * Phase 0). Purely presentational: every item comes from the server's durable
+ * transition records via `derivePathStrip`, and nothing here is clickable.
+ */
+function PathStrip({
+  items,
+  recordId,
+}: {
+  items: PathStripItem[];
+  recordId: string | null;
+}) {
+  const { t } = useI18n();
+  if (items.length === 0) return null;
+  return (
+    <div
+      aria-label={t.dbtl.pathStrip.label}
+      className="space-y-1 text-xs"
+    >
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+        {items.map((item, index) => {
+          const name =
+            STAGE_LABELS[item.stage as DbtlStage] ??
+            item.stage.charAt(0).toUpperCase() + item.stage.slice(1);
+          const notes = [
+            item.status === "invalidated"
+              ? t.dbtl.pathStrip.invalidated
+              : null,
+            item.backfilled ? t.dbtl.pathStrip.backfilled : null,
+          ].filter((note): note is string => note !== null);
+          return (
+            <span
+              key={`${item.stage}-${item.attempt}-${index}`}
+              className="flex items-center gap-x-1.5"
+            >
+              {index > 0 && (
+                <span aria-hidden className="text-muted-foreground">
+                  →
+                </span>
+              )}
+              <span
+                title={notes.length > 0 ? notes.join(" · ") : undefined}
+                className={cn(
+                  "tabular-nums",
+                  item.status === "current" && "text-foreground font-semibold",
+                  item.status === "invalidated" &&
+                    "text-muted-foreground line-through",
+                  item.status === "closed" && "text-muted-foreground",
+                )}
+              >
+                {name} {item.attempt}
+              </span>
+            </span>
+          );
+        })}
+      </div>
+      {recordId && (
+        <p className="text-muted-foreground font-mono text-[10px]">
+          {t.dbtl.pathStrip.record}: {recordId}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function CycleStageSheet({
   projectId,
   cycleId,
@@ -110,6 +178,7 @@ export function CycleStageSheet({
     open && (stage === "build" || stage === "test") ? cycleId : null,
   );
   const dbtl = useDbtlFeature();
+  const { t } = useI18n();
 
   const [rationale, setRationale] = useState("");
   const [resolutionFor, setResolutionFor] = useState<string | null>(null);
@@ -135,6 +204,21 @@ export function CycleStageSheet({
       artifacts.filter((item) => isReviewDocumentUri(item.uri)).at(-1) ?? null,
     [artifacts],
   );
+  // Present only when the server both enables the progressive gate and sends
+  // the transition walk; with either half missing the sheet is unchanged.
+  const pathStrip = useMemo(
+    () =>
+      dbtl.feature?.progressive_gate === true && cycle?.transitions
+        ? derivePathStrip(cycle.transitions, cycle.state)
+        : null,
+    [cycle, dbtl.feature?.progressive_gate],
+  );
+  const latestPathRecordId = useMemo(() => {
+    if (!cycle?.transitions?.length) return null;
+    return [...cycle.transitions].sort(
+      (left, right) => left.seq - right.seq,
+    ).at(-1)?.id ?? null;
+  }, [cycle?.transitions]);
 
   function act(decision: ReviewDecision) {
     if (!cycle || !stage || !canSubmitReview(rationale) || review.isPending)
@@ -168,47 +252,6 @@ export function CycleStageSheet({
             "Run Build in this cycle context to record reproducibility lineage before review.",
         }
       : submissionReadiness;
-
-  if (
-    open &&
-    cycle &&
-    stage === "design" &&
-    dbtl.feature?.design_deck_feedback
-  ) {
-    return (
-      <Sheet open={open} onOpenChange={onOpenChange}>
-        <SheetContent className="flex w-full flex-col gap-0 overflow-y-auto sm:max-w-xl">
-          <SheetHeader>
-            <SheetTitle className="flex items-center gap-2">
-              Design
-              {record && (
-                <Badge variant="outline">{STATUS_LABELS[record.status]}</Badge>
-              )}
-            </SheetTitle>
-            <SheetDescription>
-              Design input and review now live in the registered feedback deck.
-            </SheetDescription>
-          </SheetHeader>
-          <div className="space-y-4 p-6">
-            <p className="text-sm font-medium">{cycle.title}</p>
-            <div className="border-border rounded-md border border-dashed p-4">
-              <p className="text-sm font-medium">Open the feedback deck</p>
-              <p className="text-muted-foreground mt-1 text-sm leading-relaxed">
-                Return to the conversation where this Design meeting ran and
-                open its slide deck. The chair question, submission step, and
-                final verdict are recorded there against the exact deck and
-                evidence hashes.
-              </p>
-            </div>
-            <p className="text-muted-foreground text-xs">
-              Set <code>dbtl.design_deck_feedback=false</code> to restore the
-              rollback Design sheet. Other stage review sheets are unchanged.
-            </p>
-          </div>
-        </SheetContent>
-      </Sheet>
-    );
-  }
 
   function attachEvidence(event: React.FormEvent) {
     event.preventDefault();
@@ -256,6 +299,9 @@ export function CycleStageSheet({
           </p>
         ) : (
           <div className="space-y-7 p-6 pt-2">
+            {pathStrip && (
+              <PathStrip items={pathStrip} recordId={latestPathRecordId} />
+            )}
             <header>
               <p className="text-sm font-medium">{cycle.title}</p>
               <p className="text-muted-foreground mt-0.5 text-xs">
@@ -581,8 +627,32 @@ export function CycleStageSheet({
               </form>
             </Section>
 
+            {/* Design is inspection-only here. Submitting it and recording a
+                verdict are clicks a person makes on an authenticated surface
+                that can prove who made them — the meeting's registered slide
+                deck — so this sheet keeps the evidence and the history but
+                offers no decision. */}
             <Section icon={History} title="Review">
-              {canSubmitStage(record.status) ? (
+              {stage === "design" ? (
+                <div className="space-y-3">
+                  <p className="text-muted-foreground text-sm">
+                    {t.dbtl.designSheet.readOnly}
+                  </p>
+                  {dbtl.feature?.design_deck_feedback && (
+                    <div className="border-border rounded-md border border-dashed p-4">
+                      <p className="text-sm font-medium">
+                        Open the feedback deck
+                      </p>
+                      <p className="text-muted-foreground mt-1 text-sm leading-relaxed">
+                        Return to the conversation where this Design meeting ran
+                        and open its slide deck. The chair question, submission
+                        step, and final verdict are recorded there against the
+                        exact deck and evidence hashes.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ) : canSubmitStage(record.status) ? (
                 <div className="space-y-2">
                   <p className="text-muted-foreground text-sm">
                     Submit this stage so a reviewer can decide on the evidence

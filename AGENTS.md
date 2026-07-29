@@ -215,7 +215,17 @@ Breeding-workspace note:
   action ledger plus review provenance. A deck-backed clarification remains in
   durable thread history but is not rendered as a duplicate card and does not
   lock ordinary chat. Request changes starts a focused refinement in the
-  originating conversation. `dbtl.design_deck_feedback=false` restores the
+  originating conversation. The parent follows a chair-resume run through the
+  authenticated surface read model: a successor deck refreshes durable thread
+  history, while a terminal run with no successor marks the same payload-bound
+  action failed and re-enables its preserved choice/comment. Because recording
+  the failed worker advances `db_revision`, that exact failed action may rebind
+  only its optimistic revision under the same client submission id; changing
+  the answer, deck, evidence, or id still conflicts. On reload or such a
+  conflict, the authenticated parent restores the original selected
+  option/comment from the failed action before re-enabling the deck, so the
+  person is not trapped with a non-retryable draft.
+  `dbtl.design_deck_feedback=false` restores the
   legacy Design card/sheet during the rollback window; non-Design review sheets
   are unchanged. Legacy, downloaded, wrong-thread, stale, superseded, or
   hash-mismatched decks remain read-only.
@@ -230,9 +240,16 @@ Breeding-workspace note:
   `in_progress` until someone submits it for review, so a package already on
   the table and no `changes_requested` review means the next cycle-scoped
   request convenes nobody and points at the review sheet instead;
-  `_wants_new_debate` is a deterministic phrase check ("run the meeting again")
-  that overrides it, and a `changes_requested` review still re-opens the debate
-  without being asked, because that verdict *is* the request to argue again.
+  `_wants_new_debate` is a deterministic phrase check ("run the meeting again",
+  "restart/retry/relaunch the meeting", plus enumerated one-slip typos like
+  "restat") that overrides it. What the phrases miss, an injected fail-soft
+  intent interpreter (`make_llm_intent_interpreter`, one nostream call on
+  `dbtl.setup_draft_model_name`) may still read as a re-run — the owner's words
+  stay verbatim in the record while interpretation absorbs typos and
+  paraphrases; only an explicit CONVENE verdict convenes, and an absent model,
+  provider failure, or ambiguous reply holds. A `changes_requested` review
+  still re-opens the debate without being asked, because that verdict *is* the
+  request to argue again.
   (2) *Resume*: answering the chair's `needs_input` question dispatches the
   chair alone (`_resumed_chair_unit`) over the positions already recorded, with
   the question and the owner's words carried verbatim — re-running the full
@@ -358,7 +375,14 @@ Breeding-workspace note:
   falls back to `ordinary` for a card it does not special-case; without that the
   answer turn would convene the council the owner just declined.
   `recommend_depth` suggests one from named phrases in the request rather than
-  a model's opinion, and stakes beat brevity. The confirmed depth travels in
+  a model's opinion, and stakes beat brevity. Wording those phrases do not
+  match gets one more reading: `interpret_depth` passes the request verbatim to
+  a fail-soft interpreter (`make_llm_depth_interpreter`), so "jsut a qiuck
+  pilto" still opens the card on Light instead of quietly recommending several
+  times the debate that was asked for. It may only name Light/Medium/Heavy —
+  never `human_input`, which is a statement about who owns the answer — and a
+  provider failure or unrecognized reply keeps the deterministic default, since
+  the card must always open on a usable setting. The confirmed depth travels in
   the request's own context (`dbtl_council_depth`, next-request-only like the
   selected cycle) and the executor scopes the stage spec by it.
   **The server also recovers that depth from the card it emitted**
@@ -459,6 +483,19 @@ Breeding-workspace note:
   run request carries `context` at the top level, but LangGraph relocates it to
   `configurable["context"]` before a node sees it, so code running on both sides
   must look in both places or silently read nothing on one of them.
+- **Progressive-gate Phase 0** records every gate decision as an append-only
+  edge on a Design/Build/Test/Learn stage graph (`dbtl_stage_transitions`);
+  reconciliation is a Build-edge precondition, not a path node, so data work
+  never writes an edge. The production Test-validity router consults that graph
+  and refuses the legacy `return_to_reconciliation` destination before any
+  state change; transition rows also refuse ORM update/delete.
+  `dbtl.progressive_gate` (default off) gates only the read model — a read-only
+  path strip on the cycle sheet, including the latest `dst-…` record id — while
+  records accumulate either way. Manual checkpoint manifests may record the
+  expected head, assessment, offered routes, and next action. See
+  [docs/plans/2026-07-29-progressive-dbtl-gate-plan.md](docs/plans/2026-07-29-progressive-dbtl-gate-plan.md)
+  and [backend/AGENTS.md](backend/AGENTS.md) for the route-legality and
+  transition-write contracts.
 
 ## Commands: Root vs. Module
 
@@ -475,6 +512,7 @@ make dbtl-manual-init                          # Create the isolated DBTL manual
 make dbtl-manual-dev                           # Run the full stack against that profile
 make dbtl-manual-capture SCENARIO=chair-choice # Capture its quiet DB + project state
 make dbtl-manual-restore SCENARIO=chair-choice # Restore it after `make stop`
+make dbtl-manual-restore-hot SCENARIO=chair-choice # Swap it under the running stack
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
 make start       # Start all services in production mode (local, optimized)
 make stop        # Stop all running services
@@ -510,12 +548,20 @@ configuration changes remain hot-reloaded.
 The local DBTL manual pipeline lives in `scripts/dbtl_manual.py` and stores all
 generated state under gitignored `.deer-flow/manual-dbtl/`. Its generated
 profile forces unified SQLite plus an isolated `projects.root`, enables the
-graph and Design-deck feedback, and disables background memory/scheduler/channel
-writers. A scenario is a matched SQLite backup + project tree + integrity
+graph, Design-deck feedback, and the progressive-gate path strip, and disables
+background memory/scheduler/channel writers. A scenario is a matched SQLite backup + project tree + integrity
 manifest captured only at a quiescent human-decision boundary. Restore refuses
 while Gateway port 8001 is listening, validates both hashes, backs up the prior
 isolated live pair, and never touches the normal configured database or project
-root. This is a developer acceleration tool, not a production stage bypass; see
+root. `restore --hot` (`make dbtl-manual-restore-hot`) inverts only the
+running-stack rule and **requires** the stack to be up: it keeps every other
+safety behavior, refuses unless the live database is quiescent (the same
+active-run/action guard capture applies, re-checked immediately before the
+swap), then touches one watched backend source file so the Gateway's
+`uvicorn --reload` watcher recycles that process alone, and polls the Gateway
+until it answers. The frontend and nginx keep running, so the developer only
+hard-refreshes the browser. This is a developer acceleration tool, not a
+production stage bypass; it adds no Gateway route or config flag; see
 `docs/dbtl-manual-test-pipeline.md`.
 
 ## Where to Go Next

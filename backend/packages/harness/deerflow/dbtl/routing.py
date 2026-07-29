@@ -86,10 +86,18 @@ class RoutingDecision:
     cycle_id: str | None = None
 
 
+# One-slip misspellings of the start verbs, enumerated the same narrow way the
+# classifier recognizes "similate": each is a literal, never a fuzzy match, so
+# the rung stays auditable. A slip here is expensive in a quiet way — the rung
+# is skipped, the classifier gets the request, and someone who asked in words to
+# start a cycle is told nothing happened. The verb still has to be followed by
+# "cycle"/"dbtl" below, so a misspelled verb alone trips nothing.
+_START_VERB_TYPOS = r"strat|sttart|star|statr|creat|craete|crate|opne|oepn|begni|bgin|beign"
+
 # A typed request to start. Deliberately narrow: it must name a cycle or DBTL
 # explicitly, so "start the analysis" does not trip it.
 _EXPLICIT_START_PATTERN = re.compile(
-    r"\b(?:start|open|begin|create)\s+(?:a\s+|the\s+|new\s+)*(?:dbtl\s+cycle|dbtl\s+workflow|research\s+cycle|learning\s+cycle|cycle|dbtl)\b",
+    r"\b(?:start|open|begin|create|" + _START_VERB_TYPOS + r")\s+(?:a\s+|the\s+|new\s+)*(?:dbtl\s+cycle|dbtl\s+workflow|research\s+cycle|learning\s+cycle|cycle|dbtl)\b",
     re.IGNORECASE,
 )
 

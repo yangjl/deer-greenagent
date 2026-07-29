@@ -213,6 +213,94 @@ class TestRegenerationSupersedesRatherThanMutates:
         assert again["surface_id"] == first["surface_id"]
         assert again["is_current"] is True
 
+    async def test_a_later_deck_that_grants_nothing_does_not_hide_the_reviewable_one(self, tmp_path: Path) -> None:
+        """Supersession records what was *shown*; it must not revoke authority.
+
+        A round that produces no package renders a ``read_only`` deck. If that
+        deck were read as replacing the ``stage_review`` deck bound to the
+        package still awaiting a verdict, the Design would become undecidable —
+        no surface anywhere could record the decision. Callers asking "which
+        deck may still act?" therefore ask for the newest *stage_review*
+        surface, not the newest surface.
+        """
+        repo = await _repo(tmp_path)
+        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert cycle is not None
+        await repo.attach_artifact(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            stage="design",
+            artifact_type="design_brief.v2",
+            uri="/mnt/user-data/outputs/dbtl/cycle/design/design-review-rev1-cccccc.md",
+            content_hash=EVIDENCE_HASH,
+            created_by="user-1",
+            expected_db_revision=int(cycle["db_revision"]),
+            idempotency_key="artifact-1",
+        )
+        detail = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert detail is not None
+        artifact = detail["artifacts"][-1]
+        reviewable = await _register(
+            repo,
+            mode="stage_review",
+            evidence_artifact_id=artifact["id"],
+            evidence_artifact_revision=artifact["revision"],
+            evidence_content_hash=EVIDENCE_HASH,
+        )
+
+        await _register(repo, mode="read_only", deck_content_hash=OTHER_DECK_HASH, design_round=2)
+
+        newest_review = await repo.latest_design_feedback_surface(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            stage_attempt_id=reviewable["stage_attempt_id"],
+            mode="stage_review",
+        )
+        assert newest_review is not None
+        assert newest_review["surface_id"] == reviewable["surface_id"]
+
+        # The record itself is untouched: it still says a later deck came after.
+        stale = await repo.get_design_feedback_surface(reviewable["surface_id"], project_id="project-1")
+        assert stale is not None
+        assert stale["is_current"] is False
+
+    async def test_a_newer_review_deck_does_replace_the_older_one(self, tmp_path: Path) -> None:
+        """The relaxation is scoped: two review decks still order normally."""
+        repo = await _repo(tmp_path)
+        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert cycle is not None
+        await repo.attach_artifact(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            stage="design",
+            artifact_type="design_brief.v2",
+            uri="/mnt/user-data/outputs/dbtl/cycle/design/design-review-rev1-cccccc.md",
+            content_hash=EVIDENCE_HASH,
+            created_by="user-1",
+            expected_db_revision=int(cycle["db_revision"]),
+            idempotency_key="artifact-1",
+        )
+        detail = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert detail is not None
+        artifact = detail["artifacts"][-1]
+        evidence = {
+            "evidence_artifact_id": artifact["id"],
+            "evidence_artifact_revision": artifact["revision"],
+            "evidence_content_hash": EVIDENCE_HASH,
+        }
+        first = await _register(repo, mode="stage_review", **evidence)
+
+        second = await _register(repo, mode="stage_review", deck_content_hash=OTHER_DECK_HASH, design_round=2, **evidence)
+
+        newest_review = await repo.latest_design_feedback_surface(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            stage_attempt_id=first["stage_attempt_id"],
+            mode="stage_review",
+        )
+        assert newest_review is not None
+        assert newest_review["surface_id"] == second["surface_id"]
+
 
 class TestRefusals:
     async def test_a_review_surface_must_name_the_evidence_it_shows(self, tmp_path: Path) -> None:

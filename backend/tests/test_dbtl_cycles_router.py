@@ -599,7 +599,98 @@ def test_an_unknown_stage_name_is_rejected_by_the_schema(tmp_path: Path) -> None
     assert response.status_code == 422
 
 
-def test_a_review_without_a_rationale_is_rejected(tmp_path: Path) -> None:
+def test_a_rejection_without_a_rationale_is_refused(tmp_path: Path) -> None:
+    """A rejection ends the attempt, so it needs the reviewer's own words.
+
+    Approve and request-changes may take a labelled server projection — the
+    registered deck path already works that way — but "rejected" with a
+    generated sentence tells the next reader nothing about why.
+    """
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        project_id = _seed_project(client)
+        cycle = _create_cycle(client, project_id)
+
+        response = client.post(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/stages/design/review",
+            json={
+                "decision": "reject",
+                "rationale": "   ",
+                "expected_db_revision": 1,
+                "idempotency_key": "review-1",
+            },
+        )
+
+    assert response.status_code == 422
+    assert "rationale" in response.json()["detail"].lower()
+
+
+def test_an_omitted_rationale_is_recorded_as_the_servers_words(tmp_path: Path) -> None:
+    """The record must distinguish a generated sentence from a reviewer's.
+
+    A reviewer with nothing to add should not have to invent a sentence, but
+    the resulting record must not read as though they wrote one — so the
+    projection is stored with ``rationale_source: server_projection`` and no
+    human comment.
+    """
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        project_id = _seed_project(client)
+        cycle = _create_cycle(client, project_id)
+        _attach(client, project_id, cycle["id"], "design")
+        current = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}").json()
+        client.post(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/stages/design/submit",
+            json={"expected_db_revision": current["db_revision"], "idempotency_key": "submit-design"},
+        ).raise_for_status()
+        current = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}").json()
+
+        response = client.post(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/stages/design/review",
+            json={
+                "decision": "approve",
+                "expected_db_revision": current["db_revision"],
+                "idempotency_key": "review-design",
+            },
+        )
+
+    assert response.status_code == 200
+    stages = {row["stage"]: row for row in response.json()["stages"]}
+    assert stages["design"]["status"] == "approved"
+
+    reviews = anyio.run(_read_reviews, cycle_repo, cycle["id"], project_id)
+    assert len(reviews) == 1
+    review = reviews[0]
+    assert review["rationale_source"] == "server_projection"
+    assert review["human_comment"] is None
+    assert review["rationale"]
+
+
+async def _read_reviews(repo, cycle_id: str, project_id: str) -> list[dict]:
+    from sqlalchemy import select
+
+    from deerflow.persistence.dbtl.model import DbtlReviewRow
+
+    async with repo._sf() as session:
+        rows = (await session.execute(select(DbtlReviewRow).where(DbtlReviewRow.cycle_id == cycle_id, DbtlReviewRow.project_id == project_id))).scalars().all()
+        return [
+            {
+                "input_source": row.input_source,
+                "rationale_source": row.rationale_source,
+                "human_comment": row.human_comment,
+                "rationale": row.rationale,
+            }
+            for row in rows
+        ]
+
+
+def test_an_approval_may_omit_the_rationale(tmp_path: Path) -> None:
+    """A reviewer with nothing to add should not have to invent a sentence.
+
+    The request is accepted by validation; it is refused further in for the
+    ordinary workflow reason (the stage is not awaiting review), which is what
+    distinguishes "the rule was relaxed" from "the request never got that far".
+    """
     workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
     with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
         project_id = _seed_project(client)
@@ -609,13 +700,12 @@ def test_a_review_without_a_rationale_is_rejected(tmp_path: Path) -> None:
             f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/stages/design/review",
             json={
                 "decision": "approve",
-                "rationale": "   ",
                 "expected_db_revision": 1,
                 "idempotency_key": "review-1",
             },
         )
 
-    assert response.status_code == 422
+    assert response.status_code == 409
 
 
 def test_one_failing_target_does_not_strand_retrieval_in_the_others(
