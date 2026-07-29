@@ -28,7 +28,7 @@ help:
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
 	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
 	@echo "  make check           - Check if all required tools are installed"
-	@echo "  make detect-thread-boundaries - Inventory async/thread boundary points"
+	@echo "  make detect-thread-boundaries - Inventory backend executor/thread/event-loop boundaries"
 	@echo "  make detect-blocking-io        - Inventory blocking IO that may block the backend event loop"
 	@echo "  make dbtl-manual-init          - Create an isolated DBTL manual-test profile"
 	@echo "  make dbtl-manual-list          - List captured DBTL manual-test checkpoints"
@@ -70,7 +70,7 @@ support-bundle:
 	@$(BACKEND_UV_RUN) python ../scripts/support_bundle.py --include-doctor
 
 detect-thread-boundaries:
-	@$(PYTHON) ./scripts/detect_thread_boundaries.py
+	@$(BACKEND_UV_RUN) python ../scripts/detect_thread_boundaries.py --json-output ../.deer-flow/thread-boundary-inventory.json
 
 detect-blocking-io:
 	@$(MAKE) -C backend detect-blocking-io
