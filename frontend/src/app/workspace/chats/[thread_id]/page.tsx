@@ -306,6 +306,11 @@ export default function ChatPage() {
           // armed the composer and then sent nothing.
           if (showDbtlScope && message.text.trim()) {
             setRequestContext(nextContextAfterSend(sentContext));
+            // This provider selection is the other half of effectiveContext.
+            // Leaving it set immediately re-hydrates AUTO as the same cycle,
+            // so the next follow-up can restart the meeting despite the
+            // selector promising that scope applies to one request.
+            selectCycle(null);
           }
           // Shadow evaluation runs beside the accepted send, never in front
           // of it, and uses the exact same routing inputs as the supervisor.
@@ -330,6 +335,7 @@ export default function ChatPage() {
       showDbtlScope,
       effectiveContext,
       isWelcomeMode,
+      selectCycle,
     ],
   );
   const designKickoffInFlight = useRef<number | null>(null);
@@ -371,6 +377,9 @@ export default function ChatPage() {
           onSent: () => {
             consumeDesignKickoff(kickoff.nonce);
             setRequestContext(AUTO_REQUEST_CONTEXT);
+            // The kickoff already carried its cycle id. Do not let that
+            // internal run silently scope the next human follow-up.
+            selectCycle(null);
           },
         },
       ),
@@ -381,6 +390,7 @@ export default function ChatPage() {
     consumeDesignKickoff,
     isMock,
     pendingDesignKickoff,
+    selectCycle,
     sendMessage,
     thread.isLoading,
     threadId,

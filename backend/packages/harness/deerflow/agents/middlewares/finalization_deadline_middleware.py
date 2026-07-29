@@ -66,7 +66,7 @@ DEFAULT_RESERVE_CALLS = 3
 #: ``tests/test_finalization_deadline_middleware.py::TestTheTurnCostAssumption``:
 #: if a middleware gains or loses a hook, that test fails and names the new
 #: number rather than letting every stage worker quietly lose budget.
-SUBAGENT_SUPERSTEPS_PER_TURN = 8
+SUBAGENT_SUPERSTEPS_PER_TURN = 9
 
 #: Super-steps held back so the forced final answer has somewhere to land.
 #: Roughly one turn's worth: at the moment the deadline fires, the graph still

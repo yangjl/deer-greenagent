@@ -132,6 +132,7 @@ class DepthPolicy:
                 "max_turns": self.budget.max_turns,
                 "max_tokens": self.budget.max_tokens,
                 "timeout_seconds": self.budget.timeout_seconds,
+                "token_limit_enforced": self.budget.token_limit_enforced,
             },
         }
 
@@ -143,9 +144,9 @@ class DepthPolicy:
 #: were originally read as turns, which bought every depth two to eight model
 #: calls: not enough for a worker to read its context, argue, and emit a
 #: structured result, so each one was cut off mid-loop and the whole council
-#: reported prose. They are now sized so ``model_call_budget`` yields a usable
-#: number of calls, and ``TestCouncilBudgetsFitRealWork`` fails if a future edit
-#: takes one back below that.
+#: reported prose. Turns and wall-clock time remain bounded, but token use is
+#: metered rather than enforced for every council depth. That prevents a chair
+#: from losing the synthesis at the end of an otherwise useful meeting.
 DEPTH_POLICIES: Mapping[CouncilDepth, DepthPolicy] = MappingProxyType(
     {
         CouncilDepth.HUMAN_INPUT: DepthPolicy(
@@ -157,28 +158,52 @@ DEPTH_POLICIES: Mapping[CouncilDepth, DepthPolicy] = MappingProxyType(
             # values stay legal because ``WorkerBudget`` refuses non-positive
             # limits, and a budget nobody spends is better left obviously small
             # than set to something a reader might mistake for an allowance.
-            budget=WorkerBudget(max_workers=1, max_turns=1, max_tokens=1, timeout_seconds=1),
+            budget=WorkerBudget(
+                max_workers=1,
+                max_turns=1,
+                max_tokens=1,
+                timeout_seconds=1,
+                token_limit_enforced=False,
+            ),
         ),
         CouncilDepth.LIGHT: DepthPolicy(
             depth=CouncilDepth.LIGHT,
             label="Light debate",
-            description="One position, one challenge, one synthesis. For a quick look, a pilot, or a design you mostly already have.",
+            description="One concise position, one focused challenge, one synthesis. A quick pilot with token use recorded, not capped; not a workspace-wide research pass.",
             max_positions=1,
-            budget=WorkerBudget(max_workers=1, max_turns=80, max_tokens=150_000, timeout_seconds=420),
+            budget=WorkerBudget(
+                max_workers=1,
+                max_turns=63,
+                max_tokens=24_000,
+                timeout_seconds=180,
+                token_limit_enforced=False,
+            ),
         ),
         CouncilDepth.MEDIUM: DepthPolicy(
             depth=CouncilDepth.MEDIUM,
             label="Medium debate",
             description="Up to two independent positions before the challenge and synthesis. The default for ordinary cycle work.",
             max_positions=2,
-            budget=WorkerBudget(max_workers=2, max_turns=120, max_tokens=400_000, timeout_seconds=900),
+            budget=WorkerBudget(
+                max_workers=2,
+                max_turns=120,
+                max_tokens=400_000,
+                timeout_seconds=900,
+                token_limit_enforced=False,
+            ),
         ),
         CouncilDepth.HEAVY: DepthPolicy(
             depth=CouncilDepth.HEAVY,
             label="Heavy research",
             description="Up to four independent positions, each with room to read the workspace and argue in detail. For work that has to survive outside review.",
             max_positions=4,
-            budget=WorkerBudget(max_workers=4, max_turns=190, max_tokens=900_000, timeout_seconds=1800),
+            budget=WorkerBudget(
+                max_workers=4,
+                max_turns=190,
+                max_tokens=900_000,
+                timeout_seconds=1800,
+                token_limit_enforced=False,
+            ),
         ),
     }
 )
@@ -403,6 +428,7 @@ class CouncilPlan:
                 "max_turns": self.budget.max_turns,
                 "max_tokens": self.budget.max_tokens,
                 "timeout_seconds": self.budget.timeout_seconds,
+                "token_limit_enforced": self.budget.token_limit_enforced,
             },
             "unmet_capabilities": [item.value for item in self.unmet_capabilities],
             "notes": list(self.notes),

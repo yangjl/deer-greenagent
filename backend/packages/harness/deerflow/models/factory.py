@@ -284,7 +284,14 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         # Use explicit reasoning_effort from frontend if provided (low/medium/high)
         explicit_effort = kwargs.pop("reasoning_effort", None)
         if not thinking_enabled:
-            model_settings_from_config["reasoning_effort"] = "none"
+            # ``when_thinking_disabled`` is the provider-specific escape hatch
+            # for models whose lowest accepted effort is not ``none`` (for
+            # example GPT-5.3-Codex-Spark). The generic disable path above
+            # promises that this mapping takes full precedence, so do not
+            # overwrite an effort it supplied.
+            disabled_settings = model_config.when_thinking_disabled or {}
+            if "reasoning_effort" not in disabled_settings:
+                model_settings_from_config["reasoning_effort"] = "none"
         elif explicit_effort and explicit_effort in ("low", "medium", "high", "xhigh"):
             model_settings_from_config["reasoning_effort"] = explicit_effort
         elif "reasoning_effort" not in model_settings_from_config:

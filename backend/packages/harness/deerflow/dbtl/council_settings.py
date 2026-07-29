@@ -3,8 +3,8 @@
 The preflight card shows who will sit in the design meeting. Before this
 module, the roster was take-it-or-redraw-it: a person could pick a depth or
 send the whole roster back to the writer, but could not say "this seat, on
-that model, with this budget, and push hardest on X". Those four dials —
-model, token budget, reasoning strength, and owner instructions — are exactly
+that model, with deeper reasoning, and push hardest on X". Those three dials —
+model, reasoning strength, and owner instructions — are exactly
 what a lab head adjusts when assigning people to a group meeting, so they are
 now editable per participant, prefilled with what the roster writer proposed.
 
@@ -17,7 +17,7 @@ would run if they touched nothing.
 
 **Edits are validated server-side, field by field.** ``parse_participant_settings``
 is fail-soft per field rather than per payload: an unknown model is dropped
-while the same participant's token budget still applies. A stale client losing
+while the same participant's instructions still apply. A stale client losing
 one edit is a smaller failure than a reply that silently discards them all.
 
 **Instructions are carried verbatim.** An owner's note to a seat is quoted
@@ -43,9 +43,9 @@ REASONING_EXTENDED = "extended"
 #: factory's extended-thinking mode; anything else runs the model as-is.
 REASONING_LEVELS: tuple[str, ...] = (REASONING_STANDARD, REASONING_EXTENDED)
 
-#: Bounds for a per-participant token budget. The floor keeps a mis-typed
-#: budget from starving a worker below one useful model call; the ceiling is a
-#: safety limit independent of depth, mirroring ``MAX_PROPOSED_POSITIONS``.
+#: Legacy bounds retained for old preflight replies. Current council policies
+#: meter tokens without enforcing them, so these values are recorded but
+#: cannot stop a participant while ``token_limit_enforced`` is false.
 MIN_PARTICIPANT_TOKENS = 10_000
 MAX_PARTICIPANT_TOKENS = 2_000_000
 
@@ -208,6 +208,7 @@ def participants_payload(
             "max_tokens": seat.max_tokens or plan.budget.max_tokens,
             "max_tokens_min": MIN_PARTICIPANT_TOKENS,
             "max_tokens_max": MAX_PARTICIPANT_TOKENS,
+            "token_limit_enforced": plan.budget.token_limit_enforced,
             "reasoning": seat.reasoning or REASONING_STANDARD,
             "reasoning_options": list(REASONING_LEVELS),
             "instructions": seat.instructions or seat.brief,

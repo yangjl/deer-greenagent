@@ -62,6 +62,8 @@ export type CouncilParticipant = {
   max_tokens: number;
   max_tokens_min: number;
   max_tokens_max: number;
+  /** False means usage is recorded after the run but never stops the seat. */
+  token_limit_enforced?: boolean;
   reasoning: string;
   reasoning_options: string[];
   instructions: string;

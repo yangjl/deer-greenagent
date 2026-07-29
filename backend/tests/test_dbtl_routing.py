@@ -106,6 +106,26 @@ def test_a_selected_cycle_produces_a_continuation_not_a_new_cycle() -> None:
     assert decision.classifier is None
 
 
+def test_a_question_about_a_selected_cycle_stays_ordinary_chat() -> None:
+    """Cycle identity supplies context; it is not permission to run workers.
+
+    Follow-up questions are answered by the lead agent unless the person
+    explicitly scopes the request to the cycle. Otherwise asking what the last
+    meeting captured can accidentally convene the meeting again.
+    """
+    decision = route_request(
+        _request(
+            text="What parameters did the design stage capture for the simulation?",
+            selected_cycle_id="cycle-3",
+        )
+    )
+
+    assert decision.kind is RouteKind.ORDINARY
+    assert decision.source is RouteSource.CLASSIFIER
+    assert decision.classifier is not None
+    assert any(hit.rule_id == "ordinary.explain" for hit in decision.classifier.rule_hits)
+
+
 # ── Precedence 4: the current project ────────────────────────────────────
 
 

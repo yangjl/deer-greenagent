@@ -6,8 +6,9 @@ Five things are consulted, in this order, and the first one that answers wins:
    "Start DBTL setup". That is final.
 2. **A typed request to start a cycle.** "start a DBTL cycle" is a request,
    not a hint to be scored.
-3. **The selected cycle.** Work inside an open cycle continues it; proposing a
-   second cycle over a live one is never the right answer.
+3. **The selected cycle.** Work inside an open cycle continues it, except for
+   a clearly ordinary read/explain question. Cycle identity gives that question
+   context; it does not authorize another worker run.
 4. **The current project.** A cycle belongs to a project, so a projectless
    conversation has nothing to propose.
 5. **The classifier**, last, and only for what the first four left open.
@@ -120,8 +121,27 @@ def route_request(request: RoutingRequest) -> RoutingDecision:
     if is_explicit_start_request(request.text):
         return RoutingDecision(kind=RouteKind.CYCLE_SETUP, source=RouteSource.EXPLICIT_REQUEST)
 
-    # 3. An open cycle continues; it is never a reason to propose another.
+    # 3. An open cycle continues, but it is not permission to run a stage in
+    # response to a read-only follow-up. This distinction matters after Design:
+    # "What parameters did the meeting capture?" used to convene the meeting
+    # again merely because the cycle was still selected. An explicit
+    # CONTINUE_CYCLE choice above still wins, so a person can deliberately
+    # scope any wording to the cycle.
     if request.selected_cycle_id:
+        follow_up = classify_request(
+            request.text,
+            context=ClassifierContext(
+                is_new_conversation=request.is_new_conversation,
+                project_cycle_count=request.project_cycle_count,
+                has_unfinished_cycles=request.has_unfinished_cycles,
+            ),
+        )
+        if any(hit.rule_id.startswith("ordinary.") for hit in follow_up.rule_hits):
+            return RoutingDecision(
+                kind=RouteKind.ORDINARY,
+                source=RouteSource.CLASSIFIER,
+                classifier=follow_up,
+            )
         return RoutingDecision(
             kind=RouteKind.CYCLE_CONTINUATION,
             source=RouteSource.SELECTED_CYCLE,

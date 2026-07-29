@@ -12,11 +12,15 @@ import pytest
 from deerflow.agents.dbtl.stage_execution import (
     LiveStageAdapter,
     _compact_design_history,
+    _report_subagent_token_usage,
     _stage_worker_config,
+    _summarize_token_usage,
+    _token_limit_for_worker,
+    _tools_for_stage_budget,
 )
 from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.capabilities import Capability
-from deerflow.dbtl.stage_runner import DispatchOutcome
+from deerflow.dbtl.stage_runner import DispatchOutcome, WorkUnit
 from deerflow.dbtl.stage_spec import WorkerBudget, resolve_stage_spec
 from deerflow.subagents.config import SubagentConfig
 
@@ -111,9 +115,16 @@ class FakeRepo:
 
 
 class FakeDispatcher:
-    def __init__(self, *, text: str | None = None, error: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        text: str | None = None,
+        error: str | None = None,
+        token_usage: dict[str, int] | None = None,
+    ) -> None:
         self.text = text
         self.error = error
+        self.token_usage = token_usage
         self.calls: list[tuple[object, object]] = []
 
     async def __call__(self, units, *, budget):
@@ -123,6 +134,7 @@ class FakeDispatcher:
                 unit_id=unit.unit_id,
                 text=self.text,
                 error=self.error,
+                token_usage=self.token_usage,
             )
             for unit in units
         ]
@@ -201,6 +213,85 @@ def test_stage_workers_do_not_implicitly_load_every_enabled_skill() -> None:
     assert bounded_inherited.timeout_seconds == 60
 
 
+def test_light_pilot_keeps_only_targeted_file_read_tools() -> None:
+    from deerflow.dbtl.council import CouncilDepth, depth_policy
+
+    tools = [
+        SimpleNamespace(name="read_file"),
+        SimpleNamespace(name="bash"),
+        SimpleNamespace(name="web_search"),
+    ]
+
+    light = _tools_for_stage_budget(
+        tools,
+        depth_policy(CouncilDepth.LIGHT).budget,
+    )
+    medium = _tools_for_stage_budget(
+        tools,
+        depth_policy(CouncilDepth.MEDIUM).budget,
+    )
+
+    assert [tool.name for tool in light] == ["read_file"]
+    assert [tool.name for tool in medium] == ["read_file", "bash", "web_search"]
+
+
+def test_design_council_ignores_stale_per_participant_token_caps() -> None:
+    """A cached card edit must not re-enable the guardrail for an uncapped depth."""
+    from deerflow.dbtl.council import CouncilDepth, depth_policy
+
+    unit = WorkUnit(
+        unit_id="chair",
+        capability="design_council_chair",
+        agent_name="general-purpose",
+        prompt="Synthesize.",
+        max_tokens=10_000,
+    )
+
+    assert (
+        _token_limit_for_worker(
+            unit,
+            depth_policy(CouncilDepth.LIGHT).budget,
+        )
+        is None
+    )
+
+
+def test_design_council_usage_is_summarized_and_reported_to_the_parent_run() -> None:
+    records = [
+        {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+        },
+        {
+            "input_tokens": 50,
+            "output_tokens": 10,
+            "total_tokens": 60,
+        },
+    ]
+    recorded = []
+
+    class Recorder:
+        def record_external_llm_usage_records(self, value):
+            recorded.append(value)
+
+    result = SimpleNamespace(
+        usage_reported=False,
+        token_usage_records=records,
+    )
+
+    assert _summarize_token_usage(records) == {
+        "input_tokens": 150,
+        "output_tokens": 30,
+        "total_tokens": 180,
+    }
+    _report_subagent_token_usage({"callbacks": [Recorder()]}, result)
+    _report_subagent_token_usage({"callbacks": [Recorder()]}, result)
+
+    assert recorded == [records]
+    assert result.usage_reported is True
+
+
 def test_design_history_keeps_only_four_bounded_chair_syntheses() -> None:
     runs = [
         {
@@ -246,7 +337,14 @@ async def test_a_live_design_run_persists_workers_and_a_reviewable_package(
     tmp_path: Path,
 ) -> None:
     repo = FakeRepo(_cycle())
-    dispatcher = FakeDispatcher(text=_structured_result())
+    dispatcher = FakeDispatcher(
+        text=_structured_result(),
+        token_usage={
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "total_tokens": 125,
+        },
+    )
     adapter = LiveStageAdapter(
         repo=repo,
         app_config=SimpleNamespace(),
@@ -276,6 +374,7 @@ async def test_a_live_design_run_persists_workers_and_a_reviewable_package(
     assert write["stage_spec_key"] == "generic:design:v2"
     assert write["results"][0]["unit_id"].startswith("dbtl-")
     assert write["results"][0]["is_trustworthy"] is True
+    assert write["results"][0]["token_usage"]["total_tokens"] == 125
     assert write["artifact_type"] == "design_brief"
     assert write["artifact_content_hash"]
     # The attached artifact is the Markdown a human reads, so the approval binds
@@ -286,6 +385,7 @@ async def test_a_live_design_run_persists_workers_and_a_reviewable_package(
     rendered = document.read_text()
     assert rendered.startswith("# Design review package")
     assert "does not satisfy" in rendered
+    assert "375 total" in rendered
     # Named for a person browsing the folder, not for a machine. This fixture's
     # cycle has no title, so the readable fallback is the cycle id itself.
     assert document.name == "design-review-rev3-" + document.name.split("-")[-1]
@@ -296,6 +396,11 @@ async def test_a_live_design_run_persists_workers_and_a_reviewable_package(
     package_payload = json.loads(package.read_text())
     assert package_payload["stage_spec_key"] == "generic:design:v2"
     assert package_payload["results"][-1]["capability"] == "design_council_chair"
+    assert package_payload["token_usage"] == {
+        "input_tokens": 300,
+        "output_tokens": 75,
+        "total_tokens": 375,
+    }
     assert package.name in rendered
     # The chat note carries the synthesis, not only a path.
     assert "outputs/dbtl/cycle-1/design/" in result.note
@@ -457,6 +562,52 @@ async def test_the_confirmed_depth_changes_the_council_that_is_dispatched(
     # Whatever the depth, the debate keeps its shape.
     for units in (light_units, heavy_units):
         assert [unit.capability for unit in units][-2:] == ["design_red_team", "design_council_chair"]
+
+
+@pytest.mark.asyncio
+async def test_light_debate_runs_on_a_bounded_quick_pilot_context(
+    tmp_path: Path,
+) -> None:
+    """Light must reduce exploration even though tokens are no longer capped.
+
+    An uncapped worker with a full research prompt is still not a quick pilot.
+    It should receive a small, explicit assignment that tells it when to stop.
+    """
+    for index in range(40):
+        (tmp_path / f"{index:03}.txt").write_text(f"pilot input {index}")
+    dispatcher = FakeDispatcher(text=_structured_result())
+    adapter = LiveStageAdapter(
+        repo=FakeRepo(_cycle()),
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="designer",
+                capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN}),
+            ),
+        ),
+        dispatcher=dispatcher,
+    )
+    config = _runtime_config(tmp_path)
+    config["context"]["dbtl_council_depth"] = "light"
+
+    await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Give me a quick pilot design.",
+        state={},
+        config=config,
+    )
+
+    from deerflow.dbtl.council import CouncilDepth, depth_policy
+
+    policy = depth_policy(CouncilDepth.LIGHT)
+    assert len(dispatcher.calls) == 3
+    assert all(budget == policy.budget for _, budget in dispatcher.calls)
+    prompts = [unit.prompt for units, _ in dispatcher.calls for unit in units]
+    assert all('"mode": "quick_pilot"' in prompt for prompt in prompts)
+    assert all("Inspect at most 2 clearly relevant workspace files" in prompt for prompt in prompts)
+    assert "023.txt" in prompts[0]
+    assert "024.txt" not in prompts[0]
 
 
 @pytest.mark.asyncio
@@ -702,6 +853,116 @@ async def test_a_failed_fanout_is_recorded_but_does_not_create_review_evidence(
     assert repo.recorded[0]["results"][0]["status"] == "failed"
     assert repo.recorded[0]["artifact_type"] is None
     assert repo.recorded[0]["artifact_uri"] is None
+
+
+class _CappedPilotDispatcher:
+    """Reproduce the live failure: capped positions and prose from the chair."""
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def __call__(self, units, *, budget):
+        self.calls.append((units, budget))
+        text = (
+            _structured_result()
+            if len(self.calls) < 3
+            else ("Use the cycle's stated simulation objective and success criterion as the pilot design. Treat unavailable packages and input files as assumptions to resolve during Data reconciliation.")
+        )
+        return [
+            DispatchOutcome(
+                unit_id=unit.unit_id,
+                text=text,
+                stop_reason="token_capped",
+            )
+            for unit in units
+        ]
+
+
+@pytest.mark.asyncio
+async def test_light_pilot_turns_capped_prose_into_an_explicitly_limited_review_package(
+    tmp_path: Path,
+) -> None:
+    """Light is allowed to produce a draft where strict evidence cannot.
+
+    The fallback is a new, server-attributed result rather than laundering the
+    capped worker as trustworthy. Its source cap and missing inputs remain
+    visible for the person deciding whether this pilot may proceed.
+    """
+    repo = FakeRepo(_cycle())
+    dispatcher = _CappedPilotDispatcher()
+    config = _runtime_config(tmp_path)
+    config["context"]["dbtl_council_depth"] = "light"
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft a quick pilot design.",
+        state={},
+        config=config,
+    )
+
+    assert result.produced_usable_evidence
+    assert result.artifact_uri
+    assert repo.recorded[0]["artifact_type"] == "design_brief"
+    chair = repo.recorded[0]["results"][-1]
+    assert chair["status"] == "completed"
+    assert chair["agent_name"] == "system:light-pilot-fallback"
+    assert chair["is_trustworthy"] is True
+    assert chair["provenance"]["source_stop_reason"] == "token_capped"
+    assert any("pilot fallback" in item.lower() for item in chair["limitations"])
+
+    document = tmp_path / result.artifact_uri.removeprefix("/mnt/user-data/")
+    package = json.loads(next(document.parent.glob("design-package-rev3-*.json")).read_text())
+    assert package["pilot_review"]["strict_evidence_complete"] is False
+    assert package["pilot_review"]["preexisting_data_required"] is False
+    assert "Pilot Design package" in document.read_text()
+
+
+@pytest.mark.asyncio
+async def test_medium_keeps_rejecting_the_same_capped_prose(
+    tmp_path: Path,
+) -> None:
+    repo = FakeRepo(_cycle())
+    dispatcher = _CappedPilotDispatcher()
+    config = _runtime_config(tmp_path)
+    config["context"]["dbtl_council_depth"] = "medium"
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the full Design package.",
+        state={},
+        config=config,
+    )
+
+    assert not result.produced_usable_evidence
+    assert result.artifact_uri is None
+    assert repo.recorded[0]["artifact_type"] is None
+
+
+@pytest.mark.asyncio
+async def test_light_pilot_can_reach_human_review_from_cycle_metadata_when_tools_are_unavailable(
+    tmp_path: Path,
+) -> None:
+    repo = FakeRepo(_cycle())
+    config = _runtime_config(tmp_path)
+    config["context"]["dbtl_council_depth"] = "light"
+
+    result = await _design_adapter(
+        repo,
+        FakeDispatcher(error="sandbox and project tools unavailable"),
+    ).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft a quick pilot design.",
+        state={},
+        config=config,
+    )
+
+    assert result.produced_usable_evidence
+    assert result.artifact_uri
+    assert "Research question: Which hybrids retain yield under drought?" in repo.recorded[0]["results"][-1]["summary"]
+    assert repo.recorded[0]["results"][-1]["provenance"]["source_stop_reason"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -1022,6 +1283,7 @@ async def test_answering_the_chair_resumes_it_instead_of_re_running_the_meeting(
     assert notes[0]["execution"] == {
         "model": "gpt-5.5",
         "max_tokens": 81_000,
+        "token_limit_enforced": False,
         "reasoning": "extended",
     }
 

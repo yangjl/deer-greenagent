@@ -78,6 +78,12 @@ def _render_result(result: Mapping[str, Any]) -> list[str]:
     if meta:
         lines.append(f"_{meta}_")
 
+    usage = result.get("token_usage")
+    if isinstance(usage, Mapping):
+        total = int(usage.get("total_tokens") or 0)
+        if total > 0:
+            lines.append(f"_Token usage: {int(usage.get('input_tokens') or 0):,} input · {int(usage.get('output_tokens') or 0):,} output · {total:,} total_")
+
     summary = str(result.get("summary") or "").strip()
     if summary:
         lines += ["", summary]
@@ -191,6 +197,17 @@ def render_review_markdown(
             "> This package **does not satisfy** the review gate. A person must read it and decide; nothing here advances the cycle on its own.",
         ]
 
+    pilot = payload.get("pilot_review")
+    if isinstance(pilot, Mapping):
+        lines += [
+            "",
+            "> **Pilot Design package.** Pre-existing data and execution tools were not required at this depth. Missing inputs remain explicit limitations, and a human may approve this bounded draft to continue to Data reconciliation.",
+        ]
+        if pilot.get("fallback_used"):
+            lines += [
+                "> The strict worker-evidence contract was not completed; this package uses the recorded Light-pilot fallback and must not be represented as a full Design review.",
+            ]
+
     authored = str(payload.get("authored_design") or "").strip()
     if authored:
         # Said before the text, not after it. A reader who scrolls into an
@@ -208,6 +225,14 @@ def render_review_markdown(
 
     results = [r for r in _as_list(payload.get("results")) if isinstance(r, Mapping)]
     rejected = [str(item).strip() for item in _as_list(payload.get("rejected")) if str(item).strip()]
+    usage = payload.get("token_usage")
+    if isinstance(usage, Mapping) and int(usage.get("total_tokens") or 0) > 0:
+        lines += [
+            "",
+            "## Token usage",
+            "",
+            f"{int(usage.get('input_tokens') or 0):,} input · {int(usage.get('output_tokens') or 0):,} output · {int(usage.get('total_tokens') or 0):,} total",
+        ]
 
     if rejected:
         # What the council did *not* consider changes how much the rest is worth.

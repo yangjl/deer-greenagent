@@ -195,9 +195,35 @@ This section accumulates work toward the **2.1.0** milestone
   eliminating duplicated pattern compilation. ([#4108])
 - **docs:** `AGENTS.md` is now the source of truth for agent guidance, imported
   by `CLAUDE.md` via `@AGENTS.md`; module guides refreshed. ([#3770])
+- **DBTL:** Redesign Light debate as a quick-pilot execution contract: one
+  position, one red team, and one chair, with six model calls per seat, a
+  180-second timeout, bounded context, at most two targeted file reads, and
+  concise outputs. Design-council token use is now metered rather than capped:
+  provider-reported input/output/total usage is recorded per worker, aggregated
+  into the review package, and shown in the live meeting. Light exposes no shell or
+  research tools, treats missing data/packages as limitations rather than
+  Design blockers, and creates an explicitly labeled server-attributed pilot
+  draft when strict chair evidence fails so a human can approve the cycle into
+  Data reconciliation. Medium and Heavy retain strict research contracts.
 
 ### Fixed
 
+- **DBTL:** Consume project-rail cycle selection after its one scoped request
+  and route ordinary read/explain follow-ups through the lead agent, preventing
+  questions about a Design result from restarting its council.
+- **DBTL:** Treat explicit Design review language as a deterministic control
+  boundary even after the one-shot cycle scope clears. Chat approval/rejection
+  text no longer invokes the lead model or restarts workers; it immediately
+  directs the reviewer to the revision-bound project review action.
+- **DBTL:** Keep Design-council card replies bound to the server-resolved cycle
+  when browser selection state is missing, and recover the hidden Design
+  kickoff instead of re-reading the original “start a DBTL cycle” message and
+  opening setup again.
+- **models:** Preserve a Codex model's configured
+  `when_thinking_disabled.reasoning_effort` instead of always forcing `none`,
+  allowing subscription-backed models such as GPT-5.3-Codex-Spark that require
+  at least `low`; `CodexChatModel.include_reasoning_summary=false` also supports
+  models that reject the optional `reasoning.summary` field.
 - **runtime:** Thread metadata now switches to `running` only after the run passes
   the startup barrier, so pending-cancelled runs no longer briefly project
   `running`; clients may observe the prior thread status during worker startup.

@@ -62,6 +62,11 @@ describe("taskEventToSubtaskUpdate", () => {
           round: 1,
           counts_toward_stage_output: true,
         },
+        usage: {
+          input_tokens: 1200,
+          output_tokens: 300,
+          total_tokens: 1500,
+        },
       }),
     ).toMatchObject({
       id: "chair-1",
@@ -70,6 +75,11 @@ describe("taskEventToSubtaskUpdate", () => {
       councilSeat: {
         role: "chair",
         agentName: "general-purpose",
+      },
+      usage: {
+        inputTokens: 1200,
+        outputTokens: 300,
+        totalTokens: 1500,
       },
     });
   });

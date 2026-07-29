@@ -248,18 +248,24 @@ Breeding-workspace note:
 - The preflight card is also the meeting's setup form.
   `deerflow.dbtl.council_settings` renders one **editable participant card per
   seat** (`council_participants` on the artifact), prefilled with the roster
-  writer's suggestions: model (from the configured model list), token budget,
-  reasoning strength (`standard`/`extended` → the subagent's
+  writer's suggestions: model (from the configured model list), reasoning
+  strength (`standard`/`extended` → the subagent's
   `thinking_enabled`), and owner instructions (prefilled with the seat's
-  brief). Edits ride back on the depth reply's `participants` key, are
+  brief), plus an explicit **metered, no cap** token policy. Provider-reported
+  input/output/total usage is shown per seat and in aggregate, reported to the
+  parent run journal, and persisted in the review package. Edits ride back on
+  the depth reply's `participants` key, are
   validated server-side field by field, recovered from the card the server
   emitted (forged request ids match nothing, and like the depth they apply
   only to the meeting that reply convenes), applied to the recorded
   `CouncilPlan` so the review package reports the dials that actually ran,
-  and carried onto the dispatched `WorkUnit`s (per-seat model/token
-  budget/thinking; instructions are quoted **verbatim** into that seat's
+  and carried onto the dispatched `WorkUnit`s (per-seat model/thinking;
+  instructions are quoted **verbatim** into that seat's
   prompt — an instructions box echoed back byte-identical to its prefill is
   the writer's text, not the owner's, and is never attributed to them).
+  Legacy replies can still carry a token value, but every Design depth has
+  `token_limit_enforced=false`, so that value is recorded without restoring a
+  guardrail that can discard the chair's synthesis.
 - The council's composition is inspectable before it convenes.
   `deerflow.dbtl.council` computes the roster as values — one seat per worker,
   naming its agent, role (independent position, red team, chair), model, tools,

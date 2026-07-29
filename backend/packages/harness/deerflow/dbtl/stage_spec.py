@@ -85,23 +85,29 @@ class TransitionPolicy(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class WorkerBudget:
-    """The ceiling a stage places on one worker.
+    """The resource envelope a stage places on one worker.
 
-    Budgets are part of the spec rather than the call site because the reviewer
-    of a stage attempt needs to know what the worker was allowed to spend, and a
-    caller-supplied budget would not be reproducible from the recorded version.
+    Envelopes are part of the spec rather than the call site because the
+    reviewer needs to know which limits were enforced. ``max_tokens`` remains
+    a planning reference when ``token_limit_enforced`` is false.
     """
 
     max_workers: int = 3
     max_turns: int = 40
     max_tokens: int = 400_000
     timeout_seconds: int = 900
+    #: Whether ``max_tokens`` is a kill switch or only a planning reference.
+    #: Design councils currently meter actual use without enforcing this
+    #: ceiling: a late chair answer is more useful than a discarded meeting.
+    token_limit_enforced: bool = True
 
     def __post_init__(self) -> None:
         for name in ("max_workers", "max_turns", "max_tokens", "timeout_seconds"):
             value = getattr(self, name)
             if not isinstance(value, int) or value <= 0:
                 raise ValueError(f"WorkerBudget.{name} must be a positive integer, got {value!r}.")
+        if not isinstance(self.token_limit_enforced, bool):
+            raise ValueError(f"WorkerBudget.token_limit_enforced must be a boolean, got {self.token_limit_enforced!r}.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -485,6 +491,7 @@ def describe_specs(specs: Iterable[StageSpec]) -> tuple[dict[str, object], ...]:
                 "max_turns": spec.budget.max_turns,
                 "max_tokens": spec.budget.max_tokens,
                 "timeout_seconds": spec.budget.timeout_seconds,
+                "token_limit_enforced": spec.budget.token_limit_enforced,
             },
         }
         for spec in specs

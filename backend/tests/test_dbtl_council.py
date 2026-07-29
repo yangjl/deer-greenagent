@@ -47,14 +47,17 @@ def _generalist() -> AgentCandidate:
 
 
 class TestDepth:
-    def test_deeper_debate_buys_more_positions_and_more_budget(self) -> None:
+    def test_deeper_debate_buys_more_positions_and_more_working_time(self) -> None:
         light = depth_policy(CouncilDepth.LIGHT)
         medium = depth_policy(CouncilDepth.MEDIUM)
         heavy = depth_policy(CouncilDepth.HEAVY)
 
         assert light.max_positions < medium.max_positions < heavy.max_positions
         assert light.budget.max_turns < medium.budget.max_turns < heavy.budget.max_turns
-        assert light.budget.max_tokens < medium.budget.max_tokens < heavy.budget.max_tokens
+        assert light.budget.timeout_seconds < medium.budget.timeout_seconds < heavy.budget.timeout_seconds
+        assert not light.budget.token_limit_enforced
+        assert not medium.budget.token_limit_enforced
+        assert not heavy.budget.token_limit_enforced
 
     def test_every_depth_is_described_for_the_person_choosing(self) -> None:
         # The chooser is a scientist deciding how much debate the question is
@@ -70,6 +73,16 @@ class TestDepth:
         # whether anyone argues back. A "light" council that skipped the red
         # team would be a single opinion wearing a council's name.
         assert depth_policy(CouncilDepth.LIGHT).max_positions >= 1
+
+    def test_light_is_a_pilot_sized_council_without_a_token_kill_switch(self) -> None:
+        """Light stays quick through scope, turns, and time—not discarded output."""
+        from deerflow.agents.middlewares.finalization_deadline_middleware import model_call_budget
+
+        policy = depth_policy(CouncilDepth.LIGHT)
+
+        assert not policy.budget.token_limit_enforced
+        assert policy.budget.timeout_seconds <= 180
+        assert model_call_budget(policy.budget.max_turns) == 6
 
 
 class TestPlanningTheCouncil:

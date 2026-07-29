@@ -24,6 +24,7 @@ type TaskTerminalEvent = {
   error?: unknown;
   stop_reason?: unknown;
   model_name?: unknown;
+  usage?: unknown;
 };
 
 /** Convert an additive task lifecycle event into a task-state update. */
@@ -81,6 +82,7 @@ export function taskEventToSubtaskUpdate(
     const stopReason = normalizeText(terminal.stop_reason);
     const result = normalizeText(terminal.result);
     const error = normalizeText(terminal.error);
+    const usage = normalizeTokenUsage(terminal.usage);
     return {
       id: taskId,
       status: event.type === "task_completed" ? "completed" : "failed",
@@ -88,6 +90,7 @@ export function taskEventToSubtaskUpdate(
       ...(error ? { error } : {}),
       ...(stopReason ? { stopReason } : {}),
       ...(modelName ? { modelName } : {}),
+      ...(usage ? { usage } : {}),
       ...(councilSeat ? { councilSeat } : {}),
     };
   }

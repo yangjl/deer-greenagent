@@ -34,6 +34,7 @@ from deerflow.dbtl.agent_selector import AgentCandidate, Assignment, SelectionRe
 from deerflow.dbtl.consensus import CONSENSUS_CONTRACT
 from deerflow.dbtl.council import (
     ROLE_BRIEFS,
+    CouncilDepth,
     CouncilPlan,
     CouncilRole,
     council_depth_from_config,
@@ -72,6 +73,8 @@ from deerflow.dbtl.stage_runner import (
 )
 from deerflow.dbtl.stage_spec import StageSpec, WorkerBudget, resolve_stage_spec
 from deerflow.dbtl.worker_result import (
+    QualityCheck,
+    StageWorkerResult,
     WorkerResultRejected,
     WorkerStatus,
     extract_result_payload,
@@ -129,6 +132,21 @@ CandidateProvider = Callable[[], Sequence[AgentCandidate]]
 _DESIGN_HISTORY_TURNS = 4
 _DESIGN_HISTORY_SUMMARY_CHARS = 3_000
 _DESIGN_HISTORY_DETAIL_CHARS = 600
+_LIGHT_DEBATE_MANIFEST_ENTRIES = 24
+_LIGHT_DEBATE_DATASETS = 12
+_LIGHT_DEBATE_HISTORY_TURNS = 1
+
+_LIGHT_DEBATE_INSTRUCTIONS = (
+    "Optimize for a useful pilot decision in minutes, not an exhaustive design review.",
+    "Start from the cycle metadata and request. Inspect at most 2 clearly relevant workspace files, and only when the decision cannot be made without them.",
+    "Do not survey the workspace, conduct external research, install packages, run scripts, or implement the study.",
+    "Missing or unreadable data, packages, and tools are pilot assumptions to record in limitations, not blockers to reconstruct or reasons to withhold a design.",
+    "Return one concrete recommendation, the most important failure mode, and the assumptions a full Design review would need to revisit.",
+    "Keep the summary under 400 words and every result list to at most 5 entries. Preserve the required JSON result contract.",
+)
+
+_LIGHT_PILOT_FALLBACK_AGENT = "system:light-pilot-fallback"
+_LIGHT_PILOT_TOOL_NAMES = frozenset({"read_file"})
 
 
 def _runtime_view(config: RunnableConfig) -> dict[str, Any]:
@@ -171,6 +189,103 @@ def _compact_design_history(prior_runs: Sequence[dict[str, Any]]) -> list[dict[s
             }
         )
     return compact
+
+
+def _light_design_context(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Scope Design context to the promise made by the Light chooser.
+
+    Removing the token guardrail does not by itself make a meeting quick.
+    Light receives a small manifest, only the latest chair synthesis, and an
+    explicit stop rule. The request and cycle metadata remain intact; this is
+    a quick decision over the same question, not a different question.
+    """
+    scoped = dict(payload)
+    scoped["declared_datasets"] = list(payload.get("declared_datasets") or ())[:_LIGHT_DEBATE_DATASETS]
+    scoped["project_workspace_manifest"] = list(payload.get("project_workspace_manifest") or ())[:_LIGHT_DEBATE_MANIFEST_ENTRIES]
+    scoped["prior_design_council_runs"] = list(payload.get("prior_design_council_runs") or ())[-_LIGHT_DEBATE_HISTORY_TURNS:]
+    scoped["council_execution"] = {
+        "mode": "quick_pilot",
+        "token_accounting": "metered_not_capped",
+        "instructions": list(_LIGHT_DEBATE_INSTRUCTIONS),
+    }
+    return scoped
+
+
+def _tools_for_stage_budget(tools: Sequence[Any], budget: WorkerBudget) -> list[Any]:
+    """Keep Light on metadata and targeted reads instead of tool exploration."""
+    if budget != depth_policy(CouncilDepth.LIGHT).budget:
+        return list(tools)
+    return [tool for tool in tools if str(getattr(tool, "name", "")) in _LIGHT_PILOT_TOOL_NAMES]
+
+
+def _token_limit_for_worker(unit: WorkUnit, budget: WorkerBudget) -> int | None:
+    """Resolve an enforced ceiling, or ``None`` for metered-only execution."""
+    if not budget.token_limit_enforced:
+        return None
+    return unit.max_tokens or budget.max_tokens
+
+
+def _light_pilot_chair_fallback(
+    result: StageWorkerResult,
+    *,
+    dispatch: DispatchOutcome | None,
+    unit: WorkUnit,
+    cycle: Mapping[str, Any],
+) -> StageWorkerResult:
+    """Make a reviewable pilot draft without pretending capped work completed.
+
+    The fallback itself is deterministic and therefore is not capped. It quotes
+    the recoverable chair draft (when present), anchors it to server-owned cycle
+    metadata, and records the original worker and stop reason in provenance.
+    Medium and Heavy never call this function.
+    """
+    if result.is_trustworthy or result.status is WorkerStatus.NEEDS_INPUT:
+        return result
+
+    raw_text = _bounded_text(dispatch.text if dispatch is not None else "", max_chars=2_000)
+    worker_draft = result.summary if result.status is WorkerStatus.COMPLETED else raw_text
+    question = _bounded_text(cycle.get("research_question"), max_chars=800) or "(not stated)"
+    objective = _bounded_text(cycle.get("objective"), max_chars=800) or "(not stated)"
+    success = _bounded_text(cycle.get("success_criteria"), max_chars=800) or "(not stated)"
+    summary = "\n".join(
+        [
+            "Light-pilot Design draft.",
+            f"Research question: {question}",
+            f"Objective: {objective}",
+            f"Pilot success criterion: {success}",
+            (f"Recoverable chair draft: {worker_draft}" if worker_draft else "No chair draft was recoverable; proceed from the cycle metadata and resolve implementation details during Data reconciliation."),
+        ]
+    )
+    source_stop_reason = (dispatch.stop_reason if dispatch is not None else None) or result.stop_reason or result.status.value
+    return StageWorkerResult(
+        status=WorkerStatus.COMPLETED,
+        summary=summary,
+        capability=unit.capability,
+        agent_name=_LIGHT_PILOT_FALLBACK_AGENT,
+        limitations=(
+            "Light pilot fallback: the chair did not satisfy the strict Design evidence contract, so this is a reviewable draft assembled from cycle metadata and recoverable meeting output.",
+            "Pre-existing datasets, readable project files, installed packages, and execution tools were not required for this pilot Design; their absence must be resolved or accepted during Data reconciliation.",
+            f"The source chair ended with {source_stop_reason}; its output is context for this draft, not completed evidence.",
+        ),
+        provenance={
+            "fallback": "light_pilot_design_v1",
+            "source_agent": unit.agent_name,
+            "source_stop_reason": source_stop_reason,
+            "inputs_examined": ["cycle metadata", "recoverable chair output"],
+        },
+        quality_checks=(
+            QualityCheck(
+                name="pilot scope is explicit",
+                passed=True,
+                detail="Strict evidence and pre-existing input requirements are deferred, not represented as satisfied.",
+            ),
+        ),
+        recommended_next_actions=(
+            "Review and approve this as a pilot Design if the stated objective and success criterion are sufficient.",
+            "Resolve concrete datasets, parameters, packages, and reproducibility requirements during Data reconciliation.",
+        ),
+        token_usage=result.token_usage,
+    )
 
 
 def _preview_context(cycle: Mapping[str, Any]) -> str:
@@ -267,6 +382,42 @@ def _seat_identity(unit: WorkUnit, *, model: str) -> dict[str, Any]:
     }
 
 
+def _summarize_token_usage(
+    records: Sequence[Mapping[str, int | str | None]] | None,
+) -> dict[str, int] | None:
+    """Collapse a seat's per-call records into one provider-reported meter."""
+    if not records:
+        return None
+    usage = {key: sum(int(record.get(key, 0) or 0) for record in records if isinstance(record.get(key, 0), (int, float))) for key in ("input_tokens", "output_tokens", "total_tokens")}
+    return usage if any(usage.values()) else None
+
+
+def _report_subagent_token_usage(
+    config: RunnableConfig,
+    result: Any,
+) -> None:
+    """Add direct DBTL subagent calls to the parent run's usage journal once."""
+    if getattr(result, "usage_reported", True):
+        return
+    records = getattr(result, "token_usage_records", None) or []
+    if not records:
+        return
+    callbacks = config.get("callbacks")
+    handlers = getattr(callbacks, "handlers", callbacks)
+    if not isinstance(handlers, Sequence) or isinstance(handlers, (str, bytes)):
+        return
+    for handler in handlers:
+        recorder = getattr(handler, "record_external_llm_usage_records", None)
+        if not callable(recorder):
+            continue
+        try:
+            recorder(records)
+            result.usage_reported = True
+        except Exception:  # noqa: BLE001 - metering failure must not lose work
+            logger.warning("Failed to record Design council token usage.", exc_info=True)
+        return
+
+
 def _terminal_seat_event(
     unit: WorkUnit,
     outcome: DispatchOutcome,
@@ -277,6 +428,7 @@ def _terminal_seat_event(
     base = {
         "task_id": unit.unit_id,
         "council_seat": _seat_identity(unit, model=model),
+        **({"usage": dict(outcome.token_usage)} if outcome.token_usage else {}),
     }
     if outcome.error or not outcome.text:
         return {
@@ -1131,6 +1283,7 @@ def _write_stage_package(
         "selection": outcome.plan.selection.as_dict(),
         "results": [item.as_dict() for item in outcome.results],
         "rejected": list(outcome.rejected),
+        "token_usage": outcome.token_usage,
         "satisfies_gate": False,
     }
     if council is not None:
@@ -1139,6 +1292,16 @@ def _write_stage_package(
         # Without it the budget a reviewer reconstructs from `stage_spec_key`
         # would not be the budget the workers actually had.
         payload["council"] = council.as_dict()
+        if council.depth is CouncilDepth.LIGHT:
+            fallback_used = any(item.agent_name == _LIGHT_PILOT_FALLBACK_AGENT for item in outcome.results)
+            payload["pilot_review"] = {
+                "mode": "light",
+                "fallback_used": fallback_used,
+                "strict_evidence_complete": all(item.is_trustworthy for item in outcome.results),
+                "preexisting_data_required": False,
+                "execution_tools_required": False,
+                "advancement": "eligible_for_human_approval",
+            }
     if authored_design:
         # Kept as its own key rather than folded into ``results``: a synthetic
         # worker entry would put a person's words behind an agent's name in the
@@ -1594,6 +1757,7 @@ class LiveStageAdapter:
                 include_upload_tool=False,
                 app_config=self._app_config,
             )
+            tools = _tools_for_stage_budget(tools, budget)
             trace_id = str(metadata.get("trace_id") or "") or None
             # A stage worker is graded on its final message, but the turn budget
             # is enforced by ``recursion_limit``, which aborts from inside a tool
@@ -1626,10 +1790,10 @@ class LiveStageAdapter:
                 deerflow_trace_id=normalize_trace_id(runtime.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id(),
                 project_id=project_id,
                 project_root=project_root,
-                # A seat whose card was given its own budget or extended
-                # reasoning runs on those; every other seat keeps the stage
-                # budget and the plain model, exactly as before the editor.
-                token_budget_max_tokens=unit.max_tokens or budget.max_tokens,
+                # Council token use is metered rather than capped. When the
+                # depth disables enforcement, even a stale participant edit
+                # must not quietly turn the kill switch back on.
+                token_budget_max_tokens=_token_limit_for_worker(unit, budget),
                 thinking_enabled=unit.reasoning == REASONING_EXTENDED,
                 extra_middlewares=[deadline],
             )
@@ -1665,12 +1829,15 @@ class LiveStageAdapter:
                 )
                 raise
 
+            _report_subagent_token_usage(config, result)
+            token_usage = _summarize_token_usage(result.token_usage_records)
             if result.status is SubagentStatus.COMPLETED:
                 dispatch_outcome = DispatchOutcome(
                     unit_id=unit.unit_id,
                     text=result.result,
                     stop_reason=result.stop_reason,
                     forced_finalization=deadline.forced_any(),
+                    token_usage=token_usage,
                 )
                 await emit(
                     _terminal_seat_event(
@@ -1687,6 +1854,7 @@ class LiveStageAdapter:
                 text=result.result,
                 stop_reason=result.stop_reason,
                 error=error,
+                token_usage=token_usage,
             )
             await emit(
                 _terminal_seat_event(
@@ -1944,50 +2112,51 @@ class LiveStageAdapter:
                     ),
                 )
 
-        stage_context = json.dumps(
-            {
-                "request": request_text,
-                "cycle": {
-                    key: cycle.get(key)
-                    for key in (
-                        "id",
-                        "title",
-                        "cycle_class",
-                        "state",
-                        "research_question",
-                        "objective",
-                        "success_criteria",
-                    )
-                },
-                "declared_datasets": datasets,
-                "reconciliation": reconciliation,
-                "build_test": build_test,
-                # Named explicitly beside the listing, because a worker that
-                # *constructs* a path (rather than copying one from the
-                # manifest) has no other way to learn the prefix its tools
-                # require, and a path outside it is refused outright.
-                "workspace_root": WORKSPACE_VIRTUAL_ROOT,
-                "project_workspace_manifest": await asyncio.to_thread(
-                    _project_manifest,
-                    project_root,
-                ),
-                "prior_design_council_runs": _compact_design_history(prior_design_runs),
-                # Only present once a person has approved a Design package.
-                # Its absence is meaningful: a later stage seeing no brief is
-                # working before the gate, not merely without context.
-                "approved_design_brief": _approved_design_brief(cycle),
-                # Verbatim, not summarized. The council is being asked to answer
-                # this specific sentence, and a paraphrase is the failure mode
-                # the refinement round exists to fix.
-                "human_change_request": change_request,
-                # The question the chair asked and the owner's own words back.
-                # Verbatim for the same reason the change request is: the
-                # synthesis is being built on this answer, and a paraphrase of a
-                # decision is not the decision.
-                "chair_question_answered": pending_question if resumed_answer else None,
-                "human_answer": resumed_answer or None,
-                "design_round": design_round,
+        stage_context_payload = {
+            "request": request_text,
+            "cycle": {
+                key: cycle.get(key)
+                for key in (
+                    "id",
+                    "title",
+                    "cycle_class",
+                    "state",
+                    "research_question",
+                    "objective",
+                    "success_criteria",
+                )
             },
+            "declared_datasets": datasets,
+            "reconciliation": reconciliation,
+            "build_test": build_test,
+            # Named explicitly beside the listing, because a worker that
+            # *constructs* a path (rather than copying one from the
+            # manifest) has no other way to learn the prefix its tools
+            # require, and a path outside it is refused outright.
+            "workspace_root": WORKSPACE_VIRTUAL_ROOT,
+            "project_workspace_manifest": await asyncio.to_thread(
+                _project_manifest,
+                project_root,
+            ),
+            "prior_design_council_runs": _compact_design_history(prior_design_runs),
+            # Only present once a person has approved a Design package.
+            # Its absence is meaningful: a later stage seeing no brief is
+            # working before the gate, not merely without context.
+            "approved_design_brief": _approved_design_brief(cycle),
+            # Verbatim, not summarized. The council is being asked to answer
+            # this specific sentence, and a paraphrase is the failure mode
+            # the refinement round exists to fix.
+            "human_change_request": change_request,
+            # The question the chair asked and the owner's own words back.
+            # Verbatim for the same reason the change request is: the
+            # synthesis is being built on this answer, and a paraphrase of a
+            # decision is not the decision.
+            "chair_question_answered": pending_question if resumed_answer else None,
+            "human_answer": resumed_answer or None,
+            "design_round": design_round,
+        }
+        stage_context = json.dumps(
+            stage_context_payload,
             sort_keys=True,
             ensure_ascii=False,
         )
@@ -2021,6 +2190,14 @@ class LiveStageAdapter:
             # dispatched one the same computation: selection reads its worker
             # ceiling off the spec, and so does the dispatch budget.
             spec = replace(spec, budget=council_plan.budget)
+            if council_plan.depth is CouncilDepth.LIGHT:
+                # Light stays quick through a different execution contract:
+                # bounded context, bounded inspection, and a concise answer.
+                stage_context = json.dumps(
+                    _light_design_context(stage_context_payload),
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
             if council_plan.human_authored:
                 # Asked *before* ``dispatchable``, which is false here for a
                 # completely different reason. Reaching the fan-out at this depth
@@ -2181,6 +2358,17 @@ class LiveStageAdapter:
                 )
                 chair_outcome = collect_results(chair_plan, chair_dispatch)
                 chair_result = chair_outcome.results[0]
+                if council_plan is not None and council_plan.depth is CouncilDepth.LIGHT:
+                    chair_result = _light_pilot_chair_fallback(
+                        chair_result,
+                        dispatch=chair_dispatch[0] if chair_dispatch else None,
+                        unit=chair_unit,
+                        cycle=cycle,
+                    )
+                    chair_outcome = replace(
+                        chair_outcome,
+                        results=(chair_result,),
+                    )
                 unit_result_pairs.append((chair_unit, chair_result))
                 outcome = StageExecutionOutcome(
                     plan=outcome.plan,
@@ -2199,6 +2387,7 @@ class LiveStageAdapter:
                 "execution": {
                     "model": unit.model,
                     "max_tokens": unit.max_tokens,
+                    "token_limit_enforced": spec.budget.token_limit_enforced,
                     "reasoning": unit.reasoning,
                 },
                 "counts_toward_stage_output": (stage != "design" or unit.capability == "design_council_chair"),

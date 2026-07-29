@@ -91,6 +91,7 @@ class CodexChatModel(BaseChatModel):
 
     model: str = "gpt-5.4"
     reasoning_effort: str = "medium"
+    include_reasoning_summary: bool = True
     retry_max_attempts: int = MAX_RETRIES
     _access_token: str = ""
     _account_id: str = ""
@@ -227,13 +228,17 @@ class CodexChatModel(BaseChatModel):
         """Call the Codex Responses API and return the completed response."""
         instructions, input_items = self._convert_messages(messages)
 
+        reasoning = {"effort": self.reasoning_effort}
+        if self.reasoning_effort != "none" and self.include_reasoning_summary:
+            reasoning["summary"] = "detailed"
+
         payload = {
             "model": self.model,
             "instructions": instructions,
             "input": input_items,
             "store": False,
             "stream": True,
-            "reasoning": {"effort": self.reasoning_effort, "summary": "detailed"} if self.reasoning_effort != "none" else {"effort": "none"},
+            "reasoning": reasoning,
         }
 
         if tools:

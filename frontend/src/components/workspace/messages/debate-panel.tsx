@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { formatTokenCount } from "@/core/messages/usage";
 import { fetchSubtaskSteps } from "@/core/tasks/api";
 import { useSubtaskContext, useUpdateSubtask } from "@/core/tasks/context";
 import {
@@ -63,6 +64,10 @@ export function DebatePanel({
   const reported = seats.filter((seat) => seat.status !== "in_progress").length;
   const progress = Math.round((reported / seats.length) * 100);
   const currentRound = Math.max(...rounds.map((round) => round.round));
+  const totalTokens = seats.reduce(
+    (total, seat) => total + (seat.usage?.totalTokens ?? 0),
+    0,
+  );
 
   return (
     <section
@@ -81,6 +86,9 @@ export function DebatePanel({
             <p className="text-muted-foreground mt-0.5 text-xs">
               Round {currentRound} · {reported} of {seats.length} participants
               reported
+              {totalTokens > 0
+                ? ` · ${formatTokenCount(totalTokens)} tokens used`
+                : ""}
             </p>
           </div>
           <ConsensusBadge snapshot={snapshot} state={state} />
@@ -293,6 +301,9 @@ function SeatLane({
         <p className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
           <span>{seat.agentName}</span>
           {seat.model && <span>· {seat.model}</span>}
+          {task.usage?.totalTokens ? (
+            <span>· {formatTokenCount(task.usage.totalTokens)} tokens</span>
+          ) : null}
           {seat.viaGeneralist && (
             <span
               className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-500"

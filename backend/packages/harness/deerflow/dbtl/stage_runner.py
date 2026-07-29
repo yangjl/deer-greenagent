@@ -21,7 +21,7 @@ three workers crashed must not read as a tidy run with one worker.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
@@ -61,10 +61,10 @@ class WorkUnit:
     #: A few words naming what this seat brings, when a proposed roster supplied
     #: one. Empty for a capability-selected seat, whose angle is its capability.
     focus: str = ""
-    #: Owner-edited dials from the meeting preflight card. ``max_tokens``
-    #: overrides the stage budget's per-worker token cap for this one unit, and
-    #: ``reasoning`` is ``"extended"`` to run the worker with extended thinking.
-    #: Unset means the stage budget and the plain model, exactly as before.
+    #: Owner-edited dials from the meeting preflight card. ``max_tokens`` is a
+    #: legacy recorded override and applies only when the enclosing budget
+    #: explicitly enforces token limits; Design councils currently do not.
+    #: ``reasoning`` is ``"extended"`` to enable extended thinking.
     max_tokens: int | None = None
     reasoning: str = ""
 
@@ -83,6 +83,9 @@ class DispatchOutcome:
     text: str | None
     stop_reason: str | None = None
     error: str | None = None
+    #: Provider-reported usage for this worker. Metering is independent of
+    #: enforcement: an uncapped council still records exactly what it spent.
+    token_usage: Mapping[str, int] | None = None
     #: The worker was stopped to make it write its answer. Not a
     #: ``stop_reason``: a run that met a deadline it was warned about is finished
     #: work, and routing it through the cap channel would discard the evidence.
@@ -166,11 +169,17 @@ class StageExecutionOutcome:
     def produced_usable_evidence(self) -> bool:
         return bool(self.trustworthy_results)
 
+    @property
+    def token_usage(self) -> dict[str, int]:
+        """Aggregate provider-reported usage across every recorded worker."""
+        return {key: sum(int(item.token_usage.get(key, 0) or 0) for item in self.results) for key in ("input_tokens", "output_tokens", "total_tokens")}
+
     def as_dict(self) -> dict[str, object]:
         return {
             "plan": self.plan.as_dict(),
             "results": [item.as_dict() for item in self.results],
             "rejected": list(self.rejected),
+            "token_usage": self.token_usage,
             "produced_usable_evidence": self.produced_usable_evidence,
             "satisfies_gate": self.satisfies_gate,
         }
@@ -296,14 +305,13 @@ def collect_results(plan: StageExecutionPlan, outcomes: Sequence[DispatchOutcome
             results.append(failed_result(capability=unit.capability, agent_name=unit.agent_name, reason="The worker never reported a result."))
             continue
         if outcome.error or not outcome.text:
-            results.append(
-                failed_result(
-                    capability=unit.capability,
-                    agent_name=unit.agent_name,
-                    reason=outcome.error or "The worker returned no output.",
-                    stop_reason=outcome.stop_reason,
-                )
+            failed = failed_result(
+                capability=unit.capability,
+                agent_name=unit.agent_name,
+                reason=outcome.error or "The worker returned no output.",
+                stop_reason=outcome.stop_reason,
             )
+            results.append(replace(failed, token_usage=dict(outcome.token_usage or {})))
             continue
         try:
             payload = extract_result_payload(outcome.text)
@@ -318,18 +326,17 @@ def collect_results(plan: StageExecutionPlan, outcomes: Sequence[DispatchOutcome
                     parsed,
                     limitations=(*parsed.limitations, _FORCED_FINALIZATION_LIMITATION),
                 )
-            results.append(parsed)
+            results.append(replace(parsed, token_usage=dict(outcome.token_usage or {})))
         except WorkerResultRejected as exc:
             logger.info("dbtl stage worker %s returned an unusable result: %s", unit.unit_id, exc)
             rejected.append(f"{unit.unit_id}: {exc}")
-            results.append(
-                failed_result(
-                    capability=unit.capability,
-                    agent_name=unit.agent_name,
-                    reason=f"The worker's result did not satisfy the stage contract: {exc}",
-                    stop_reason=outcome.stop_reason,
-                )
+            failed = failed_result(
+                capability=unit.capability,
+                agent_name=unit.agent_name,
+                reason=f"The worker's result did not satisfy the stage contract: {exc}",
+                stop_reason=outcome.stop_reason,
             )
+            results.append(replace(failed, token_usage=dict(outcome.token_usage or {})))
 
     return StageExecutionOutcome(plan=plan, results=tuple(results), rejected=tuple(rejected))
 

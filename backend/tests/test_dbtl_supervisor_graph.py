@@ -216,6 +216,41 @@ class TestCompleteThreadStateOnEveryBranch:
         assert final["messages"][-1].content == "the workspace has 2 files"
 
     @pytest.mark.asyncio
+    async def test_a_follow_up_question_does_not_restart_the_selected_cycles_debate(self):
+        marker: list[str] = []
+
+        class Adapter:
+            async def execute(self, **kwargs):
+                raise AssertionError("a follow-up question must not dispatch DBTL workers")
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent(marker),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id="cyc-1",
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    HumanMessage(
+                        content="What parameters did the design stage capture for the simulation?",
+                        id="follow-up",
+                    )
+                ],
+            },
+            config={"configurable": {"thread_id": "ordinary-cycle-follow-up"}},
+        )
+
+        assert marker == ["lead_agent"]
+        assert final["messages"][-1].content == "the workspace has 2 files"
+
+    @pytest.mark.asyncio
     async def test_genomic_simulation_request_uses_native_dbtl_inquiry_without_lead_agent(self):
         marker: list[str] = []
         graph = compile_supervisor(
@@ -828,6 +863,74 @@ class TestCouncilPreflight:
 
         assert _latest_cycle_request_text(state) == "Start the Design council with the owner's recorded answers."
 
+    @pytest.mark.asyncio
+    async def test_preflight_answer_recovers_its_cycle_when_client_selection_is_missing(self):
+        """A council card is server-owned scope, even if the browser loses its selection."""
+        executed: list = []
+        adapter = self._adapter(self._plan(), executed)
+        kickoff = "Start the Design council with the owner's recorded answers."
+        initial = {
+            **FULL_STATE,
+            "messages": [
+                HumanMessage(content="start a DBTL cycle", id="visible"),
+                HumanMessage(
+                    content=kickoff,
+                    id="kickoff",
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        "dbtl_design_kickoff": True,
+                    },
+                ),
+            ],
+        }
+        selected_graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id="cyc-1",
+                explicit_choice=ExplicitChoice.CONTINUE_CYCLE,
+            ),
+            stage_adapter=adapter,
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+        asked = await selected_graph.ainvoke(
+            initial,
+            config={
+                "configurable": {"thread_id": "preflight-cycle-recovery-ask"},
+                "context": {"run_id": "run-1"},
+            },
+        )
+        request_id = asked["messages"][-1].artifact["human_input"]["request_id"]
+
+        # A new graph is built for the answer run, exactly as production does.
+        # Deliberately omit selected_cycle_id to reproduce a lost client-side
+        # selection after the server has already bound the card to this cycle.
+        answer_graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F"),
+            stage_adapter=adapter,
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+        final = await answer_graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    *asked["messages"],
+                    TestSetupClarificationIsACard.card_reply(request_id, "light"),
+                ],
+            },
+            config={
+                "configurable": {"thread_id": "preflight-cycle-recovery-answer"},
+                "context": {"run_id": "run-2", "dbtl_council_depth": "light"},
+            },
+        )
+
+        assert len(executed) == 1
+        assert executed[0]["cycle_id"] == "cyc-1"
+        assert executed[0]["request_text"] == kickoff
+        assert final["messages"][-1].content == "This request is scoped to cyc-1.\n\nran\n\nThis run cannot satisfy a review gate. Design and Data reconciliation advance only through the project's human review records."
+
     @staticmethod
     def _human_input_adapter(executed):
         """An adapter that behaves like the live one at Human Input depth."""
@@ -995,6 +1098,41 @@ class TestCouncilPreflight:
 
 
 class TestLiveStageBranch:
+    @pytest.mark.asyncio
+    async def test_unscoped_review_intent_returns_immediately_without_the_lead_or_workers(
+        self,
+    ):
+        lead_calls = []
+        worker_calls = []
+
+        class Adapter:
+            async def execute(self, **kwargs):
+                worker_calls.append(kwargs)
+                raise AssertionError("review intent must not dispatch stage workers")
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent(lead_calls),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id=None,
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [HumanMessage(content="I approve the design", id="human-review")],
+            },
+            config={"configurable": {"thread_id": "unscoped-review-intent"}},
+        )
+
+        assert lead_calls == []
+        assert worker_calls == []
+        assert "chat text cannot record a DBTL review gate" in final["messages"][-1].content
+
     @pytest.mark.parametrize(
         "text",
         [

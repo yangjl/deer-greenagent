@@ -136,6 +136,7 @@ describe("HumanInputCard meeting setup (DOM)", () => {
                 max_tokens: 400000,
                 max_tokens_min: 10000,
                 max_tokens_max: 2000000,
+                token_limit_enforced: false,
                 reasoning: "standard",
                 reasoning_options: ["standard", "extended"],
                 instructions: "Argue first.",
@@ -152,6 +153,7 @@ describe("HumanInputCard meeting setup (DOM)", () => {
                 max_tokens: 400000,
                 max_tokens_min: 10000,
                 max_tokens_max: 2000000,
+                token_limit_enforced: false,
                 reasoning: "standard",
                 reasoning_options: ["standard", "extended"],
                 instructions: "Argue second.",
@@ -168,6 +170,7 @@ describe("HumanInputCard meeting setup (DOM)", () => {
                 max_tokens: 400000,
                 max_tokens_min: 10000,
                 max_tokens_max: 2000000,
+                token_limit_enforced: false,
                 reasoning: "standard",
                 reasoning_options: ["standard", "extended"],
                 instructions: "Synthesize.",
@@ -180,6 +183,8 @@ describe("HumanInputCard meeting setup (DOM)", () => {
     );
 
     expect(screen.getByText("second position")).not.toBeNull();
+    expect(screen.queryByText("Token budget")).toBeNull();
+    expect(screen.getAllByText("Metered, no cap")).toHaveLength(3);
     fireEvent.click(screen.getByRole("button", { name: "Light debate" }));
 
     expect(onSubmit).not.toHaveBeenCalled();

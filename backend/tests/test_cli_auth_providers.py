@@ -61,6 +61,31 @@ def test_codex_provider_flattens_structured_text_blocks(monkeypatch):
     assert input_items == [{"role": "user", "content": "Hello from blocks"}]
 
 
+def test_codex_provider_can_omit_reasoning_summary(monkeypatch):
+    """Spark accepts reasoning effort but rejects the optional summary field."""
+    monkeypatch.setattr(
+        CodexChatModel,
+        "_load_codex_auth",
+        lambda self: CodexCliCredential(access_token="token", account_id="acct"),
+    )
+    model = CodexChatModel(
+        model="gpt-5.3-codex-spark",
+        reasoning_effort="low",
+        include_reasoning_summary=False,
+    )
+    captured: dict = {}
+
+    def capture(_headers, payload):
+        captured.update(payload)
+        return {"output": [], "usage": {}}
+
+    monkeypatch.setattr(model, "_stream_response", capture)
+
+    model._call_codex_api([HumanMessage(content="Hello")])
+
+    assert captured["reasoning"] == {"effort": "low"}
+
+
 def test_claude_provider_rejects_non_positive_retry_attempts():
     with pytest.raises(ValueError, match="retry_max_attempts must be >= 1"):
         ClaudeChatModel(model="claude-sonnet-4-6", retry_max_attempts=0)

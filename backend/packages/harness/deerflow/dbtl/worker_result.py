@@ -123,6 +123,9 @@ class StageWorkerResult:
     recommended_next_actions: tuple[str, ...] = ()
     clarification_question: str | None = None
     stop_reason: str | None = None
+    #: Server-collected provider usage for this worker. The worker cannot
+    #: author or alter it; ``collect_results`` attaches it after validation.
+    token_usage: Mapping[str, int] = field(default_factory=dict)
     #: Where the council converged and where it did not. Only a chair fills
     #: this in; every other worker leaves it ``None``. Optional rather than
     #: required because the contract is shared by all five stages, and a Build
@@ -172,6 +175,7 @@ class StageWorkerResult:
             "recommended_next_actions": list(self.recommended_next_actions),
             "clarification_question": self.clarification_question,
             "stop_reason": self.stop_reason,
+            "token_usage": dict(self.token_usage),
             "was_capped": self.was_capped,
             "is_trustworthy": self.is_trustworthy,
             # Omitted rather than serialized as null for the four workers in

@@ -58,15 +58,33 @@ Design–Build–Test–Learn (DBTL) governance.
   common structured claim objects from participants are normalized without
   discarding an otherwise valid position, while unsupported claims still fail
   evidence validation;
+  Light debate is a quick-pilot contract with six model calls per seat, a
+  24-entry manifest, and at most two targeted file reads rather than a smaller
+  headcount running full research budgets. Design-council token use is metered,
+  shown per participant and in aggregate, and recorded in the review package;
+  it is not currently used to discard a participant result. Light
+  exposes only targeted file reads—not shell or research tools—and missing
+  data/packages become review limitations rather than Design blockers. If the
+  strict chair contract still fails, DeerFlow creates a clearly labeled pilot
+  draft from cycle metadata and recoverable meeting output so a person can
+  approve it into Data reconciliation; Medium and Heavy retain strict evidence
+  contracts and also meter tokens without enforcing a token cap;
   if the chair pauses for a decision, the resumed synthesis keeps that same
   chair model and participant settings rather than inheriting the current chat
   model;
+  council cards remain bound to their server-resolved cycle even if the
+  browser's temporary cycle selection is lost while the card is waiting;
   the waiting meeting remains scoped to that conversation, so a new project
   chat opens cleanly and can start a separate cycle;
+  after a scoped request is accepted the cycle selection is consumed, and
+  ordinary read/explain follow-ups go to normal chat instead of dispatching
+  the council again;
   the final stage sheet pairs a structured decision map with the exact Markdown
   document the human review binds.
 - **DeerFlow capabilities** — sandboxed execution, tools, skills, MCP,
-  subagents, persistent conversations, and multiple model providers.
+  subagents, persistent conversations, and multiple model providers, including
+  local reuse of Claude Code and Codex subscription logins through the
+  CLI-backed providers.
 
 ## Quick start
 

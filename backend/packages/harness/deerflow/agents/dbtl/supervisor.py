@@ -212,7 +212,15 @@ def _is_new_conversation(state: dict) -> bool:
 
 
 def _latest_cycle_request_text(state: dict) -> str:
-    """Prefer a Design-council card response over the preceding visible prompt."""
+    """Recover the request that owns the current Design-council exchange.
+
+    Human-input replies are hidden plumbing. A preflight answer such as
+    ``"light"`` must not make routing fall back to the older visible
+    ``"start a DBTL cycle"`` request when an automatic Design kickoff sits
+    between them. Scan through card replies and other hidden messages until we
+    find either the chair's clarification answer, that kickoff, or the newest
+    visible request.
+    """
     from deerflow.agents.human_input import read_human_input_response
     from deerflow.utils.messages import message_content_to_text
 
@@ -223,10 +231,14 @@ def _latest_cycle_request_text(state: dict) -> str:
         response = read_human_input_response(additional_kwargs)
         if response and response.get("source") == "ask_clarification" and str(response.get("request_id") or "").startswith(DESIGN_CLARIFICATION_PREFIX):
             return str(response.get("value") or "")
+        if response is not None:
+            continue
         if additional_kwargs.get("dbtl_design_kickoff") is True:
             return message_content_to_text(message.content) or ""
-        break
-    return _latest_user_text(state)
+        if additional_kwargs.get("hide_from_ui"):
+            continue
+        return message_content_to_text(message.content) or ""
+    return ""
 
 
 def _card_answer(state: dict, prefix: str) -> tuple[str, str] | None:
@@ -262,8 +274,33 @@ def _emitted_card_request(state: dict, request_id: str) -> dict | None:
     return None
 
 
-def _routing_input(state: dict) -> tuple[str, ExplicitChoice | None]:
-    """The text routing reads, plus any intent recovered from a card answer.
+def _answered_cycle_card_id(state: dict) -> str | None:
+    """Recover the cycle bound to the newest server-emitted card reply.
+
+    The browser normally echoes its selected cycle in request context, but
+    selection is UI state and can disappear while a card is waiting. The card
+    is durable thread state and was emitted after the server resolved the
+    cycle, so it is the authoritative fallback. Cards without a cycle binding
+    — notably setup, before a cycle exists — deliberately recover nothing.
+    """
+    from deerflow.agents.human_input import read_human_input_response
+
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if not response or response.get("source") != "ask_clarification":
+            return None
+        request = _emitted_card_request(state, str(response.get("request_id") or ""))
+        if request is None:
+            return None
+        cycle_id = request.get("dbtl_cycle_id")
+        return str(cycle_id) if cycle_id else None
+    return None
+
+
+def _routing_input(state: dict) -> tuple[str, ExplicitChoice | None, str | None]:
+    """The text routing reads, plus any scope recovered from a card answer.
 
     A setup clarification is only ever raised for an explicit start request, and
     the choice that produced it applies to that one request by design — so it is
@@ -281,20 +318,22 @@ def _routing_input(state: dict) -> tuple[str, ExplicitChoice | None]:
         request_id, _answer = confirmed
         request = _emitted_card_request(state, request_id)
         if request is not None:
-            return (str(request.get("source_request") or ""), ExplicitChoice.START_CYCLE)
+            return (str(request.get("source_request") or ""), ExplicitChoice.START_CYCLE, None)
 
     answered = _card_answer(state, SETUP_CLARIFICATION_PREFIX)
-    if answered is None:
-        return (_latest_user_text(state), None)
+    if answered is not None:
+        request_id, answer = answered
+        request = _emitted_card_request(state, request_id)
+        if request is not None:
+            source_request = str(request.get("source_request") or "")
+            combined = f"{source_request}\n\n{answer}".strip()
+            return (combined, ExplicitChoice.START_CYCLE, None)
 
-    request_id, answer = answered
-    request = _emitted_card_request(state, request_id)
-    if request is None:
-        return (_latest_user_text(state), None)
+    cycle_id = _answered_cycle_card_id(state)
+    if cycle_id is not None:
+        return (_latest_cycle_request_text(state), ExplicitChoice.CONTINUE_CYCLE, cycle_id)
 
-    source_request = str(request.get("source_request") or "")
-    combined = f"{source_request}\n\n{answer}".strip()
-    return (combined, ExplicitChoice.START_CYCLE)
+    return (_latest_user_text(state), None, None)
 
 
 def _bullets(items: tuple[str, ...] | list[str]) -> str:
@@ -682,6 +721,7 @@ def _council_preflight_message(
                     "source": "ask_clarification",
                     "request_id": request_id,
                     "clarification_type": "council_preflight",
+                    "dbtl_cycle_id": cycle,
                     "title": "Before the design meeting starts",
                     "question": question,
                     "context": note,
@@ -735,6 +775,7 @@ def _design_clarification_message(
                     "source": "ask_clarification",
                     "request_id": request_id,
                     "clarification_type": "design_decision",
+                    "dbtl_cycle_id": cycle,
                     "title": "The design meeting needs your input",
                     "question": question,
                     "context": note,
@@ -788,6 +829,7 @@ def _design_authoring_message(
                     "source": "ask_clarification",
                     "request_id": request_id,
                     "clarification_type": "design_authoring",
+                    "dbtl_cycle_id": cycle,
                     "title": "Write the design yourself",
                     "question": question,
                     "context": note,
@@ -859,6 +901,7 @@ def _council_adjustment_message(
                     "source": "ask_clarification",
                     "request_id": request_id,
                     "clarification_type": "council_adjustment",
+                    "dbtl_cycle_id": cycle,
                     "title": "Adjust the design meeting",
                     "question": _ADJUST_QUESTION,
                     "context": _ADJUST_NOTE,
@@ -1153,7 +1196,7 @@ def build_supervisor_graph(
     writer = question_writer or _make_llm_question_writer(context)
 
     def decide(state: dict) -> BranchDecision:
-        text, recovered_choice = _routing_input(state)
+        text, recovered_choice, recovered_cycle_id = _routing_input(state)
         # The recovered choice wins over the request's own. Answering a card is
         # not choosing a scope: the client sends a scope with every request and
         # falls back to "ordinary" for a card it has no special handling for, so
@@ -1163,12 +1206,22 @@ def build_supervisor_graph(
         # evidence of intent than a field the client always fills in.
         active = replace(
             context,
+            selected_cycle_id=recovered_cycle_id or context.selected_cycle_id,
             explicit_choice=recovered_choice if recovered_choice is not None else context.explicit_choice,
             is_new_conversation=_is_new_conversation(state),
         )
         return resolve_branch(text, active)
 
     def route(state: dict) -> str:
+        # A review sentence is a control action, not an open-ended prompt. The
+        # one-shot cycle selector may already have cleared after the meeting,
+        # in which case normal routing would send "I approve the design" to
+        # the lead model and leave the UI spinning on unrelated work. Route it
+        # to the deterministic review-boundary response in project chat even
+        # without a currently selected cycle; it still cannot write a gate.
+        if context.project_id and _review_intent(_latest_user_text(state)) is not None:
+            return SupervisorBranch.CYCLE_CONTINUATION.value
+
         # Approval is the hinge of the whole flow, and only the graph can see
         # it: it lives in an answered card rather than in the request text
         # ``resolve_branch`` is given. An approved confirmation moves to the
@@ -1194,7 +1247,7 @@ def build_supervisor_graph(
 
     async def clarification(state: dict, config: RunnableConfig) -> dict:
         decision = decide(state)
-        source_request, _ = _routing_input(state)
+        source_request, _, _ = _routing_input(state)
         raw_context = request_context(config)
         request_nonce = str(raw_context.get("run_id") or "")
         questions = await writer(source_request, decision.missing_fields)
@@ -1215,7 +1268,7 @@ def build_supervisor_graph(
         acknowledgement = _setup_confirmation_acknowledgement(state) or _design_inputs_acknowledgement(state)
         if acknowledgement is not None:
             return {"messages": [AIMessage(content=acknowledgement)]}
-        source_request, _choice = _routing_input(state)
+        source_request, _choice, _cycle_id = _routing_input(state)
         raw_context = request_context(config)
         request_nonce = str(raw_context.get("run_id") or "")
         return {

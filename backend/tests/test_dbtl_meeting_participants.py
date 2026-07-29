@@ -167,6 +167,7 @@ class TestTheCardPayload:
         assert first["model"] == "gpt-5.6-sol"
         assert first["model_options"] == list(KNOWN_MODELS)
         assert first["max_tokens"] == plan.budget.max_tokens
+        assert first["token_limit_enforced"] is False
         assert first["reasoning"] == "standard"
         assert first["instructions"] == plan.seats[0].brief
         assert first["agent_name"] == "designer"

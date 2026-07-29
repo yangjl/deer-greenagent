@@ -1853,9 +1853,36 @@ headroom so the forced answer can be produced *and committed*; the constant is
 measured from the live chain by
 `tests/test_finalization_deadline_middleware.py::TestTheTurnCostAssumption`,
 which fails and names the new number if a middleware gains or loses a hook. The
-council's `DEPTH_POLICIES` budgets were sized under the old reading and bought
-two to eight model calls each; they are now sized so every dispatchable depth
-buys a usable number, pinned by `TestCouncilBudgetsFitRealWork`.
+council's `DEPTH_POLICIES` turn budgets were sized under the old reading and
+bought two to eight model calls each; they are now sized so every dispatchable
+depth buys a usable number. Token enforcement is deliberately disabled for all
+Design-council depths while provider-reported usage remains metered. The direct
+executor path reports each seat's records to the parent run journal,
+`DispatchOutcome.token_usage` binds the meter to the worker result, and the
+review package stores both per-seat and aggregate input/output/total counts.
+Light sits exactly at the six-call floor with a 180-second per-seat timeout.
+`_light_design_context` also limits the
+manifest to 24 entries, prior history to the latest chair turn, declared
+datasets to 12, and tells each seat to inspect at most two relevant files and
+return a concise pilot decision. Lowering the guardrail without lowering the
+research assignment only makes a worker fail sooner; both halves are the Light
+contract. Production Light workers receive only `read_file`; shell, web, and
+other execution tools are withheld so a pilot does not spend its time
+reconstructing packages or surveying the environment.
+
+Light also has a fail-soft **review** boundary, not a fail-open gate.
+`_light_pilot_chair_fallback` runs only when its chair fails or is capped. It
+creates a new server-attributed `system:light-pilot-fallback` result from the
+cycle's research question, objective, success criterion, and any recoverable
+chair output. It never relabels the capped worker as complete: the source agent,
+stop reason, missing data/tools, and strict-contract failure are recorded in
+provenance and limitations. The package's `pilot_review` block says whether
+strict evidence completed and that pre-existing data/tools were not required;
+the Markdown leads with the same warning. This synthetic bounded result is
+enough to attach a Design artifact and make it eligible for authenticated human
+approval, which can advance the cycle to Data reconciliation. It does not
+approve itself. Medium and Heavy retain their research-sized contexts, tools,
+budgets, and strict evidence requirement.
 
 The one thing this middleware must **not** do is report a `stop_reason`. That
 channel feeds `CAPPED_STOP_REASONS`, which makes `is_trustworthy` false —
@@ -2074,7 +2101,12 @@ chair counts toward Design-stage output. A `needs_input` chair must return one
 question, and the supervisor emits the standard `ask_clarification` AI-tool /
 ToolMessage pair so the existing chat card owns the interaction. The card
 response is routed back to the same selected cycle and appears in the next
-council context. A completed chair emits the standard `present_files` message
+council context. Every cycle-scoped council card records the server-resolved
+`dbtl_cycle_id`; an answered card recovers that cycle as a continuation when
+the browser's temporary selected-cycle context is missing, and request-text
+recovery scans through hidden card replies to the automatic Design kickoff
+instead of re-reading the older visible cycle-setup request. A completed chair
+emits the standard `present_files` message
 pair and adds the package to the thread's existing artifact reducer/inspector.
 It may create a `design_brief.v2` package, but `satisfies_gate` remains
 structurally false. Explicit review language in cycle-scoped chat (`approve`,
@@ -2087,7 +2119,14 @@ is preserved, while a `None` whitelist becomes `[]` for the bounded stage run.
 **A meeting convenes when a person asks for one.** A Design stage stays
 `in_progress` until someone submits it for review, so before this every later
 cycle-scoped message re-ran the whole council over a design already sitting on
-the table. Three rules, all in `stage_execution`:
+the table. The frontend consumes both the composer scope and the project-rail
+cycle selection as soon as a non-empty send is accepted; resetting only the
+composer state let the still-selected rail cycle silently re-arm the next
+request. The backend also treats a deterministic read/explain question as
+ordinary chat when it arrives with a selected cycle but no explicit
+`continue_cycle` choice. An explicit cycle scope still wins, as do answers
+bound to server-emitted council cards. Three additional rules live in
+`stage_execution`:
 
 - `_unreviewed_design_package` **holds**: a package on the attempt plus no
   `changes_requested` review means nothing is dispatched and the reply points at
@@ -2154,7 +2193,13 @@ instead of reporting a bare status. Successful HTTP streams may still terminate
 with `response.failed`, `response.incomplete`, or `error`; those SSE frames are
 terminal failures too, and `_stream_failure_message` carries their provider
 code/reason/message into the worker error instead of reducing all three to
-“stream ended without response.completed”.
+“stream ended without response.completed”. When thinking is disabled the Codex
+factory defaults `reasoning_effort` to `none`, but a model-specific
+`when_thinking_disabled.reasoning_effort` wins; this is required for
+GPT-5.3-Codex-Spark, whose lowest accepted effort is `low`. The same model
+rejects the optional `reasoning.summary` payload member, so
+`CodexChatModel.include_reasoning_summary=false` omits it without changing
+reasoning effort.
 
 The Design council preflight is a native `single_choice` Human Input request;
 its options carry `id`/`label`/`value` plus descriptions and the server-owned
@@ -2163,16 +2208,20 @@ titles, notes, review Markdown); internal identifiers keep the council
 vocabulary. The card additionally carries `council_participants` — one
 editable entry per seat, built by `deerflow.dbtl.council_settings` from the
 same `CouncilPlan` dispatch runs, prefilled with the roster writer's
-suggestions (model, token budget, reasoning strength, instructions = the
-seat's brief). Edits come back on the reply's `participants` key (read off
+suggestions (model, reasoning strength, instructions = the seat's brief) plus
+an explicit “metered, no cap” token policy. Edits come back on the reply's
+`participants` key (read off
 the raw payload, since the typed reader strips unknown keys), are validated
-field by field against the configured models and token bounds, must name a
+field by field against the configured models, must name a
 card the server emitted, apply only to the answering turn, and land on both
 the recorded plan (`apply_participant_settings`) and the dispatched
-`WorkUnit`s: per-seat `model`, `max_tokens` (overrides the stage budget for
-that one worker), `reasoning: "extended"` → `SubagentExecutor(thinking_enabled=True)`,
+`WorkUnit`s: per-seat `model`, `reasoning: "extended"` →
+`SubagentExecutor(thinking_enabled=True)`,
 and instructions quoted verbatim into that seat's prompt — unless byte-identical
 to the prefill, which is the writer's suggestion, not the owner's words.
+Legacy replies may still carry `max_tokens`; it is recorded for compatibility
+but `_token_limit_for_worker` ignores it whenever the council depth has
+`token_limit_enforced=false`, so a cached card cannot restore the kill switch.
 The card also serializes the question-specific `council_proposal`.
 `_confirmed_council_proposal` recovers it only from the matching server-emitted
 card and passes it as `approved_council_proposal`; `LiveStageAdapter.execute`

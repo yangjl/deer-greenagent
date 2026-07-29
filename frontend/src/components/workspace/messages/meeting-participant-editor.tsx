@@ -18,7 +18,7 @@ import { type CouncilParticipant } from "@/core/messages/human-input";
  * The editable participant cards on a design-meeting preflight.
  *
  * One card per participant, prefilled with the roster writer's suggestions:
- * the model, token budget, reasoning strength, and instructions shown are
+ * the model, token policy, reasoning strength, and instructions shown are
  * exactly what runs if nothing is touched. Edits are collected by the parent
  * card and ride back on the depth reply; the backend re-validates every field,
  * so this editor only has to be honest about the prefills, not defensive.
@@ -129,27 +129,36 @@ function ParticipantCard({
               </Select>
             </div>
           ) : null}
-          <div className="space-y-1">
-            <label
-              className="text-xs leading-4 font-medium"
-              htmlFor={`${idBase}-tokens`}
-            >
-              Token budget
-            </label>
-            <Input
-              id={`${idBase}-tokens`}
-              className="text-sm"
-              disabled={disabled}
-              max={participant.max_tokens_max}
-              min={participant.max_tokens_min}
-              step={10000}
-              type="number"
-              value={value.maxTokens}
-              onChange={(event) =>
-                onChange({ ...value, maxTokens: event.target.value })
-              }
-            />
-          </div>
+          {participant.token_limit_enforced === false ? (
+            <div className="space-y-1">
+              <span className="text-xs leading-4 font-medium">Token use</span>
+              <p className="text-muted-foreground border-input bg-muted/30 rounded-md border px-3 py-2 text-sm">
+                Metered, no cap
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <label
+                className="text-xs leading-4 font-medium"
+                htmlFor={`${idBase}-tokens`}
+              >
+                Token budget
+              </label>
+              <Input
+                id={`${idBase}-tokens`}
+                className="text-sm"
+                disabled={disabled}
+                max={participant.max_tokens_max}
+                min={participant.max_tokens_min}
+                step={10000}
+                type="number"
+                value={value.maxTokens}
+                onChange={(event) =>
+                  onChange({ ...value, maxTokens: event.target.value })
+                }
+              />
+            </div>
+          )}
           <div className="space-y-1">
             <label
               className="text-xs leading-4 font-medium"
@@ -221,8 +230,9 @@ export function MeetingParticipantEditor({
   return (
     <div className="space-y-2" data-testid="meeting-participant-editor">
       <p className="text-muted-foreground text-xs leading-5">
-        Participants in this meeting. Expand one to change its model, token
-        budget, reasoning strength, or instructions before it starts.
+        Participants in this meeting. Expand one to change its model, reasoning
+        strength, or instructions before it starts. Token use is recorded for
+        each participant and is not capped.
       </p>
       {participants.map((participant) => {
         const value = Object.prototype.hasOwnProperty.call(
