@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulate a maize breeding population — Design meeting</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #16181d; --muted: #5d6470; --line: #e3e6ec;
+    --accent: #1f6feb; --warn: #b45309; --card: #f7f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101216; --fg: #e8eaef; --muted: #9aa2b1; --line: #262b33;
+      --accent: #6ea8ff; --warn: #f0b45e; --card: #171a20;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .deck { height: 100vh; display: flex; align-items: center; justify-content: center; padding: 3rem 2rem 4.5rem; }
+  .slide { display: none; width: min(60rem, 100%); max-height: 100%; overflow-y: auto; }
+  .slide.is-active { display: block; animation: in .18s ease-out; }
+  @keyframes in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  .eyebrow { margin: 0 0 .35rem; color: var(--muted); font-size: .8rem; letter-spacing: .09em; text-transform: uppercase; }
+  h2 { margin: 0 0 1.25rem; font-size: clamp(1.7rem, 3.6vw, 2.7rem); line-height: 1.15; letter-spacing: -.02em; }
+  .slide--title h2 { font-size: clamp(2.1rem, 5vw, 3.4rem); }
+  .lede { font-size: 1.15rem; color: var(--muted); max-width: 42rem; }
+  .stamp { color: var(--muted); font-size: .82rem; margin-top: 1.75rem; word-break: break-all; }
+  ul { margin: 0; padding-left: 1.15rem; }
+  li { margin: .55rem 0; font-size: 1.08rem; }
+  .empty { color: var(--muted); font-style: italic; }
+  .contested-grid { display: grid; gap: .9rem; }
+  .contested { border: 1px solid var(--line); border-radius: 10px; padding: .9rem 1.05rem; background: var(--card); }
+  .contested h3 { margin: 0 0 .5rem; font-size: 1.05rem; }
+  .positions { color: var(--muted); }
+  .positions li { font-size: .96rem; margin: .3rem 0; }
+  .verdict { margin: .6rem 0 0; font-size: .95rem; }
+  .verdict span { display: inline-block; margin-right: .5rem; padding: .08rem .5rem; border-radius: 999px; font-size: .74rem;
+    letter-spacing: .05em; text-transform: uppercase; border: 1px solid currentColor; }
+  .verdict--open { color: var(--warn); }
+  .verdict--settled span { color: var(--accent); }
+  .slide--decide li { font-size: 1.15rem; }
+  .decision { margin: 0 0 1.1rem; padding: 0; border: 0; }
+  .decision legend { padding: 0; margin-bottom: .9rem; font-size: 1.2rem; font-weight: 600; }
+  .options { display: grid; gap: .65rem; }
+  .option { display: flex; gap: .7rem; align-items: flex-start; border: 1px solid var(--line); border-radius: 10px;
+    padding: .8rem .95rem; background: var(--card); }
+  .option input { margin: .3rem 0 0; flex: none; width: 1.05rem; height: 1.05rem; accent-color: var(--accent); }
+  .option label { display: grid; gap: .2rem; }
+  .option-label { font-weight: 600; font-size: 1.02rem; }
+  .option-value { color: var(--fg); font-size: .97rem; }
+  .option-detail { color: var(--muted); font-size: .9rem; }
+  /* Not colour alone: the badge keeps its border and text in every theme and in
+     print, where an accent tint is the first thing to disappear. */
+  .badge { margin-left: .55rem; padding: .08rem .5rem; border: 1px solid currentColor; border-radius: 999px;
+    color: var(--accent); font-size: .68rem; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; vertical-align: middle; }
+  .decision[disabled] .option { opacity: .92; }
+  .recommendation { margin: 0 0 .9rem; color: var(--muted); font-size: .93rem; }
+  .recommendation span { display: block; font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; }
+  .inert { margin: 0; padding: .55rem .8rem; border: 1px dashed var(--line); border-radius: 8px;
+    color: var(--muted); font-size: .88rem; }
+  .gate { margin-top: 1.5rem; color: var(--muted); font-size: .9rem; border-left: 2px solid var(--line); padding-left: .85rem; }
+  .bar { position: fixed; left: 0; bottom: 0; width: 100%; display: flex; align-items: center; gap: 1rem;
+    padding: .7rem 1.4rem; border-top: 1px solid var(--line); background: var(--bg); font-size: .82rem; color: var(--muted); }
+  .bar button { font: inherit; color: inherit; background: none; border: 1px solid var(--line); border-radius: 6px;
+    padding: .2rem .7rem; cursor: pointer; }
+  .bar button:hover { border-color: var(--accent); color: var(--accent); }
+  .track { flex: 1; height: 3px; background: var(--line); border-radius: 999px; overflow: hidden; }
+  .track i { display: block; height: 100%; background: var(--accent); transition: width .2s ease; }
+  @media print {
+    .deck { display: block; height: auto; padding: 0; }
+    .slide, .slide.is-active { display: block; page-break-after: always; padding: 2.5rem; }
+    .bar { display: none; }
+  }
+</style>
+</head>
+<body>
+<main class="deck"><section class="slide slide--title"><p class="eyebrow">Design meeting · Round 1</p><h2>Simulate a maize breeding population</h2><p class="lede">What the participants agreed, where they split, and what still needs your decision.</p><p class="stamp">2026-07-29 01:50 UTC</p></section><section class="slide slide--agree"><p class="eyebrow">Where the meeting agreed</p><h2>Agreed</h2><ul><li>The family is biparental and the trait is flowering time.</li></ul></section><section class="slide slide--contest"><p class="eyebrow">Where the meeting split</p><h2>Contested</h2><div class="contested-grid"><article class="contested"><h3>Which base the acceptance checks are evaluated against</h3><ul class="positions"><li>Against the founder haplotypes</li><li>Against the realized F2 sample</li></ul><p class="verdict verdict--open"><span>Not resolved</span> still open for the project owner.</p></article></div></section><section class="slide slide--decide"><p class="eyebrow">Only you can settle these</p><h2>Needs your decision</h2><fieldset class="decision" disabled><legend>Should the RIL family be produced by selfing to F5/F6, or by doubled-haploid production?</legend><div class="options"><div class="option"><input type="radio" id="inbreeding-route--selfing_f5_f6" name="inbreeding-route" value="selfing_f5_f6" disabled><label for="inbreeding-route--selfing_f5_f6"><span class="option-label">Selfing to F5/F6<span class="badge">Recommended</span></span><span class="option-value">Produce the RIL family by single-seed descent to F5/F6.</span><span class="option-detail">Residual heterozygosity around 3-6%; the segregation checks stay as written.</span></label></div><div class="option"><input type="radio" id="inbreeding-route--doubled_haploid" name="inbreeding-route" value="doubled_haploid" disabled><label for="inbreeding-route--doubled_haploid"><span class="option-label">Doubled-haploid production</span><span class="option-value">Produce the family by doubled-haploid production.</span><span class="option-detail">Fully homozygous lines, but induction rate biases which families survive.</span></label></div></div><div class="comment"><label for="inbreeding-route--comment">Add a comment (optional)</label><textarea id="inbreeding-route--comment" data-deck-comment rows="3" disabled></textarea></div></fieldset><p class="recommendation"><span>Why the chair leans this way</span> The owner said &#x27;biparental&#x27; without an inbreeding route, and selfing keeps the stated map-length check valid.</p><div class="submit-row"><button type="button" data-deck-submit disabled>Send to the meeting</button><p class="inert" data-deck-status role="status" aria-live="polite">Open this deck in DeerFlow to respond.</p></div><ul><li>Which base the acceptance checks are evaluated against</li><li>How many seasons and replicates?</li></ul></section><section class="slide slide--synthesis"><p class="eyebrow">The chair&#x27;s synthesis</p><h2>Where this lands</h2><p>Simulate the biparental family under an additive-plus-dominance model, then validate against the stated criteria.</p></section><section class="slide slide--limits"><p class="eyebrow">Read the synthesis against these</p><h2>Limitations</h2><ul><li>Generation rules stay unfrozen until the route is settled.</li></ul></section><section class="slide slide--next"><p class="eyebrow">Recommended, not decided</p><h2>Next</h2><ul><li>Freeze the generation rules once the route is chosen.</li></ul><p class="gate">Nothing here approves anything. Approving, requesting changes, or rejecting this design is a separate human record in the Design review sheet.</p><p class="stamp">Full review package: /mnt/user-data/outputs/dbtl/x/design/design-review-rev1-fb18c0.md</p></section></main>
+<nav class="bar">
+  <button type="button" data-step="-1" aria-label="Previous slide">&larr;</button>
+  <button type="button" data-step="1" aria-label="Next slide">&rarr;</button>
+  <span class="track"><i></i></span>
+  <span class="count"><span class="at">1</span> / 7</span>
+</nav>
+<script>
+(function () {
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var at = document.querySelector('.at');
+  var fill = document.querySelector('.track i');
+  var index = 0;
+  function show(next) {
+    index = Math.max(0, Math.min(next, slides.length - 1));
+    slides.forEach(function (slide, i) { slide.classList.toggle('is-active', i === index); });
+    at.textContent = String(index + 1);
+    fill.style.width = ((index + 1) / slides.length * 100) + '%';
+  }
+  // Space selects a focused radio and an arrow key moves between them, so a
+  // deck that always paged would make the choice unusable by keyboard the
+  // moment these controls are live.
+  var INTERACTIVE = /^(input|textarea|select|button|a)$/i;
+  function inControl(target) {
+    if (!target) { return false; }
+    // The deck's own arrows are buttons; keeping the keyboard working after
+    // someone clicks one is the whole point of the navigation bar.
+    if (target.closest && target.closest('.bar')) { return false; }
+    return INTERACTIVE.test(target.nodeName || '') || target.isContentEditable;
+  }
+  document.addEventListener('keydown', function (event) {
+    if (inControl(event.target)) { return; }
+    if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') { show(index + 1); }
+    else if (event.key === 'ArrowLeft' || event.key === 'PageUp') { show(index - 1); }
+    else if (event.key === 'Home') { show(0); }
+    else if (event.key === 'End') { show(slides.length - 1); }
+    else { return; }
+    event.preventDefault();
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('.bar button'), function (button) {
+    button.addEventListener('click', function () { show(index + Number(button.dataset.step)); });
+  });
+  show(0);
+})();
+</script>
+
+<script>
+(function () {
+  'use strict';
+  var SURFACE_ID = "dfs-e2e-surface-001";
+  var PROTOCOL = 1;
+  var SOURCE = "deerflow-design-deck";
+
+  // Opened directly rather than framed: there is no parent to authenticate, so
+  // the deck stays exactly as it was persisted.
+  if (window.parent === window) { return; }
+
+  var channel = null;
+  var allowed = [];
+  var submitting = false;
+  // Latched once the surface is answered or replaced. The parent already
+  // refuses to re-initialize a settled surface, but a deck that would happily
+  // re-arm on a later 'initialize' leaves that as the parent's promise rather
+  // than the file's property — and this file is the part that travels.
+  var settled = false;
+
+  var fieldset = document.querySelector('fieldset.decision');
+  var submit = document.querySelector('[data-deck-submit]');
+  var status = document.querySelector('[data-deck-status]');
+  var comment = document.querySelector('[data-deck-comment]');
+
+  function say(text) { if (status) { status.textContent = text; } }
+
+  function send(type, extra) {
+    var payload = { source: SOURCE, protocol: PROTOCOL, surfaceId: SURFACE_ID, type: type };
+    if (channel) { payload.channel = channel; }
+    if (extra) { for (var key in extra) { if (Object.prototype.hasOwnProperty.call(extra, key)) { payload[key] = extra[key]; } } }
+    // No secret crosses this boundary, so a wildcard target is acceptable; the
+    // parent authenticates by source window, channel, and its own server call.
+    window.parent.postMessage(payload, '*');
+  }
+
+  function setEnabled(on) {
+    if (fieldset) { fieldset.disabled = !on; }
+    if (submit) { submit.disabled = !on; }
+    if (comment) { comment.disabled = !on; }
+  }
+
+  function selected() {
+    var checked = document.querySelector('fieldset.decision input[type="radio"]:checked');
+    return checked ? checked.value : '';
+  }
+
+  if (submit) {
+    submit.addEventListener('click', function () {
+      if (submitting || !channel || allowed.indexOf('chair_option') === -1) { return; }
+      var option = selected();
+      if (!option) { say('Choose one option first.'); return; }
+      submitting = true;
+      setEnabled(false);
+      say('Sending your decision...');
+      // The draft is kept in the DOM, so a failure can re-enable exactly what
+      // the person had typed rather than asking them to retype it.
+      send('submit_intent', {
+        action: { kind: 'chair_option', optionIds: [option] },
+        comment: comment ? comment.value : ''
+      });
+    });
+  }
+
+  window.addEventListener('message', function (event) {
+    if (event.source !== window.parent) { return; }
+    var data = event.data;
+    if (!data || typeof data !== 'object') { return; }
+    if (data.source !== SOURCE) { return; }
+    if (data.protocol !== PROTOCOL) { return; }
+    if (data.surfaceId !== SURFACE_ID) { return; }
+    // Every message after the handshake must carry the channel the parent
+    // issued for this mount. Convenience against cross-talk, not authority.
+    if (data.type !== 'initialize' && data.channel !== channel) { return; }
+
+    if (data.type === 'initialize') {
+      // A surface that has been answered or superseded is not re-openable.
+      if (settled) { return; }
+      channel = typeof data.channel === 'string' && data.channel ? data.channel : null;
+      allowed = Array.isArray(data.allowedActions) ? data.allowedActions.slice(0, 8) : [];
+      submitting = false;
+      var live = !!channel && allowed.indexOf('chair_option') !== -1;
+      setEnabled(live);
+      say(live ? 'Choose an option, then send it to the meeting.' : (typeof data.note === 'string' && data.note ? data.note : 'This round is read-only.'));
+      return;
+    }
+    if (data.type === 'pending') { submitting = true; setEnabled(false); say('Sending your decision...'); return; }
+    if (data.type === 'accepted') {
+      submitting = false;
+      settled = true;
+      setEnabled(false);
+      say(typeof data.note === 'string' && data.note ? data.note : 'Recorded. The meeting is resuming in the conversation it started in.');
+      return;
+    }
+    if (data.type === 'stale') {
+      submitting = false;
+      settled = true;
+      setEnabled(false);
+      say(typeof data.note === 'string' && data.note ? data.note : 'A newer round has replaced this one. Open the latest deck to respond.');
+      return;
+    }
+    if (data.type === 'failed') {
+      // Re-enable rather than clear: the draft is still the person's, and the
+      // parent reuses the same submission id when they try again.
+      submitting = false;
+      setEnabled(true);
+      say(typeof data.note === 'string' && data.note ? data.note : 'That did not go through. Your choice is still here — try again.');
+      return;
+    }
+  });
+
+  send('ready');
+})();
+</script>
+
+</body>
+</html>

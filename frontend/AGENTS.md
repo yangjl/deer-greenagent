@@ -655,3 +655,46 @@ argument summary, and counts from the chair's recorded `consensus` object.
 bound review Markdown and parses only the chair's recorded consensus. The stage
 sheet renders that decision map above the Markdown as a reading guide; it never
 recomputes consensus, and the approval remains bound to the Markdown bytes.
+
+## Design deck feedback bridge
+
+`src/core/dbtl/design-deck-feedback.ts` is the parent's half of the Design deck
+bridge: **pure**, React-free, and the security-critical boundary between an
+agent-rendered page and the application. A deck runs in an opaque-origin iframe
+and may *collect* a decision; it may never authorize one. Everything it sends is
+an intent parsed into a closed vocabulary (`ready`, `submit_intent`,
+`open_evidence_intent`, `open_originating_conversation_intent`), and everything
+sent back is state (`initialize`, `pending`, `accepted`, `stale`, `failed`). No
+endpoint, token, or write capability crosses the boundary in either direction.
+
+Two rules are easy to erode and worth restating. **Parsing here is a UX
+boundary, not an authorization boundary** — the server repeats membership,
+surface identity, evidence revision, and deck-hash checks on the write itself,
+and if the backend ever trusts this module the model collapses to "any page that
+can talk to the parent can write". **A settled surface never rebases**:
+`reduceDeckState` refuses to return an `accepted` or `stale` surface to
+readiness, because retrying a pending answer against a newer revision is how an
+approval ends up bound to a document nobody read.
+
+`parseDeckIntent` refuses a foreign source, a different protocol version, another
+surface id, an unknown type, an unknown action kind, a selection that is not
+exactly one slug-shaped option id, and any post-handshake message not carrying
+the per-mount channel this parent issued. A non-string comment is treated as
+absent rather than coerced, and an over-long one is bounded.
+
+The deck's own half lives in the Python renderer
+(`deerflow.dbtl.council_deck._bridge_script`) and is emitted **only** for a
+server-registered surface — a legacy or unregistered deck carries no bridge at
+all rather than a disabled one, because the safest version of "this file cannot
+answer" is a file with no code that could. `tests/e2e/design-deck-bridge.spec.ts`
+drives that script in a real browser against
+`tests/e2e/fixtures/design-deck.html`, which is generated from the Python
+renderer and guarded against drift by
+`backend/tests/test_dbtl_deck_fixture_drift.py` (regenerate with
+`cd backend && PYTHONPATH=.:tests uv run python -c 'import _design_deck_fixture as f; f.FIXTURE_PATH.write_text(f.render_fixture_deck())'`).
+That browser suite earns its keep: it is what caught a deck that would happily
+re-arm itself after being superseded, which no source-level assertion noticed.
+
+**Not yet implemented**: the React controller that performs the handshake against
+a live artifact iframe, and the write paths behind `submit_intent`. The read
+model reports `allowed_actions: []` today, so a wired deck stays inert.

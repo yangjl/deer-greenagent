@@ -402,6 +402,80 @@ class DbtlReviewRow(Base):
     )
 
 
+class DbtlDesignFeedbackSurfaceRow(Base):
+    """One rendered Design deck, bound to the work it projects.
+
+    This is deliberately **not** a review and does not replace
+    ``dbtl_reviews``. It answers a narrower question the review path cannot:
+    given some HTML that claims to be a Design deck, did this workflow produce
+    it, from which evidence, and which conversation may it answer? Without that
+    binding, any page an agent wrote could impersonate the deck.
+
+    The evidence columns are nullable because a paused meeting has no package
+    yet — the chair stopped to ask something before it could write one. A
+    ``stage_review`` surface without them is refused at the write boundary,
+    since a verdict must bind to a document.
+    """
+
+    __tablename__ = "dbtl_design_feedback_surfaces"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    cycle_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dbtl_cycles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    stage_attempt_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("dbtl_stage_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    design_round: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    #: The only conversation this surface may answer. Work continues where it
+    #: started; a deck opened from another view may display, never mutate.
+    originating_thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    chair_worker_run_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    human_input_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    deck_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The exact bytes shown. A review binds this beside the evidence hash, so
+    #: an audit can answer both "what was authoritative" and "what was read".
+    deck_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    deck_schema_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    evidence_artifact_id: Mapped[str | None] = mapped_column(
+        String(96),
+        ForeignKey("dbtl_artifacts.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    evidence_artifact_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    evidence_content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    bound_db_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    projection_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(96), nullable=False)
+    #: Regeneration supersedes rather than mutates: the old row stays readable
+    #: because it is the record of what somebody was actually shown.
+    superseded_by_surface_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "stage_attempt_id",
+            "mode",
+            "deck_content_hash",
+            name="uq_dbtl_design_feedback_deck",
+        ),
+        Index("ix_dbtl_design_feedback_cycle_created", "cycle_id", "created_at"),
+    )
+
+
 class DbtlEventRow(Base):
     __tablename__ = "activity_events"
 

@@ -57,7 +57,7 @@ from deerflow.dbtl.council_settings import (
     owner_instruction_lines,
 )
 from deerflow.dbtl.cycle_state import StageStatus, stage_for_state
-from deerflow.dbtl.decision_request import DECISION_REQUEST_CONTRACT
+from deerflow.dbtl.decision_request import DECISION_REQUEST_CONTRACT, DecisionRequest
 from deerflow.dbtl.review_markdown import render_review_markdown, render_stage_digest
 from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
 from deerflow.dbtl.stage_runner import (
@@ -1355,6 +1355,42 @@ def _write_stage_package(
     return uri, document_hash, digest
 
 
+@dataclass(frozen=True, slots=True)
+class _FeedbackSurfacePlan:
+    """What a deck will be registered as, decided before it is rendered."""
+
+    surface_id: str
+    mode: str
+    stage_attempt_id: str
+    originating_thread_id: str
+    design_round: int
+    evidence: Mapping[str, Any] | None = None
+    evidence_content_hash: str = ""
+
+    @property
+    def answerable(self) -> bool:
+        """Whether this deck should carry a bridge at all.
+
+        A ``read_only`` deck ships with no bridge script whatsoever rather than
+        a disabled one: the safest version of "this file cannot answer" is a
+        file containing no code that could.
+        """
+        return self.mode in {"chair_feedback", "stage_review"}
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedDeck:
+    """A written deck and the hash of the exact bytes written.
+
+    The hash is returned rather than recomputed by the caller because the file
+    on disk is what a person is shown, and a second hash of a second render
+    could differ from it without anyone noticing.
+    """
+
+    uri: str
+    content_hash: str
+
+
 def _write_council_deck(
     *,
     project_root: str,
@@ -1363,7 +1399,9 @@ def _write_council_deck(
     round_number: int,
     package_path: str,
     clarification_question: str,
-) -> str | None:
+    decision_request: DecisionRequest | None = None,
+    surface_id: str = "",
+) -> RenderedDeck | None:
     """Write the meeting's outcome as a slide deck, beside the review package.
 
     Deliberately **not** registered as a durable artifact and never returned as
@@ -1384,11 +1422,14 @@ def _write_council_deck(
             results=results,
             package_path=package_path,
             clarification_question=clarification_question,
+            decision_request=decision_request,
+            surface_id=surface_id,
         ).encode("utf-8")
     except Exception:  # noqa: BLE001 - a presentation must not break the record
         logger.warning("Could not render the design meeting slide deck.", exc_info=True)
         return None
 
+    content_hash = hashlib.sha256(document).hexdigest()
     try:
         root = Path(project_root).expanduser().resolve()
         ensure_project_dirs(root)
@@ -1401,13 +1442,42 @@ def _write_council_deck(
             stage="design",
             kind="slides",
             revision=cycle.get("db_revision"),
-            content_hash=hashlib.sha256(document).hexdigest(),
+            content_hash=content_hash,
         )
         _atomic_write(project_outputs_dir(root) / relative, document)
     except Exception:  # noqa: BLE001 - same reason
         logger.warning("Could not write the design meeting slide deck.", exc_info=True)
         return None
-    return f"/mnt/user-data/outputs/{relative.as_posix()}"
+    return RenderedDeck(uri=f"/mnt/user-data/outputs/{relative.as_posix()}", content_hash=content_hash)
+
+
+def _stage_attempt_row_id(cycle: Mapping[str, Any], stage: str) -> str:
+    """The durable ``dbtl_stage_runs`` id, not the worker plan's attempt token."""
+    stages = cycle.get("stages")
+    if not isinstance(stages, Sequence) or isinstance(stages, str):
+        return ""
+    for item in stages:
+        if isinstance(item, dict) and item.get("stage") == stage:
+            return str(item.get("id") or "")
+    return ""
+
+
+def _bound_evidence(cycle: Mapping[str, Any], *, artifact_uri: str, content_hash: str) -> Mapping[str, Any] | None:
+    """The artifact row a review deck projects, matched by its exact hash.
+
+    Matched on the content hash rather than "the newest artifact", because
+    attachment order is not evidence: the deck must bind to the document it was
+    rendered from or to nothing at all.
+    """
+    artifacts = cycle.get("artifacts")
+    if not artifacts or not isinstance(artifacts, Sequence) or isinstance(artifacts, str):
+        return None
+    for item in artifacts:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("content_hash") or "") == content_hash and str(item.get("uri") or "") == artifact_uri:
+            return item
+    return None
 
 
 def _atomic_write(destination: Path, content: bytes) -> None:
@@ -1933,6 +2003,112 @@ class LiveStageAdapter:
             produced_usable_evidence=True,
             artifact_uri=artifact_uri,
         )
+
+    async def _plan_feedback_surface(
+        self,
+        *,
+        cycle_id: str,
+        project_id: str,
+        execution_key: str,
+        design_round: int,
+        originating_thread_id: str,
+        paused: bool,
+        artifact_uri: str,
+        artifact_hash: str,
+    ) -> _FeedbackSurfacePlan | None:
+        """Decide the surface *before* the deck is rendered.
+
+        The deck has to carry its own surface id — that identifier is how a
+        parent asks the server whether the file in front of it is a Design
+        surface at all — but registering binds the deck's content hash, so the
+        id cannot be assigned afterwards without changing the bytes it was
+        assigned for. Deciding first breaks that circle.
+
+        The id is derived rather than random so a retried turn produces the same
+        id, hence the same bytes, hence the same hash, and re-registration
+        collapses onto the existing row instead of superseding it with a copy
+        of itself. ``mode`` is part of the derivation because two runs of one
+        execution can legitimately differ (a round that paused, then completed),
+        and those are different surfaces.
+
+        Returns ``None`` when there is nothing to bind to; the deck is still
+        written, just without a bridge.
+        """
+        thread_id = (originating_thread_id or "").strip()
+        try:
+            cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
+        except Exception:  # noqa: BLE001 - a descriptor must not break the record
+            logger.warning("Could not read cycle %s to plan its design feedback surface.", cycle_id, exc_info=True)
+            return None
+        if cycle is None:
+            return None
+        attempt_row_id = _stage_attempt_row_id(cycle, "design")
+        if not attempt_row_id:
+            return None
+
+        evidence: Mapping[str, Any] | None = None
+        if artifact_uri and artifact_hash:
+            evidence = _bound_evidence(cycle, artifact_uri=artifact_uri, content_hash=artifact_hash)
+
+        if not thread_id:
+            mode = "read_only"
+        elif paused:
+            mode = "chair_feedback"
+        elif evidence is not None:
+            mode = "stage_review"
+        else:
+            # A completed round whose evidence could not be matched by hash.
+            # Registering it as reviewable would bind a future verdict to a
+            # document nobody confirmed this deck was rendered from.
+            mode = "read_only"
+
+        digest = hashlib.sha256("\x1f".join((execution_key, mode, str(design_round))).encode("utf-8")).hexdigest()
+        return _FeedbackSurfacePlan(
+            surface_id=f"dfs-{digest[:32]}",
+            mode=mode,
+            stage_attempt_id=attempt_row_id,
+            # A read-only surface still needs a non-empty column; it names no
+            # live conversation and is refused as an answer target.
+            originating_thread_id=thread_id or "unbound",
+            design_round=design_round,
+            evidence=evidence if mode == "stage_review" else None,
+            evidence_content_hash=artifact_hash if mode == "stage_review" and evidence is not None else "",
+        )
+
+    async def _register_feedback_surface(
+        self,
+        plan: _FeedbackSurfacePlan,
+        deck: RenderedDeck,
+        *,
+        cycle_id: str,
+        project_id: str,
+    ) -> None:
+        """Record that this workflow produced this deck, for this conversation.
+
+        Fail-soft, for the same reason writing the deck is: the meeting's
+        results are already committed by the time this runs, and a descriptor
+        that could fail the turn would trade a durable record for a projection
+        of it. That inverts once the deck is the only way to answer — at
+        cutover this has to block instead, because an unregistered deck will
+        then be an owner who cannot respond at all.
+        """
+        try:
+            await self._repo.register_design_feedback_surface(
+                surface_id=plan.surface_id,
+                project_id=project_id,
+                cycle_id=cycle_id,
+                stage_attempt_id=plan.stage_attempt_id,
+                design_round=plan.design_round,
+                originating_thread_id=plan.originating_thread_id,
+                mode=plan.mode,
+                deck_uri=deck.uri,
+                deck_content_hash=deck.content_hash,
+                evidence_artifact_id=str(plan.evidence["id"]) if plan.evidence is not None else None,
+                evidence_artifact_revision=int(plan.evidence["revision"]) if plan.evidence is not None else None,
+                evidence_content_hash=plan.evidence_content_hash or None,
+            )
+        except Exception:  # noqa: BLE001 - a descriptor must not break the record
+            logger.warning("Could not register the design feedback surface for cycle %s.", cycle_id, exc_info=True)
 
     async def execute(
         self,
@@ -2505,7 +2681,17 @@ class LiveStageAdapter:
         # open split on one screen.
         deck_uri = None
         if stage == "design" and chair_result is not None:
-            deck_uri = await asyncio.to_thread(
+            surface_plan = await self._plan_feedback_surface(
+                cycle_id=cycle_id,
+                project_id=project_id,
+                execution_key=execution_key,
+                design_round=design_round,
+                originating_thread_id=str(runtime.get("thread_id") or ""),
+                paused=bool(clarification_question),
+                artifact_uri=artifact_uri or "",
+                artifact_hash=artifact_hash or "",
+            )
+            deck = await asyncio.to_thread(
                 _write_council_deck,
                 project_root=project_root,
                 cycle=cycle,
@@ -2513,7 +2699,18 @@ class LiveStageAdapter:
                 round_number=design_round,
                 package_path=artifact_uri or "",
                 clarification_question=clarification_question or "",
+                decision_request=chair_result.decision_request,
+                surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
             )
+            if deck is not None:
+                deck_uri = deck.uri
+                if surface_plan is not None:
+                    await self._register_feedback_surface(
+                        surface_plan,
+                        deck,
+                        cycle_id=cycle_id,
+                        project_id=project_id,
+                    )
 
         if clarification_question and resumed_chair is not None:
             note = "The meeting chair resumed on your answer and still needs one more decision before it can write the design up for review. No participants were re-run."

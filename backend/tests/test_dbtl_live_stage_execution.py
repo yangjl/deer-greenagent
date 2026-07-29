@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 
 from deerflow.agents.dbtl.stage_execution import (
     LiveStageAdapter,
+    _bound_evidence,
     _compact_design_history,
     _report_subagent_token_usage,
     _stage_worker_config,
@@ -60,6 +62,10 @@ class FakeRepo:
         self.learn_syntheses: list[dict] = []
         self.replay: dict | None = None
         self.worker_runs: list[dict] = []
+        self.surfaces: list[dict] = []
+        #: Set to raise from surface registration, to prove a descriptor
+        #: failure cannot cost the meeting whose results are already committed.
+        self.surface_error: Exception | None = None
 
     async def get_cycle(self, cycle_id: str, *, project_id: str):
         if self.cycle is None or cycle_id != self.cycle["id"] or project_id != self.cycle["project_id"]:
@@ -89,6 +95,12 @@ class FakeRepo:
 
     async def get_stage_execution_replay(self, cycle_id: str, *, project_id: str, idempotency_key: str):
         return self.replay
+
+    async def register_design_feedback_surface(self, **kwargs):
+        if self.surface_error is not None:
+            raise self.surface_error
+        self.surfaces.append(kwargs)
+        return {"surface_id": f"dfs-{len(self.surfaces)}", **kwargs}
 
     async def record_worker_runs(self, **kwargs):
         self.recorded.append(kwargs)
@@ -1490,3 +1502,257 @@ async def test_a_wedged_roster_writer_does_not_swallow_the_meeting(
     assert plan.dispatchable
     # Capability selection's seats, not the proposal's: no focus was written.
     assert [seat.focus for seat in plan.seats] == ["", "", ""]
+
+
+@pytest.mark.asyncio
+async def test_a_completed_round_registers_a_surface_bound_to_its_review_package(
+    tmp_path: Path,
+) -> None:
+    """The descriptor is what later separates this deck from any other HTML."""
+    cycle = _cycle()
+    repo = FakeRepo(cycle)
+    dispatcher = FakeDispatcher(text=_structured_result())
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert len(repo.surfaces) == 1
+    surface = repo.surfaces[0]
+    assert surface["deck_uri"] == result.deck_uri
+    assert surface["stage_attempt_id"] == "attempt-design"
+    assert surface["project_id"] == "project-1"
+    # The hash is of the bytes actually written, so the descriptor and the file
+    # on disk cannot describe different decks.
+    deck = tmp_path / result.deck_uri.removeprefix("/mnt/user-data/")
+    assert surface["deck_content_hash"] == hashlib.sha256(deck.read_bytes()).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_a_completed_round_without_matchable_evidence_is_not_reviewable(
+    tmp_path: Path,
+) -> None:
+    """Binding a verdict to an unconfirmed document is the bug this prevents.
+
+    ``FakeRepo`` exposes no ``artifacts`` on the cycle, so the review package
+    cannot be matched by hash. The surface must then decline ``stage_review``
+    rather than name evidence nobody confirmed the deck was rendered from.
+    """
+    repo = FakeRepo(_cycle())
+    dispatcher = FakeDispatcher(text=_structured_result())
+
+    await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert repo.surfaces[0]["mode"] == "read_only"
+    assert repo.surfaces[0]["evidence_artifact_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_paused_meeting_registers_a_chair_feedback_surface(
+    tmp_path: Path,
+) -> None:
+    repo = FakeRepo(_cycle())
+    dispatcher = FakeDispatcher(
+        text=json.dumps(
+            {
+                "status": "needs_input",
+                "summary": "One decision is required.",
+                "artifact_refs": [],
+                "claims": [],
+                "evidence_refs": [],
+                "limitations": [],
+                "quality_checks": [{"name": "scope stated", "passed": True, "detail": ""}],
+                "recommended_next_actions": [],
+                "clarification_question": "Toy benchmark or credible simulator?",
+                "provenance": {"inputs_examined": []},
+            }
+        )
+    )
+
+    await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    surface = repo.surfaces[0]
+    assert surface["mode"] == "chair_feedback"
+    # A paused meeting has no package yet; a surface that claimed one would be
+    # describing evidence that does not exist.
+    assert surface["evidence_artifact_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_registration_does_not_cost_the_meeting(
+    tmp_path: Path,
+) -> None:
+    """The results are already committed; a descriptor must not undo that.
+
+    This inverts at cutover: once the deck is the only way to respond, an
+    unregistered deck is an owner who cannot answer, and the failure has to
+    become visible instead of silent.
+    """
+    repo = FakeRepo(_cycle())
+    repo.surface_error = RuntimeError("descriptor store unavailable")
+    dispatcher = FakeDispatcher(text=_structured_result())
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert repo.surfaces == []
+    assert result.deck_uri is not None
+    assert result.artifact_uri is not None
+
+
+def test_evidence_matching_uses_the_keys_the_repository_actually_returns() -> None:
+    """A silent rename here would disable the review path without failing anything.
+
+    ``_bound_evidence`` reads an artifact's ``content_hash`` and ``uri`` out of a
+    ``get_cycle`` payload. If either key moved, every completed round would
+    quietly register ``read_only`` forever and no deck would ever be reviewable —
+    a failure with no error, no log, and no test unless it is this one.
+    """
+    from deerflow.persistence.dbtl.cycles import DbtlCycleRepository
+
+    # The exact projection the repository builds for an artifact row.
+    row = SimpleNamespace(
+        id="artifact-1",
+        stage_attempt_id="attempt-design",
+        artifact_type="design_brief.v2",
+        revision=2,
+        content_hash="d" * 64,
+        uri="/mnt/user-data/outputs/dbtl/x/design/design-review-rev2-dddddd.md",
+        created_by="user-1",
+        created_at=None,
+    )
+    payload = DbtlCycleRepository._cycle_payload(
+        SimpleNamespace(
+            id="cycle-1",
+            project_id="project-1",
+            parent_cycle_id=None,
+            title="Drought",
+            cycle_class="computational",
+            state="design",
+            policy_version="v1",
+            db_revision=3,
+            projection_hash="e" * 64,
+            projection_json={},
+            created_by="user-1",
+            created_at=None,
+            updated_at=None,
+        ),
+        [],
+        artifacts=[row],
+    )
+
+    matched = _bound_evidence(payload, artifact_uri=row.uri, content_hash=row.content_hash)
+
+    assert matched is not None
+    assert matched["id"] == "artifact-1"
+    assert matched["revision"] == 2
+    # A different document at the same path is not the evidence this deck showed.
+    assert _bound_evidence(payload, artifact_uri=row.uri, content_hash="f" * 64) is None
+
+
+@pytest.mark.asyncio
+async def test_a_paused_deck_embeds_the_surface_id_it_is_registered_under(
+    tmp_path: Path,
+) -> None:
+    """The bridge is only meaningful if the file and the row agree on the id."""
+    repo = FakeRepo(_cycle())
+    dispatcher = FakeDispatcher(
+        text=json.dumps(
+            {
+                "status": "needs_input",
+                "summary": "One decision is required.",
+                "artifact_refs": [],
+                "claims": [],
+                "evidence_refs": [],
+                "limitations": [],
+                "quality_checks": [{"name": "scope stated", "passed": True, "detail": ""}],
+                "recommended_next_actions": [],
+                "clarification_question": "Toy benchmark or credible simulator?",
+                "provenance": {"inputs_examined": []},
+            }
+        )
+    )
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    surface = repo.surfaces[0]
+    rendered = (tmp_path / result.deck_uri.removeprefix("/mnt/user-data/")).read_text()
+    assert surface["surface_id"].startswith("dfs-")
+    assert surface["surface_id"] in rendered
+    assert "deerflow-design-deck" in rendered
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_deck_carries_no_bridge_at_all(tmp_path: Path) -> None:
+    """The safest 'cannot answer' is a file with no code that could."""
+    repo = FakeRepo(_cycle())
+    dispatcher = FakeDispatcher(text=_structured_result())
+    config = _runtime_config(tmp_path)
+    config["context"].pop("thread_id")
+    config["configurable"].pop("thread_id")
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=config,
+    )
+
+    assert repo.surfaces[0]["mode"] == "read_only"
+    rendered = (tmp_path / result.deck_uri.removeprefix("/mnt/user-data/")).read_text()
+    assert "deerflow-design-deck" not in rendered
+    assert "submit_intent" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_a_retried_execution_reuses_one_surface_identity(tmp_path: Path) -> None:
+    """A derived id means a retry re-renders the same bytes, not a rival surface."""
+    dispatcher = FakeDispatcher(text=_structured_result())
+
+    first_repo = FakeRepo(_cycle())
+    await _design_adapter(first_repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    second_repo = FakeRepo(_cycle())
+    await _design_adapter(second_repo, FakeDispatcher(text=_structured_result())).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert first_repo.surfaces[0]["surface_id"] == second_repo.surfaces[0]["surface_id"]

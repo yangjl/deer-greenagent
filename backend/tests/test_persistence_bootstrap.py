@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0021_run_cancel_request"
+HEAD = "0022_dbtl_design_feedback_surface"
 BASELINE = "0001_baseline"
 
 

@@ -2218,12 +2218,122 @@ so a deck that always paged would make the choice unusable by keyboard — while
 keyboard navigation. Tests: `tests/test_dbtl_decision_request.py`,
 `tests/test_dbtl_deck_decision_cards.py`.
 
-This is phase 0–2 of
+**A rendered deck is registered as a durable feedback surface.** Nothing about
+an HTML file distinguishes the deck DeerFlow rendered from any other page an
+agent wrote, so before a parent application may treat one as a Design surface it
+has to ask a server: *did you produce these exact bytes, for which cycle, from
+which evidence, and which conversation may they answer?*
+`dbtl_design_feedback_surfaces` (migration `0022_dbtl_design_feedback_surface`,
+`DesignFeedbackOpsMixin` on `DbtlCycleRepository`) is the answer, and only that
+— it is **not** a review, does not replace `dbtl_reviews`, and grants no
+authority on its own.
+
+Two rules shape the write path. **Server-owned binding**: `bound_db_revision`,
+`projection_hash`, and `policy_version` are read off the cycle rather than
+accepted from the caller, because a deck that could assert what it was rendered
+against could assert that a stale one is current. **Supersede, never mutate**:
+registering a new deck for an attempt points every earlier live surface at it
+and leaves those rows intact, since each is the record of what somebody was
+actually shown and a review may already refer to it; `is_current` is derived
+from the absence of a successor rather than stored, so a second column cannot
+disagree with it. Re-registering identical bytes for the same attempt and mode
+returns the existing descriptor — a retried turn re-renders the same file, and a
+second id for it would leave two live surfaces answering one question.
+
+Refusals are at the write boundary: an unknown `mode`, a `deck_content_hash`
+that is not a lowercase SHA-256 (refused rather than normalized, so two
+spellings of one hash cannot compare unequal when the bridge later checks the
+file it was handed), a surface naming no conversation, a cycle from another
+project, a stage attempt from another cycle, or an evidence artifact from
+another cycle. A `stage_review` surface **must** name its evidence; a
+`chair_feedback` surface must not, because a paused meeting has no package yet.
+`get_design_feedback_surface` is project-scoped and the route additionally
+requires the path cycle to match, so a surface resolving under a different cycle
+is not that cycle's to serve.
+
+`LiveStageAdapter._register_feedback_surface` runs after `_write_council_deck`,
+which now returns a `RenderedDeck` carrying the hash of the bytes it actually
+wrote (recomputing it in the caller could differ from the file on disk without
+anyone noticing). Mode is chosen from what exists: `chair_feedback` when the
+chair paused, `stage_review` when the review package can be matched by
+`_bound_evidence` — **by content hash, never by attachment order**, since a deck
+must bind to the document it was rendered from or to nothing — and `read_only`
+otherwise, including when there is no originating thread. Registration is
+fail-soft for the same reason writing the deck is: the meeting's results are
+already committed by the time it runs. **That inverts at cutover** — once the
+deck is the only way to answer, an unregistered deck is an owner who cannot
+respond, and the failure has to become visible instead of silent.
+
+`GET /api/projects/{id}/dbtl/cycles/{cycle_id}/design-feedback/{surface_id}`
+serves the read model in **every** mode including `audit_only`: a read model
+that disappeared when mutations were off could not tell an owner why their deck
+is inert. It always reports `allowed_actions: []` and `interactive: false` in
+this phase — both served rather than omitted, so a client cannot read a missing
+key as permission — plus `newest_surface_id` for pointing a stale deck forward.
+
+`safe_create_table` / `safe_drop_table` were added to `migrations/_helpers.py`
+because a revision introducing a table cannot assume the table is absent: a
+database whose alembic ledger sits behind its physical schema (stamped after a
+full `create_all` — the drift `0015` exists to repair) already has every ORM
+table, and a bare `op.create_table` there aborts the upgrade and strands that
+database one revision short of head. Like `safe_add_column`, an existing table
+is left as-is and the skip is logged rather than repaired. Note that several
+tests pin the current head literal (`test_persistence_bootstrap*`,
+`test_migration_0004/0007/0015`), so a new revision updates them.
+
+Tests: `tests/test_dbtl_design_feedback_surface.py` (write boundary and
+scoping), `tests/test_dbtl_design_feedback_router.py` (read model, membership,
+cycle scoping), `tests/test_migration_0022_design_feedback_surface.py` (clean,
+drifted, and rollback paths), plus registration coverage in
+`tests/test_dbtl_live_stage_execution.py`.
+
+**The deck carries its own half of the bridge, and only when registered.**
+`_bridge_script` is emitted **only** for a deck the server registered; a legacy
+or unregistered deck carries no bridge at all rather than a disabled one,
+because the safest version of "this file cannot answer" is a file with no code
+that could. The deck announces `ready` and waits: it holds no endpoint, no
+token, and no way to reach a server. It validates `event.source ===
+window.parent`, the message source string, the protocol version, its own
+`surfaceId`, and — after the handshake — the per-mount channel the parent
+issued. `window.parent === window` returns early, so a deck opened directly
+never even announces itself. Terminal states **latch**: once `accepted` or
+`stale`, a later `initialize` cannot re-arm it. That latch is defence in depth
+(the parent's reducer already refuses to re-initialize a settled surface) and it
+exists because the browser suite caught the deck happily re-arming, which no
+source-level assertion would have noticed.
+
+**The deck embeds its own surface id, which is why the id is derived rather than
+random.** A deck must carry the id a parent uses to ask the server about it, but
+registration binds the deck's content hash — so the id cannot be assigned
+afterwards without changing the bytes it was assigned for.
+`_plan_feedback_surface` decides mode and id *before* rendering, deriving
+`dfs-<sha256(execution_key, mode, round)[:32]>` so a retried turn produces the
+same id, the same bytes, the same hash, and re-registration collapses onto the
+existing row instead of superseding it with a copy of itself. Mode is part of
+the derivation because one execution can legitimately render twice (a round that
+paused, then completed) and those are different surfaces;
+`register_design_feedback_surface` accepts a caller-supplied `surface_id` and
+disambiguates a genuine id clash rather than colliding on the primary key.
+A `read_only` plan renders with no surface id at all.
+
+Tests: `tests/test_dbtl_deck_bridge.py` (protocol shape and refusals),
+`frontend/tests/e2e/design-deck-bridge.spec.ts` (the script driven in a real
+browser), `frontend/tests/unit/core/dbtl/design-deck-feedback.test.ts` (the
+parent's parser and reducer), and `tests/test_dbtl_deck_fixture_drift.py`, which
+keeps the browser suite's committed deck fixture byte-identical to this
+renderer — a fixture that drifts would keep the browser suite passing against a
+deck the product no longer produces.
+
+This is phases 0–3's protocol layer of
 [docs/plans/2026-07-28-design-deck-feedback-plan.md](../docs/plans/2026-07-28-design-deck-feedback-plan.md).
-The durable feedback-surface descriptor, the authenticated read model, the
-sandboxed parent bridge, and the in-deck submit/review transitions are **not
-implemented**; no deck can record anything, and the Design review sheet remains
-the only place a human review is written.
+Still **not implemented**: the React controller that performs the handshake
+against a live artifact iframe, the in-deck submit and review transitions
+(phase 4), chair-response idempotency, binding the deck's
+`human_input_request_id` to the card the supervisor emits (it is registered
+`NULL` today), extending stage submit/review validation to the deck hash, and
+the cutover and cleanup phases. The read model reports `allowed_actions: []`, so
+even a wired deck stays inert. No deck can record anything, and the Design
+review sheet remains the only place a human review is written.
 
 **A card's tool-call id must satisfy every provider it may be replayed to.**
 `supervisor.card_request_id` builds every card/present-files id as

@@ -270,8 +270,24 @@ Breeding-workspace note:
   navigation now yields to a focused control (space selects a radio) while the
   deck's own arrow buttons keep working. See
   [docs/plans/2026-07-28-design-deck-feedback-plan.md](docs/plans/2026-07-28-design-deck-feedback-plan.md)
-  for the surface descriptor, bridge, and review bindings this is the first
-  phase of; **no deck can yet record anything**.
+  for the bridge and review bindings this is an early phase of; **no deck can
+  yet record anything**.
+- **A rendered deck is registered, so a page can later prove it is one.**
+  Nothing about an HTML file distinguishes the deck DeerFlow rendered from any
+  other page an agent wrote, so `dbtl_design_feedback_surfaces` records which
+  cycle, stage attempt, round, evidence, and originating conversation a
+  particular deck's exact bytes belong to. It is **not** a review and grants no
+  authority by itself. Its bindings are server-owned — a deck that could assert
+  what it was rendered against could assert that a stale one is current — and
+  regeneration **supersedes rather than mutates**, because each old row is the
+  record of what somebody was actually shown. A review deck must name the
+  evidence it projects, matched by content hash rather than attachment order; a
+  paused meeting's deck must not, because there is no package yet. An
+  authenticated, project-scoped read endpoint reports those bindings and, in
+  this phase, always reports that nothing is actionable. Registration is
+  fail-soft today (the meeting's results are already committed when it runs) and
+  must become fail-visible at cutover, when an unregistered deck would mean an
+  owner who cannot answer.
 - The preflight card is also the meeting's setup form.
   `deerflow.dbtl.council_settings` renders one **editable participant card per
   seat** (`council_participants` on the artifact), prefilled with the roster

@@ -31,6 +31,7 @@ string, so what a reviewer will see is testable without running a meeting.
 from __future__ import annotations
 
 import html
+import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
@@ -114,6 +115,12 @@ def _disagreement_body(consensus: Consensus) -> str:
 #: it was opened from.
 INERT_NOTICE = "Open this deck in DeerFlow to respond."
 
+#: The envelope every bridge message carries. A dedicated source string means a
+#: page cannot accidentally answer for the deck, and the parent cannot mistake
+#: another frame's chatter for it.
+DECK_MESSAGE_SOURCE = "deerflow-design-deck"
+BRIDGE_PROTOCOL_VERSION = 1
+
 
 def _decision_cards(request: DecisionRequest) -> str:
     """The chair's options as a real radio group, shipped disabled.
@@ -143,7 +150,150 @@ def _decision_cards(request: DecisionRequest) -> str:
             f"</div>"
         )
     recommendation = f'<p class="recommendation"><span>Why the chair leans this way</span> {html.escape(_text(request.recommendation))}</p>' if request.recommendation else ""
-    return f'<fieldset class="decision" disabled><legend>{html.escape(_text(request.question, limit=600))}</legend><div class="options">{"".join(cards)}</div></fieldset>{recommendation}<p class="inert">{html.escape(INERT_NOTICE)}</p>'
+    # The comment and submit exist in the persisted file but are disabled. They
+    # are rendered here rather than injected by the parent so the reviewed bytes
+    # contain the whole surface: an approval binds to this file, and a control
+    # that appeared afterwards would not be part of what was hashed.
+    comment = f'<div class="comment"><label for="{html.escape(request.id)}--comment">Add a comment (optional)</label><textarea id="{html.escape(request.id)}--comment" data-deck-comment rows="3" disabled></textarea></div>'
+    submit = '<div class="submit-row"><button type="button" data-deck-submit disabled>Send to the meeting</button><p class="inert" data-deck-status role="status" aria-live="polite">' + html.escape(INERT_NOTICE) + "</p></div>"
+    return f'<fieldset class="decision" disabled><legend>{html.escape(_text(request.question, limit=600))}</legend><div class="options">{"".join(cards)}</div>{comment}</fieldset>{recommendation}{submit}'
+
+
+def _bridge_script(surface_id: str) -> str:
+    """The deck's half of the handshake, or nothing at all.
+
+    Emitted only for a deck the server registered. A legacy or unregistered deck
+    carries no bridge whatsoever — not a disabled one — because the safest
+    version of "this file cannot answer" is a file with no code that could.
+
+    The deck holds no endpoint, no token, and no way to reach a server. It
+    announces itself and waits; the authenticated parent decides whether
+    anything becomes live, and repeats every check server-side regardless.
+    """
+    if not surface_id:
+        return ""
+    # json.dumps escapes quotes and backslashes; the ``</`` split additionally
+    # prevents a literal ``</script>`` inside the value from closing this block.
+    encoded = json.dumps(surface_id).replace("</", "<\\/")
+    return _BRIDGE_TEMPLATE.replace("__SURFACE_ID__", encoded).replace("__PROTOCOL__", str(BRIDGE_PROTOCOL_VERSION)).replace("__SOURCE__", json.dumps(DECK_MESSAGE_SOURCE))
+
+
+_BRIDGE_TEMPLATE = """
+<script>
+(function () {
+  'use strict';
+  var SURFACE_ID = __SURFACE_ID__;
+  var PROTOCOL = __PROTOCOL__;
+  var SOURCE = __SOURCE__;
+
+  // Opened directly rather than framed: there is no parent to authenticate, so
+  // the deck stays exactly as it was persisted.
+  if (window.parent === window) { return; }
+
+  var channel = null;
+  var allowed = [];
+  var submitting = false;
+  // Latched once the surface is answered or replaced. The parent already
+  // refuses to re-initialize a settled surface, but a deck that would happily
+  // re-arm on a later 'initialize' leaves that as the parent's promise rather
+  // than the file's property — and this file is the part that travels.
+  var settled = false;
+
+  var fieldset = document.querySelector('fieldset.decision');
+  var submit = document.querySelector('[data-deck-submit]');
+  var status = document.querySelector('[data-deck-status]');
+  var comment = document.querySelector('[data-deck-comment]');
+
+  function say(text) { if (status) { status.textContent = text; } }
+
+  function send(type, extra) {
+    var payload = { source: SOURCE, protocol: PROTOCOL, surfaceId: SURFACE_ID, type: type };
+    if (channel) { payload.channel = channel; }
+    if (extra) { for (var key in extra) { if (Object.prototype.hasOwnProperty.call(extra, key)) { payload[key] = extra[key]; } } }
+    // No secret crosses this boundary, so a wildcard target is acceptable; the
+    // parent authenticates by source window, channel, and its own server call.
+    window.parent.postMessage(payload, '*');
+  }
+
+  function setEnabled(on) {
+    if (fieldset) { fieldset.disabled = !on; }
+    if (submit) { submit.disabled = !on; }
+    if (comment) { comment.disabled = !on; }
+  }
+
+  function selected() {
+    var checked = document.querySelector('fieldset.decision input[type="radio"]:checked');
+    return checked ? checked.value : '';
+  }
+
+  if (submit) {
+    submit.addEventListener('click', function () {
+      if (submitting || !channel || allowed.indexOf('chair_option') === -1) { return; }
+      var option = selected();
+      if (!option) { say('Choose one option first.'); return; }
+      submitting = true;
+      setEnabled(false);
+      say('Sending your decision...');
+      // The draft is kept in the DOM, so a failure can re-enable exactly what
+      // the person had typed rather than asking them to retype it.
+      send('submit_intent', {
+        action: { kind: 'chair_option', optionIds: [option] },
+        comment: comment ? comment.value : ''
+      });
+    });
+  }
+
+  window.addEventListener('message', function (event) {
+    if (event.source !== window.parent) { return; }
+    var data = event.data;
+    if (!data || typeof data !== 'object') { return; }
+    if (data.source !== SOURCE) { return; }
+    if (data.protocol !== PROTOCOL) { return; }
+    if (data.surfaceId !== SURFACE_ID) { return; }
+    // Every message after the handshake must carry the channel the parent
+    // issued for this mount. Convenience against cross-talk, not authority.
+    if (data.type !== 'initialize' && data.channel !== channel) { return; }
+
+    if (data.type === 'initialize') {
+      // A surface that has been answered or superseded is not re-openable.
+      if (settled) { return; }
+      channel = typeof data.channel === 'string' && data.channel ? data.channel : null;
+      allowed = Array.isArray(data.allowedActions) ? data.allowedActions.slice(0, 8) : [];
+      submitting = false;
+      var live = !!channel && allowed.indexOf('chair_option') !== -1;
+      setEnabled(live);
+      say(live ? 'Choose an option, then send it to the meeting.' : (typeof data.note === 'string' && data.note ? data.note : 'This round is read-only.'));
+      return;
+    }
+    if (data.type === 'pending') { submitting = true; setEnabled(false); say('Sending your decision...'); return; }
+    if (data.type === 'accepted') {
+      submitting = false;
+      settled = true;
+      setEnabled(false);
+      say(typeof data.note === 'string' && data.note ? data.note : 'Recorded. The meeting is resuming in the conversation it started in.');
+      return;
+    }
+    if (data.type === 'stale') {
+      submitting = false;
+      settled = true;
+      setEnabled(false);
+      say(typeof data.note === 'string' && data.note ? data.note : 'A newer round has replaced this one. Open the latest deck to respond.');
+      return;
+    }
+    if (data.type === 'failed') {
+      // Re-enable rather than clear: the draft is still the person's, and the
+      // parent reuses the same submission id when they try again.
+      submitting = false;
+      setEnabled(true);
+      say(typeof data.note === 'string' && data.note ? data.note : 'That did not go through. Your choice is still here — try again.');
+      return;
+    }
+  });
+
+  send('ready');
+})();
+</script>
+"""
 
 
 def _decision_items(consensus: Consensus | None, clarification_question: str) -> list[str]:
@@ -166,6 +316,7 @@ def render_council_deck(
     package_path: str = "",
     clarification_question: str = "",
     decision_request: DecisionRequest | None = None,
+    surface_id: str = "",
     generated_at: datetime | None = None,
 ) -> str:
     """The meeting's outcome as one self-contained HTML slide deck."""
@@ -240,6 +391,7 @@ def render_council_deck(
         title=html.escape(f"{cycle_title or 'Design meeting'} — {stage_title}"),
         slides="".join(slides),
         count=len(slides),
+        bridge=_bridge_script(surface_id),
     )
 
 
@@ -368,6 +520,7 @@ _DECK_TEMPLATE = """<!doctype html>
   show(0);
 }})();
 </script>
+{bridge}
 </body>
 </html>
 """

@@ -37,6 +37,7 @@ operators to notice and decide.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import sqlalchemy as sa
 from alembic import op
@@ -175,6 +176,44 @@ def safe_add_column(table: str, column: sa.Column) -> None:
         return
     with op.batch_alter_table(table) as batch:
         batch.add_column(column)
+
+
+def safe_create_table(table: str, create: Callable[[], None]) -> None:
+    """Run a table-creating revision only when the table is genuinely absent.
+
+    A revision that introduces a new table cannot assume the table is missing
+    just because its own revision has not been applied. A database whose
+    alembic ledger sits behind its physical schema — stamped at an older
+    revision after a full ``Base.metadata.create_all``, which is exactly the
+    drift `0015` exists to repair — already has every ORM table, so a bare
+    ``op.create_table`` aborts the whole upgrade with "table already exists"
+    and strands that database one revision short of head.
+
+    ``create`` is a callable rather than a table definition so the revision
+    keeps ownership of its own DDL, including the indexes that must be created
+    with the table and skipped with it.
+
+    Like :func:`safe_add_column`, an existing table is left exactly as it is and
+    the skip is logged rather than repaired: a table that exists with the wrong
+    shape is an operator's decision to make, and silently altering it here would
+    be a schema change nobody reviewed.
+    """
+    insp = _inspector()
+    if table in insp.get_table_names():
+        logger.warning(
+            "safe_create_table: %s already exists; skipping creation. If this database predates the revision, verify the table matches the model definition.",
+            table,
+        )
+        return
+    create()
+
+
+def safe_drop_table(table: str) -> None:
+    """``op.drop_table`` that no-ops when the table is already gone."""
+    insp = _inspector()
+    if table not in insp.get_table_names():
+        return
+    op.drop_table(table)
 
 
 def safe_drop_column(table: str, column_name: str) -> None:

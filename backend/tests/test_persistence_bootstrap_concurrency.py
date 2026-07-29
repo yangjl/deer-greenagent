@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0021_run_cancel_request"
+HEAD = "0022_dbtl_design_feedback_surface"
 
 
 def _url(tmp_path: Path) -> str:

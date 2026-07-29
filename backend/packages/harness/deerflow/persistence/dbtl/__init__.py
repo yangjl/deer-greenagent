@@ -3,12 +3,18 @@ from deerflow.persistence.dbtl.cycles import (
     DbtlRevisionConflict,
     DbtlWorkflowRefused,
 )
+from deerflow.persistence.dbtl.design_feedback_ops import (
+    DECK_SCHEMA_VERSION,
+    SURFACE_MODES,
+    DesignFeedbackOpsMixin,
+)
 from deerflow.persistence.dbtl.model import (
     DbtlArtifactRow,
     DbtlBuildLineageRow,
     DbtlCutoverDecisionRow,
     DbtlCycleRow,
     DbtlDatasetRow,
+    DbtlDesignFeedbackSurfaceRow,
     DbtlEventRow,
     DbtlGateEvaluationRow,
     DbtlReviewRow,
@@ -39,6 +45,7 @@ from deerflow.persistence.dbtl.sql import (
 )
 
 __all__ = [
+    "DECK_SCHEMA_VERSION",
     "RECONCILIATION_KIND",
     "DbtlArtifactRow",
     "DbtlBuildLineageRow",
@@ -47,6 +54,7 @@ __all__ = [
     "DbtlCycleRepository",
     "DbtlCycleRow",
     "DbtlDatasetRow",
+    "DbtlDesignFeedbackSurfaceRow",
     "DbtlEventRow",
     "DbtlGateEvaluationRow",
     "DbtlGovernanceRepository",
@@ -68,6 +76,8 @@ __all__ = [
     "KnowledgePublicationRow",
     "KnowledgePromotionRow",
     "MemoryCandidateRow",
+    "DesignFeedbackOpsMixin",
     "ReconciliationOpsMixin",
+    "SURFACE_MODES",
     "WorkItemRow",
 ]

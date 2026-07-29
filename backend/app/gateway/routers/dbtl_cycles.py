@@ -234,6 +234,49 @@ async def list_activity(project_id: str, cycle_id: str, request: Request, repo=D
     return {"cycle_id": cycle_id, "events": await repo.list_activity(cycle_id, project_id=project_id)}
 
 
+@router.get("/projects/{project_id}/dbtl/cycles/{cycle_id}/design-feedback/{surface_id}")
+@require_permission("threads", "read")
+async def get_design_feedback_surface(
+    project_id: str,
+    cycle_id: str,
+    surface_id: str,
+    request: Request,
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    """Resolve a rendered Design deck to what the server knows about it.
+
+    This is what a parent application asks before treating any HTML as a Design
+    surface. It is deliberately a **read**: it reports what a deck is bound to
+    and what may be done with it, and in this phase the answer is always
+    "nothing" — the bridge and the in-deck transitions do not exist yet, so
+    advertising an action would describe a capability that is not there.
+
+    Available in every mode, including ``audit_only``. A read model that
+    disappeared when mutations were off could not tell an owner *why* their deck
+    is inert, which is the one thing they need to know in that state.
+    """
+    await _require_project(project_id, request)
+    surface = await repo.get_design_feedback_surface(surface_id, project_id=project_id)
+    # The cycle in the path is part of the addressing rule: a surface that
+    # resolves under a different cycle is not this cycle's to serve.
+    if surface is None or surface["cycle_id"] != cycle_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Feedback surface not found")
+
+    newest = await repo.latest_design_feedback_surface(project_id=project_id, cycle_id=cycle_id)
+    return {
+        **surface,
+        # Where to go when this deck is no longer the live one. Reported even
+        # for a current surface so a client never has to guess whether the
+        # absence of this field means "current" or "unknown".
+        "newest_surface_id": (newest or {}).get("surface_id"),
+        # Phase 1 registers decks; it does not make them answerable. Both keys
+        # are served rather than omitted so a client cannot read a missing key
+        # as permission.
+        "allowed_actions": [],
+        "interactive": False,
+    }
+
+
 # ── Mutations ────────────────────────────────────────────────────────────
 
 
