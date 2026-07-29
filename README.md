@@ -531,6 +531,71 @@ branch, preserve GreenAgent refactors, test, and then fast-forward
 - [SECURITY.md](./SECURITY.md) — security policy
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — contribution guide
 
+- [Contributing Guide](CONTRIBUTING.md) - Development environment setup and workflow
+- [Configuration Guide](backend/docs/CONFIGURATION.md) - Setup and configuration instructions
+- [Architecture Overview](backend/CLAUDE.md) - Technical architecture details
+- [Backend Architecture](backend/README.md) - Backend architecture and API reference
+
+## ⚠️ Security Notice
+
+### Improper Deployment May Introduce Security Risks
+
+DeerFlow has key high-privilege capabilities including **system command execution, resource operations, and business logic invocation**, and is designed by default to be **deployed in a local trusted environment (accessible only via the 127.0.0.1 loopback interface)**. If you deploy the agent in untrusted environments — such as LAN networks, public cloud servers, or other multi-endpoint accessible environments — without strict security measures, it may introduce security risks, including:
+
+- **Unauthorized illegal invocation**: Agent functionality could be discovered by unauthorized third parties or malicious internet scanners, triggering bulk unauthorized requests that execute high-risk operations such as system commands and file read/write, potentially causing serious security consequences.
+- **Compliance and legal risks**: If the agent is illegally invoked to conduct cyberattacks, data theft, or other illegal activities, it may result in legal liability and compliance risks.
+
+### Security Recommendations
+
+**Note: We strongly recommend deploying DeerFlow in a local trusted network environment.** If you need cross-device or cross-network deployment, you must implement strict security measures, such as:
+
+- **IP allowlist**: Use `iptables`, or deploy hardware firewalls / switches with Access Control Lists (ACL), to **configure IP allowlist rules** and deny access from all other IP addresses.
+- **Authentication gateway**: Configure a reverse proxy (e.g., nginx) and **enable strong pre-authentication**, blocking any unauthenticated access.
+- **Network isolation**: Where possible, place the agent and trusted devices in the **same dedicated VLAN**, isolated from other network devices.
+- **Stay updated**: Continue to follow DeerFlow's security feature updates.
+
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
+
+Backend `make test` is offline by default and excludes live external-API
+coverage. Maintainers can explicitly run the real `DeerFlowClient` integration
+suite with `cd backend && make test-live` after providing a valid root
+`config.yaml` and API credentials; this may incur API costs and create local
+sandboxes, artifacts, or files. Direct pytest runs additionally require
+`DEER_FLOW_RUN_LIVE_TESTS=1`.
+
+Regression coverage includes Docker sandbox mode detection and provisioner kubeconfig-path handling tests in `backend/tests/`.
+Backend blocking-IO diagnostics are available from the repository root with
+`make detect-blocking-io`: it statically scans backend business code for
+blocking IO that may run on the backend event loop, prints a concise summary,
+and writes complete JSON findings to `.deer-flow/blocking-io-findings.json`.
+The JSON includes compact review records with `priority`, `location`,
+`blocking_call`, `event_loop_exposure`, `reason`, and `code`.
+Gateway artifact serving now forces active web content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) to download as attachments instead of inline rendering, reducing XSS risk for generated artifacts.
+
+## License
+
+This project is open source and available under the [MIT License](./LICENSE).
+
+## Acknowledgments
+
+DeerFlow is built upon the incredible work of the open-source community. We are deeply grateful to all the projects and contributors whose efforts have made DeerFlow possible. Truly, we stand on the shoulders of giants.
+
+We would like to extend our sincere appreciation to the following projects for their invaluable contributions:
+
+- **[LangChain](https://github.com/langchain-ai/langchain)**: Their exceptional framework powers our LLM interactions and chains, enabling seamless integration and functionality.
+- **[LangGraph](https://github.com/langchain-ai/langgraph)**: Their innovative approach to multi-agent orchestration has been instrumental in enabling DeerFlow's sophisticated workflows.
+
+These projects exemplify the transformative power of open-source collaboration, and we are proud to build upon their foundations.
+
+### Key Contributors
+
+A heartfelt thank you goes out to the core authors of `DeerFlow`, whose vision, passion, and dedication have brought this project to life:
+
+- **[Daniel Walnut](https://github.com/hetaoBackend/)**
+- **[Henry Li](https://github.com/magiccube/)**
+
 ## Upstream and license
 
 GreenAgent is a maintained customization of
