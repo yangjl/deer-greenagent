@@ -18,6 +18,8 @@ else
     RUN_WITH_GIT_BASH =
 endif
 
+FRONTEND_PNPM = $(PYTHON) ../scripts/pnpm.py
+
 help:
 	@echo "DeerFlow Development Commands:"
 	@echo "  make setup           - Interactive setup wizard (recommended for new users)"
@@ -113,7 +115,7 @@ install:
 	@echo "Installing backend dependencies..."
 	@cd backend && uv sync
 	@echo "Installing frontend dependencies..."
-	@cd frontend && pnpm install
+	@cd frontend && $(FRONTEND_PNPM) install
 	@echo "Installing pre-commit hooks..."
 	@uv tool install pre-commit
 	@pre-commit install --overwrite
