@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en" data-themes="engineering-whiteprint">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DBTL Deep Dive · Drought-Tolerance Marker Validation</title>
+  <link rel="stylesheet" href="assets/fonts.css">
+  <link rel="stylesheet" href="assets/base.css">
+  <link id="theme-link" rel="stylesheet" href="assets/themes/engineering-whiteprint.css">
+  <link rel="stylesheet" href="assets/animations/animations.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="tpl-tech-sharing">
+<div class="deck">
+
+  <section class="slide cover" data-title="DBTL deep dive">
+    <p class="kicker">deerflow / implementation deep dive</p>
+    <h1 class="h1 anim-fade-up" data-anim="fade-up">How the current<br><span class="accent-rule">DBTL system</span> works</h1>
+    <p class="lede">A code-level walkthrough using drought-tolerance marker validation—from chat request to governed project knowledge.</p>
+    <div class="cover-meta mono">
+      <span>LangGraph</span><span>prompts</span><span>tool calls</span><span>memory</span><span>human gates</span>
+    </div>
+    <div class="deck-footer"><span>TECHNICAL WALKTHROUGH · CURRENT REPOSITORY</span><span>01 / 20</span></div>
+    <div class="notes">
+      Start with the simple mental model: DBTL is a governed evidence pipeline. The AI may execute and propose; humans own the scientific decisions. The maize marker, data dimensions, model, and thresholds in this deck are an illustrative experiment. The orchestration, validation, persistence, memory, and review behavior are the current implementation.
+    </div>
+  </section>
+
+  <section class="slide" data-title="The one-sentence model">
+    <p class="kicker">00 / mental model</p>
+    <h2 class="h2">One request becomes an evidence pipeline.</h2>
+    <div class="flow mt-l">
+      <div class="flow-node"><b>Design</b><small>What would convince us?</small></div>
+      <span class="arrow">→</span>
+      <div class="flow-node"><b>Reconcile</b><small>Are inputs trustworthy?</small></div>
+      <span class="arrow">→</span>
+      <div class="flow-node"><b>Build</b><small>Run reproducibly</small></div>
+      <span class="arrow">→</span>
+      <div class="flow-node"><b>Test</b><small>Try to invalidate</small></div>
+      <span class="arrow">→</span>
+      <div class="flow-node"><b>Learn</b><small>Propose knowledge</small></div>
+    </div>
+    <div class="callout mt-l">
+      <span class="callout-label">Invariant</span>
+      <p>Agents create structured evidence. <strong>Humans approve gates, adjudicate judgement calls, and publish knowledge.</strong></p>
+    </div>
+    <div class="grid g3 mt-l">
+      <div class="micro"><b>Durable</b><span>Every attempt, failure, review, and transition is recorded.</span></div>
+      <div class="micro"><b>Project-scoped</b><span>Cycle, files, thread, and retrieval all resolve to one project.</span></div>
+      <div class="micro"><b>Replay-safe</b><span>Idempotency prevents a retry from silently dispatching work twice.</span></div>
+    </div>
+    <div class="deck-footer"><span>THE SIMPLE EXPLANATION</span><span>02 / 20</span></div>
+    <div class="notes">
+      DBTL means Design, Build, Test, Learn, with Data Reconciliation as a real gate between Design and Build. “Governed” means a persuasive answer cannot skip an approval boundary. The ordinary chat agent is still available; DBTL is a one-request routing choice inside a project conversation.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Worked example">
+    <p class="kicker">01 / worked example · illustrative biology</p>
+    <h2 class="h2">Can this allele improve yield under drought?</h2>
+    <div class="grid split-example mt-m">
+      <div>
+        <div class="specimen">
+          <span class="specimen-label">candidate marker</span>
+          <strong>chr3:145,678,902</strong>
+          <span class="allele">A → G</span>
+        </div>
+        <p class="question">Does the <b>G allele</b> improve grain yield under managed drought—independent of population structure—without an unacceptable well-watered penalty?</p>
+      </div>
+      <div class="data-sheet">
+        <div><span>Germplasm</span><b>1,200 doubled-haploid maize lines</b></div>
+        <div><span>Environments</span><b>4 sites × 2 years</b></div>
+        <div><span>Treatments</span><b>managed drought + well-watered</b></div>
+        <div><span>Inputs</span><b>VCF · phenotypes · pedigree · environments</b></div>
+      </div>
+    </div>
+    <div class="hypothesis mt-l">
+      <span>H₁</span>
+      <code>β(marker × drought) ≥ +0.25 t/ha</code>
+      <span class="plus">and</span>
+      <code>well-watered penalty ≤ 0.10 t/ha</code>
+    </div>
+    <p class="fineprint">Illustrative domain thresholds. DeerFlow supplies the governance machinery; the project owner must approve the scientific criteria.</p>
+    <div class="deck-footer"><span>DROUGHT-TOLERANCE MARKER VALIDATION</span><span>03 / 20</span></div>
+    <div class="notes">
+      The example is intentionally concrete enough to expose every DBTL stage. These files could live in the project workspace as genotypes.vcf.gz, phenotypes.parquet, pedigree.csv, and environments.csv. DeerFlow does not hardcode the mixed model or thresholds. Those become binding only when the human approves the Design package.
+    </div>
+  </section>
+
+  <section class="slide" data-title="From chat to cycle">
+    <p class="kicker">02 / request ingress</p>
+    <h2 class="h2">The chatbox scopes one request.</h2>
+    <div class="grid g2 mt-m">
+      <div class="chat-frame">
+        <div class="scope-row"><span class="flask">⚗</span><b>Start a new cycle</b><span>next request only</span></div>
+        <p>Validate whether the G allele at chr3:145,678,902 improves yield under managed drought…</p>
+      </div>
+      <div class="terminal light-terminal">
+        <div class="bar"><span>frontend · runContextPayload()</span></div>
+<pre><span class="kw">context</span>: {
+  dbtl_supervisor_enabled: <span class="bool">true</span>,
+  dbtl_explicit_choice: <span class="str">"start_cycle"</span>,
+  dbtl_selected_cycle_id: <span class="null">null</span>
+}</pre>
+      </div>
+    </div>
+    <div class="sequence mt-l">
+      <div><b>1</b><span>Gateway stamps durable <code>project_id</code> and project root</span></div>
+      <div><b>2</b><span>Supervisor routes to cycle setup</span></div>
+      <div><b>3</b><span>Agent proposes title, objective, inputs, criteria</span></div>
+      <div><b>4</b><span>Human confirms; only then is the cycle recorded</span></div>
+    </div>
+    <div class="deck-footer"><span>COMPOSER SCOPE → RUNTIME CONTEXT</span><span>04 / 20</span></div>
+    <div class="notes">
+      The flask control is not a permanent mode switch. It applies to the next request. The client’s project claim is not authoritative: the Gateway removes caller-supplied project identity and derives it from durable thread membership. Cycle setup is two-step; a proposal is not a cycle until the person confirms it.
+    </div>
+  </section>
+
+  <section class="slide" data-title="LangGraph topology">
+    <p class="kicker">03 / langgraph</p>
+    <h2 class="h2">A thin supervisor routes once.</h2>
+    <div class="graph mt-m">
+      <div class="graph-start">START</div>
+      <div class="graph-router">route(config, state)</div>
+      <div class="graph-branches">
+        <div><b>ordinary</b><small>real lead-agent graph</small></div>
+        <div><b>clarification</b><small>ask for missing scope</small></div>
+        <div><b>cycle_setup</b><small>propose / confirm</small></div>
+        <div><b>continuation</b><small>execute active stage</small></div>
+      </div>
+      <div class="graph-end">END</div>
+    </div>
+    <div class="terminal light-terminal compact-code mt-l">
+      <div class="bar"><span>agents/dbtl/supervisor.py · build_supervisor_graph()</span></div>
+<pre>builder = <span class="fn">StateGraph</span>(state_schema)
+builder.<span class="fn">add_node</span>(SupervisorBranch.ORDINARY.value, lead_agent)
+builder.<span class="fn">add_conditional_edges</span>(START, route, [b.value <span class="kw">for</span> b <span class="kw">in</span> SupervisorBranch])
+<span class="kw">for</span> branch <span class="kw">in</span> SupervisorBranch:
+    builder.<span class="fn">add_edge</span>(branch.value, END)</pre>
+    </div>
+    <div class="deck-footer"><span>ONE REQUEST · ONE TERMINAL BRANCH</span><span>05 / 20</span></div>
+    <div class="notes">
+      This is not a second agent replacing ordinary chat. The ordinary node is the compiled lead-agent graph itself. The supervisor is enabled only when dbtl.mode is graph_enabled, the thread belongs to a project, and this request opted in. Every branch terminates, so one user request does not loop among orchestration branches.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Routing and scope">
+    <p class="kicker">04 / fail-closed scope</p>
+    <h2 class="h2">Routing preference is not authorization.</h2>
+    <div class="grid g2 mt-m">
+      <div>
+        <h3 class="subhead">Routing precedence</h3>
+        <ol class="ranked">
+          <li><b>Explicit user choice</b><span>start / continue / ordinary</span></li>
+          <li><b>Typed cycle intent</b><span>“start a new cycle…”</span></li>
+          <li><b>Selected cycle</b><span>continue its active stage</span></li>
+          <li><b>No project</b><span>ordinary work</span></li>
+          <li><b>Classifier</b><span>last resort only</span></li>
+        </ol>
+      </div>
+      <div class="boundary">
+        <h3 class="subhead">Authority boundary</h3>
+        <div class="boundary-row"><span>Client</span><code>selected_cycle_id</code><b>preference</b></div>
+        <div class="boundary-row"><span>Gateway</span><code>project_id / root</code><b>durable truth</b></div>
+        <div class="boundary-row"><span>Adapter</span><code>cycle.project_id</code><b>verified</b></div>
+        <p>A mismatched cycle never reaches worker dispatch.</p>
+      </div>
+    </div>
+    <div class="code-path mt-l"><code>composer-scope.ts</code><span>→</span><code>gateway/services.py</code><span>→</span><code>dbtl/routing.py</code><span>→</span><code>LiveStageAdapter.execute()</code></div>
+    <div class="deck-footer"><span>PROJECT / CYCLE ISOLATION</span><span>06 / 20</span></div>
+    <div class="notes">
+      This slide separates three concepts that are easy to confuse: user intent, runtime selection, and durable authorization. The selected cycle tells the router what the user wants. The live adapter must still load the cycle and prove it belongs to the runtime project before creating a work unit.
+    </div>
+  </section>
+
+  <section class="slide" data-title="State machine and gates">
+    <p class="kicker">05 / durable governance</p>
+    <h2 class="h2">Progress is a state machine, not a persuasive reply.</h2>
+    <div class="state-line mt-l">
+      <div><span>DESIGN</span><b>awaiting_review</b></div>
+      <i>human approval</i>
+      <div><span>RECONCILIATION</span><b>awaiting_review</b></div>
+      <i>human approval</i>
+      <div><span>BUILD</span><b>locked → in_progress</b></div>
+    </div>
+    <div class="review-grid mt-l">
+      <div class="decision approve"><b>Approve</b><span>binds artifact hash + versions</span></div>
+      <div class="decision changes"><b>Request changes</b><span>starts a focused refinement round</span></div>
+      <div class="decision reject"><b>Reject</b><span>ends this attempt</span></div>
+    </div>
+    <div class="terminal light-terminal compact-code mt-l">
+      <div class="bar"><span>cycle_state.py · HumanGatePolicy</span></div>
+<pre><span class="kw">class</span> <span class="fn">HumanGatePolicy</span>:
+    allows_agent_approval = <span class="bool">False</span>  <span class="cmt"># invariant</span>
+
+<span class="cmt"># “approve this” in chat cannot satisfy a gate.</span>
+<span class="cmt"># POST .../stages/{stage}/review uses server-owned reviewer identity.</span></pre>
+    </div>
+    <div class="deck-footer"><span>OPTIMISTIC CONCURRENCY · HUMAN REVIEW</span><span>07 / 20</span></div>
+    <div class="notes">
+      Stage records have statuses such as locked, in_progress, awaiting_review, changes_requested, approved, and rejected. Review writes require an authenticated human, rationale, idempotency key, and expected db_revision. Build unlocks only after both Design and Reconciliation are approved.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Design council">
+    <p class="kicker">06 / design council</p>
+    <h2 class="h2">The roster is shown before anyone runs.</h2>
+    <div class="grid council-grid mt-m">
+      <div class="seat"><span>POSITION 1</span><b>Quantitative geneticist</b><small>causal structure, kinship, G×E</small></div>
+      <div class="seat"><span>POSITION 2</span><b>Breeding trial methodologist</b><small>fold design, environment transfer</small></div>
+      <div class="seat red"><span>RED TEAM</span><b>Skeptical validator</b><small>leakage, direction, confounding</small></div>
+      <div class="seat chair"><span>CHAIR</span><b>Synthesis</b><small>preserve disagreements; do not average</small></div>
+    </div>
+    <div class="depth mt-l">
+      <div><b>Light</b><span>1 position + red team + chair</span></div>
+      <div class="selected"><b>Medium</b><span>up to 2 positions + red team + chair</span></div>
+      <div><b>Heavy</b><span>up to 4 positions + red team + chair</span></div>
+      <div><b>Write it myself</b><span>zero worker runs; human attribution</span></div>
+    </div>
+    <p class="notice mt-m"><b>Current local configuration:</b> no specialist <code>dbtl_capabilities</code> are declared, so the validated seats resolve to <code>general-purpose</code> stand-ins with distinct focus and briefs.</p>
+    <div class="deck-footer"><span>PREFLIGHT CARD · NO DISPATCH BEFORE ANSWER</span><span>08 / 20</span></div>
+    <div class="notes">
+      A one-shot nostream model proposes the roster for this question. Each seat is validated independently: unknown agents, unsupported models, unknown capabilities, and empty briefs are refused rather than silently substituted. Bash is registered as a subagent but explicitly excluded from deliberative seats. Duplicate briefs collapse. If proposal generation fails, the system falls back to deterministic capability selection.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Prompt anatomy">
+    <p class="kicker">07 / prompt construction</p>
+    <h2 class="h2">A worker sees a layered, bounded prompt.</h2>
+    <div class="prompt-stack mt-m">
+      <div><span>1</span><b>Subagent system prompt</b><code>general_purpose.py</code><small>tool rules, no nested delegation, no human gate authority</small></div>
+      <div><span>2</span><b>StageSpec instructions</b><code>generic:design:v2</code><small>required inputs, outputs, validity gates, budgets</small></div>
+      <div><span>3</span><b>Seat brief</b><code>focus + argument</code><small>what this position must independently examine</small></div>
+      <div><span>4</span><b>Stage context</b><code>JSON</code><small>request, manifest, datasets, prior rounds, approved Design</small></div>
+      <div><span>5</span><b>Result contract</b><code>StageWorkerResult</code><small>claims, evidence, checks, limitations, provenance</small></div>
+    </div>
+    <div class="prompt-excerpt mt-l">
+      <span class="line-no">constraint</span>
+      <p>“Every substantive claim must cite an evidence reference. Do not approve a stage. Report contradictory sources; do not resolve a judgement call for the human.”</p>
+    </div>
+    <div class="deck-footer"><span>NOSTREAM INTERNAL CALLS</span><span>09 / 20</span></div>
+    <div class="notes">
+      Roster drafting and internal council calls are tagged nostream: raw prompts, reasoning, and tool output do not leak into the parent chat or its history. The project context is bounded: it contains a file manifest and structured records, not an unbounded dump of every file. A chair receives an additional structured consensus contract.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Tool calls">
+    <p class="kicker">08 / execution trace</p>
+    <h2 class="h2">“Tool call” means three different things here.</h2>
+    <div class="swimlanes mt-m">
+      <div class="lane">
+        <b>SERVER METHODS</b>
+        <code>_project_manifest()</code>
+        <code>record_worker_runs()</code>
+        <code>_write_stage_package()</code>
+        <small>deterministic orchestration</small>
+      </div>
+      <div class="lane">
+        <b>MODEL-CHOSEN TOOLS</b>
+        <code>read_file("phenotypes…")</code>
+        <code>bash("python analysis.py")</code>
+        <code>write_file("derived/…")</code>
+        <small>illustrative calls; actual choice depends on the task</small>
+      </div>
+      <div class="lane">
+        <b>SYNTHETIC UI MESSAGE</b>
+        <code>present_files([...])</code>
+        <small>emitted by supervisor after package write—not a worker tool call</small>
+      </div>
+    </div>
+    <div class="deny-row mt-l">
+      <span>Stage workers cannot call</span>
+      <code>task</code><code>ask_clarification</code><code>present_files</code>
+    </div>
+    <p class="fineprint">The model may use filesystem, shell, or configured web/MCP tools allowed by subagent configuration and authorization. The prompt records declared provenance, but orchestration remains server-owned.</p>
+    <div class="deck-footer"><span>SERVER ≠ MODEL ≠ UI SYNTHESIS</span><span>10 / 20</span></div>
+    <div class="notes">
+      This distinction prevents an inaccurate “everything is an LLM tool call” explanation. The server assembles context and writes durable packages. The worker chooses among its allowed tools. After successful packaging, the supervisor creates the existing present_files message shape so the frontend can open the artifact inspector.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Structured worker result">
+    <p class="kicker">09 / result contract</p>
+    <h2 class="h2">Free-form prose cannot satisfy a stage.</h2>
+    <div class="grid g2 mt-m">
+      <div class="terminal light-terminal json-code">
+        <div class="bar"><span>StageWorkerResult</span></div>
+<pre>{
+  <span class="key">"status"</span>: <span class="str">"completed"</span>,
+  <span class="key">"summary"</span>: <span class="str">"Marker effect estimated…"</span>,
+  <span class="key">"claims"</span>: [<span class="str">"G increases drought yield"</span>],
+  <span class="key">"evidence_refs"</span>: [{
+    <span class="key">"kind"</span>: <span class="str">"artifact"</span>,
+    <span class="key">"reference"</span>: <span class="str">"derived/model.json"</span>
+  }],
+  <span class="key">"limitations"</span>: [<span class="str">"site 4 sparse"</span>],
+  <span class="key">"quality_checks"</span>: [{
+    <span class="key">"name"</span>: <span class="str">"family folds"</span>,
+    <span class="key">"passed"</span>: <span class="bool">true</span>
+  }],
+  <span class="key">"provenance"</span>: { <span class="key">"tools_used"</span>: [<span class="str">"bash"</span>] }
+}</pre>
+      </div>
+      <div class="contract-rules">
+        <div><b>Claims need evidence</b><span>A claim with no evidence reference is rejected.</span></div>
+        <div><b>Needs-input needs a question</b><span>The status is invalid without a clarification question.</span></div>
+        <div><b>Capped runs are untrustworthy</b><span>Token, turn, loop, or deadline stops cannot count as completion.</span></div>
+        <div><b>Failures are still durable</b><span>Every worker outcome is persisted for audit and replay.</span></div>
+      </div>
+    </div>
+    <div class="deck-footer"><span>SCHEMA VALIDATION BEFORE GATE EVIDENCE</span><span>11 / 20</span></div>
+    <div class="notes">
+      The exact contract also includes artifact_refs, recommended_next_actions, clarification_question, and inputs_examined. The chair adds agreements, disagreements preserving both positions and resolution status, and open questions. If consensus parsing is malformed, the prose can remain but the structured consensus view is omitted.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Data reconciliation">
+    <p class="kicker">10 / data readiness</p>
+    <h2 class="h2">Build is locked until inputs are reconciled.</h2>
+    <div class="fingerprint mt-m">
+      <div><span>genotypes.vcf.gz</span><code>sha256: 52a4…90c1</code><b>immutable</b></div>
+      <div><span>phenotypes.parquet</span><code>sha256: 8de1…be72</code><b>immutable</b></div>
+      <div><span>pedigree.csv</span><code>sha256: c7f0…18ae</code><b>immutable</b></div>
+      <div class="dataset-fp"><span>DATASET FINGERPRINT</span><code>sha256(sorted declarations)</code></div>
+    </div>
+    <div class="matrix mt-l">
+      <div class="matrix-head"><span>check</span><span>agent may inspect</span><span>human must settle</span></div>
+      <div><span>IDs, units, missingness, duplicates</span><b>✓</b><em>when policy permits</em></div>
+      <div><span>contradictory sources / trait direction</span><b>✓ propose</b><strong>✓ judgement</strong></div>
+      <div><span>exclusions / implausible values</span><b>✓ propose</b><strong>✓ judgement</strong></div>
+      <div><span>leakage / train-test separation</span><b>✓ test</b><strong>✓ judgement</strong></div>
+    </div>
+    <p class="notice mt-m">Change one input hash → old reconciliation approval no longer binds → Build relocks.</p>
+    <div class="deck-footer"><span>CONTENT-BOUND APPROVALS</span><span>12 / 20</span></div>
+    <div class="notes">
+      Dataset declarations contain URI, SHA-256, immutable flag, and role. The dataset fingerprint is deterministic over the declaration set. Raw data must be declared immutable. Agents may find and propose resolutions, but contradictory sources, trait direction, exclusions, implausible values, leakage, and train/test separation remain human decisions at the write boundary.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Build">
+    <p class="kicker">11 / build · illustrative analysis</p>
+    <h2 class="h2">Build executes the approved design—then binds lineage.</h2>
+    <div class="model-formula mt-m">
+      <code>yield ~ marker + water + marker×water + environment + PC₁…PC₅</code>
+      <code>+ (1 | family) + (1 | environment) + genomic background</code>
+    </div>
+    <div class="grid g2 mt-l">
+      <div>
+        <h3 class="subhead">Approved validation plan</h3>
+        <ul class="checklist">
+          <li>Group folds by family</li>
+          <li>Leave-one-environment-out prediction</li>
+          <li>Later-year holdout</li>
+          <li>Drought and well-watered effects reported separately</li>
+        </ul>
+      </div>
+      <div>
+        <h3 class="subhead">Persisted build lineage</h3>
+        <ul class="checklist mono-list">
+          <li>dataset fingerprint</li>
+          <li>code + config revisions</li>
+          <li>Python / platform environment</li>
+          <li>versioned output hashes</li>
+          <li>deviations + logs URI</li>
+        </ul>
+      </div>
+    </div>
+    <p class="fineprint">If the workspace is not version-controlled, the lineage explicitly records <code>workspace:unversioned</code> as a deviation.</p>
+    <div class="deck-footer"><span>REPRODUCIBLE EXECUTION CONTRACT</span><span>13 / 20</span></div>
+    <div class="notes">
+      This statistical model is an example, not a built-in StageSpec. The current generic Build spec requires approved Design, approved Reconciliation, and the bound fingerprint. Build produces versioned artifacts and logs; it cannot overwrite raw inputs. The approved Design is injected with its content hash, not merely by path, so later edits cannot silently change the contract.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Test">
+    <p class="kicker">12 / test · validity dominates metrics</p>
+    <h2 class="h2">A strong headline can still be invalidated.</h2>
+    <div class="metrics mt-m">
+      <div><span>drought effect</span><b>+0.28 t/ha</b><small>threshold +0.25</small></div>
+      <div><span>positive environments</span><b>7 / 8</b><small>threshold 6 / 8</small></div>
+      <div><span>LOO-env prediction</span><b>r = .31</b><small>threshold .25</small></div>
+      <div><span>well-watered penalty</span><b>−0.04 t/ha</b><small>limit −0.10</small></div>
+    </div>
+    <div class="validity-tree mt-l">
+      <div class="gate bad-gate"><b>Leakage detected?</b><span>family relatives crossed folds</span></div>
+      <span class="big-arrow">→</span>
+      <div class="outcome invalid"><span>OUTCOME</span><b>invalidated</b><small>even though every headline threshold passed</small></div>
+    </div>
+    <div class="outcome-row mt-l">
+      <code>supported</code><code>not_supported</code><code>inconclusive</code><code class="active">invalidated</code>
+    </div>
+    <div class="deck-footer"><span>FAIL-CLOSED VALIDITY ASSESSMENT</span><span>14 / 20</span></div>
+    <div class="notes">
+      The generic predictive validity pack checks structure nulls, fold composition, ceiling and direction, leakage, tester holdout, within-group behavior, duplicates/relatedness, reproducibility, and reconciled inputs. Any implausible metric or failed required validity check dominates the headline metrics. Missing required evidence yields inconclusive. The final assessment is human-owned.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Learn">
+    <p class="kicker">13 / learn · knowledge authority</p>
+    <h2 class="h2">Learning proposes a claim; it does not publish one.</h2>
+    <div class="knowledge-flow mt-l">
+      <div><span>TEST OUTCOME</span><b>supported</b><small>human-owned assessment</small></div>
+      <span>→</span>
+      <div><span>LEARN WORKER</span><b>candidate</b><small>evidence-bound synthesis</small></div>
+      <span>→</span>
+      <div><span>HUMAN</span><b>promote / discard</b><small>project-scope decision</small></div>
+      <span>→</span>
+      <div><span>HUMAN</span><b>publish</b><small>explicit target projects</small></div>
+    </div>
+    <div class="candidate mt-l">
+      <span>PROVISIONAL CLAIM</span>
+      <p>“In the evaluated 1,200-line population and eight managed environments, the G allele is associated with higher drought yield after the approved adjustments.”</p>
+      <div><code>evidence: test-package@sha256</code><code>scope: project</code><code>status: provisional</code></div>
+    </div>
+    <p class="notice mt-m">Retraction or supersession removes active retrieval pointers but preserves the claim and event history.</p>
+    <div class="deck-footer"><span>CANDIDATE → PROMOTION → PUBLICATION</span><span>15 / 20</span></div>
+    <div class="notes">
+      Supported and not-supported outcomes can produce evidence-bound scientific candidates; inconclusive and invalidated outcomes cannot. Promotion and publication are separate human actions. Publication writes SQL audit records, portable Markdown projections, and bounded retrieval pointers. An agent, a stage approval, or a promotion cannot implicitly publish.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Memory">
+    <p class="kicker">14 / memory · exact current behavior</p>
+    <h2 class="h2">Memory helps conversation; stage evidence stays explicit.</h2>
+    <div class="memory-map mt-m">
+      <div class="memory-source">
+        <b>Project conversation</b>
+        <span>private project memory</span>
+        <span>shared / published knowledge</span>
+        <code>{user}--project--{hash(project_id)}</code>
+      </div>
+      <span class="memory-arrow">→</span>
+      <div class="memory-inject">
+        <b>Hidden HumanMessage</b>
+        <span>injected by DynamicContextMiddleware</span>
+        <small>not SystemMessage: memory has no elevated authority</small>
+      </div>
+    </div>
+    <div class="split-rule mt-l">
+      <div class="yes">
+        <b>Lead agent / ordinary chat</b>
+        <p>Reads scoped memory and learns from the current run’s user + final assistant messages.</p>
+      </div>
+      <div class="no">
+        <b>DBTL stage workers</b>
+        <p>Currently receive explicit <code>stage_context</code>, project files, SQL records, tools, and skills—<strong>not dynamic memory middleware</strong>.</p>
+      </div>
+    </div>
+    <p class="fineprint">StageSpec declares memory read/write policies, but the current LiveStageAdapter does not yet enforce those policies or inject dynamic memory into workers. Memory is never scientific evidence by itself.</p>
+    <div class="deck-footer"><span>CHAT CONTEXT ≠ STAGE EVIDENCE</span><span>16 / 20</span></div>
+    <div class="notes">
+      This is an important implementation detail. Project memory is keyed by user and project. Memory learning excludes tool chatter and uses only current-run messages. DBTL worker execution uses a different middleware chain, so evidence comes through explicit stage context and durable artifacts. Published knowledge can later become a governed retrieval pointer for project conversation.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Persistence and replay">
+    <p class="kicker">15 / persistence</p>
+    <h2 class="h2">SQL owns governance; the workspace owns artifacts.</h2>
+    <div class="grid persistence-grid mt-m">
+      <div>
+        <h3 class="subhead">Durable SQL records</h3>
+        <div class="table-list mono">
+          <span>dbtl_cycles</span><span>dbtl_stage_runs</span>
+          <span>dbtl_stage_worker_runs</span><span>dbtl_reviews</span>
+          <span>dbtl_datasets</span><span>dbtl_build_lineage</span>
+          <span>dbtl_validity_assessments</span><span>dbtl_artifacts</span>
+          <span>activity_events</span><span>dbtl_transitions</span>
+          <span>memory_candidates</span><span>knowledge_*</span>
+        </div>
+      </div>
+      <div>
+        <h3 class="subhead">Human-visible files</h3>
+        <div class="file-tree mono">
+          <span>/mnt/user-data/outputs/marker-validation/</span>
+          <span class="indent">design-round-01.md</span>
+          <span class="indent">design-round-01.<b>sha256</b>.json</span>
+          <span class="indent">reconciliation.<b>sha256</b>.json</span>
+          <span class="indent">build/<b>versioned outputs</b></span>
+          <span class="indent">test/validity-pack.<b>sha256</b>.json</span>
+        </div>
+      </div>
+    </div>
+    <div class="replay mt-l">
+      <code>dbtl-stage:{run_id}:{cycle_id}</code>
+      <span>same key</span>
+      <b>replay durable event—do not dispatch workers again</b>
+    </div>
+    <div class="deck-footer"><span>ATOMIC FILE WRITES · IDEMPOTENT EVENTS</span><span>17 / 20</span></div>
+    <div class="notes">
+      Exact filenames depend on stage and title; the pattern shown is illustrative. The implementation writes a structured JSON package and a reviewable Markdown document atomically using a temporary file, fsync, and replace. Approvals bind content hash, StageSpec version, and policy version. db_revision prevents stale concurrent review writes.
+    </div>
+  </section>
+
+  <section class="slide" data-title="End-to-end trace">
+    <p class="kicker">16 / complete trace</p>
+    <h2 class="h2">One continuation request, end to end.</h2>
+    <div class="trace mt-m">
+      <div><span>01</span><b>Composer</b><code>continue_cycle + cycle_id</code></div>
+      <div><span>02</span><b>Gateway</b><code>stamp project scope</code></div>
+      <div><span>03</span><b>LangGraph</b><code>route → continuation</code></div>
+      <div><span>04</span><b>LiveStageAdapter</b><code>verify project/cycle · replay check</code></div>
+      <div><span>05</span><b>StageSpec</b><code>resolve generic:{stage}:vN</code></div>
+      <div><span>06</span><b>Executor</b><code>dispatch bounded structured workers</code></div>
+      <div><span>07</span><b>Tools</b><code>read / analyze / write derived outputs</code></div>
+      <div><span>08</span><b>Validator</b><code>parse StageWorkerResult</code></div>
+      <div><span>09</span><b>Persistence</b><code>worker rows + activity events</code></div>
+      <div><span>10</span><b>Package</b><code>atomic JSON + Markdown + hash</code></div>
+      <div><span>11</span><b>Frontend</b><code>present_files + review sheet</code></div>
+      <div><span>12</span><b>Human</b><code>approve / changes / reject</code></div>
+    </div>
+    <div class="deck-footer"><span>REQUEST → EVIDENCE → HUMAN DECISION</span><span>18 / 20</span></div>
+    <div class="notes">
+      The Design stage adds two special controls: preflight roster confirmation before dispatch and a chair after position and red-team work. Task lifecycle events include council seat metadata, so the frontend can render seat role, focus, agent, model, stand-in status, round, and consensus counts without exposing hidden reasoning.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Code map">
+    <p class="kicker">17 / code map</p>
+    <h2 class="h2">Where to inspect each behavior.</h2>
+    <div class="code-map mt-m mono">
+      <div><b>Graph + branches</b><span>backend/packages/harness/deerflow/agents/dbtl/</span><code>supervisor.py · branches.py · stage_execution.py</code></div>
+      <div><b>Routing + state</b><span>backend/packages/harness/deerflow/dbtl/</span><code>routing.py · cycle_state.py · stage_spec.py</code></div>
+      <div><b>Prompts + contracts</b><span>backend/packages/harness/deerflow/dbtl/</span><code>stage_runner.py · worker_result.py · consensus.py</code></div>
+      <div><b>Council</b><span>backend/packages/harness/deerflow/dbtl/</span><code>council.py · council_proposal.py</code></div>
+      <div><b>Memory</b><span>backend/packages/harness/deerflow/agents/memory/</span><code>scope.py · middleware.py</code></div>
+      <div><b>Review API</b><span>backend/app/gateway/routers/</span><code>dbtl_cycles.py</code></div>
+      <div><b>Composer</b><span>frontend/src/core/dbtl/</span><code>composer-scope.ts</code></div>
+      <div><b>Council UI</b><span>frontend/src/components/workspace/messages/</span><code>debate-panel.tsx</code></div>
+    </div>
+    <div class="callout compact-callout mt-l">
+      <span class="callout-label">Current status</span>
+      <p>All five generic stages are executable. The framework is domain-neutral; this maize protocol becomes real only through approved project evidence and configuration.</p>
+    </div>
+    <div class="deck-footer"><span>IMPLEMENTATION REFERENCE</span><span>19 / 20</span></div>
+    <div class="notes">
+      Additional persistence definitions are in persistence/dbtl/model.py; reconciliation logic is in dbtl/reconciliation.py; validity calculation is in dbtl/validity.py; governed knowledge is in dbtl/knowledge.py. The frontend review sheets provide the authoritative review actions.
+    </div>
+  </section>
+
+  <section class="slide center tc" data-title="Questions">
+    <div class="qa">
+      <p class="kicker">18 / follow-up mode</p>
+      <div class="question-mark">?</div>
+      <h2 class="h2">Where should we zoom in?</h2>
+      <div class="qa-options">
+        <span>LangGraph routing</span>
+        <span>exact prompts</span>
+        <span>worker tool trace</span>
+        <span>reconciliation matrix</span>
+        <span>memory lifecycle</span>
+        <span>database schema</span>
+      </div>
+      <p class="lede">Ask a question, and we can walk through the exact code path or extend this marker example one stage at a time.</p>
+    </div>
+    <div class="deck-footer"><span>← → NAVIGATE · N NOTES · O OVERVIEW · F FULLSCREEN</span><span>20 / 20</span></div>
+    <div class="notes">
+      Suggested next walkthrough: take the illustrative request payload and trace it line-by-line through resolve_run_agent_factory, route_supervisor_request, LiveStageAdapter.execute, StageSpec resolution, SubagentExecutor, StageWorkerResult parsing, package writing, and review persistence.
+    </div>
+  </section>
+
+</div>
+<script src="assets/runtime.js"></script>
+</body>
+</html>

@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en" data-themes="engineering-whiteprint">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Design Meeting Deck Feedback · Implementation Plan</title>
+  <link rel="stylesheet" href="assets/fonts.css">
+  <link rel="stylesheet" href="assets/base.css">
+  <link id="theme-link" rel="stylesheet" href="assets/themes/engineering-whiteprint.css">
+  <link rel="stylesheet" href="assets/animations/animations.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="tpl-tech-sharing">
+<div class="deck">
+
+  <section class="slide cover" data-title="Deck feedback plan">
+    <div class="plan-stamp">PROPOSED · NO CODE CHANGED</div>
+    <p class="kicker">deerflow / dbtl design stage</p>
+    <h1 class="h1 anim-fade-up" data-anim="fade-up">The deck stops<br>being a handout.<br><span class="accent-rule">It becomes the desk.</span></h1>
+    <p class="lede">Making the design meeting's slide deck the single place a project owner answers the chair, submits for review, and records a verdict — without letting untrusted HTML near a database.</p>
+    <div class="cover-meta mono">
+      <span>one input surface</span><span>untrusted iframe</span><span>hash-bound review</span><span>fail-closed</span><span>7 phases</span>
+    </div>
+    <div class="deck-footer"><span>PLAN WALKTHROUGH · docs/plans/2026-07-28-design-deck-feedback-plan.md</span><span>01 / 18</span></div>
+    <div class="notes">
+      This deck walks the proposed plan, not shipped behavior. Nothing in the repository implements it yet. The plan is deliberately opinionated about one thing: a page rendered by an agent may collect a decision, but it must never be the thing that authorizes it. Everything else in the plan follows from that split.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Today: three surfaces">
+    <p class="kicker">01 / the problem</p>
+    <h2 class="h2">One decision currently lives in three places.</h2>
+    <p class="lede">A design meeting ends, and the owner has to assemble the decision from surfaces that each hold part of it.</p>
+    <div class="surfaces mt-m">
+      <div class="surface-card deck-now">
+        <span>surface 1 · read only</span>
+        <b>The slide deck</b>
+        <p>Renders the recorded chair result — agreements, contested points, synthesis. It cannot collect anything, and it tells the owner to go to the review sheet.</p>
+        <code>council_deck.render_council_deck</code>
+      </div>
+      <div class="surface-card card-now">
+        <span>surface 2 · in chat</span>
+        <b>The clarification card</b>
+        <p>A paused chair raises a standard <code>ask_clarification</code>. Answering it in chat resumes only the chair, over the positions already recorded.</p>
+        <code>human-input-card.tsx</code>
+      </div>
+      <div class="surface-card sheet-now">
+        <span>surface 3 · in the rail</span>
+        <b>The Design review sheet</b>
+        <p>Owns submit-for-review and the approve / request changes / reject verdict. It is the only place a durable, revision-bound review can be written.</p>
+        <code>project-rail/design-review.tsx</code>
+      </div>
+    </div>
+    <div class="friction mt-l">
+      <span>THE COST</span>
+      <p>The evidence, the question, and the authority to answer it are three different screens. Even the chat shortcut just points back at the sheet.</p>
+    </div>
+    <div class="deck-footer"><span>WHY THIS PLAN EXISTS</span><span>02 / 18</span></div>
+    <div class="notes">
+      Worth naming the most recent change here: the stabilization commit made explicit review language in cycle-scoped chat a deterministic control boundary, so typing "approve" no longer invokes a model — it immediately directs the reviewer to the revision-bound project review action. That was the right fix, and it is also a fourth pointer at the same sheet. The plan's argument is that the pointer should not be necessary.
+    </div>
+  </section>
+
+  <section class="slide" data-title="The proposal">
+    <p class="kicker">02 / the outcome</p>
+    <h2 class="h2">The deck becomes the only input surface.</h2>
+    <div class="flow mt-m">
+      <div class="flow-node"><b>meeting</b><small>participants argue; the chair synthesizes</small></div>
+      <span class="arrow">→</span>
+      <div class="flow-node"><b>chair result</b><small>recorded, validated, hashed</small></div>
+      <span class="arrow">→</span>
+      <div class="flow-node"><b>feedback deck</b><small>revision-bound projection of that result</small></div>
+      <span class="arrow">→</span>
+      <div class="flow-node human"><b>human choice</b><small>answer · submit · approve · reject</small></div>
+      <span class="arrow">→</span>
+      <div class="flow-node"><b>resume or record</b><small>same conversation, or a durable review</small></div>
+    </div>
+    <div class="grid g3 mt-l">
+      <div class="micro"><b>Five things in one place</b><span>See the debate, answer a paused chair, submit for review, record a verdict, read the receipt.</span></div>
+      <div class="micro"><b>Only the Design sheet goes</b><span>Reconciliation, Build, Test, and Learn keep their existing review surfaces untouched.</span></div>
+      <div class="micro"><b>Setup stays where it is</b><span>The participant/depth preflight happens before the meeting convenes. Moving it into a deck is deferred.</span></div>
+    </div>
+    <div class="callout mt-l">
+      <span class="callout-label">SCOPE</span>
+      <p>The deck is not the database, an API client, or a new agent. <strong>The authenticated parent application owns every mutation.</strong></p>
+    </div>
+    <div class="deck-footer"><span>ONE SURFACE, UNCHANGED AUTHORITY</span><span>03 / 18</span></div>
+    <div class="notes">
+      "Only input surface" is a claim about where a person types, not about where evidence lives. The Markdown package, the JSON package, the worker record, and the activity feed all stay readable — the deck may link or open them. Removing the sheet must not remove the evidence.
+    </div>
+  </section>
+
+  <section class="slide" data-title="The debate record">
+    <p class="kicker">03 / how this plan was made</p>
+    <h2 class="h2">Three positions, kept intact.</h2>
+    <div class="positions mt-m">
+      <div class="position product">
+        <span>independent position</span>
+        <b>Product &amp; interaction</b>
+        <ul>
+          <li>One contextual surface beats a deck plus a card plus a sheet.</li>
+          <li>Open on the decision that needs the owner.</li>
+          <li>Keep drafts through a retry; freeze accepted answers.</li>
+          <li>State which conversation will resume.</li>
+          <li>Keep meeting feedback distinct from formal stage review.</li>
+        </ul>
+      </div>
+      <div class="position arch">
+        <span>independent position</span>
+        <b>Architecture &amp; governance</b>
+        <ul>
+          <li>The HTML stays an untrusted projection.</li>
+          <li>It emits bounded intents; the parent maps them to fixed handlers.</li>
+          <li>A server-issued descriptor binds project, cycle, attempt, round, thread, request, artifact, and hashes.</li>
+          <li>Keep <code>submit_for_review</code> and <code>stage_review</code> as explicit transitions.</li>
+        </ul>
+      </div>
+      <div class="position red">
+        <span>red team</span>
+        <b>How this gets abused</b>
+        <ul>
+          <li>A generic HTML write bridge lets any agent page imitate a Design deck.</li>
+          <li>A downloaded deck can be framed by a hostile page.</li>
+          <li>An old tab can submit against a later round.</li>
+          <li>A truncated deck could claim the reviewer read a different document.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="notice mt-l">
+      The debate did <strong>not</strong> support an invisible one-click submit-and-approve. Two frontend mutations presented as one atomic action can half-complete; a future one-click action must be a single server command.
+    </div>
+    <div class="deck-footer"><span>DISAGREEMENT BEFORE SYNTHESIS</span><span>04 / 18</span></div>
+    <div class="notes">
+      This slide follows the same rule the plan's own review Markdown follows: show where the positions disagreed before showing what was concluded. The red-team column is not decoration — every fail-closed rule later in this deck traces back to one of those four attacks.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Chair synthesis">
+    <p class="kicker">04 / chair synthesis</p>
+    <h2 class="h2">Adopt the deck — under five constraints.</h2>
+    <div class="chair-synth mt-m">
+      <b>The conditions that make "the deck is the input surface" safe</b>
+      <ol>
+        <li>The persisted HTML <strong>starts inert</strong>. It becomes interactive only after an authenticated parent validates a server-issued descriptor against current hashes and state.</li>
+        <li>The deck stays a <strong>pure renderer</strong>. Scientific option text comes from a validated chair result; workflow action text comes from server-owned vocabulary.</li>
+        <li>Canonical Markdown and JSON remain the <strong>evidence record</strong>; the exact deck is a separately hashed projection. A review binds both.</li>
+        <li>A paused chair <strong>resumes only in the conversation that produced the deck</strong>. Opening another chat or another cycle stays independent.</li>
+        <li>The Design sheet survives behind a <strong>rollback flag</strong> until parity and live-state migration are proven.</li>
+      </ol>
+    </div>
+    <div class="grid g2 mt-l">
+      <div class="micro"><b>Why "pure renderer" is load-bearing</b><span>If the deck could write a sentence of its own, an approval could bind to prose no participant argued for.</span></div>
+      <div class="micro"><b>Why the hash split matters</b><span>An audit must answer two questions: what evidence was authoritative, and what did the reviewer actually look at.</span></div>
+    </div>
+    <div class="deck-footer"><span>ADOPT, WITH CONDITIONS</span><span>05 / 18</span></div>
+    <div class="notes">
+      Constraint one is the whole security model in a sentence. Constraint five is the operational one people forget: this feature removes the only working review path, so the old path has to remain reachable until live surfaces have actually migrated and rollback has been exercised at least once.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Deck states">
+    <p class="kicker">05 / product behavior</p>
+    <h2 class="h2">The deck renders server state. It never guesses.</h2>
+    <div class="state-table mt-m">
+      <div class="th"><b>SERVER STATE</b><span>DECK BEHAVIOR</span></div>
+      <div class="locked"><b>meeting running</b><span>Read-only progress. No feedback controls exist yet.</span></div>
+      <div class="act"><b>chair needs_input</b><span>Opens on “Needs your decision”; chair-authored option cards, or the exact recorded question as free text.</span></div>
+      <div class="locked"><b>submitting</b><span>Inputs freeze, progress shows, the draft is retained for retry.</span></div>
+      <div class="locked"><b>accepted</b><span>Receipt plus “Chair resuming in &lt;conversation&gt;”.</span></div>
+      <div class="act"><b>in_progress + package</b><span>A distinct “Submit for review” action — and nothing else.</span></div>
+      <div class="act"><b>awaiting_review</b><span>Approve, Request changes, Reject — each with its consequence stated.</span></div>
+      <div class="locked"><b>approved / rejected</b><span>Read-only receipt: reviewer, time, revision, bound hashes.</span></div>
+      <div class="locked"><b>changes_requested</b><span>Read-only receipt while a focused refinement starts in the originating conversation.</span></div>
+      <div class="stop"><b>superseded / stale</b><span>Input disabled; links or opens the newest feedback deck.</span></div>
+      <div class="stop"><b>bad descriptor or hash</b><span>Read-only failure with “Regenerate feedback deck”. Gate actions are never exposed.</span></div>
+    </div>
+    <p class="fineprint">Selections are drafts until an explicit submit. Success freezes the controls; a failed request keeps the draft and reuses the same idempotency key.</p>
+    <div class="deck-footer"><span>ELEVEN STATES, ONE RENDERER</span><span>06 / 18</span></div>
+    <div class="notes">
+      Notice how few rows are actionable — three. Every other row exists to make a wrong action impossible rather than merely discouraged. The last two rows are the ones that turn a class of security bugs into a visible error message.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Asking rules">
+    <p class="kicker">06 / option and comment rules</p>
+    <h2 class="h2">What the deck may ask, and what it must require.</h2>
+    <div class="rules-split mt-m">
+      <div class="rule-col">
+        <b>Chair feedback</b>
+        <ul>
+          <li>Exactly one option is selected in the first version.</li>
+          <li class="no">No option is preselected — not even a recommended one.</li>
+          <li>A recommendation may be labelled and explained as recorded evidence.</li>
+          <li>The comment is optional.</li>
+          <li class="req">An “Other” option requires text.</li>
+          <li>No valid structured options? Show the exact recorded question with free text.</li>
+        </ul>
+      </div>
+      <div class="rule-col">
+        <b>Formal review</b>
+        <ul>
+          <li>“Submit for review” takes no comment.</li>
+          <li>Approve permits an optional comment — the action and bindings are already structured facts.</li>
+          <li class="req">Request changes requires a comment or an explicitly selected contested card.</li>
+          <li class="req">Reject requires a comment.</li>
+          <li class="no">The backend never manufactures prose and attributes it to the reviewer.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout warn mt-l">
+      <span class="callout-label">AUTHORSHIP</span>
+      <p>The selected action and the human's comment are stored separately. Any readable sentence assembled from them is labelled <code>rationale_source = server_projection</code>.</p>
+    </div>
+    <div class="deck-footer"><span>NO PRESELECTION · NO MANUFACTURED PROSE</span><span>07 / 18</span></div>
+    <div class="notes">
+      Two rules here are ethical, not technical. Not preselecting the recommendation keeps a default from becoming a decision nobody made. Keeping the human comment distinguishable from the server's readable projection means a future auditor can tell what a person actually wrote from what the system wrote on their behalf.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Same conversation">
+    <p class="kicker">07 / continuity</p>
+    <h2 class="h2">Work continues where it started. Nothing gets locked.</h2>
+    <div class="grid g2 mt-m">
+      <div class="rule-col">
+        <b>Guaranteed</b>
+        <ul>
+          <li>Every surface names its originating conversation.</li>
+          <li>Chair feedback and requested changes continue <strong>only</strong> there.</li>
+          <li>The deck says where work will continue and offers a link.</li>
+          <li>A resumed chair updates that thread's normal badge without interrupting the active chat.</li>
+        </ul>
+      </div>
+      <div class="rule-col">
+        <b>Forbidden</b>
+        <ul>
+          <li class="no">No project-global “waiting for you” modal.</li>
+          <li class="no">No pending-input lock or composer lock.</li>
+          <li class="no">No automatic thread switch.</li>
+          <li class="no">No substitute thread created when the deck is opened from elsewhere.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout mt-l">
+      <span class="callout-label">INVARIANT</span>
+      <p>The owner may leave that conversation, open a new chat, and start another cycle while the first meeting waits. <strong>A pending decision is not a mode.</strong></p>
+    </div>
+    <div class="deck-footer"><span>A PENDING DECISION IS NOT A MODE</span><span>08 / 18</span></div>
+    <div class="notes">
+      Opening the deck from another project view may display it, but mutation is allowed only when the descriptor still resolves to the originating project, cycle, and thread. Display and authority are separate questions, and conflating them is how you end up with a substitute thread that owns nothing.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Trust boundary">
+    <p class="kicker">08 / authority</p>
+    <h2 class="h2">The page collects. The parent authorizes.</h2>
+    <div class="trust mt-m">
+      <div class="zone untrusted">
+        <span>untrusted · opaque origin iframe</span>
+        <b>The deck</b>
+        <ul>
+          <li>no cookie</li>
+          <li>no bearer token</li>
+          <li>no CSRF token</li>
+          <li>no endpoint selection</li>
+          <li>no reusable write capability</li>
+          <li>emits intents only</li>
+        </ul>
+      </div>
+      <div class="boundary-line"><div class="bar"></div><em>postMessage</em><div class="bar"></div></div>
+      <div class="zone trusted">
+        <span>trusted · authenticated parent</span>
+        <b>DeerFlow</b>
+        <ul>
+          <li>validates event.source</li>
+          <li>resolves a registered surface</li>
+          <li>verifies content hash</li>
+          <li>maps a finite action enum</li>
+          <li>supplies project / cycle / thread</li>
+          <li>calls fixed handlers</li>
+        </ul>
+      </div>
+    </div>
+    <div class="grid g3 mt-l">
+      <div class="micro"><b>Generic HTML cannot write</b><span>Feedback handling is enabled only for a server-registered, hash-matched Design surface — never for any artifact iframe.</span></div>
+      <div class="micro"><b>Parent checks are UX, not authorization</b><span>The backend revalidates membership, state, revision, and hash on every write.</span></div>
+      <div class="micro"><b>Downloaded decks are inert</b><span>Still navigable, printable, readable — and they say “Open this deck in DeerFlow to respond.”</span></div>
+    </div>
+    <div class="deck-footer"><span>TWELVE INVARIANTS · THE THREE THAT CARRY THE REST</span><span>09 / 18</span></div>
+    <div class="notes">
+      The plan lists twelve invariants; these three do most of the work. The subtle one is the middle: it is tempting to treat the parent's validation as the security boundary because it is the one you can see failing in the UI. It is not. If the server ever trusts the parent's word, the whole model collapses to "any page that can talk to the parent can write".
+    </div>
+  </section>
+
+  <section class="slide" data-title="Chair decision contract">
+    <p class="kicker">09 / durable contract · 1 of 2</p>
+    <h2 class="h2">A paused chair returns structure, not a sentence.</h2>
+    <div class="grid g2 mt-m">
+      <div class="light-terminal json-code">
+        <div class="bar">chair result · status = needs_input</div>
+<pre>{
+  <span class="key">"status"</span>: <span class="str">"needs_input"</span>,
+  <span class="key">"clarification_question"</span>: <span class="str">"Which population
+     structure should define validation?"</span>,
+  <span class="key">"decision_request"</span>: {
+    <span class="key">"version"</span>: <span class="num">1</span>,
+    <span class="key">"id"</span>: <span class="str">"validation-population"</span>,
+    <span class="key">"options"</span>: [
+      { <span class="key">"id"</span>: <span class="str">"family_holdout"</span>,
+        <span class="key">"label"</span>: <span class="str">"Family holdout"</span>, … },
+      { <span class="key">"id"</span>: <span class="str">"random_split"</span>,
+        <span class="key">"label"</span>: <span class="str">"Random split"</span>, … }
+    ],
+    <span class="key">"recommended_option_id"</span>: <span class="str">"family_holdout"</span>,
+    <span class="key">"recommendation"</span>: <span class="str">"Matches the stated
+       deployment population."</span>
+  }
+}</pre>
+      </div>
+      <div>
+        <div class="subhead">Validation must</div>
+        <ul class="checklist">
+          <li>allow one focused request per chair pause</li>
+          <li>require stable, bounded, unique option IDs</li>
+          <li>require 2–5 options for card mode</li>
+          <li>bound labels, values, descriptions, recommendation text</li>
+          <li>reject a <code>recommended_option_id</code> that is not present</li>
+          <li>preserve the existing exact <code>clarification_question</code></li>
+          <li>fail the contract or fall back to free text by explicit, test-covered policy</li>
+        </ul>
+        <div class="notice mt-m">
+          It must <strong>never silently drop the question</strong>. A malformed decision request costs the card layout — not the chair's ability to ask.
+        </div>
+      </div>
+    </div>
+    <p class="fineprint">The chair-resume prompt receives a mechanical rendering of the selected value and comment; the structured response stays in metadata so the exact human choice never depends on parsing prose later.</p>
+    <div class="deck-footer"><span>STRUCTURED QUESTION → STRUCTURED ANSWER</span><span>10 / 18</span></div>
+    <div class="notes">
+      This is what makes option cards possible at all. Today the chair asks a question as a string and the card renders it. To render real choices you need the choices to exist as data — and once they exist as data, the audit record can say which one a person picked, rather than requiring someone to re-read a sentence years later.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Surface descriptor">
+    <p class="kicker">10 / durable contract · 2 of 2</p>
+    <h2 class="h2">A descriptor proves which deck may answer what.</h2>
+    <div class="grid g2 mt-m">
+      <div class="light-terminal json-code">
+        <div class="bar">dbtl_design_feedback_surfaces</div>
+<pre><span class="key">surface_id</span>
+<span class="key">project_id</span> · <span class="key">cycle_id</span> · <span class="key">stage_attempt_id</span>
+<span class="key">design_round</span>
+<span class="key">originating_thread_id</span>
+<span class="key">mode</span>        <span class="cmt">chair_feedback | stage_review | read_only</span>
+<span class="key">chair_worker_run_id</span>       <span class="cmt">nullable</span>
+<span class="key">human_input_request_id</span>    <span class="cmt">nullable</span>
+<span class="key">deck_uri</span> · <span class="key">deck_content_hash</span> · <span class="key">deck_schema_version</span>
+<span class="key">evidence_artifact_id</span>
+<span class="key">evidence_artifact_revision</span>
+<span class="key">evidence_content_hash</span>
+<span class="key">projection_hash</span> · <span class="key">policy_version</span>
+<span class="key">created_at</span>
+<span class="key">superseded_by_surface_id</span>  <span class="cmt">nullable</span></pre>
+      </div>
+      <div>
+        <div class="subhead">What it is — and is not</div>
+        <div class="micro mb-m"><b>Not a review</b><span>It does not replace <code>dbtl_reviews</code>. It proves a particular HTML projection came from the Design workflow, from particular evidence.</span></div>
+        <div class="micro mb-m"><b>An addressing rule</b><span>It identifies the only thread and only request that this deck may answer.</span></div>
+        <div class="micro"><b>Regeneration supersedes</b><span>A new deck writes a new row and points the old one at it. Old surfaces are never mutated in place.</span></div>
+        <div class="notice mt-l">
+          Do <strong>not</strong> make the deck the “latest ordinary artifact.” If deck rows share <code>dbtl_artifacts</code>, add an explicit derived-from link and select the canonical <code>design_review</code> artifact by type and revision — never by attachment order.
+        </div>
+      </div>
+    </div>
+    <div class="deck-footer"><span>THE DECK IS A PROJECTION, NOT THE EVIDENCE</span><span>11 / 18</span></div>
+    <div class="notes">
+      The warning in the corner is a real bug waiting to happen. The moment a deck is just another artifact on the attempt, "approve the latest artifact" starts approving the slides instead of the reviewed document. Type and revision, never recency.
+    </div>
+  </section>
+
+  <section class="slide" data-title="The handshake">
+    <p class="kicker">11 / sandboxed bridge</p>
+    <h2 class="h2">Six steps before a single control is enabled.</h2>
+    <div class="ladder mt-m">
+      <div><span>1</span><b>deck → parent</b><small>Emits <code>ready</code> with a protocol version and its public <code>surface_id</code>. Nothing else is known to it.</small></div>
+      <div class="server-step"><span>2</span><b>parent</b><small>Checks <code>event.source</code> is the exact iframe <code>contentWindow</code>.</small></div>
+      <div class="server-step"><span>3</span><b>parent</b><small>Resolves the selected file to a registered Design surface and verifies its content hash.</small></div>
+      <div class="server-step"><span>4</span><b>parent → server</b><small>Fetches the authenticated surface read model: status, allowed actions, revisions, hashes, receipts.</small></div>
+      <div><span>5</span><b>parent → deck</b><small>Creates a random per-mount channel ID and sends <code>initialize</code> with current status and allowed actions.</small></div>
+      <div class="server-step"><span>6</span><b>every message after</b><small>Must match source window, channel ID, protocol schema, surface ID, and allowed action set.</small></div>
+    </div>
+    <div class="vocab mt-l">
+      <div><b>deck → parent (intents)</b>
+        <code>ready</code><code>submit_intent</code><code>open_evidence_intent</code><code>open_originating_conversation_intent</code>
+      </div>
+      <div><b>parent → deck (state)</b>
+        <code>initialize</code><code>pending</code><code>accepted</code><code>stale</code><code>failed</code>
+      </div>
+    </div>
+    <p class="fineprint">Messages carry no endpoints and no credentials. <code>postMessage("*")</code> is acceptable only because no secret crosses the boundary — and the channel ID is convenience, not authorization.</p>
+    <div class="deck-footer"><span>HANDSHAKE → BOUNDED VOCABULARY</span><span>12 / 18</span></div>
+    <div class="notes">
+      The vocabulary is deliberately tiny. Four intents up, five states down. A closed enum is what stops an attacker-authored page from being creative: there is no message that means "call this endpoint", only messages that mean "the person pressed the button you told me about".
+    </div>
+  </section>
+
+  <section class="slide" data-title="Two write paths">
+    <p class="kicker">12 / mutation</p>
+    <h2 class="h2">Two paths. Both already exist; both get bound tighter.</h2>
+    <div class="paths mt-m">
+      <div class="path chair">
+        <span>path A</span>
+        <b>Paused chair</b>
+        <ol>
+          <li>The surface references the exact server-emitted Human Input request.</li>
+          <li>The parent submits the existing <code>human_input_response</code> shape through the originating thread's hidden reply path, plus <code>surface_id</code> and <code>client_submission_id</code>.</li>
+          <li>The server confirms it is the newest unanswered linked request, consumes it once, and starts or replays the same bound run.</li>
+          <li>The supervisor keeps using <code>clarification_answer</code> — so only the chair resumes, over the recorded positions.</li>
+        </ol>
+        <p class="pin">Idempotency at (thread_id, request_id, client_submission_id). Run concurrency alone does not stop duplicate hidden human messages.</p>
+      </div>
+      <div class="path gate">
+        <span>path B</span>
+        <b>Final Design gate</b>
+        <ol>
+          <li><code>submit_for_review</code> uses the existing stage transition, extended to validate surface, evidence revision/hash, and deck hash.</li>
+          <li>Only after the server returns <code>awaiting_review</code> does the same deck enable the three verdict cards.</li>
+          <li>A verdict uses the existing authenticated review transition, extended with Design deck provenance.</li>
+          <li>Request changes records exact issue IDs and comment, then queues the focused refinement in the originating conversation. Approve and reject start no run.</li>
+        </ol>
+        <p class="pin">Two visible transitions, deliberately. A one-click version would need one atomic server command.</p>
+      </div>
+    </div>
+    <div class="deck-footer"><span>REUSE THE TRANSITIONS · BIND THEM HARDER</span><span>13 / 18</span></div>
+    <div class="notes">
+      Neither path invents a new way to mutate DBTL state. That is the point — the existing transitions already enforce membership, reviewer identity, expected revision, and idempotency. What is new is that each write now also names the exact deck the human was looking at when they decided.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Fail-closed">
+    <p class="kicker">13 / failure behavior</p>
+    <h2 class="h2">Every ambiguous case resolves to “you may read this.”</h2>
+    <div class="fail-grid mt-m">
+      <div><span>Legacy deck has no descriptor</span><b class="ro">read only</b></div>
+      <div><span>Two tabs submit together</span><b class="conflict">first write wins</b></div>
+      <div><span>Downloaded or new-window deck, no handshake</span><b class="ro">read only</b></div>
+      <div><span>Retry, same key and payload</span><b class="replay">replay result</b></div>
+      <div><span>Wrong project or thread</span><b class="ro">read only</b></div>
+      <div><span>Retry, same key, changed payload</span><b class="conflict">conflict</b></div>
+      <div><span>Deck bytes do not match registered hash</span><b class="ro">read-only error</b></div>
+      <div><span>Chair accepted, later fails</span><b class="stale">keep receipt</b></div>
+      <div><span>Evidence revision or hash changed</span><b class="stale">stale · link newest</b></div>
+      <div><span>No trustworthy chair result</span><b class="forbid">no gate actions</b></div>
+      <div><span>A newer Design round exists</span><b class="stale">superseded</b></div>
+      <div><span>Renderer or descriptor write fails</span><b class="forbid">block + regenerate</b></div>
+      <div><span>Linked chair request already answered</span><b class="ro">receipt</b></div>
+      <div><span>Internal or system caller attempts review</span><b class="forbid">forbidden</b></div>
+    </div>
+    <div class="callout warn mt-l">
+      <span class="callout-label">NO REBASING</span>
+      <p>A response rejected for stale DB, stage, artifact, deck, policy, or projection revision is <strong>never automatically retried against the new revision</strong>. The human decided about a specific document.</p>
+    </div>
+    <p class="fineprint">Slack and other IM channels cannot host the interactive deck — they get an authenticated deep link and a read-only summary. The Design gate is documented as web-only rather than left apparently actionable in chat.</p>
+    <div class="deck-footer"><span>FOURTEEN CONDITIONS · NONE OF THEM SILENT</span><span>14 / 18</span></div>
+    <div class="notes">
+      The no-rebasing rule is the one worth defending in review. Auto-retrying against a newer revision feels helpful and is exactly how an approval ends up bound to a document nobody read. If the evidence moved, the decision has to be made again.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Rollout">
+    <p class="kicker">14 / implementation sequence</p>
+    <h2 class="h2">Seven phases. Tests land before behavior.</h2>
+    <div class="phases mt-m">
+      <div class="phase"><span>PHASE 0</span><b>Freeze contracts</b><small>Failing tests, JSON schemas, migration decision. No UI removed.</small><div class="est">1–2 d</div></div>
+      <div class="phase"><span>PHASE 1</span><b>Backend foundation</b><small>Decision parser, surface persistence, deck registration, read endpoint, idempotency.</small><div class="est">4–6 d</div></div>
+      <div class="phase"><span>PHASE 2</span><b>Inert renderer</b><small>Option, verdict, receipt, stale and failure layouts. Still cannot mutate.</small><div class="est">2–3 d</div></div>
+      <div class="phase"><span>PHASE 3</span><b>Bridge + resume</b><small>Iframe controller, handshake, chair intents, duplicate-card suppression.</small><div class="est">4–5 d</div></div>
+      <div class="phase"><span>PHASE 4</span><b>Submit + review</b><small>Gate handlers, exact bindings, focused refinement, live receipts.</small><div class="est">3–4 d</div></div>
+      <div class="phase cutover"><span>PHASE 5</span><b>Cut over the UI</b><small>Regenerate live surfaces, remove sheet controls, keep the rollback flag.</small><div class="est">2–3 d</div></div>
+      <div class="phase gated"><span>PHASE 6</span><b>Cleanup + docs</b><small>Remove the fallback sheet after telemetry is clean and rollback is exercised.</small><div class="est">1–2 d · gated</div></div>
+    </div>
+    <div class="risk-row mt-l">
+      <div class="risk"><b>Testing is the long pole</b><span>Contract, bridge, race, accessibility, and browser-security suites are roughly 40–50% of total effort.</span></div>
+      <div class="risk"><b>Bridge + idempotency carry the risk</b><span>Both touch security and audit integrity, so review cycles run slower than ordinary UI work.</span></div>
+      <div class="risk"><b>Phase 6 is calendar-bound</b><span>“Code complete” trails “done” by one release window, by design.</span></div>
+    </div>
+    <p class="fineprint">Roughly 3–5 weeks of focused effort; 4–6 weeks of calendar. Phases 1 and 2 can run in parallel. A natural early milestone ships 0–3 — chair feedback in the deck, review still in the sheet.</p>
+    <div class="deck-footer"><span>SEQUENCE AND HONEST ESTIMATE</span><span>15 / 18</span></div>
+    <div class="notes">
+      Phase 5 is where the feature becomes irreversible in practice, which is why it keeps the flag. Phase 6 should not be scheduled as work — it should be scheduled as a decision, taken once telemetry shows no unresolved live surfaces and someone has actually pulled the rollback lever in anger.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Acceptance">
+    <p class="kicker">15 / definition of done</p>
+    <h2 class="h2">What must be true before the sheet is removed.</h2>
+    <div class="accept-split mt-m">
+      <div>
+        <div class="subhead">Acceptance criteria</div>
+        <ul class="checklist">
+          <li>A paused chair can be answered entirely inside the deck.</li>
+          <li>Every choice shown traces to a recorded chair result — the renderer adds no scientific text.</li>
+          <li>The answer resumes only the chair, in the exact originating conversation.</li>
+          <li>The owner can use another conversation and start another cycle while the first meeting waits.</li>
+          <li>Submit and verdict complete in the deck as two visible transitions.</li>
+          <li>All three verdicts write durable reviews with exact evidence and deck bindings.</li>
+          <li>Request changes carries the exact issue IDs and comment into the focused round.</li>
+          <li>Downloaded, legacy, wrong-thread, stale, superseded, hash-mismatched and consumed decks are read-only.</li>
+          <li>Arbitrary agent-generated HTML cannot cause a DBTL write.</li>
+          <li>Keyboard-only and assistive-technology users can navigate, select, comment, submit, retry, and understand the result.</li>
+        </ul>
+      </div>
+      <div>
+        <div class="subhead">Explicit non-goals</div>
+        <ul class="nongoals">
+          <li>No model call creates or rewrites slide prose.</li>
+          <li>No direct API access in downloaded HTML.</li>
+          <li>No project-wide “waiting for you” lock.</li>
+          <li>No review sheet removed for non-Design stages.</li>
+          <li>No existing historical deck becomes interactive.</li>
+          <li>No one-click submit-and-review in v1.</li>
+          <li>No preflight roster/depth configuration moved into the deck.</li>
+        </ul>
+        <div class="notice mt-m">
+          A renderer or descriptor failure must never strand the owner without a visible, deterministic recovery action.
+        </div>
+      </div>
+    </div>
+    <div class="deck-footer"><span>ACCEPTANCE · NON-GOALS</span><span>16 / 18</span></div>
+    <div class="notes">
+      The accessibility line is a real gate, not a courtesy. Once the deck is the only input surface, an inaccessible deck means an inaccessible approval, and the approval is the part of DBTL that is legally and scientifically load-bearing.
+    </div>
+  </section>
+
+  <section class="slide" data-title="Where it lands">
+    <p class="kicker">16 / expected file map</p>
+    <h2 class="h2">Where this work lands, and what it emits.</h2>
+    <div class="code-map mt-m">
+      <div><b>Chair contract</b><span>backend/packages/harness/deerflow/dbtl/</span><code>worker_result.py · consensus.py</code></div>
+      <div><b>Deck renderer</b><span>backend/packages/harness/deerflow/dbtl/</span><code>council_deck.py</code></div>
+      <div><b>Stage + routing</b><span>backend/packages/harness/deerflow/agents/dbtl/</span><code>stage_execution.py · supervisor.py</code></div>
+      <div><b>Persistence</b><span>backend/packages/harness/deerflow/persistence/dbtl/</span><code>model.py · cycles.py · new migration</code></div>
+      <div><b>Read + write API</b><span>backend/app/gateway/routers/</span><code>dbtl_cycles.py</code></div>
+      <div><b>Pure reducer</b><span>frontend/src/core/dbtl/</span><code>design-deck-feedback.ts (new)</code></div>
+      <div><b>Deck controller</b><span>frontend/src/components/workspace/artifacts/</span><code>artifact-file-detail.tsx</code></div>
+      <div><b>Cutover targets</b><span>frontend/src/components/workspace/</span><code>human-input-card.tsx · cycle-stage-sheet.tsx · design-review.tsx</code></div>
+    </div>
+    <div class="mt-l">
+      <div class="subhead">Lifecycle telemetry — identifiers and codes only, never comments or deck content</div>
+      <div class="events mono">
+        <code>design_feedback.surface_created</code><code>design_feedback.conflict</code>
+        <code>design_feedback.surface_opened</code><code>design_feedback.superseded</code>
+        <code>design_feedback.intent_received</code><code>design_feedback.resume_started</code>
+        <code>design_feedback.accepted</code><code>design_feedback.resume_failed</code>
+        <code>design_feedback.replayed</code><code>design_feedback.review_recorded</code>
+      </div>
+    </div>
+    <div class="callout compact-callout mt-l">
+      <span class="callout-label">ROLLBACK</span>
+      <p>The flag restores the visible card and sheet without deleting descriptors, responses, reviews, or deck artifacts — and must never reopen a consumed surface or discard a recorded decision.</p>
+    </div>
+    <div class="deck-footer"><span>IMPLEMENTATION REFERENCE</span><span>17 / 18</span></div>
+    <div class="notes">
+      The renderer stays pure: no model call, no database access, no authentication, no filesystem access is added to render_council_deck. If that line is ever crossed, the "the deck invents nothing" guarantee becomes unverifiable by inspection.
+    </div>
+  </section>
+
+  <section class="slide center tc" data-title="Questions">
+    <div class="qa">
+      <p class="kicker">17 / decisions to take</p>
+      <div class="question-mark">?</div>
+      <h2 class="h2">What should we settle before Phase 0?</h2>
+      <div class="qa-options">
+        <span>ship 0–3 first?</span>
+        <span>descriptor table vs. dbtl_artifacts</span>
+        <span>free-text fallback policy</span>
+        <span>rollback window length</span>
+        <span>IM read-only summary</span>
+        <span>accessibility budget</span>
+      </div>
+      <p class="lede">The plan is complete enough to start; the open questions are about sequencing and scope, not about the security model.</p>
+    </div>
+    <div class="deck-footer"><span>← → NAVIGATE · N NOTES · O OVERVIEW · S PRESENTER · F FULLSCREEN</span><span>18 / 18</span></div>
+    <div class="notes">
+      Recommended opening move: Phase 0 is cheap and it forces the two genuinely contested decisions into the open — whether deck rows share dbtl_artifacts, and what happens when a chair returns an unparseable decision request. Both are easier to argue against a failing test than against a paragraph.
+    </div>
+  </section>
+
+</div>
+<script src="assets/runtime.js"></script>
+</body>
+</html>
