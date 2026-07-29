@@ -111,6 +111,9 @@ class LiveStageResult:
     #: document — ``artifact_uri`` is what an approval binds to, and a second
     #: approvable-looking file is how a gate ends up bound to a summary.
     deck_uri: str | None = None
+    #: Opaque identifier embedded in ``deck_uri`` and resolved by the
+    #: authenticated parent. Present only when the deck was registered.
+    feedback_surface_id: str | None = None
 
     @property
     def satisfies_gate(self) -> bool:
@@ -742,7 +745,11 @@ def _change_request(activity: Any) -> str | None:
     if not reviews:
         return None
     latest = reviews[-1]
-    if str(latest.get("decision") or "") != "changes_requested":
+    # ``stage.reviewed`` records the review decision (``request_changes``),
+    # while older projections used the resulting stage status
+    # (``changes_requested``). Read both so an actual review event opens the
+    # refinement round and existing records remain valid.
+    if str(latest.get("decision") or "") not in {"request_changes", "changes_requested"}:
         return None
     rationale = str(latest.get("rationale") or "").strip()[:_CHANGE_REQUEST_CHARS]
     return rationale or None
@@ -750,7 +757,7 @@ def _change_request(activity: Any) -> str | None:
 
 def _design_round(activity: Any) -> int:
     """Which round of this Design debate the next attempt is."""
-    requested = sum(1 for payload in _design_reviews(activity) if str(payload.get("decision") or "") == "changes_requested")
+    requested = sum(1 for payload in _design_reviews(activity) if str(payload.get("decision") or "") in {"request_changes", "changes_requested"})
     return min(requested + 1, MAX_DESIGN_ROUNDS)
 
 
@@ -1366,6 +1373,8 @@ class _FeedbackSurfacePlan:
     design_round: int
     evidence: Mapping[str, Any] | None = None
     evidence_content_hash: str = ""
+    decision_request: Mapping[str, Any] | None = None
+    chair_worker_run_id: str | None = None
 
     @property
     def answerable(self) -> bool:
@@ -1401,6 +1410,7 @@ def _write_council_deck(
     clarification_question: str,
     decision_request: DecisionRequest | None = None,
     surface_id: str = "",
+    surface_mode: str = "",
 ) -> RenderedDeck | None:
     """Write the meeting's outcome as a slide deck, beside the review package.
 
@@ -1424,6 +1434,7 @@ def _write_council_deck(
             clarification_question=clarification_question,
             decision_request=decision_request,
             surface_id=surface_id,
+            surface_mode=surface_mode,
         ).encode("utf-8")
     except Exception:  # noqa: BLE001 - a presentation must not break the record
         logger.warning("Could not render the design meeting slide deck.", exc_info=True)
@@ -2015,6 +2026,9 @@ class LiveStageAdapter:
         paused: bool,
         artifact_uri: str,
         artifact_hash: str,
+        decision_request: DecisionRequest | None = None,
+        chair_worker_run_id: str | None = None,
+        review_issue_ids: Sequence[str] = (),
     ) -> _FeedbackSurfacePlan | None:
         """Decide the surface *before* the deck is rendered.
 
@@ -2073,6 +2087,12 @@ class LiveStageAdapter:
             design_round=design_round,
             evidence=evidence if mode == "stage_review" else None,
             evidence_content_hash=artifact_hash if mode == "stage_review" and evidence is not None else "",
+            decision_request={
+                **(decision_request.as_dict() if decision_request is not None else {}),
+                **({"review_issue_ids": list(review_issue_ids)} if review_issue_ids else {}),
+            }
+            or None,
+            chair_worker_run_id=chair_worker_run_id,
         )
 
     async def _register_feedback_surface(
@@ -2101,6 +2121,8 @@ class LiveStageAdapter:
                 design_round=plan.design_round,
                 originating_thread_id=plan.originating_thread_id,
                 mode=plan.mode,
+                chair_worker_run_id=plan.chair_worker_run_id,
+                decision_request=dict(plan.decision_request) if plan.decision_request is not None else None,
                 deck_uri=deck.uri,
                 deck_content_hash=deck.content_hash,
                 evidence_artifact_id=str(plan.evidence["id"]) if plan.evidence is not None else None,
@@ -2109,6 +2131,34 @@ class LiveStageAdapter:
             )
         except Exception:  # noqa: BLE001 - a descriptor must not break the record
             logger.warning("Could not register the design feedback surface for cycle %s.", cycle_id, exc_info=True)
+
+    async def bind_feedback_request(
+        self,
+        *,
+        project_id: str,
+        surface_id: str,
+        human_input_request_id: str,
+    ) -> None:
+        """Attach the supervisor-emitted card to the deck that replaces it."""
+        await self._repo.bind_design_feedback_request(
+            surface_id,
+            project_id=project_id,
+            human_input_request_id=human_input_request_id,
+        )
+
+    async def consume_feedback_request(
+        self,
+        *,
+        project_id: str,
+        human_input_request_id: str,
+        answer: str,
+    ) -> None:
+        """Make a rollback-card answer consume the same deck surface."""
+        await self._repo.mark_bound_design_feedback_answer(
+            project_id=project_id,
+            human_input_request_id=human_input_request_id,
+            answer=answer,
+        )
 
     async def execute(
         self,
@@ -2593,7 +2643,7 @@ class LiveStageAdapter:
             )
             artifact_type = spec.required_artifact_types[0]
 
-        await self._repo.record_worker_runs(
+        recorded_worker_runs = await self._repo.record_worker_runs(
             cycle_id=cycle_id,
             project_id=project_id,
             stage=stage,
@@ -2606,6 +2656,16 @@ class LiveStageAdapter:
             artifact_uri=artifact_uri,
             artifact_content_hash=artifact_hash,
         )
+        chair_worker_run_id = None
+        if chair_result is not None:
+            chair_unit_id = next(
+                (unit.unit_id for unit, result in unit_result_pairs if result is chair_result),
+                None,
+            )
+            chair_worker_run_id = next(
+                (str(item.get("id")) for item in (recorded_worker_runs or []) if chair_unit_id and item.get("unit_id") == chair_unit_id),
+                None,
+            )
 
         if stage == "learn":
             assessment = dict((build_test or {}).get("validity_assessment") or {})
@@ -2680,6 +2740,8 @@ class LiveStageAdapter:
         # ask something is exactly when a person needs the agreements and the
         # open split on one screen.
         deck_uri = None
+        deck = None
+        surface_plan = None
         if stage == "design" and chair_result is not None:
             surface_plan = await self._plan_feedback_surface(
                 cycle_id=cycle_id,
@@ -2690,6 +2752,9 @@ class LiveStageAdapter:
                 paused=bool(clarification_question),
                 artifact_uri=artifact_uri or "",
                 artifact_hash=artifact_hash or "",
+                decision_request=chair_result.decision_request,
+                chair_worker_run_id=chair_worker_run_id,
+                review_issue_ids=tuple(f"issue-{index + 1}" for index, _item in enumerate(chair_result.consensus.disagreements if chair_result.consensus is not None else ())),
             )
             deck = await asyncio.to_thread(
                 _write_council_deck,
@@ -2701,6 +2766,7 @@ class LiveStageAdapter:
                 clarification_question=clarification_question or "",
                 decision_request=chair_result.decision_request,
                 surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
+                surface_mode=(surface_plan.mode if surface_plan is not None else ""),
             )
             if deck is not None:
                 deck_uri = deck.uri
@@ -2749,4 +2815,5 @@ class LiveStageAdapter:
             artifact_uri=artifact_uri,
             clarification_question=clarification_question,
             deck_uri=deck_uri,
+            feedback_surface_id=(surface_plan.surface_id if surface_plan is not None and deck is not None else None),
         )

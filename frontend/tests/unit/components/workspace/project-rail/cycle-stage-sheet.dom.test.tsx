@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 const mutate = rs.fn();
+const featureState = { designDeckFeedback: false };
 
 rs.mock("@/core/dbtl", () => ({
   CYCLE_STATE_LABELS: { design: "Design" },
@@ -69,6 +70,11 @@ rs.mock("@/core/dbtl", () => ({
     error: null,
     isPending: false,
   }),
+  useDbtlFeature: () => ({
+    feature: {
+      design_deck_feedback: featureState.designDeckFeedback,
+    },
+  }),
   useResolveWorkItem: () => ({
     error: null,
     isPending: false,
@@ -91,6 +97,7 @@ import { CycleStageSheet } from "@/components/workspace/project-rail/cycle-stage
 afterEach(() => {
   cleanup();
   mutate.mockReset();
+  featureState.designDeckFeedback = false;
 });
 
 describe("CycleStageSheet evidence guidance", () => {
@@ -153,5 +160,25 @@ describe("CycleStageSheet evidence guidance", () => {
         .getByRole("button", { name: "Attach evidence" })
         .hasAttribute("disabled"),
     ).toBe(false);
+  });
+
+  it("hands Design review to the deck when the cutover flag is enabled", () => {
+    featureState.designDeckFeedback = true;
+
+    render(
+      <CycleStageSheet
+        projectId="project-1"
+        cycleId="cycle-1"
+        stage="design"
+        open
+        onOpenChange={rs.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Open the feedback deck")).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Submit for review" }),
+    ).toBeNull();
+    expect(screen.queryByLabelText(/SHA-256/)).toBeNull();
   });
 });

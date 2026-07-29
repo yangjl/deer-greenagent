@@ -34,6 +34,14 @@ class DbtlConfig(BaseModel):
             "before anyone is interrupted by a card — the human exit review approves thresholds and wording before this is turned on."
         ),
     )
+    design_deck_feedback: bool = Field(
+        default=True,
+        description=(
+            "Use authenticated Design feedback decks for chair answers and Design review. "
+            "Set false to restore the visible Design Human Input card and Design stage sheet "
+            "without deleting surfaces, actions, reviews, or artifacts."
+        ),
+    )
 
     setup_draft_model_name: str | None = Field(
         default=None,

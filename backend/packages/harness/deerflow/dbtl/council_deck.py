@@ -159,6 +159,42 @@ def _decision_cards(request: DecisionRequest) -> str:
     return f'<fieldset class="decision" disabled><legend>{html.escape(_text(request.question, limit=600))}</legend><div class="options">{"".join(cards)}</div>{comment}</fieldset>{recommendation}{submit}'
 
 
+def _decision_text(question: str) -> str:
+    """Render the exact recorded chair question as an inert text control."""
+    return (
+        '<fieldset class="decision" disabled>'
+        f"<legend>{html.escape(_text(question, limit=600))}</legend>"
+        '<div class="comment"><label for="design-chair-answer">Your answer</label>'
+        '<textarea id="design-chair-answer" data-deck-comment rows="5" disabled></textarea></div>'
+        '<div class="submit-row"><button type="button" data-deck-action="chair_text" disabled>'
+        "Send to the meeting</button></div></fieldset>"
+        '<p class="inert" data-deck-status role="status" aria-live="polite">' + html.escape(INERT_NOTICE) + "</p>"
+    )
+
+
+def _review_controls(consensus: Consensus | None) -> str:
+    issues: list[str] = []
+    if consensus is not None:
+        for index, item in enumerate(consensus.disagreements[:MAX_DISAGREEMENTS]):
+            issue_id = f"issue-{index + 1}"
+            issues.append(f'<label class="review-issue" for="{issue_id}"><input id="{issue_id}" type="checkbox" value="{issue_id}" data-deck-issue disabled><span>{html.escape(_text(item.topic, limit=240))}</span></label>')
+    issue_html = f'<div class="review-issues"><p>Select the points that need another round</p>{"".join(issues)}</div>' if issues else ""
+    return (
+        '<fieldset class="review" disabled><legend>Move this Design through its human gate</legend>'
+        '<p class="option-detail">Submission and the final verdict are separate records. Nothing is approved by opening this deck.</p>'
+        f"{issue_html}"
+        '<div class="comment"><label for="design-review-comment">Rationale or requested change</label>'
+        '<textarea id="design-review-comment" data-deck-comment rows="4" disabled></textarea></div>'
+        '<div class="review-actions">'
+        '<button type="button" data-deck-action="submit_for_review" disabled>Submit for review</button>'
+        '<button type="button" data-deck-action="approve" disabled>Approve</button>'
+        '<button type="button" data-deck-action="request_changes" disabled>Request changes</button>'
+        '<button type="button" data-deck-action="reject" disabled>Reject</button>'
+        "</div></fieldset>"
+        '<p class="inert" data-deck-status role="status" aria-live="polite">' + html.escape(INERT_NOTICE) + "</p>"
+    )
+
+
 def _bridge_script(surface_id: str) -> str:
     """The deck's half of the handshake, or nothing at all.
 
@@ -200,9 +236,16 @@ _BRIDGE_TEMPLATE = """
   var settled = false;
 
   var fieldset = document.querySelector('fieldset.decision');
+  var review = document.querySelector('fieldset.review');
   var submit = document.querySelector('[data-deck-submit]');
+  var actionButtons = Array.prototype.slice.call(document.querySelectorAll('[data-deck-action]'));
   var status = document.querySelector('[data-deck-status]');
   var comment = document.querySelector('[data-deck-comment]');
+  // The chair's options and the review's contested-topic checkboxes: every one
+  // is rendered disabled, and both submit paths read them back via :checked.
+  var choices = Array.prototype.slice.call(
+    document.querySelectorAll('fieldset.decision input[type="radio"], [data-deck-issue]')
+  );
 
   function say(text) { if (status) { status.textContent = text; } }
 
@@ -217,8 +260,17 @@ _BRIDGE_TEMPLATE = """
 
   function setEnabled(on) {
     if (fieldset) { fieldset.disabled = !on; }
-    if (submit) { submit.disabled = !on; }
+    if (submit) { submit.disabled = !on || allowed.indexOf('chair_option') === -1; }
+    if (review) { review.disabled = !on; }
+    actionButtons.forEach(function (button) {
+      button.disabled = !on || allowed.indexOf(button.dataset.deckAction) === -1;
+    });
     if (comment) { comment.disabled = !on; }
+    // Every option ships individually disabled so the persisted file is inert
+    // wherever it is opened. An enabled fieldset does not re-enable a control
+    // that carries its own `disabled`, so activation has to clear each one --
+    // otherwise the submit button comes alive over a choice nobody can make.
+    choices.forEach(function (choice) { choice.disabled = !on; });
   }
 
   function selected() {
@@ -231,6 +283,9 @@ _BRIDGE_TEMPLATE = """
       if (submitting || !channel || allowed.indexOf('chair_option') === -1) { return; }
       var option = selected();
       if (!option) { say('Choose one option first.'); return; }
+      if (option.toLowerCase() === 'other' && (!comment || !comment.value.trim())) {
+        say('Add a comment for the Other option.'); return;
+      }
       submitting = true;
       setEnabled(false);
       say('Sending your decision...');
@@ -242,6 +297,31 @@ _BRIDGE_TEMPLATE = """
       });
     });
   }
+
+  actionButtons.forEach(function (button) {
+    button.addEventListener('click', function () {
+      var kind = button.dataset.deckAction;
+      if (submitting || !channel || allowed.indexOf(kind) === -1) { return; }
+      var optionIds = [];
+      if (kind === 'request_changes') {
+        optionIds = Array.prototype.slice.call(document.querySelectorAll('[data-deck-issue]:checked')).map(function (item) { return item.value; });
+      }
+      var text = comment ? comment.value.trim() : '';
+      if ((kind === 'chair_text' || kind === 'reject') && !text) {
+        say('Add a rationale before recording this decision.'); return;
+      }
+      if (kind === 'request_changes' && !optionIds.length && !text) {
+        say('Select a contested point or describe the change needed.'); return;
+      }
+      submitting = true;
+      setEnabled(false);
+      say('Recording your Design decision...');
+      send('submit_intent', {
+        action: { kind: kind, optionIds: optionIds },
+        comment: text
+      });
+    });
+  });
 
   window.addEventListener('message', function (event) {
     if (event.source !== window.parent) { return; }
@@ -260,9 +340,16 @@ _BRIDGE_TEMPLATE = """
       channel = typeof data.channel === 'string' && data.channel ? data.channel : null;
       allowed = Array.isArray(data.allowedActions) ? data.allowedActions.slice(0, 8) : [];
       submitting = false;
-      var live = !!channel && allowed.indexOf('chair_option') !== -1;
+      var live = !!channel && allowed.length > 0;
       setEnabled(live);
-      say(live ? 'Choose an option, then send it to the meeting.' : (typeof data.note === 'string' && data.note ? data.note : 'This round is read-only.'));
+      var prompt = allowed.indexOf('submit_for_review') !== -1
+        ? 'Submit this Design when it is ready for human review.'
+        : (allowed.indexOf('approve') !== -1
+          ? 'Choose a Design verdict.'
+          : (allowed.indexOf('chair_text') !== -1
+            ? 'Answer the chair, then send it to the meeting.'
+            : 'Choose an option, then send it to the meeting.'));
+      say(live ? prompt : (typeof data.note === 'string' && data.note ? data.note : 'This round is read-only.'));
       return;
     }
     if (data.type === 'pending') { submitting = true; setEnabled(false); say('Sending your decision...'); return; }
@@ -317,6 +404,7 @@ def render_council_deck(
     clarification_question: str = "",
     decision_request: DecisionRequest | None = None,
     surface_id: str = "",
+    surface_mode: str = "",
     generated_at: datetime | None = None,
 ) -> str:
     """The meeting's outcome as one self-contained HTML slide deck."""
@@ -355,17 +443,18 @@ def render_council_deck(
         )
     )
     cards = _decision_cards(decision_request) if decision_request is not None and decision_request.renders_as_cards else ""
-    if cards or decisions:
+    free_text = _decision_text(clarification_question) if surface_mode == "chair_feedback" and clarification_question.strip() and not cards else ""
+    if cards or free_text or decisions:
         # The options replace the question's own bullet, not the rest of the
         # list: a contested topic the chair left open still needs settling
         # whether or not this one question came with choices.
-        remaining = [item for item in decisions if item != _text(clarification_question)] if cards else decisions
+        remaining = [item for item in decisions if item != _text(clarification_question)] if cards or free_text else decisions
         slides.append(
             _slide(
                 kind="decide",
                 eyebrow="Only you can settle these",
                 title="Needs your decision",
-                body=cards + (_list_body(remaining, empty="") if remaining else ""),
+                body=cards + free_text + (_list_body(remaining, empty="") if remaining else ""),
             )
         )
     if summary:
@@ -374,6 +463,15 @@ def render_council_deck(
     limitations = _bullets(list(chair.get("limitations") or []))
     if limitations:
         slides.append(_slide(kind="limits", eyebrow="Read the synthesis against these", title="Limitations", body=_list_body(limitations, empty="")))
+    if surface_mode == "stage_review":
+        slides.append(
+            _slide(
+                kind="review",
+                eyebrow="Human gate",
+                title="Review the Design",
+                body=_review_controls(consensus),
+            )
+        )
     next_actions = _bullets(list(chair.get("recommended_next_actions") or []))
     footer = f'<p class="stamp">Full review package: {html.escape(package_path)}</p>' if package_path else ""
     slides.append(
@@ -381,9 +479,7 @@ def render_council_deck(
             kind="next",
             eyebrow="Recommended, not decided",
             title="Next",
-            body=_list_body(next_actions, empty="The chair recommended no next action.")
-            + '<p class="gate">Nothing here approves anything. Approving, requesting changes, or rejecting this design is a separate human record in the Design review sheet.</p>'
-            + footer,
+            body=_list_body(next_actions, empty="The chair recommended no next action.") + '<p class="gate">Nothing here approves anything merely by opening the deck. Use the Human gate slide to submit and record a verdict.</p>' + footer,
         )
     )
 
@@ -441,6 +537,7 @@ _DECK_TEMPLATE = """<!doctype html>
   .verdict--settled span {{ color: var(--accent); }}
   .slide--decide li {{ font-size: 1.15rem; }}
   .decision {{ margin: 0 0 1.1rem; padding: 0; border: 0; }}
+  .review {{ margin: 0; padding: 0; border: 0; }}
   .decision legend {{ padding: 0; margin-bottom: .9rem; font-size: 1.2rem; font-weight: 600; }}
   .options {{ display: grid; gap: .65rem; }}
   .option {{ display: flex; gap: .7rem; align-items: flex-start; border: 1px solid var(--line); border-radius: 10px;
@@ -457,6 +554,23 @@ _DECK_TEMPLATE = """<!doctype html>
   .decision[disabled] .option {{ opacity: .92; }}
   .recommendation {{ margin: 0 0 .9rem; color: var(--muted); font-size: .93rem; }}
   .recommendation span {{ display: block; font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; }}
+  .review-issues {{ display: grid; gap: .5rem; margin: 1rem 0; }}
+  .review-issues > p {{ margin: 0; color: var(--muted); font-size: .86rem; }}
+  .review-issue {{ display: flex; gap: .65rem; align-items: flex-start; padding: .65rem .8rem;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--card); }}
+  .review-issue input {{ margin-top: .25rem; }}
+  .comment {{ display: grid; gap: .35rem; margin: .9rem 0; }}
+  .comment label {{ font-size: .82rem; color: var(--muted); }}
+  .comment textarea {{ width: 100%; resize: vertical; border: 1px solid var(--line); border-radius: 8px;
+    padding: .6rem .7rem; color: var(--fg); background: var(--bg); font: inherit; }}
+  .submit-row, .review-actions {{ display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; }}
+  .submit-row button, .review-actions button {{ border: 1px solid var(--line); border-radius: 7px;
+    padding: .5rem .75rem; color: var(--fg); background: var(--card); font: inherit; cursor: pointer; }}
+  .submit-row button:focus-visible, .review-actions button:focus-visible, .bar button:focus-visible,
+  .option input:focus-visible, .review-issue input:focus-visible, .comment textarea:focus-visible {{
+    outline: 3px solid var(--accent); outline-offset: 3px;
+  }}
+  .submit-row button:disabled, .review-actions button:disabled {{ cursor: not-allowed; opacity: .55; }}
   .inert {{ margin: 0; padding: .55rem .8rem; border: 1px dashed var(--line); border-radius: 8px;
     color: var(--muted); font-size: .88rem; }}
   .gate {{ margin-top: 1.5rem; color: var(--muted); font-size: .9rem; border-left: 2px solid var(--line); padding-left: .85rem; }}
@@ -467,9 +581,14 @@ _DECK_TEMPLATE = """<!doctype html>
   .bar button:hover {{ border-color: var(--accent); color: var(--accent); }}
   .track {{ flex: 1; height: 3px; background: var(--line); border-radius: 999px; overflow: hidden; }}
   .track i {{ display: block; height: 100%; background: var(--accent); transition: width .2s ease; }}
+  @media (prefers-reduced-motion: reduce) {{
+    .track i {{ transition: none; }}
+  }}
   @media print {{
     .deck {{ display: block; height: auto; padding: 0; }}
     .slide, .slide.is-active {{ display: block; page-break-after: always; padding: 2.5rem; }}
+    .decision .comment, .review .comment, .submit-row, .review-actions, [data-deck-status] {{ display: none !important; }}
+    .decision input, .review input {{ display: none; }}
     .bar {{ display: none; }}
   }}
 </style>

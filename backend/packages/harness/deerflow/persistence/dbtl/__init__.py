@@ -5,7 +5,9 @@ from deerflow.persistence.dbtl.cycles import (
 )
 from deerflow.persistence.dbtl.design_feedback_ops import (
     DECK_SCHEMA_VERSION,
+    DESIGN_FEEDBACK_ACTIONS,
     SURFACE_MODES,
+    DesignFeedbackConflict,
     DesignFeedbackOpsMixin,
 )
 from deerflow.persistence.dbtl.model import (
@@ -14,6 +16,7 @@ from deerflow.persistence.dbtl.model import (
     DbtlCutoverDecisionRow,
     DbtlCycleRow,
     DbtlDatasetRow,
+    DbtlDesignFeedbackActionRow,
     DbtlDesignFeedbackSurfaceRow,
     DbtlEventRow,
     DbtlGateEvaluationRow,
@@ -46,6 +49,7 @@ from deerflow.persistence.dbtl.sql import (
 
 __all__ = [
     "DECK_SCHEMA_VERSION",
+    "DESIGN_FEEDBACK_ACTIONS",
     "RECONCILIATION_KIND",
     "DbtlArtifactRow",
     "DbtlBuildLineageRow",
@@ -54,6 +58,7 @@ __all__ = [
     "DbtlCycleRepository",
     "DbtlCycleRow",
     "DbtlDatasetRow",
+    "DbtlDesignFeedbackActionRow",
     "DbtlDesignFeedbackSurfaceRow",
     "DbtlEventRow",
     "DbtlGateEvaluationRow",
@@ -70,6 +75,7 @@ __all__ = [
     "DbtlValidationRow",
     "DbtlValidityAssessmentRow",
     "DbtlWorkflowRefused",
+    "DesignFeedbackConflict",
     "KnowledgeClaimRow",
     "KnowledgeEventRow",
     "KnowledgeLinkRow",

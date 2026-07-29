@@ -35,6 +35,7 @@ class DbtlFeature(BaseModel):
     mode: str
     mutations_enabled: bool
     graph_execution_enabled: bool
+    design_deck_feedback: bool
     reason: str
 
 
@@ -62,6 +63,7 @@ async def list_features(config: AppConfig = Depends(get_config)) -> FeaturesResp
             mode=config.dbtl.mode,
             mutations_enabled=config.dbtl.mutations_enabled,
             graph_execution_enabled=config.dbtl.graph_execution_enabled,
+            design_deck_feedback=config.dbtl.design_deck_feedback,
             reason=dbtl_mode_reason(config.dbtl),
         ),
     )

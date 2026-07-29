@@ -44,6 +44,7 @@ import {
   useAttachArtifact,
   useBuildTest,
   useCreateWorkItem,
+  useDbtlFeature,
   useResolveWorkItem,
   useReviewStage,
   useSubmitStage,
@@ -108,6 +109,7 @@ export function CycleStageSheet({
     projectId,
     open && (stage === "build" || stage === "test") ? cycleId : null,
   );
+  const dbtl = useDbtlFeature();
 
   const [rationale, setRationale] = useState("");
   const [resolutionFor, setResolutionFor] = useState<string | null>(null);
@@ -166,6 +168,47 @@ export function CycleStageSheet({
             "Run Build in this cycle context to record reproducibility lineage before review.",
         }
       : submissionReadiness;
+
+  if (
+    open &&
+    cycle &&
+    stage === "design" &&
+    dbtl.feature?.design_deck_feedback
+  ) {
+    return (
+      <Sheet open={open} onOpenChange={onOpenChange}>
+        <SheetContent className="flex w-full flex-col gap-0 overflow-y-auto sm:max-w-xl">
+          <SheetHeader>
+            <SheetTitle className="flex items-center gap-2">
+              Design
+              {record && (
+                <Badge variant="outline">{STATUS_LABELS[record.status]}</Badge>
+              )}
+            </SheetTitle>
+            <SheetDescription>
+              Design input and review now live in the registered feedback deck.
+            </SheetDescription>
+          </SheetHeader>
+          <div className="space-y-4 p-6">
+            <p className="text-sm font-medium">{cycle.title}</p>
+            <div className="border-border rounded-md border border-dashed p-4">
+              <p className="text-sm font-medium">Open the feedback deck</p>
+              <p className="text-muted-foreground mt-1 text-sm leading-relaxed">
+                Return to the conversation where this Design meeting ran and
+                open its slide deck. The chair question, submission step, and
+                final verdict are recorded there against the exact deck and
+                evidence hashes.
+              </p>
+            </div>
+            <p className="text-muted-foreground text-xs">
+              Set <code>dbtl.design_deck_feedback=false</code> to restore the
+              rollback Design sheet. Other stage review sheets are unchanged.
+            </p>
+          </div>
+        </SheetContent>
+      </Sheet>
+    );
+  }
 
   function attachEvidence(event: React.FormEvent) {
     event.preventDefault();

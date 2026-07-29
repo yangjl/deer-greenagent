@@ -41,6 +41,18 @@ import { urlOfArtifact } from "@/core/artifacts/utils";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { extractCitationSources } from "@/core/citations/sources";
 import { writeTextToClipboard } from "@/core/clipboard";
+import {
+  applyDesignFeedbackAction,
+  DbtlRequestError,
+  fetchDesignFeedbackSurface,
+  type DesignFeedbackSurface,
+} from "@/core/dbtl/cycles-api";
+import {
+  DECK_PROTOCOL_VERSION,
+  isDeckIntent,
+  parseDeckIntent,
+  toDeckMessage,
+} from "@/core/dbtl/design-deck-feedback";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
 import { installSkill, SkillRequestError } from "@/core/skills/api";
@@ -55,6 +67,7 @@ import {
   getFileIcon,
   getFileName,
 } from "@/core/utils/files";
+import { uuid } from "@/core/utils/uuid";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -72,10 +85,12 @@ export function ArtifactFileDetail({
   className,
   filepath: filepathFromProps,
   threadId,
+  projectId,
 }: {
   className?: string;
   filepath: string;
   threadId: string;
+  projectId?: string | null;
 }) {
   const { t } = useI18n();
   const { user } = useAuth();
@@ -357,6 +372,8 @@ export function ArtifactFileDetail({
               language={language ?? "text"}
               scrollKey={filepathFromProps}
               url={url}
+              projectId={projectId}
+              threadId={threadId}
             />
           )}
         {isCodeFile && viewMode === "code" && (
@@ -436,12 +453,16 @@ export function ArtifactFilePreview({
   scrollKey,
   url,
   resolveArtifactLinks = true,
+  projectId = null,
+  threadId = "",
 }: {
   content: string;
   language: string;
   scrollKey: string;
   url?: string;
   resolveArtifactLinks?: boolean;
+  projectId?: string | null;
+  threadId?: string;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const scrollPositionRef = useRef({ x: 0, y: 0 });
@@ -450,6 +471,9 @@ export function ArtifactFilePreview({
     [scrollKey],
   );
   const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string>();
+  const deckChannelRef = useRef<string | null>(null);
+  const deckSurfaceRef = useRef<DesignFeedbackSurface | null>(null);
+  const deckSubmissionIdRef = useRef<string | null>(null);
   const citationSources = useMemo(
     () =>
       language === "markdown" ? extractCitationSources(content ?? "") : [],
@@ -498,6 +522,178 @@ export function ArtifactFilePreview({
       window.removeEventListener("message", handleMessage);
     };
   }, [language, scrollMessageKey]);
+
+  useEffect(() => {
+    if (language !== "html" || !projectId || !threadId) {
+      return;
+    }
+
+    let cancelled = false;
+    const send = (
+      surfaceId: string,
+      channel: string,
+      body: Parameters<typeof toDeckMessage>[2],
+    ) => {
+      iframeRef.current?.contentWindow?.postMessage(
+        toDeckMessage(surfaceId, channel, body),
+        "*",
+      );
+    };
+
+    const verifyBytes = async (expectedHash: string) => {
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(content ?? ""),
+      );
+      return (
+        Array.from(new Uint8Array(digest))
+          .map((value) => value.toString(16).padStart(2, "0"))
+          .join("") === expectedHash
+      );
+    };
+
+    const handleMessage = async (event: MessageEvent) => {
+      if (
+        event.source !== iframeRef.current?.contentWindow ||
+        !isDeckIntent(event.data)
+      ) {
+        return;
+      }
+      const raw = event.data as Record<string, unknown>;
+      if (
+        raw.protocol !== DECK_PROTOCOL_VERSION ||
+        typeof raw.surfaceId !== "string"
+      ) {
+        return;
+      }
+      const surfaceId = raw.surfaceId;
+
+      if (raw.type === "ready") {
+        try {
+          const surface = await fetchDesignFeedbackSurface({
+            projectId,
+            surfaceId,
+            viewerThreadId: threadId,
+          });
+          if (cancelled) return;
+          const channel = uuid();
+          deckChannelRef.current = channel;
+          deckSurfaceRef.current = surface;
+          const bytesMatch = await verifyBytes(surface.deck_content_hash);
+          if (cancelled) return;
+          send(surfaceId, channel, {
+            type: "initialize",
+            allowedActions: bytesMatch ? surface.allowed_actions : [],
+            note: bytesMatch
+              ? surface.note
+              : "This preview does not match the registered deck bytes.",
+          });
+        } catch (error) {
+          if (cancelled) return;
+          const channel = uuid();
+          deckChannelRef.current = channel;
+          send(surfaceId, channel, {
+            type: "initialize",
+            allowedActions: [],
+            note:
+              error instanceof Error
+                ? error.message
+                : "This deck could not be verified.",
+          });
+        }
+        return;
+      }
+
+      const channel = deckChannelRef.current;
+      const surface = deckSurfaceRef.current;
+      if (!channel || surface?.surface_id !== surfaceId) return;
+      const intent = parseDeckIntent(event.data, { surfaceId, channel });
+      if (intent?.type !== "submit_intent") return;
+
+      const submissionId = (deckSubmissionIdRef.current ??= uuid());
+      send(surfaceId, channel, { type: "pending" });
+      try {
+        const result = await applyDesignFeedbackAction({
+          projectId,
+          surface,
+          viewerThreadId: threadId,
+          action: intent.action,
+          comment: intent.comment,
+          clientSubmissionId: submissionId,
+        });
+        if (cancelled) return;
+        if (intent.action.kind === "submit_for_review") {
+          const refreshed = await fetchDesignFeedbackSurface({
+            projectId,
+            surfaceId,
+            viewerThreadId: threadId,
+          });
+          deckSurfaceRef.current = refreshed;
+          deckSubmissionIdRef.current = null;
+          send(surfaceId, channel, {
+            type: "initialize",
+            allowedActions: refreshed.allowed_actions,
+            note:
+              result.receipt?.message ??
+              "Submitted. Choose the final Design verdict.",
+          });
+        } else {
+          send(surfaceId, channel, {
+            type: "accepted",
+            note: result.receipt?.message ?? "Recorded.",
+          });
+        }
+      } catch (error) {
+        if (cancelled) return;
+        if (error instanceof DbtlRequestError && error.status === 409) {
+          try {
+            const refreshed = await fetchDesignFeedbackSurface({
+              projectId,
+              surfaceId,
+              viewerThreadId: threadId,
+            });
+            if (cancelled) return;
+            deckSurfaceRef.current = refreshed;
+            if (
+              !refreshed.is_current ||
+              refreshed.current_db_revision !== surface.current_db_revision ||
+              !refreshed.interactive
+            ) {
+              send(surfaceId, channel, {
+                type: "stale",
+                note:
+                  refreshed.note ||
+                  "This deck changed or was already answered. Open the latest feedback deck.",
+              });
+              return;
+            }
+          } catch {
+            // The original conflict remains authoritative. Never retry it
+            // against a new revision merely because refresh also failed.
+          }
+        }
+        send(surfaceId, channel, {
+          type: "failed",
+          note:
+            error instanceof Error
+              ? error.message
+              : "That Design feedback could not be recorded.",
+        });
+      }
+    };
+
+    const onMessage = (event: MessageEvent) => {
+      void handleMessage(event);
+    };
+    window.addEventListener("message", onMessage);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("message", onMessage);
+      deckChannelRef.current = null;
+      deckSurfaceRef.current = null;
+      deckSubmissionIdRef.current = null;
+    };
+  }, [content, language, projectId, threadId]);
 
   useEffect(() => {
     if (language !== "html") {

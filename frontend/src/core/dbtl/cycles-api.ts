@@ -16,11 +16,53 @@ export interface CycleListResponse {
   cycles: CycleRecord[];
 }
 
+export type DesignFeedbackActionKind =
+  | "chair_option"
+  | "chair_text"
+  | "submit_for_review"
+  | "approve"
+  | "request_changes"
+  | "reject";
+
+export interface DesignFeedbackSurface {
+  surface_id: string;
+  project_id: string;
+  cycle_id: string;
+  originating_thread_id: string;
+  mode: "chair_feedback" | "stage_review" | "read_only";
+  deck_content_hash: string;
+  deck_schema_version: string;
+  evidence_artifact_id: string | null;
+  evidence_artifact_revision: number | null;
+  evidence_content_hash: string | null;
+  is_current: boolean;
+  newest_surface_id: string | null;
+  allowed_actions: DesignFeedbackActionKind[];
+  interactive: boolean;
+  current_db_revision: number | null;
+  current_stage_status: string | null;
+  receipt: {
+    status: string;
+    receipt?: { message?: string; run_id?: string; db_revision?: number };
+  } | null;
+  note: string;
+}
+
 async function parseError(response: Response, fallback: string) {
   const body = (await response.json().catch(() => null)) as {
     detail?: string;
   } | null;
   return body?.detail ?? `${fallback}: ${response.statusText}`;
+}
+
+export class DbtlRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "DbtlRequestError";
+  }
 }
 
 function base(projectId: string) {
@@ -38,7 +80,10 @@ async function post<T>(
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    throw new Error(await parseError(response, fallback));
+    throw new DbtlRequestError(
+      await parseError(response, fallback),
+      response.status,
+    );
   }
   return (await response.json()) as T;
 }
@@ -77,6 +122,64 @@ export async function fetchCycleActivity(
     throw new Error(await parseError(response, "Failed to load activity"));
   }
   return ((await response.json()) as { events: ActivityEvent[] }).events;
+}
+
+export async function fetchDesignFeedbackSurface(input: {
+  projectId: string;
+  surfaceId: string;
+  viewerThreadId: string;
+}): Promise<DesignFeedbackSurface> {
+  const params = new URLSearchParams({
+    viewer_thread_id: input.viewerThreadId,
+  });
+  const response = await fetch(
+    `${base(input.projectId)}/design-feedback/${encodeURIComponent(input.surfaceId)}?${params}`,
+  );
+  if (!response.ok) {
+    throw new DbtlRequestError(
+      await parseError(response, "Could not verify this Design feedback deck"),
+      response.status,
+    );
+  }
+  return (await response.json()) as DesignFeedbackSurface;
+}
+
+export async function applyDesignFeedbackAction(input: {
+  projectId: string;
+  surface: DesignFeedbackSurface;
+  viewerThreadId: string;
+  action: { kind: DesignFeedbackActionKind; optionIds: string[] };
+  comment: string;
+  clientSubmissionId: string;
+}) {
+  return post<{
+    status: string;
+    run_id?: string | null;
+    receipt?: { message?: string; run_id?: string; db_revision?: number };
+    replayed: boolean;
+  }>(
+    `${base(input.projectId)}/cycles/${encodeURIComponent(input.surface.cycle_id)}/design-feedback/${encodeURIComponent(input.surface.surface_id)}/actions`,
+    {
+      version: 1,
+      action: {
+        kind: input.action.kind,
+        option_ids: input.action.optionIds,
+      },
+      comment: input.comment,
+      client_submission_id: input.clientSubmissionId,
+      originating_thread_id: input.viewerThreadId,
+      expected_db_revision: input.surface.current_db_revision,
+      expected_evidence: input.surface.evidence_artifact_id
+        ? {
+            artifact_id: input.surface.evidence_artifact_id,
+            revision: input.surface.evidence_artifact_revision,
+            content_hash: input.surface.evidence_content_hash,
+          }
+        : null,
+      expected_deck_hash: input.surface.deck_content_hash,
+    },
+    "Could not record the Design feedback",
+  );
 }
 
 export interface CreateCycleInput {

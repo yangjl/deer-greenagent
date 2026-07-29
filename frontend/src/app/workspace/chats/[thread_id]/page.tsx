@@ -532,7 +532,11 @@ export default function ChatPage() {
         context={settings.context}
         isMock={isMock}
       >
-        <ChatBox threadId={threadId} browserEnabled={browserEnabled}>
+        <ChatBox
+          threadId={threadId}
+          projectId={projectId}
+          browserEnabled={browserEnabled}
+        >
           <div className="relative flex size-full min-h-0 justify-between">
             <header
               className={cn(

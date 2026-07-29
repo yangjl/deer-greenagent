@@ -103,6 +103,7 @@ export type HumanInputRequest = {
   request_id: string;
   tool_call_id?: string;
   clarification_type?: string;
+  design_feedback_surface_id?: string;
   title?: string;
   question: string;
   context?: string | null;
@@ -653,6 +654,13 @@ export function parseHumanInputRequest(
     ...(readOptionalString(value.clarification_type)
       ? { clarification_type: readOptionalString(value.clarification_type) }
       : {}),
+    ...(readOptionalString(value.design_feedback_surface_id)
+      ? {
+          design_feedback_surface_id: readOptionalString(
+            value.design_feedback_surface_id,
+          ),
+        }
+      : {}),
     ...(readOptionalString(value.title)
       ? { title: readOptionalString(value.title) }
       : {}),
@@ -833,10 +841,19 @@ export function hasOpenHumanInputRequest(
   messages: Message[],
   isVisibleMessage?: (message: Message) => boolean,
 ) {
-  return (
-    deriveHumanInputThreadState(messages, isVisibleMessage)
-      .latestOpenRequestId !== null
-  );
+  const latestOpenRequestId = deriveHumanInputThreadState(
+    messages,
+    isVisibleMessage,
+  ).latestOpenRequestId;
+  if (latestOpenRequestId === null) return false;
+  const request = [...messages]
+    .reverse()
+    .map(extractHumanInputRequest)
+    .find((candidate) => candidate?.request_id === latestOpenRequestId);
+  // A verified deck-backed Design request remains in durable thread state for
+  // the supervisor, but the deck is now its input surface. It must not lock the
+  // ordinary composer or render a duplicate card.
+  return !request?.design_feedback_surface_id;
 }
 
 export function createHumanInputOptionResponse(

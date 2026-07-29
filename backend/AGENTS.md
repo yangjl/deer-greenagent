@@ -2316,24 +2316,59 @@ paused, then completed) and those are different surfaces;
 disambiguates a genuine id clash rather than colliding on the primary key.
 A `read_only` plan renders with no surface id at all.
 
-Tests: `tests/test_dbtl_deck_bridge.py` (protocol shape and refusals),
+**Activation has to reach every control, not just the fieldset.** Each radio and
+each `[data-deck-issue]` checkbox is rendered carrying its own `disabled`, so the
+persisted file is inert wherever it is opened — and an enabled `<fieldset>` does
+**not** re-enable a descendant that carries that attribute itself. `setEnabled`
+therefore drives a cached `choices` collection alongside the fieldset, submit,
+action buttons, and comment box. Without it the deck reached a state no
+source-level assertion would call wrong and no person could use: the parent
+verified the bytes, the server allowed `chair_option`, the submit button came
+alive, and every click answered "Choose one option first." because `selected()`
+read an empty radio group. The same omission silently emptied
+`request_changes`'s `optionIds`, so a reviewer's selected contested topics could
+never reach the audit record. Deactivation must drive the same collection —
+freezing a submission in flight has to freeze the choice behind it.
+
+Tests: `tests/test_dbtl_deck_bridge.py` (protocol shape, refusals, and that
+activation reaches every control),
 `frontend/tests/e2e/design-deck-bridge.spec.ts` (the script driven in a real
-browser), `frontend/tests/unit/core/dbtl/design-deck-feedback.test.ts` (the
+browser against a stub parent),
+`frontend/tests/e2e/design-deck-feedback.spec.ts` (the whole path through the
+real application — artifact panel, `ArtifactFilePreview`, SHA-256 verification,
+and the action request's bindings; this is the suite that caught the disabled
+options),
+`frontend/tests/unit/core/dbtl/design-deck-feedback.test.ts` (the
 parent's parser and reducer), and `tests/test_dbtl_deck_fixture_drift.py`, which
 keeps the browser suite's committed deck fixture byte-identical to this
 renderer — a fixture that drifts would keep the browser suite passing against a
 deck the product no longer produces.
 
-This is phases 0–3's protocol layer of
-[docs/plans/2026-07-28-design-deck-feedback-plan.md](../docs/plans/2026-07-28-design-deck-feedback-plan.md).
-Still **not implemented**: the React controller that performs the handshake
-against a live artifact iframe, the in-deck submit and review transitions
-(phase 4), chair-response idempotency, binding the deck's
-`human_input_request_id` to the card the supervisor emits (it is registered
-`NULL` today), extending stage submit/review validation to the deck hash, and
-the cutover and cleanup phases. The read model reports `allowed_actions: []`, so
-even a wired deck stays inert. No deck can record anything, and the Design
-review sheet remains the only place a human review is written.
+The feedback path in
+[docs/plans/2026-07-28-design-deck-feedback-plan.md](../docs/plans/2026-07-28-design-deck-feedback-plan.md)
+is now live for newly rendered registered surfaces. Migration `0023` adds the
+single-use action ledger and immutable Design review provenance. Surface reads
+return only server-computed allowed actions after membership, user-owned
+originating-thread, current-surface, current-evidence, feature-mode, and human
+principal checks. Writes repeat those checks, bind the normalized payload to a
+client submission id, and arbitrate each surface/action group with a unique
+constraint. An identical retry replays; another payload, tab, DB revision,
+artifact revision, or deck hash conflicts without rebasing.
+
+Chair answers use the recorded option/value or exact free text, bind to the
+supervisor-emitted `human_input_request_id`, and start the run only in the
+originating thread. Stage review remains two explicit transitions:
+`submit_for_review`, then one of `approve`, `request_changes`, or `reject`.
+Reviews bind canonical evidence and deck hashes and separately retain selected
+card ids, the nullable human comment, and the labelled server rationale
+projection. Request changes queues the existing focused refinement with the
+selected issue ids and comment. Lifecycle logs use the
+`design_feedback.*` vocabulary and omit comments and raw deck content.
+
+`dbtl.design_deck_feedback=false` is the rollback switch. Descriptor and review
+records are retained when it is off; consumed surfaces never reopen. Historical
+decks without a descriptor, direct/downloaded decks, stale evidence, and
+superseded surfaces remain inert.
 
 **A card's tool-call id must satisfy every provider it may be replayed to.**
 `supervisor.card_request_id` builds every card/present-files id as

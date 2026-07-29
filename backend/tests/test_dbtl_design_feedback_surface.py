@@ -16,7 +16,11 @@ import pytest
 import pytest_asyncio
 
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlWorkflowRefused
+from deerflow.persistence.dbtl import (
+    DbtlCycleRepository,
+    DbtlWorkflowRefused,
+    DesignFeedbackConflict,
+)
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
 
@@ -326,6 +330,220 @@ class TestEvidenceBinding:
                 evidence_artifact_id="artifact-that-does-not-exist",
                 evidence_artifact_revision=1,
                 evidence_content_hash=EVIDENCE_HASH,
+            )
+
+    async def test_a_claimed_evidence_hash_must_match_the_artifact_row(self, tmp_path: Path) -> None:
+        repo = await _repo(tmp_path)
+        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert cycle is not None
+        await repo.attach_artifact(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            stage="design",
+            artifact_type="design_brief.v2",
+            uri="/mnt/user-data/outputs/design.md",
+            content_hash=EVIDENCE_HASH,
+            created_by="user-1",
+            expected_db_revision=int(cycle["db_revision"]),
+            idempotency_key="artifact-exact",
+        )
+        detail = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert detail is not None
+        artifact = detail["artifacts"][-1]
+
+        with pytest.raises(DbtlWorkflowRefused, match="does not match"):
+            await _register(
+                repo,
+                mode="stage_review",
+                evidence_artifact_id=artifact["id"],
+                evidence_artifact_revision=artifact["revision"],
+                evidence_content_hash="d" * 64,
+            )
+
+    async def test_a_newer_design_artifact_makes_the_old_deck_stale(self, tmp_path: Path) -> None:
+        repo = await _repo(tmp_path)
+        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert cycle is not None
+        await repo.attach_artifact(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            stage="design",
+            artifact_type="design_brief.v2",
+            uri="/mnt/user-data/outputs/design-v1.md",
+            content_hash=EVIDENCE_HASH,
+            created_by="user-1",
+            expected_db_revision=int(cycle["db_revision"]),
+            idempotency_key="artifact-stale-1",
+        )
+        detail = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert detail is not None
+        artifact = detail["artifacts"][-1]
+        surface = await _register(
+            repo,
+            mode="stage_review",
+            evidence_artifact_id=artifact["id"],
+            evidence_artifact_revision=artifact["revision"],
+            evidence_content_hash=EVIDENCE_HASH,
+        )
+        await repo.attach_artifact(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            stage="design",
+            artifact_type="design_brief.v2",
+            uri="/mnt/user-data/outputs/design-v2.md",
+            content_hash="e" * 64,
+            created_by="user-1",
+            expected_db_revision=int(detail["db_revision"]),
+            idempotency_key="artifact-stale-2",
+        )
+        newest = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert newest is not None
+
+        with pytest.raises(DesignFeedbackConflict, match="evidence changed"):
+            await repo.reserve_design_feedback_action(
+                project_id="project-1",
+                cycle_id="cycle-1",
+                surface_id=surface["surface_id"],
+                originating_thread_id="thread-1",
+                action_kind="submit_for_review",
+                selected_card_ids=[],
+                human_comment="",
+                client_submission_id="submission-stale-evidence",
+                expected_db_revision=int(newest["db_revision"]),
+                expected_evidence={
+                    "artifact_id": artifact["id"],
+                    "revision": artifact["revision"],
+                    "content_hash": EVIDENCE_HASH,
+                },
+                expected_deck_hash=DECK_HASH,
+            )
+
+
+class TestPayloadBoundActions:
+    async def test_a_rollback_card_answer_consumes_the_same_surface(self, tmp_path: Path) -> None:
+        repo = await _repo(tmp_path)
+        surface = await _register(
+            repo,
+            human_input_request_id="dbtl-design__request-rollback",
+            decision_request={
+                "question": "Which split?",
+                "options": [
+                    {
+                        "id": "family",
+                        "label": "Family",
+                        "value": "Use families.",
+                    }
+                ],
+            },
+        )
+
+        await repo.mark_bound_design_feedback_answer(
+            project_id="project-1",
+            human_input_request_id="dbtl-design__request-rollback",
+            answer="Use family holdout.",
+        )
+
+        actions = await repo.design_feedback_actions(surface["surface_id"], project_id="project-1")
+        assert len(actions) == 1
+        assert actions[0]["action_group"] == "chair_response"
+        assert actions[0]["status"] == "resume_started"
+
+    async def test_a_chair_option_is_single_use_and_payload_bound(self, tmp_path: Path) -> None:
+        repo = await _repo(tmp_path)
+        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert cycle is not None
+        surface = await _register(
+            repo,
+            human_input_request_id="dbtl-design__request-1",
+            decision_request={
+                "question": "Which split?",
+                "options": [{"id": "family", "label": "Family", "value": "Use families."}],
+            },
+        )
+        kwargs = {
+            "project_id": "project-1",
+            "cycle_id": "cycle-1",
+            "surface_id": surface["surface_id"],
+            "originating_thread_id": "thread-1",
+            "action_kind": "chair_option",
+            "selected_card_ids": ["family"],
+            "human_comment": "Keep one site external.",
+            "client_submission_id": "submission-1",
+            "expected_db_revision": int(cycle["db_revision"]),
+            "expected_evidence": None,
+            "expected_deck_hash": DECK_HASH,
+        }
+
+        _surface, first, replayed = await repo.reserve_design_feedback_action(**kwargs)
+        _surface, replay, was_replayed = await repo.reserve_design_feedback_action(**kwargs)
+
+        assert replayed is False
+        assert was_replayed is True
+        assert replay["client_submission_id"] == first["client_submission_id"]
+
+        with pytest.raises(DesignFeedbackConflict, match="different payload"):
+            await repo.reserve_design_feedback_action(
+                **{
+                    **kwargs,
+                    "human_comment": "A different answer.",
+                    "client_submission_id": "submission-2",
+                }
+            )
+
+    async def test_a_chair_option_must_come_from_the_recorded_result(self, tmp_path: Path) -> None:
+        repo = await _repo(tmp_path)
+        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert cycle is not None
+        surface = await _register(
+            repo,
+            human_input_request_id="dbtl-design__request-1",
+            decision_request={
+                "question": "Which split?",
+                "options": [{"id": "family", "label": "Family", "value": "Use families."}],
+            },
+        )
+
+        with pytest.raises(DesignFeedbackConflict, match="not offered"):
+            await repo.reserve_design_feedback_action(
+                project_id="project-1",
+                cycle_id="cycle-1",
+                surface_id=surface["surface_id"],
+                originating_thread_id="thread-1",
+                action_kind="chair_option",
+                selected_card_ids=["forged"],
+                human_comment="",
+                client_submission_id="submission-forged",
+                expected_db_revision=int(cycle["db_revision"]),
+                expected_evidence=None,
+                expected_deck_hash=DECK_HASH,
+            )
+
+    async def test_the_other_chair_option_requires_the_human_comment(self, tmp_path: Path) -> None:
+        repo = await _repo(tmp_path)
+        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert cycle is not None
+        surface = await _register(
+            repo,
+            human_input_request_id="dbtl-design__request-1",
+            decision_request={
+                "question": "Which split?",
+                "options": [{"id": "other", "label": "Other", "value": "Use another split."}],
+            },
+        )
+
+        with pytest.raises(DesignFeedbackConflict, match="requires a comment"):
+            await repo.reserve_design_feedback_action(
+                project_id="project-1",
+                cycle_id="cycle-1",
+                surface_id=surface["surface_id"],
+                originating_thread_id="thread-1",
+                action_kind="chair_option",
+                selected_card_ids=["other"],
+                human_comment="",
+                client_submission_id="submission-other",
+                expected_db_revision=int(cycle["db_revision"]),
+                expected_evidence=None,
+                expected_deck_hash=DECK_HASH,
             )
 
 

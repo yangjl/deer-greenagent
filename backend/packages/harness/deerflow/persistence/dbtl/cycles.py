@@ -592,6 +592,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
         expected_db_revision: int,
         actor_user_id: str,
         idempotency_key: str,
+        design_feedback_binding: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Move a workable stage to ``awaiting_review``."""
         async with self._sf() as session:
@@ -609,6 +610,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                         "stage": stage,
                         "expected_db_revision": expected_db_revision,
                         "actor_user_id": actor_user_id,
+                        "design_feedback_binding": design_feedback_binding,
                     },
                 )
                 is not None
@@ -657,6 +659,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                     "stage": stage,
                     "expected_db_revision": expected_db_revision,
                     "actor_user_id": actor_user_id,
+                    "design_feedback_binding": design_feedback_binding,
                 },
             )
             await session.commit()
@@ -674,6 +677,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
         reviewer_user_id: str,
         reviewer_project_role: str,
         idempotency_key: str,
+        design_feedback_provenance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Apply one human verdict, advancing the cycle only when legal."""
         if not rationale.strip():
@@ -700,6 +704,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                         "expected_db_revision": expected_db_revision,
                         "reviewer_user_id": reviewer_user_id,
                         "reviewer_project_role": reviewer_project_role,
+                        "design_feedback_provenance": design_feedback_provenance,
                     },
                 )
                 is not None
@@ -739,6 +744,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
             evidence = await self._latest_artifact(session, stage_attempt_id)
             if evidence is None:
                 raise DbtlWorkflowRefused(f"Stage {stage!r} has no artifact to review.")
+            provenance = design_feedback_provenance or {}
             session.add(
                 DbtlReviewRow(
                     id=f"review-{cycle.id}-{cycle.db_revision}",
@@ -760,6 +766,15 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                     reviewer_user_id=reviewer_user_id,
                     reviewer_project_role=reviewer_project_role,
                     authorization_reference=f"manual-workflow:{project_id}:{reviewer_user_id}",
+                    input_source=str(provenance.get("input_source") or "design_sheet"),
+                    feedback_surface_id=provenance.get("feedback_surface_id"),
+                    deck_content_hash=provenance.get("deck_content_hash"),
+                    deck_schema_version=provenance.get("deck_schema_version"),
+                    selected_action=provenance.get("selected_action"),
+                    selected_card_ids=list(provenance.get("selected_card_ids") or []) or None,
+                    human_comment=provenance.get("human_comment"),
+                    rationale_projection=provenance.get("rationale_projection"),
+                    rationale_source=provenance.get("rationale_source"),
                 )
             )
             await self._record_event(
@@ -776,6 +791,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                     "reviewer_user_id": reviewer_user_id,
                     "reviewer_project_role": reviewer_project_role,
                     "state": cycle.state,
+                    "design_feedback_provenance": design_feedback_provenance,
                 },
             )
             await session.commit()

@@ -131,10 +131,12 @@ function StageRow({
   cycle,
   stage,
   onOpen,
+  designDeckFeedback,
 }: {
   cycle: CycleRecord;
   stage: DbtlStage;
   onOpen: (stage: DbtlStage) => void;
+  designDeckFeedback: boolean;
 }) {
   const record = cycle.stages.find((item) => item.stage === stage);
   const mark = STATUS_MARK[record?.status ?? "locked"] ?? LOCKED_MARK;
@@ -146,7 +148,11 @@ function StageRow({
       className="hover:bg-muted/60 group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors"
     >
       <Icon className={cn("size-3.5 shrink-0", mark.tone)} />
-      <span className="min-w-0 flex-1 truncate">{STAGE_LABELS[stage]}</span>
+      <span className="min-w-0 flex-1 truncate">
+        {stage === "design" && designDeckFeedback
+          ? "Open feedback deck"
+          : STAGE_LABELS[stage]}
+      </span>
       <span className="text-muted-foreground shrink-0 text-[11px]">
         {STATUS_LABELS[record?.status ?? "locked"]}
       </span>
@@ -419,6 +425,9 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                           cycle={entry}
                           stage={stage}
                           onOpen={setOpenStage}
+                          designDeckFeedback={
+                            dbtl.feature?.design_deck_feedback === true
+                          }
                         />
                       ))}
                     </div>

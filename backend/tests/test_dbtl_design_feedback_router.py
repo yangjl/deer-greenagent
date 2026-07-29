@@ -11,6 +11,7 @@ from __future__ import annotations
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import anyio
@@ -88,7 +89,15 @@ def _create_cycle(client, project_id: str, *, key: str = "create-1") -> dict:
     ).json()
 
 
-async def _register(repo, cycle: dict, *, deck_content_hash: str = DECK_HASH, mode: str = "chair_feedback", design_round: int = 1) -> dict:
+async def _register(
+    repo,
+    cycle: dict,
+    *,
+    deck_content_hash: str = DECK_HASH,
+    mode: str = "chair_feedback",
+    design_round: int = 1,
+    **overrides,
+) -> dict:
     attempt = next(item["id"] for item in cycle["stages"] if item["stage"] == "design")
     return await repo.register_design_feedback_surface(
         project_id=cycle["project_id"],
@@ -99,6 +108,7 @@ async def _register(repo, cycle: dict, *, deck_content_hash: str = DECK_HASH, mo
         mode=mode,
         deck_uri=DECK_URI,
         deck_content_hash=deck_content_hash,
+        **overrides,
     )
 
 
@@ -216,3 +226,230 @@ def test_an_internal_principal_may_read_but_gains_no_actions(tmp_path: Path) -> 
         body = client.get(_url(project_id, cycle["id"], surface["surface_id"])).json()
 
     assert body["allowed_actions"] == []
+
+
+def test_a_recorded_chair_option_starts_one_originating_thread_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+
+    async def fake_start_run(body, thread_id, request):
+        assert thread_id == "thread-1"
+        message = body.input["messages"][0]
+        assert message["additional_kwargs"]["human_input_response"]["option_id"] == "family"
+        return SimpleNamespace(run_id="run-resume-1")
+
+    monkeypatch.setattr(dbtl_cycles, "start_run", fake_start_run)
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        project_id = _seed_project(client)
+        client.app.state.thread_store.get = AsyncMock(return_value={"thread_id": "thread-1", "project_id": project_id})
+        cycle = _create_cycle(client, project_id)
+        surface = anyio.run(
+            partial(
+                _register,
+                cycle_repo,
+                cycle,
+                human_input_request_id="dbtl-design__request-1",
+                decision_request={
+                    "question": "Which validation split?",
+                    "options": [
+                        {
+                            "id": "family",
+                            "label": "Family holdout",
+                            "value": "Use family holdout.",
+                        }
+                    ],
+                },
+            )
+        )
+
+        response = client.post(
+            f"{_url(project_id, cycle['id'], surface['surface_id'])}/actions",
+            json={
+                "version": 1,
+                "action": {"kind": "chair_option", "option_ids": ["family"]},
+                "comment": "Keep one site external.",
+                "client_submission_id": "submission-1",
+                "originating_thread_id": "thread-1",
+                "expected_db_revision": cycle["db_revision"],
+                "expected_evidence": None,
+                "expected_deck_hash": DECK_HASH,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "resume_started"
+    assert response.json()["run_id"] == "run-resume-1"
+
+
+def test_design_submission_and_approval_are_two_bound_deck_transitions(tmp_path: Path) -> None:
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    evidence_hash = "c" * 64
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        project_id = _seed_project(client)
+        client.app.state.thread_store.get = AsyncMock(return_value={"thread_id": "thread-1", "project_id": project_id})
+        cycle = _create_cycle(client, project_id)
+        attached = client.post(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/artifacts",
+            json={
+                "stage": "design",
+                "artifact_type": "design_brief.v2",
+                "uri": "/mnt/user-data/outputs/design-review.md",
+                "content_hash": evidence_hash,
+                "expected_db_revision": cycle["db_revision"],
+                "idempotency_key": "artifact-1",
+            },
+        )
+        assert attached.status_code == 201
+        cycle = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}").json()
+        artifact = cycle["artifacts"][-1]
+        surface = anyio.run(
+            partial(
+                _register,
+                cycle_repo,
+                cycle,
+                mode="stage_review",
+                evidence_artifact_id=artifact["id"],
+                evidence_artifact_revision=artifact["revision"],
+                evidence_content_hash=evidence_hash,
+                decision_request={"review_issue_ids": ["issue-1"]},
+            )
+        )
+        action_url = f"{_url(project_id, cycle['id'], surface['surface_id'])}/actions"
+        common = {
+            "version": 1,
+            "comment": "",
+            "originating_thread_id": "thread-1",
+            "expected_evidence": {
+                "artifact_id": artifact["id"],
+                "revision": artifact["revision"],
+                "content_hash": evidence_hash,
+            },
+            "expected_deck_hash": DECK_HASH,
+        }
+
+        submitted = client.post(
+            action_url,
+            json={
+                **common,
+                "action": {"kind": "submit_for_review", "option_ids": []},
+                "client_submission_id": "submit-1",
+                "expected_db_revision": cycle["db_revision"],
+            },
+        )
+        assert submitted.status_code == 200
+        submitted_cycle = submitted.json()["cycle"]
+        assert next(item for item in submitted_cycle["stages"] if item["stage"] == "design")["status"] == "awaiting_review"
+
+        reviewed = client.post(
+            action_url,
+            json={
+                **common,
+                "action": {"kind": "approve", "option_ids": []},
+                "comment": "The validation split is explicit.",
+                "client_submission_id": "review-1",
+                "expected_db_revision": submitted_cycle["db_revision"],
+            },
+        )
+
+        assert reviewed.status_code == 200
+        assert reviewed.json()["status"] == "review_recorded"
+        activity = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/activity").json()["events"]
+        review_event = next(item for item in activity if item["event_type"] == "stage.reviewed")
+        provenance = review_event["payload"]["design_feedback_provenance"]
+        assert provenance["input_source"] == "design_deck"
+        assert provenance["feedback_surface_id"] == surface["surface_id"]
+        assert provenance["deck_content_hash"] == DECK_HASH
+
+
+def test_request_changes_starts_a_focused_run_in_the_originating_thread(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    started: list[object] = []
+
+    async def fake_start_run(body, thread_id, request):
+        assert thread_id == "thread-1"
+        message = body.input["messages"][0]
+        assert message["additional_kwargs"]["hide_from_ui"] is True
+        assert message["additional_kwargs"]["dbtl_design_kickoff"] is True
+        assert "issue-1" in message["content"]
+        assert "Selected contested Design issues require refinement" in message["content"]
+        started.append(body)
+        return SimpleNamespace(run_id="run-refinement-1")
+
+    monkeypatch.setattr(dbtl_cycles, "start_run", fake_start_run)
+    evidence_hash = "d" * 64
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        project_id = _seed_project(client)
+        client.app.state.thread_store.get = AsyncMock(return_value={"thread_id": "thread-1", "project_id": project_id})
+        cycle = _create_cycle(client, project_id)
+        attached = client.post(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/artifacts",
+            json={
+                "stage": "design",
+                "artifact_type": "design_brief.v2",
+                "uri": "/mnt/user-data/outputs/design-review.md",
+                "content_hash": evidence_hash,
+                "expected_db_revision": cycle["db_revision"],
+                "idempotency_key": "artifact-refinement",
+            },
+        )
+        assert attached.status_code == 201
+        cycle = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}").json()
+        artifact = cycle["artifacts"][-1]
+        surface = anyio.run(
+            partial(
+                _register,
+                cycle_repo,
+                cycle,
+                mode="stage_review",
+                evidence_artifact_id=artifact["id"],
+                evidence_artifact_revision=artifact["revision"],
+                evidence_content_hash=evidence_hash,
+                decision_request={"review_issue_ids": ["issue-1"]},
+            )
+        )
+        action_url = f"{_url(project_id, cycle['id'], surface['surface_id'])}/actions"
+        binding = {
+            "version": 1,
+            "originating_thread_id": "thread-1",
+            "expected_evidence": {
+                "artifact_id": artifact["id"],
+                "revision": artifact["revision"],
+                "content_hash": evidence_hash,
+            },
+            "expected_deck_hash": DECK_HASH,
+        }
+        submitted = client.post(
+            action_url,
+            json={
+                **binding,
+                "action": {"kind": "submit_for_review", "option_ids": []},
+                "comment": "",
+                "client_submission_id": "submit-refinement",
+                "expected_db_revision": cycle["db_revision"],
+            },
+        )
+        assert submitted.status_code == 200
+
+        reviewed = client.post(
+            action_url,
+            json={
+                **binding,
+                "action": {
+                    "kind": "request_changes",
+                    "option_ids": ["issue-1"],
+                },
+                "comment": "",
+                "client_submission_id": "review-refinement",
+                "expected_db_revision": submitted.json()["cycle"]["db_revision"],
+            },
+        )
+
+    assert reviewed.status_code == 200
+    assert reviewed.json()["run_id"] == "run-refinement-1"
+    assert reviewed.json()["receipt"]["run_id"] == "run-refinement-1"
+    assert len(started) == 1

@@ -42,6 +42,17 @@ class TestReadingTheObjection:
 
         assert _change_request(events) == "Still no rejection criterion."
 
+    def test_it_reads_the_persisted_review_decision_value(self):
+        events = [
+            _event(
+                "stage.reviewed",
+                decision="request_changes",
+                rationale="Keep the external site out of model selection.",
+            )
+        ]
+
+        assert _change_request(events) == "Keep the external site out of model selection."
+
     def test_an_approval_clears_a_previous_objection(self):
         """An answered objection must not steer the next round.
 
@@ -88,6 +99,13 @@ class TestNumberingTheRound:
         ]
 
         assert _design_round(events) == 3
+
+    def test_persisted_review_decisions_increment_the_round(self):
+        events = [
+            _event("stage.reviewed", decision="request_changes", rationale="More detail."),
+        ]
+
+        assert _design_round(events) == 2
 
     def test_an_approval_does_not_open_a_round(self):
         events = [_event("stage.reviewed", decision="approved", rationale="Good.")]

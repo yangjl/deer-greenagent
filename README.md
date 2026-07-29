@@ -39,9 +39,12 @@ Design–Build–Test–Learn (DBTL) governance.
   Starting a cycle launches a project-grounded Design council: independent
   specialist and red-team positions are synthesized by a chair, which either
   asks one focused clarification or presents a Design package for human review.
-  Gate decisions are recorded from the stage inspection sheet, where the
-  authenticated reviewer submits the exact artifact revision with a rationale;
-  approval language in chat does not mutate the gate or rerun the council.
+  After the meeting convenes, its registered slide deck is the input surface:
+  the owner can answer the chair, submit the exact Design package, and record a
+  final verdict there. The authenticated parent verifies the exact deck and
+  evidence hashes before enabling controls; downloaded, stale, or wrong-thread
+  copies remain read-only. Approval language in ordinary chat does not mutate
+  the gate or rerun the council.
 - **One native setup interaction** — DBTL setup and confirmation are emitted
   through DeerFlow's existing `ask_clarification` Human Input Card in the chat
   transcript. Internal model prompts, structured drafting responses, subagent
@@ -79,8 +82,8 @@ Design–Build–Test–Learn (DBTL) governance.
   after a scoped request is accepted the cycle selection is consumed, and
   ordinary read/explain follow-ups go to normal chat instead of dispatching
   the council again;
-  the final stage sheet pairs a structured decision map with the exact Markdown
-  document the human review binds.
+  the final feedback deck pairs the structured decision map with the exact
+  Markdown evidence and records the reviewed deck projection separately.
 - **DeerFlow capabilities** — sandboxed execution, tools, skills, MCP,
   subagents, persistent conversations, and multiple model providers, including
   local reuse of Claude Code and Codex subscription logins through the
@@ -129,6 +132,7 @@ dbtl:
   mode: graph_enabled # disabled | audit_only | manual | graph_enabled
   classifier_shadow_enabled: true
   proposals_visible: true
+  design_deck_feedback: true # false restores legacy Design controls during rollback
 ```
 
 DBTL modes:

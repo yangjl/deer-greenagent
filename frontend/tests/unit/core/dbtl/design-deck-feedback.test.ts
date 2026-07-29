@@ -78,9 +78,49 @@ describe("parseDeckIntent", () => {
   });
 
   it("refuses an unknown action kind", () => {
-    const payload = submitIntent({ action: { kind: "approve", optionIds: [] } });
+    const payload = submitIntent({
+      action: { kind: "delete_everything", optionIds: [] },
+    });
 
     expect(parseDeckIntent(payload, { surfaceId: SURFACE_ID, channel: CHANNEL })).toBeNull();
+  });
+
+  it("accepts formal review actions with their bounded shapes", () => {
+    const approve = submitIntent({
+      action: { kind: "approve", optionIds: [] },
+    });
+    const changes = submitIntent({
+      action: { kind: "request_changes", optionIds: ["issue-1"] },
+    });
+
+    expect(
+      parseDeckIntent(approve, { surfaceId: SURFACE_ID, channel: CHANNEL }),
+    ).not.toBeNull();
+    expect(
+      parseDeckIntent(changes, { surfaceId: SURFACE_ID, channel: CHANNEL }),
+    ).not.toBeNull();
+  });
+
+  it("accepts a written change request without a recorded issue card", () => {
+    const changes = submitIntent({
+      action: { kind: "request_changes", optionIds: [] },
+      comment: "Add an external-site validation criterion.",
+    });
+
+    expect(
+      parseDeckIntent(changes, { surfaceId: SURFACE_ID, channel: CHANNEL }),
+    ).not.toBeNull();
+  });
+
+  it("refuses a change request with neither an issue nor a comment", () => {
+    const changes = submitIntent({
+      action: { kind: "request_changes", optionIds: [] },
+      comment: "",
+    });
+
+    expect(
+      parseDeckIntent(changes, { surfaceId: SURFACE_ID, channel: CHANNEL }),
+    ).toBeNull();
   });
 
   it("refuses a chair option that selects nothing", () => {
@@ -160,7 +200,7 @@ describe("reduceDeckState", () => {
       allowedActions: ["chair_option", "approve", "delete_everything"] as never,
     });
 
-    expect(next.allowedActions).toEqual(["chair_option"]);
+    expect(next.allowedActions).toEqual(["chair_option", "approve"]);
   });
 
   it("marks a submission pending and keeps its idempotency key", () => {

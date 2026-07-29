@@ -11,6 +11,7 @@ export interface DbtlFeature {
   mode: "disabled" | "audit_only" | "manual" | "graph_enabled";
   mutations_enabled: boolean;
   graph_execution_enabled: boolean;
+  design_deck_feedback?: boolean;
   reason: string;
 }
 
@@ -18,6 +19,7 @@ const DISABLED_DBTL_FEATURE: DbtlFeature = {
   mode: "disabled",
   mutations_enabled: false,
   graph_execution_enabled: false,
+  design_deck_feedback: false,
   reason:
     "The backend did not publish a DBTL safety contract, so workflow controls are disabled.",
 };

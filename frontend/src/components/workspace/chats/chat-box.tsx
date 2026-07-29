@@ -39,8 +39,9 @@ type RightPanelKind = "sidecar" | "artifacts" | "browser" | "files";
 const ChatBox: React.FC<{
   children: React.ReactNode;
   threadId: string;
+  projectId?: string | null;
   browserEnabled?: boolean;
-}> = ({ children, threadId, browserEnabled = true }) => {
+}> = ({ children, threadId, projectId = null, browserEnabled = true }) => {
   const { thread } = useThread();
   const isMobile = useIsMobile();
   const pathname = usePathname();
@@ -243,6 +244,7 @@ const ChatBox: React.FC<{
           className="size-full"
           filepath={selectedArtifact}
           threadId={threadId}
+          projectId={projectId}
         />
       );
     }
@@ -287,6 +289,7 @@ const ChatBox: React.FC<{
   }, [
     renderedRightPanel,
     selectedArtifact,
+    projectId,
     threadId,
     artifacts,
     setArtifactsOpen,

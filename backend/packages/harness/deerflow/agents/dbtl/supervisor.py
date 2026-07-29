@@ -744,6 +744,7 @@ def _design_clarification_message(
     note: str,
     question: str,
     request_nonce: str,
+    feedback_surface_id: str | None = None,
 ) -> tuple[AIMessage, ToolMessage]:
     cycle = decision.cycle_id or "selected-cycle"
     request_id = card_request_id(DESIGN_CLARIFICATION_PREFIX, cycle, request_nonce, question)
@@ -776,6 +777,7 @@ def _design_clarification_message(
                     "request_id": request_id,
                     "clarification_type": "design_decision",
                     "dbtl_cycle_id": cycle,
+                    **({"design_feedback_surface_id": feedback_surface_id} if feedback_surface_id else {}),
                     "title": "The design meeting needs your input",
                     "question": question,
                     "context": note,
@@ -1374,6 +1376,22 @@ def build_supervisor_graph(
             # says nothing about what it is answering: the adapter resumes the
             # paused meeting on it instead of convening a new one.
             execute_kwargs["clarification_answer"] = design_answer[1]
+            consumer = getattr(stage_adapter, "consume_feedback_request", None)
+            if consumer is not None:
+                try:
+                    consumed = consumer(
+                        project_id=str(context.project_id or ""),
+                        human_input_request_id=design_answer[0],
+                        answer=design_answer[1],
+                    )
+                    if isawaitable(consumed):
+                        await consumed
+                except Exception:  # noqa: BLE001 - never discard a real card answer
+                    logger.warning(
+                        "Could not mark Design feedback request %s consumed.",
+                        design_answer[0],
+                        exc_info=True,
+                    )
         known_models = _adapter_known_models(stage_adapter)
         participant_settings = _confirmed_participant_settings(state, known_models)
         approved_proposal = _confirmed_council_proposal(state)
@@ -1432,15 +1450,52 @@ def build_supervisor_graph(
                 if deck_uri
                 else []
             )
+            feedback_surface_id = getattr(result, "feedback_surface_id", None)
+            feedback_surface_id = feedback_surface_id if isinstance(feedback_surface_id, str) and feedback_surface_id else None
+            if feedback_surface_id:
+                try:
+                    from deerflow.config.app_config import get_app_config
+
+                    if not get_app_config().dbtl.design_deck_feedback:
+                        feedback_surface_id = None
+                except Exception:  # noqa: BLE001 - unavailable config keeps rollback UI
+                    feedback_surface_id = None
+            clarification_messages = list(
+                _design_clarification_message(
+                    decision,
+                    note=result.note,
+                    question=clarification_question,
+                    request_nonce=request_nonce,
+                    feedback_surface_id=feedback_surface_id,
+                )
+            )
+            if feedback_surface_id:
+                request_id = clarification_messages[-1].tool_call_id
+                binder = getattr(stage_adapter, "bind_feedback_request", None)
+                try:
+                    if binder is None:
+                        raise RuntimeError("The stage adapter cannot bind a Design feedback request.")
+                    bound = binder(
+                        project_id=str(context.project_id or ""),
+                        surface_id=feedback_surface_id,
+                        human_input_request_id=request_id,
+                    )
+                    if isawaitable(bound):
+                        await bound
+                except Exception:  # noqa: BLE001 - keep the visible card as recovery
+                    logger.warning("Could not bind Design feedback deck %s to its Human Input request.", feedback_surface_id, exc_info=True)
+                    clarification_messages = list(
+                        _design_clarification_message(
+                            decision,
+                            note=result.note,
+                            question=clarification_question,
+                            request_nonce=request_nonce,
+                        )
+                    )
             return {
                 "messages": [
                     *deck_messages,
-                    *_design_clarification_message(
-                        decision,
-                        note=result.note,
-                        question=clarification_question,
-                        request_nonce=request_nonce,
-                    ),
+                    *clarification_messages,
                 ],
                 **({"artifacts": [deck_uri]} if deck_uri else {}),
             }

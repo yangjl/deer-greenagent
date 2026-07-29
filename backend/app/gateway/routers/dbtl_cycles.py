@@ -15,17 +15,19 @@ from __future__ import annotations
 import hashlib
 import logging
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_config, get_dbtl_cycle_repo, get_workspace_repo
+from app.gateway.deps import get_config, get_dbtl_cycle_repo, get_thread_store, get_workspace_repo
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 from app.gateway.memory_scope_service import resolve_scope_bindings
 from app.gateway.project_scope import ensure_project_root
+from app.gateway.run_models import RunCreateRequest
+from app.gateway.services import start_run
 from deerflow.agents.memory.scopes import bind_scope, publication_scope
 from deerflow.config.app_config import AppConfig
 from deerflow.dbtl import (
@@ -38,6 +40,7 @@ from deerflow.dbtl import (
 from deerflow.persistence.dbtl import (
     DbtlRevisionConflict,
     DbtlWorkflowRefused,
+    DesignFeedbackConflict,
 )
 from deerflow.utils.file_io import run_file_io
 
@@ -104,6 +107,51 @@ class StageReviewRequest(BaseModel):
         if not value.strip():
             raise ValueError("A review decision requires a rationale.")
         return value.strip()
+
+
+class DesignFeedbackEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: str = Field(min_length=1, max_length=96)
+    revision: int = Field(ge=1)
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DesignFeedbackAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal[
+        "chair_option",
+        "chair_text",
+        "submit_for_review",
+        "approve",
+        "request_changes",
+        "reject",
+    ]
+    option_ids: list[str] = Field(default_factory=list, max_length=16)
+
+    @field_validator("option_ids")
+    @classmethod
+    def option_ids_are_bounded_slugs(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("option_ids must be unique")
+        for value in values:
+            if not value or len(value) > 64 or not value.replace("-", "").replace("_", "").isalnum():
+                raise ValueError("option_ids must be bounded slug identifiers")
+        return values
+
+
+class DesignFeedbackActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1]
+    action: DesignFeedbackAction
+    comment: str = Field(default="", max_length=4_000)
+    client_submission_id: str = Field(min_length=1, max_length=128)
+    originating_thread_id: str = Field(min_length=1, max_length=64)
+    expected_db_revision: int = Field(ge=1)
+    expected_evidence: DesignFeedbackEvidence | None = None
+    expected_deck_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class ArtifactCreateRequest(BaseModel):
@@ -196,6 +244,8 @@ def _translate(exc: Exception) -> HTTPException:
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This cycle changed since you loaded it. Reload and try again.")
     if isinstance(exc, DbtlWorkflowRefused):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    if isinstance(exc, DesignFeedbackConflict):
+        return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     if isinstance(exc, KnowledgeLifecycleRefused):
         return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     if isinstance(exc, ValueError):
@@ -234,6 +284,111 @@ async def list_activity(project_id: str, cycle_id: str, request: Request, repo=D
     return {"cycle_id": cycle_id, "events": await repo.list_activity(cycle_id, project_id=project_id)}
 
 
+async def _design_feedback_read_model(
+    project_id: str,
+    surface_id: str,
+    request: Request,
+    *,
+    cycle_id: str | None,
+    viewer_thread_id: str | None,
+    config: AppConfig,
+    repo,
+) -> dict[str, Any]:
+    _project, user_id = await _require_project(project_id, request)
+    surface = await repo.get_design_feedback_surface(surface_id, project_id=project_id)
+    if surface is None or (cycle_id is not None and surface["cycle_id"] != cycle_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Feedback surface not found")
+
+    resolved_cycle_id = str(surface["cycle_id"])
+    newest = await repo.latest_design_feedback_surface(project_id=project_id, cycle_id=resolved_cycle_id)
+    cycle = await repo.get_cycle(resolved_cycle_id, project_id=project_id)
+    actions = await repo.design_feedback_actions(surface_id, project_id=project_id)
+    latest_action = actions[-1] if actions else None
+    evidence_matches = True
+    if surface["mode"] == "stage_review":
+        attempt_artifacts = [item for item in (cycle or {}).get("artifacts", []) if item.get("stage_attempt_id") == surface.get("stage_attempt_id")]
+        artifact = max(
+            attempt_artifacts,
+            key=lambda item: int(item.get("revision") or 0),
+            default=None,
+        )
+        evidence_matches = bool(
+            artifact and artifact.get("id") == surface.get("evidence_artifact_id") and artifact.get("revision") == surface.get("evidence_artifact_revision") and artifact.get("content_hash") == surface.get("evidence_content_hash")
+        )
+
+    dbtl_config = getattr(request.app.state, "dbtl_config_override", config.dbtl)
+    interactive = False
+    allowed_actions: list[str] = []
+    user = getattr(request.state, "user", None)
+    viewer_matches = bool(viewer_thread_id and viewer_thread_id == surface["originating_thread_id"])
+    if viewer_matches:
+        try:
+            thread = await get_thread_store(request).get(str(viewer_thread_id), user_id=user_id)
+            viewer_matches = bool(thread and thread.get("project_id") == project_id)
+        except Exception:  # noqa: BLE001 - inability to prove scope means inert
+            viewer_matches = False
+
+    if dbtl_config.design_deck_feedback and dbtl_config.mutations_enabled and getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE and viewer_matches and surface["is_current"] and evidence_matches and cycle is not None:
+        stage = next((item for item in cycle["stages"] if item["stage"] == "design"), None)
+        stage_status = str((stage or {}).get("status") or "")
+        groups = {str(item["action_group"]): item for item in actions}
+        if surface["mode"] == "chair_feedback" and surface.get("human_input_request_id"):
+            chair = groups.get("chair_response")
+            if chair is None or chair.get("status") == "failed":
+                request_payload = surface.get("decision_request")
+                options = request_payload.get("options") if isinstance(request_payload, dict) else None
+                allowed_actions = ["chair_option"] if options else ["chair_text"]
+        elif surface["mode"] == "stage_review":
+            if "stage_review" not in groups:
+                if stage_status in {"in_progress", "changes_requested"} and "stage_submit" not in groups:
+                    allowed_actions = ["submit_for_review"]
+                elif stage_status == "awaiting_review":
+                    allowed_actions = ["approve", "request_changes", "reject"]
+        interactive = bool(allowed_actions)
+
+    note = ""
+    if not surface["is_current"]:
+        note = "A newer Design round replaced this deck."
+    elif not evidence_matches:
+        note = "The Design evidence changed after this deck was rendered. Regenerate the feedback deck."
+    elif not viewer_matches:
+        note = "Open this deck in the conversation where the Design meeting started."
+    elif not dbtl_config.design_deck_feedback:
+        note = "Design deck feedback is disabled; use the fallback Design controls."
+    elif latest_action and latest_action.get("status") in {
+        "accepted",
+        "resume_started",
+        "review_recorded",
+    }:
+        receipt = latest_action.get("receipt")
+        note = str(receipt.get("message")) if isinstance(receipt, dict) and receipt.get("message") else "This feedback step has already been recorded."
+
+    logger.info(
+        "design_feedback.surface_opened",
+        extra={
+            "design_feedback": {
+                "project_id": project_id,
+                "cycle_id": resolved_cycle_id,
+                "thread_id": viewer_thread_id or "",
+                "surface_id": surface_id,
+                "round": surface["design_round"],
+                "interactive": interactive,
+            }
+        },
+    )
+    return {
+        **surface,
+        "newest_surface_id": (newest or {}).get("surface_id"),
+        "allowed_actions": allowed_actions,
+        "interactive": interactive,
+        "current_db_revision": int(cycle["db_revision"]) if cycle else None,
+        "current_stage_status": (next((item["status"] for item in cycle["stages"] if item["stage"] == "design"), None) if cycle else None),
+        "originating_conversation_id": surface["originating_thread_id"],
+        "receipt": latest_action,
+        "note": note,
+    }
+
+
 @router.get("/projects/{project_id}/dbtl/cycles/{cycle_id}/design-feedback/{surface_id}")
 @require_permission("threads", "read")
 async def get_design_feedback_surface(
@@ -241,40 +396,392 @@ async def get_design_feedback_surface(
     cycle_id: str,
     surface_id: str,
     request: Request,
+    viewer_thread_id: str | None = None,
+    config: AppConfig = Depends(get_config),
     repo=Depends(get_dbtl_cycle_repo),
 ):
-    """Resolve a rendered Design deck to what the server knows about it.
+    return await _design_feedback_read_model(
+        project_id,
+        surface_id,
+        request,
+        cycle_id=cycle_id,
+        viewer_thread_id=viewer_thread_id,
+        config=config,
+        repo=repo,
+    )
 
-    This is what a parent application asks before treating any HTML as a Design
-    surface. It is deliberately a **read**: it reports what a deck is bound to
-    and what may be done with it, and in this phase the answer is always
-    "nothing" — the bridge and the in-deck transitions do not exist yet, so
-    advertising an action would describe a capability that is not there.
 
-    Available in every mode, including ``audit_only``. A read model that
-    disappeared when mutations were off could not tell an owner *why* their deck
-    is inert, which is the one thing they need to know in that state.
-    """
-    await _require_project(project_id, request)
-    surface = await repo.get_design_feedback_surface(surface_id, project_id=project_id)
-    # The cycle in the path is part of the addressing rule: a surface that
-    # resolves under a different cycle is not this cycle's to serve.
-    if surface is None or surface["cycle_id"] != cycle_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Feedback surface not found")
+@router.get("/projects/{project_id}/dbtl/design-feedback/{surface_id}")
+@require_permission("threads", "read")
+async def resolve_design_feedback_surface(
+    project_id: str,
+    surface_id: str,
+    request: Request,
+    viewer_thread_id: str | None = None,
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    """Resolve a deck from its embedded opaque id without trusting deck routing."""
+    return await _design_feedback_read_model(
+        project_id,
+        surface_id,
+        request,
+        cycle_id=None,
+        viewer_thread_id=viewer_thread_id,
+        config=config,
+        repo=repo,
+    )
 
-    newest = await repo.latest_design_feedback_surface(project_id=project_id, cycle_id=cycle_id)
-    return {
-        **surface,
-        # Where to go when this deck is no longer the live one. Reported even
-        # for a current surface so a client never has to guess whether the
-        # absence of this field means "current" or "unknown".
-        "newest_surface_id": (newest or {}).get("surface_id"),
-        # Phase 1 registers decks; it does not make them answerable. Both keys
-        # are served rather than omitted so a client cannot read a missing key
-        # as permission.
-        "allowed_actions": [],
-        "interactive": False,
-    }
+
+def _feedback_event(
+    event: str,
+    *,
+    surface_id: str,
+    project_id: str,
+    cycle_id: str,
+    thread_id: str,
+    action_kind: str,
+    revision: int,
+    failure_code: str | None = None,
+) -> None:
+    logger.info(
+        event,
+        extra={
+            "design_feedback": {
+                "project_id": project_id,
+                "cycle_id": cycle_id,
+                "thread_id": thread_id,
+                "surface_id": surface_id,
+                "action_kind": action_kind,
+                "revision": revision,
+                "failure_code": failure_code,
+            }
+        },
+    )
+
+
+@router.post("/projects/{project_id}/dbtl/cycles/{cycle_id}/design-feedback/{surface_id}/actions")
+@require_permission("threads", "write")
+async def apply_design_feedback_action(
+    project_id: str,
+    cycle_id: str,
+    surface_id: str,
+    body: DesignFeedbackActionRequest,
+    request: Request,
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    """Accept one authenticated intent; the iframe itself receives no authority."""
+    project, user_id = await _require_project(project_id, request)
+    _require_mutations_enabled(request, config)
+    _require_human_reviewer(request)
+    dbtl_config = getattr(request.app.state, "dbtl_config_override", config.dbtl)
+    if not dbtl_config.design_deck_feedback:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Design deck feedback is disabled; use the fallback Design controls.",
+        )
+    try:
+        originating_thread = await get_thread_store(request).get(
+            body.originating_thread_id,
+            user_id=user_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The originating conversation could not be verified.",
+        ) from exc
+    if not originating_thread or originating_thread.get("project_id") != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The originating conversation is not owned by this user in this project.",
+        )
+
+    expected_evidence = body.expected_evidence.model_dump() if body.expected_evidence else None
+    try:
+        surface, action, replayed = await repo.reserve_design_feedback_action(
+            project_id=project_id,
+            cycle_id=cycle_id,
+            surface_id=surface_id,
+            originating_thread_id=body.originating_thread_id,
+            action_kind=body.action.kind,
+            selected_card_ids=body.action.option_ids,
+            human_comment=body.comment,
+            client_submission_id=body.client_submission_id,
+            expected_db_revision=body.expected_db_revision,
+            expected_evidence=expected_evidence,
+            expected_deck_hash=body.expected_deck_hash,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _feedback_event(
+            "design_feedback.conflict",
+            surface_id=surface_id,
+            project_id=project_id,
+            cycle_id=cycle_id,
+            thread_id=body.originating_thread_id,
+            action_kind=body.action.kind,
+            revision=body.expected_db_revision,
+            failure_code="validation_conflict",
+        )
+        raise _translate(exc) from exc
+
+    action_id = str(action["client_submission_id"])
+    if replayed and action["status"] in {"accepted", "resume_started", "review_recorded"}:
+        _feedback_event(
+            "design_feedback.replayed",
+            surface_id=surface_id,
+            project_id=project_id,
+            cycle_id=cycle_id,
+            thread_id=body.originating_thread_id,
+            action_kind=body.action.kind,
+            revision=body.expected_db_revision,
+        )
+        return {**action, "replayed": True}
+
+    _feedback_event(
+        "design_feedback.intent_received",
+        surface_id=surface_id,
+        project_id=project_id,
+        cycle_id=cycle_id,
+        thread_id=body.originating_thread_id,
+        action_kind=body.action.kind,
+        revision=body.expected_db_revision,
+    )
+    try:
+        if body.action.kind in {"chair_option", "chair_text"}:
+            request_payload = dict(surface.get("decision_request") or {})
+            question = str(request_payload.get("question") or "the Design meeting's question")
+            option = next(
+                (item for item in request_payload.get("options", []) if isinstance(item, dict) and item.get("id") in body.action.option_ids),
+                None,
+            )
+            if body.action.kind == "chair_option":
+                answer = str((option or {}).get("value") or "")
+                response = {
+                    "version": 1,
+                    "kind": "human_input_response",
+                    "source": "ask_clarification",
+                    "request_id": surface["human_input_request_id"],
+                    "response_kind": "option",
+                    "option_id": body.action.option_ids[0],
+                    "value": answer,
+                }
+            else:
+                answer = body.comment.strip()
+                if not answer:
+                    raise DesignFeedbackConflict("A free-text chair answer cannot be empty.")
+                response = {
+                    "version": 1,
+                    "kind": "human_input_response",
+                    "source": "ask_clarification",
+                    "request_id": surface["human_input_request_id"],
+                    "response_kind": "text",
+                    "value": answer,
+                }
+            visible_answer = answer
+            if body.action.kind == "chair_option" and body.comment.strip():
+                visible_answer = f"{answer}\n\nComment: {body.comment.strip()}"
+            record = await start_run(
+                RunCreateRequest(
+                    input={
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": f'For your clarification "{question}", my answer is: {visible_answer}',
+                                "additional_kwargs": {
+                                    "hide_from_ui": True,
+                                    "human_input_response": response,
+                                    "design_feedback_surface_id": surface_id,
+                                },
+                            }
+                        ]
+                    },
+                    context={
+                        "dbtl_supervisor_enabled": True,
+                        "dbtl_explicit_choice": "continue_cycle",
+                        "dbtl_selected_cycle_id": cycle_id,
+                    },
+                    on_disconnect="continue",
+                ),
+                body.originating_thread_id,
+                request,
+            )
+            receipt = {
+                "kind": body.action.kind,
+                "run_id": record.run_id,
+                "originating_thread_id": body.originating_thread_id,
+                "message": "Recorded. The Design chair is resuming in the originating conversation.",
+            }
+            updated = await repo.update_design_feedback_action(
+                action_id,
+                project_id=project_id,
+                status="resume_started",
+                run_id=record.run_id,
+                receipt=receipt,
+            )
+            _feedback_event(
+                "design_feedback.resume_started",
+                surface_id=surface_id,
+                project_id=project_id,
+                cycle_id=cycle_id,
+                thread_id=body.originating_thread_id,
+                action_kind=body.action.kind,
+                revision=body.expected_db_revision,
+            )
+            return {**updated, "replayed": replayed}
+
+        binding = {
+            "feedback_surface_id": surface_id,
+            "deck_content_hash": surface["deck_content_hash"],
+            "deck_schema_version": surface["deck_schema_version"],
+            "evidence": expected_evidence,
+        }
+        workflow_key = f"design-deck:{action_id}"
+        if body.action.kind == "submit_for_review":
+            cycle = await repo.submit_stage_for_review(
+                cycle_id=cycle_id,
+                project_id=project_id,
+                stage="design",
+                expected_db_revision=body.expected_db_revision,
+                actor_user_id=user_id,
+                idempotency_key=workflow_key,
+                design_feedback_binding=binding,
+            )
+            receipt = {
+                "kind": "submit_for_review",
+                "db_revision": cycle["db_revision"],
+                "message": "The Design package is submitted for human review.",
+            }
+            updated = await repo.update_design_feedback_action(
+                action_id,
+                project_id=project_id,
+                status="accepted",
+                receipt=receipt,
+            )
+            _feedback_event(
+                "design_feedback.accepted",
+                surface_id=surface_id,
+                project_id=project_id,
+                cycle_id=cycle_id,
+                thread_id=body.originating_thread_id,
+                action_kind=body.action.kind,
+                revision=int(cycle["db_revision"]),
+            )
+            return {**updated, "cycle": cycle, "replayed": replayed}
+
+        if body.action.kind == "reject" and not body.comment.strip():
+            raise DesignFeedbackConflict(f"{body.action.kind.replace('_', ' ').title()} requires a comment.")
+        rationale = body.comment.strip() or ("Approved from the registered Design feedback deck." if body.action.kind == "approve" else "Selected contested Design issues require refinement.")
+        rationale_projection = rationale
+        if body.action.kind == "request_changes":
+            target = f"the recorded issues {', '.join(body.action.option_ids)}" if body.action.option_ids else "the Design described in the reviewer's comment"
+            rationale_projection = f"Requested changes to {target}.\n\n{rationale}"
+        provenance = {
+            "input_source": "design_deck",
+            "feedback_surface_id": surface_id,
+            "deck_content_hash": surface["deck_content_hash"],
+            "deck_schema_version": surface["deck_schema_version"],
+            "selected_action": body.action.kind,
+            "selected_card_ids": body.action.option_ids,
+            "human_comment": body.comment.strip() or None,
+            "rationale_projection": rationale_projection,
+            "rationale_source": "server_projection",
+        }
+        cycle = await repo.review_stage(
+            cycle_id=cycle_id,
+            project_id=project_id,
+            stage="design",
+            decision=body.action.kind,
+            rationale=rationale_projection,
+            expected_db_revision=body.expected_db_revision,
+            reviewer_user_id=user_id,
+            reviewer_project_role=str(project["current_user_role"]),
+            idempotency_key=workflow_key,
+            design_feedback_provenance=provenance,
+        )
+        refinement_run_id: str | None = None
+        if body.action.kind == "request_changes":
+            refinement_target = f"these recorded issues: {', '.join(body.action.option_ids)}" if body.action.option_ids else "the reviewer's written objection"
+            refinement_request = f"Refine the approved Design candidate for {refinement_target}.\n\n{rationale}"
+            record = await start_run(
+                RunCreateRequest(
+                    input={
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": refinement_request,
+                                "additional_kwargs": {
+                                    "hide_from_ui": True,
+                                    "dbtl_design_kickoff": True,
+                                    "design_feedback_surface_id": surface_id,
+                                },
+                            }
+                        ]
+                    },
+                    context={
+                        "dbtl_supervisor_enabled": True,
+                        "dbtl_explicit_choice": "continue_cycle",
+                        "dbtl_selected_cycle_id": cycle_id,
+                    },
+                    on_disconnect="continue",
+                ),
+                body.originating_thread_id,
+                request,
+            )
+            refinement_run_id = record.run_id
+        receipt = {
+            "kind": body.action.kind,
+            "db_revision": cycle["db_revision"],
+            "message": ("Design changes were recorded and a focused refinement started." if refinement_run_id else f"Design review recorded: {body.action.kind.replace('_', ' ')}."),
+        }
+        if refinement_run_id:
+            receipt["run_id"] = refinement_run_id
+            receipt["originating_thread_id"] = body.originating_thread_id
+        updated = await repo.update_design_feedback_action(
+            action_id,
+            project_id=project_id,
+            status="review_recorded",
+            run_id=refinement_run_id,
+            receipt=receipt,
+        )
+        _feedback_event(
+            "design_feedback.review_recorded",
+            surface_id=surface_id,
+            project_id=project_id,
+            cycle_id=cycle_id,
+            thread_id=body.originating_thread_id,
+            action_kind=body.action.kind,
+            revision=int(cycle["db_revision"]),
+        )
+        return {**updated, "cycle": cycle, "replayed": replayed}
+    except HTTPException as exc:
+        await repo.update_design_feedback_action(
+            action_id,
+            project_id=project_id,
+            status="failed",
+            failure_code=f"http_{exc.status_code}",
+        )
+        raise
+    except Exception as exc:  # noqa: BLE001
+        await repo.update_design_feedback_action(
+            action_id,
+            project_id=project_id,
+            status="failed",
+            failure_code=type(exc).__name__[:64],
+        )
+        _feedback_event(
+            "design_feedback.resume_failed" if body.action.kind.startswith("chair_") else "design_feedback.conflict",
+            surface_id=surface_id,
+            project_id=project_id,
+            cycle_id=cycle_id,
+            thread_id=body.originating_thread_id,
+            action_kind=body.action.kind,
+            revision=body.expected_db_revision,
+            failure_code=type(exc).__name__[:64],
+        )
+        raise _translate(exc) from exc
 
 
 # ── Mutations ────────────────────────────────────────────────────────────

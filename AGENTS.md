@@ -206,6 +206,20 @@ Breeding-workspace note:
   transcript. The
   presentation icon beside Cycles opens a client-only Phase 7 three-case demo
   and never mutates durable records.
+- A registered Design feedback deck is the normal post-meeting input surface.
+  The persisted HTML is inert until the authenticated artifact parent verifies
+  its exact SHA-256, project, cycle, originating conversation, evidence
+  revision, and current server state. It can answer a paused chair, explicitly
+  submit Design for review, and then record Approve, Request changes, or Reject
+  as a second transition. The iframe emits bounded intents only; the parent
+  owns API calls, and the backend revalidates scope and records a single-use
+  action ledger plus review provenance. A deck-backed clarification remains in
+  durable thread history but is not rendered as a duplicate card and does not
+  lock ordinary chat. Request changes starts a focused refinement in the
+  originating conversation. `dbtl.design_deck_feedback=false` restores the
+  legacy Design card/sheet during the rollback window; non-Design review sheets
+  are unchanged. Legacy, downloaded, wrong-thread, stale, superseded, or
+  hash-mismatched decks remain read-only.
 - The Design council surfaces in the product as a **design meeting** — every
   user-facing string (card titles, debate panel, decision map, review
   Markdown) says "meeting"/"participants", while internal identifiers

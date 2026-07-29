@@ -1209,6 +1209,9 @@ export function MessageList({
 
               const humanInputRequest = extractHumanInputRequest(message);
               if (humanInputRequest) {
+                if (humanInputRequest.design_feedback_surface_id) {
+                  return null;
+                }
                 const answeredResponse =
                   humanInputState.answeredResponses.get(
                     humanInputRequest.request_id,

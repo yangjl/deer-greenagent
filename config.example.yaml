@@ -1225,6 +1225,10 @@ dbtl:
   # after reviewing the false-upgrade and missed-cycle rates in
   # Settings -> DBTL readiness. Also requires mode=manual or graph_enabled.
   proposals_visible: true
+  # Design meetings ask follow-up questions and collect the Design verdict in
+  # the registered feedback deck. Set false for the one-release rollback path;
+  # durable deck responses and reviews are retained.
+  design_deck_feedback: true
 
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider

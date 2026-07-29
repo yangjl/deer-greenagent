@@ -205,6 +205,17 @@ This section accumulates work toward the **2.1.0** milestone
   Design blockers, and creates an explicitly labeled server-attributed pilot
   draft when strict chair evidence fails so a human can approve the cycle into
   Data reconciliation. Medium and Heavy retain strict research contracts.
+- **DBTL:** Make registered Design meeting decks the post-convening input
+  surface. The opaque-origin iframe can answer a paused chair, explicitly
+  submit Design for review, and record Approve, Request changes, or Reject
+  through an authenticated parent bridge. Writes are single-use and bind the
+  originating conversation, current DB revision, canonical evidence
+  revision/hash, and exact deck hash; reviews retain structured action/comment
+  provenance. Stale, copied, legacy, wrong-thread, and superseded decks remain
+  read-only. Request changes starts a focused refinement in the originating
+  conversation, while ordinary chat remains unlocked. The legacy Design
+  card/sheet is available with `dbtl.design_deck_feedback=false` during the
+  rollback window; non-Design review surfaces are unchanged.
 
 ### Fixed
 

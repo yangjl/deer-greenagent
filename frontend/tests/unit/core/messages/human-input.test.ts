@@ -247,6 +247,25 @@ test("detects whether a thread has an open human input request", () => {
   );
 });
 
+test("a deck-backed Design request does not lock the ordinary composer", () => {
+  const requestMessage = {
+    type: "tool",
+    name: "ask_clarification",
+    content: "fallback",
+    artifact: {
+      human_input: {
+        ...requestPayload,
+        design_feedback_surface_id: "dfs-0123456789abcdef",
+      },
+    },
+  } as unknown as Message;
+
+  expect(extractHumanInputRequest(requestMessage)).toMatchObject({
+    design_feedback_surface_id: "dfs-0123456789abcdef",
+  });
+  expect(hasOpenHumanInputRequest([requestMessage])).toBe(false);
+});
+
 test("detects new thread errors that should unlock pending human input cards", () => {
   const previousError = new Error("old failure");
   const currentError = new Error("stream failed");

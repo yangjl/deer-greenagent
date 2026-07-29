@@ -393,6 +393,20 @@ class DbtlReviewRow(Base):
     reviewer_user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     reviewer_project_role: Mapped[str] = mapped_column(String(24), nullable=False)
     authorization_reference: Mapped[str] = mapped_column(String(160), nullable=False)
+    input_source: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="design_sheet",
+        server_default="design_sheet",
+    )
+    feedback_surface_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    deck_content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    deck_schema_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    selected_action: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    selected_card_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    human_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rationale_projection: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rationale_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     consumed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
 
@@ -445,6 +459,9 @@ class DbtlDesignFeedbackSurfaceRow(Base):
     mode: Mapped[str] = mapped_column(String(32), nullable=False)
     chair_worker_run_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
     human_input_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: Server-recorded decision request used to validate an option without
+    #: trusting the iframe to repeat the chair's choices honestly.
+    decision_request: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     deck_uri: Mapped[str] = mapped_column(Text, nullable=False)
     #: The exact bytes shown. A review binds this beside the evidence hash, so
     #: an audit can answer both "what was authoritative" and "what was read".
@@ -473,6 +490,52 @@ class DbtlDesignFeedbackSurfaceRow(Base):
             name="uq_dbtl_design_feedback_deck",
         ),
         Index("ix_dbtl_design_feedback_cycle_created", "cycle_id", "created_at"),
+    )
+
+
+class DbtlDesignFeedbackActionRow(Base):
+    """One single-use, payload-bound intent accepted from a Design deck."""
+
+    __tablename__ = "dbtl_design_feedback_actions"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    cycle_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dbtl_cycles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    surface_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("dbtl_design_feedback_surfaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    action_group: Mapped[str] = mapped_column(String(32), nullable=False)
+    action_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    selected_card_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    human_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_db_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    expected_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    expected_deck_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    run_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    receipt: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    failure_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now, onupdate=_utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "id", name="uq_dbtl_design_feedback_action_id"),
+        UniqueConstraint("surface_id", "action_group", name="uq_dbtl_design_feedback_action_group"),
+        Index("ix_dbtl_design_feedback_action_cycle_created", "cycle_id", "created_at"),
     )
 
 

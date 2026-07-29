@@ -162,6 +162,52 @@ class TestAccessibility:
         assert "<legend>" in html
 
 
+class TestActivationReachesEveryControl:
+    """A control ships disabled individually, so enabling the fieldset is not enough.
+
+    `<fieldset disabled>` disables its descendants, but an `<input disabled>`
+    inside an *enabled* fieldset stays disabled. Every radio and issue checkbox
+    is rendered with its own `disabled` attribute so the persisted file is inert
+    wherever it is opened — which means activation has to clear each one. An
+    end-to-end run caught the omission: the parent verified the bytes, the
+    server allowed `chair_option`, the submit button came alive, and no option
+    could be selected, so `selected()` returned `''` and the deck answered every
+    click with "Choose one option first."
+    """
+
+    @staticmethod
+    def _enable_body(html: str) -> str:
+        return html.split("function setEnabled")[1].split("\n  }")[0]
+
+    def test_activation_clears_each_radio_not_just_the_fieldset(self) -> None:
+        body = self._enable_body(_deck(decision=_request()))
+
+        assert "choices" in body
+        assert "choice.disabled = !on" in body
+
+    def test_the_enable_path_reaches_the_issue_checkboxes_too(self) -> None:
+        """`request_changes` reads `[data-deck-issue]:checked`; none could be checked."""
+        html = render_council_deck(
+            cycle_title="Genomic selection in maize",
+            stage_title="Design meeting",
+            round_number=2,
+            results=[{"summary": "Run a benchmark.", "consensus": _CONSENSUS}],
+            surface_id=SURFACE_ID,
+            surface_mode="stage_review",
+        )
+
+        declaration = html.split("var choices =")[1].split(";")[0]
+        assert "data-deck-issue" in declaration
+        assert "choice.disabled = !on" in self._enable_body(html)
+
+    def test_deactivation_freezes_the_choice_again(self) -> None:
+        """Freezing while a submission is in flight has to freeze the options too."""
+        body = self._enable_body(_deck(decision=_request()))
+
+        # Driven by `on`, never set unconditionally true.
+        assert "choice.disabled = true" not in body
+
+
 class TestStillSelfContained:
     def test_the_bridge_adds_no_network_dependency(self) -> None:
         html = _deck(decision=_request())

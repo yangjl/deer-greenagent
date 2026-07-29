@@ -3,8 +3,7 @@
 The persisted file must be safe to open from anywhere: a downloaded copy, an
 email attachment, a page that framed it. So every control ships disabled and the
 deck says where a real answer is given. Activation is the authenticated parent's
-job, and it is not implemented yet; nothing here may anticipate it by shipping
-an enabled control.
+job; nothing here may anticipate it by shipping an enabled control.
 """
 
 from __future__ import annotations
@@ -150,6 +149,26 @@ class TestFallbackAndOrdering:
         assert QUESTION in html
         assert 'type="radio"' not in html
 
+    def test_a_registered_chair_deck_collects_the_exact_question_as_text(self) -> None:
+        html = render_council_deck(
+            cycle_title="Genomic selection in maize",
+            stage_title="Design meeting",
+            round_number=2,
+            results=[
+                {
+                    "summary": "Run a matched-model benchmark.",
+                    "consensus": _CONSENSUS,
+                }
+            ],
+            clarification_question=QUESTION,
+            surface_id="dfs-free-text",
+            surface_mode="chair_feedback",
+        )
+
+        assert f"<legend>{QUESTION}</legend>" in html
+        assert 'data-deck-action="chair_text"' in html
+        assert "data-deck-comment" in html
+
     def test_the_decision_slide_sits_between_contested_and_synthesis(self) -> None:
         html = _deck(decision=_request())
 
@@ -171,3 +190,34 @@ class TestFallbackAndOrdering:
         }
 
         assert render_council_deck(**common) == render_council_deck(**common)
+
+
+class TestFormalReviewControls:
+    def test_a_completed_design_has_separate_submit_and_verdict_controls(self) -> None:
+        rendered = render_council_deck(
+            cycle_title="Drought",
+            stage_title="Design meeting",
+            round_number=1,
+            results=[{"summary": "Use family holdout.", "consensus": _CONSENSUS}],
+            surface_id="dfs-review",
+            surface_mode="stage_review",
+        )
+
+        assert 'data-deck-action="submit_for_review"' in rendered
+        assert 'data-deck-action="approve"' in rendered
+        assert 'data-deck-action="request_changes"' in rendered
+        assert 'data-deck-action="reject"' in rendered
+        assert "Nothing here approves anything" in rendered
+
+    def test_request_changes_selects_only_topics_the_chair_recorded(self) -> None:
+        rendered = render_council_deck(
+            cycle_title="Drought",
+            stage_title="Design meeting",
+            round_number=1,
+            results=[{"summary": "Use family holdout.", "consensus": _CONSENSUS}],
+            surface_id="dfs-review",
+            surface_mode="stage_review",
+        )
+
+        assert "data-deck-issue" in rendered
+        assert 'value="issue-1"' in rendered

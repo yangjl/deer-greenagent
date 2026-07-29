@@ -695,6 +695,20 @@ renderer and guarded against drift by
 That browser suite earns its keep: it is what caught a deck that would happily
 re-arm itself after being superseded, which no source-level assertion noticed.
 
-**Not yet implemented**: the React controller that performs the handshake against
-a live artifact iframe, and the write paths behind `submit_intent`. The read
-model reports `allowed_actions: []` today, so a wired deck stays inert.
+`ArtifactFilePreview` owns the live controller only when it has trusted project
+and thread context. It verifies `event.source`, resolves the opaque surface id
+through the authenticated parent, hashes the exact HTML bytes with SHA-256, and
+issues a per-mount channel before sending the server's allowed-action set.
+`submit_intent` maps to fixed API handlers; endpoints and credentials never
+cross into the iframe. A failed request keeps the DOM draft and client
+submission id, while a 409 refresh that proves revision change or consumption
+latches the deck stale instead of rebasing.
+
+The Design gate is deliberately two-step in the same deck: submit first, then
+refresh and show the three verdicts. A deck-backed Human Input request stays in
+thread state for supervisor recovery but `MessageList` suppresses the duplicate
+card and `hasOpenHumanInputRequest` leaves the ordinary composer unlocked.
+With `design_deck_feedback` enabled, the project rail says **Open feedback
+deck** and the Design stage sheet is a handoff only; Reconciliation, Build,
+Test, and Learn sheets are unchanged. Setting
+`dbtl.design_deck_feedback=false` restores the old Design controls.

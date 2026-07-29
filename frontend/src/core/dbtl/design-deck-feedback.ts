@@ -34,7 +34,14 @@ const OPTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
  * What the parent may be told a person did. Closed on purpose: an action the
  * parent has no handler for must not be expressible, let alone forwarded.
  */
-export const DECK_ACTION_KINDS = ["chair_option"] as const;
+export const DECK_ACTION_KINDS = [
+  "chair_option",
+  "chair_text",
+  "submit_for_review",
+  "approve",
+  "request_changes",
+  "reject",
+] as const;
 export type DeckActionKind = (typeof DECK_ACTION_KINDS)[number];
 
 export interface DeckSubmitAction {
@@ -100,9 +107,15 @@ function parseAction(value: unknown): DeckSubmitAction | null {
     (id): id is string =>
       typeof id === "string" && id.length <= MAX_OPTION_ID_CHARS && OPTION_ID_PATTERN.test(id),
   );
-  // Exactly one in this version. Zero is not a decision, and more than one is a
-  // shape the recorded question never offered.
-  if (optionIds.length !== 1 || optionIds.length !== rawIds.length) return null;
+  if (optionIds.length !== rawIds.length) return null;
+  if (kind === "chair_option" && optionIds.length !== 1) return null;
+  if (
+    kind !== "chair_option" &&
+    kind !== "request_changes" &&
+    optionIds.length !== 0
+  ) {
+    return null;
+  }
   return { kind: kind as DeckActionKind, optionIds };
 }
 
@@ -132,6 +145,13 @@ export function parseDeckIntent(value: unknown, context: DeckIntentContext): Dec
     const action = parseAction(value.action);
     if (action === null) return null;
     const comment = typeof value.comment === "string" ? value.comment.slice(0, MAX_COMMENT_CHARS) : "";
+    if (
+      action.kind === "request_changes" &&
+      action.optionIds.length === 0 &&
+      comment.trim().length === 0
+    ) {
+      return null;
+    }
     return { type: "submit_intent", surfaceId: context.surfaceId, action, comment };
   }
 
@@ -181,8 +201,8 @@ export function reduceDeckState(state: DeckSurfaceState, event: DeckStateEvent):
 
   switch (event.kind) {
     case "server_state": {
-      const allowedActions = event.allowedActions.filter((action): action is DeckActionKind =>
-        DECK_ACTION_KINDS.includes(action as DeckActionKind),
+      const allowedActions = event.allowedActions.filter((action) =>
+        DECK_ACTION_KINDS.includes(action),
       );
       return {
         ...state,

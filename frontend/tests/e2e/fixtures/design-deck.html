@@ -44,6 +44,7 @@
   .verdict--settled span { color: var(--accent); }
   .slide--decide li { font-size: 1.15rem; }
   .decision { margin: 0 0 1.1rem; padding: 0; border: 0; }
+  .review { margin: 0; padding: 0; border: 0; }
   .decision legend { padding: 0; margin-bottom: .9rem; font-size: 1.2rem; font-weight: 600; }
   .options { display: grid; gap: .65rem; }
   .option { display: flex; gap: .7rem; align-items: flex-start; border: 1px solid var(--line); border-radius: 10px;
@@ -60,6 +61,23 @@
   .decision[disabled] .option { opacity: .92; }
   .recommendation { margin: 0 0 .9rem; color: var(--muted); font-size: .93rem; }
   .recommendation span { display: block; font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; }
+  .review-issues { display: grid; gap: .5rem; margin: 1rem 0; }
+  .review-issues > p { margin: 0; color: var(--muted); font-size: .86rem; }
+  .review-issue { display: flex; gap: .65rem; align-items: flex-start; padding: .65rem .8rem;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  .review-issue input { margin-top: .25rem; }
+  .comment { display: grid; gap: .35rem; margin: .9rem 0; }
+  .comment label { font-size: .82rem; color: var(--muted); }
+  .comment textarea { width: 100%; resize: vertical; border: 1px solid var(--line); border-radius: 8px;
+    padding: .6rem .7rem; color: var(--fg); background: var(--bg); font: inherit; }
+  .submit-row, .review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; }
+  .submit-row button, .review-actions button { border: 1px solid var(--line); border-radius: 7px;
+    padding: .5rem .75rem; color: var(--fg); background: var(--card); font: inherit; cursor: pointer; }
+  .submit-row button:focus-visible, .review-actions button:focus-visible, .bar button:focus-visible,
+  .option input:focus-visible, .review-issue input:focus-visible, .comment textarea:focus-visible {
+    outline: 3px solid var(--accent); outline-offset: 3px;
+  }
+  .submit-row button:disabled, .review-actions button:disabled { cursor: not-allowed; opacity: .55; }
   .inert { margin: 0; padding: .55rem .8rem; border: 1px dashed var(--line); border-radius: 8px;
     color: var(--muted); font-size: .88rem; }
   .gate { margin-top: 1.5rem; color: var(--muted); font-size: .9rem; border-left: 2px solid var(--line); padding-left: .85rem; }
@@ -70,15 +88,20 @@
   .bar button:hover { border-color: var(--accent); color: var(--accent); }
   .track { flex: 1; height: 3px; background: var(--line); border-radius: 999px; overflow: hidden; }
   .track i { display: block; height: 100%; background: var(--accent); transition: width .2s ease; }
+  @media (prefers-reduced-motion: reduce) {
+    .track i { transition: none; }
+  }
   @media print {
     .deck { display: block; height: auto; padding: 0; }
     .slide, .slide.is-active { display: block; page-break-after: always; padding: 2.5rem; }
+    .decision .comment, .review .comment, .submit-row, .review-actions, [data-deck-status] { display: none !important; }
+    .decision input, .review input { display: none; }
     .bar { display: none; }
   }
 </style>
 </head>
 <body>
-<main class="deck"><section class="slide slide--title"><p class="eyebrow">Design meeting · Round 1</p><h2>Simulate a maize breeding population</h2><p class="lede">What the participants agreed, where they split, and what still needs your decision.</p><p class="stamp">2026-07-29 01:50 UTC</p></section><section class="slide slide--agree"><p class="eyebrow">Where the meeting agreed</p><h2>Agreed</h2><ul><li>The family is biparental and the trait is flowering time.</li></ul></section><section class="slide slide--contest"><p class="eyebrow">Where the meeting split</p><h2>Contested</h2><div class="contested-grid"><article class="contested"><h3>Which base the acceptance checks are evaluated against</h3><ul class="positions"><li>Against the founder haplotypes</li><li>Against the realized F2 sample</li></ul><p class="verdict verdict--open"><span>Not resolved</span> still open for the project owner.</p></article></div></section><section class="slide slide--decide"><p class="eyebrow">Only you can settle these</p><h2>Needs your decision</h2><fieldset class="decision" disabled><legend>Should the RIL family be produced by selfing to F5/F6, or by doubled-haploid production?</legend><div class="options"><div class="option"><input type="radio" id="inbreeding-route--selfing_f5_f6" name="inbreeding-route" value="selfing_f5_f6" disabled><label for="inbreeding-route--selfing_f5_f6"><span class="option-label">Selfing to F5/F6<span class="badge">Recommended</span></span><span class="option-value">Produce the RIL family by single-seed descent to F5/F6.</span><span class="option-detail">Residual heterozygosity around 3-6%; the segregation checks stay as written.</span></label></div><div class="option"><input type="radio" id="inbreeding-route--doubled_haploid" name="inbreeding-route" value="doubled_haploid" disabled><label for="inbreeding-route--doubled_haploid"><span class="option-label">Doubled-haploid production</span><span class="option-value">Produce the family by doubled-haploid production.</span><span class="option-detail">Fully homozygous lines, but induction rate biases which families survive.</span></label></div></div><div class="comment"><label for="inbreeding-route--comment">Add a comment (optional)</label><textarea id="inbreeding-route--comment" data-deck-comment rows="3" disabled></textarea></div></fieldset><p class="recommendation"><span>Why the chair leans this way</span> The owner said &#x27;biparental&#x27; without an inbreeding route, and selfing keeps the stated map-length check valid.</p><div class="submit-row"><button type="button" data-deck-submit disabled>Send to the meeting</button><p class="inert" data-deck-status role="status" aria-live="polite">Open this deck in DeerFlow to respond.</p></div><ul><li>Which base the acceptance checks are evaluated against</li><li>How many seasons and replicates?</li></ul></section><section class="slide slide--synthesis"><p class="eyebrow">The chair&#x27;s synthesis</p><h2>Where this lands</h2><p>Simulate the biparental family under an additive-plus-dominance model, then validate against the stated criteria.</p></section><section class="slide slide--limits"><p class="eyebrow">Read the synthesis against these</p><h2>Limitations</h2><ul><li>Generation rules stay unfrozen until the route is settled.</li></ul></section><section class="slide slide--next"><p class="eyebrow">Recommended, not decided</p><h2>Next</h2><ul><li>Freeze the generation rules once the route is chosen.</li></ul><p class="gate">Nothing here approves anything. Approving, requesting changes, or rejecting this design is a separate human record in the Design review sheet.</p><p class="stamp">Full review package: /mnt/user-data/outputs/dbtl/x/design/design-review-rev1-fb18c0.md</p></section></main>
+<main class="deck"><section class="slide slide--title"><p class="eyebrow">Design meeting · Round 1</p><h2>Simulate a maize breeding population</h2><p class="lede">What the participants agreed, where they split, and what still needs your decision.</p><p class="stamp">2026-07-29 01:50 UTC</p></section><section class="slide slide--agree"><p class="eyebrow">Where the meeting agreed</p><h2>Agreed</h2><ul><li>The family is biparental and the trait is flowering time.</li></ul></section><section class="slide slide--contest"><p class="eyebrow">Where the meeting split</p><h2>Contested</h2><div class="contested-grid"><article class="contested"><h3>Which base the acceptance checks are evaluated against</h3><ul class="positions"><li>Against the founder haplotypes</li><li>Against the realized F2 sample</li></ul><p class="verdict verdict--open"><span>Not resolved</span> still open for the project owner.</p></article></div></section><section class="slide slide--decide"><p class="eyebrow">Only you can settle these</p><h2>Needs your decision</h2><fieldset class="decision" disabled><legend>Should the RIL family be produced by selfing to F5/F6, or by doubled-haploid production?</legend><div class="options"><div class="option"><input type="radio" id="inbreeding-route--selfing_f5_f6" name="inbreeding-route" value="selfing_f5_f6" disabled><label for="inbreeding-route--selfing_f5_f6"><span class="option-label">Selfing to F5/F6<span class="badge">Recommended</span></span><span class="option-value">Produce the RIL family by single-seed descent to F5/F6.</span><span class="option-detail">Residual heterozygosity around 3-6%; the segregation checks stay as written.</span></label></div><div class="option"><input type="radio" id="inbreeding-route--doubled_haploid" name="inbreeding-route" value="doubled_haploid" disabled><label for="inbreeding-route--doubled_haploid"><span class="option-label">Doubled-haploid production</span><span class="option-value">Produce the family by doubled-haploid production.</span><span class="option-detail">Fully homozygous lines, but induction rate biases which families survive.</span></label></div></div><div class="comment"><label for="inbreeding-route--comment">Add a comment (optional)</label><textarea id="inbreeding-route--comment" data-deck-comment rows="3" disabled></textarea></div></fieldset><p class="recommendation"><span>Why the chair leans this way</span> The owner said &#x27;biparental&#x27; without an inbreeding route, and selfing keeps the stated map-length check valid.</p><div class="submit-row"><button type="button" data-deck-submit disabled>Send to the meeting</button><p class="inert" data-deck-status role="status" aria-live="polite">Open this deck in DeerFlow to respond.</p></div><ul><li>Which base the acceptance checks are evaluated against</li><li>How many seasons and replicates?</li></ul></section><section class="slide slide--synthesis"><p class="eyebrow">The chair&#x27;s synthesis</p><h2>Where this lands</h2><p>Simulate the biparental family under an additive-plus-dominance model, then validate against the stated criteria.</p></section><section class="slide slide--limits"><p class="eyebrow">Read the synthesis against these</p><h2>Limitations</h2><ul><li>Generation rules stay unfrozen until the route is settled.</li></ul></section><section class="slide slide--next"><p class="eyebrow">Recommended, not decided</p><h2>Next</h2><ul><li>Freeze the generation rules once the route is chosen.</li></ul><p class="gate">Nothing here approves anything merely by opening the deck. Use the Human gate slide to submit and record a verdict.</p><p class="stamp">Full review package: /mnt/user-data/outputs/dbtl/x/design/design-review-rev1-fb18c0.md</p></section></main>
 <nav class="bar">
   <button type="button" data-step="-1" aria-label="Previous slide">&larr;</button>
   <button type="button" data-step="1" aria-label="Next slide">&rarr;</button>
@@ -145,9 +168,16 @@
   var settled = false;
 
   var fieldset = document.querySelector('fieldset.decision');
+  var review = document.querySelector('fieldset.review');
   var submit = document.querySelector('[data-deck-submit]');
+  var actionButtons = Array.prototype.slice.call(document.querySelectorAll('[data-deck-action]'));
   var status = document.querySelector('[data-deck-status]');
   var comment = document.querySelector('[data-deck-comment]');
+  // The chair's options and the review's contested-topic checkboxes: every one
+  // is rendered disabled, and both submit paths read them back via :checked.
+  var choices = Array.prototype.slice.call(
+    document.querySelectorAll('fieldset.decision input[type="radio"], [data-deck-issue]')
+  );
 
   function say(text) { if (status) { status.textContent = text; } }
 
@@ -162,8 +192,17 @@
 
   function setEnabled(on) {
     if (fieldset) { fieldset.disabled = !on; }
-    if (submit) { submit.disabled = !on; }
+    if (submit) { submit.disabled = !on || allowed.indexOf('chair_option') === -1; }
+    if (review) { review.disabled = !on; }
+    actionButtons.forEach(function (button) {
+      button.disabled = !on || allowed.indexOf(button.dataset.deckAction) === -1;
+    });
     if (comment) { comment.disabled = !on; }
+    // Every option ships individually disabled so the persisted file is inert
+    // wherever it is opened. An enabled fieldset does not re-enable a control
+    // that carries its own `disabled`, so activation has to clear each one --
+    // otherwise the submit button comes alive over a choice nobody can make.
+    choices.forEach(function (choice) { choice.disabled = !on; });
   }
 
   function selected() {
@@ -176,6 +215,9 @@
       if (submitting || !channel || allowed.indexOf('chair_option') === -1) { return; }
       var option = selected();
       if (!option) { say('Choose one option first.'); return; }
+      if (option.toLowerCase() === 'other' && (!comment || !comment.value.trim())) {
+        say('Add a comment for the Other option.'); return;
+      }
       submitting = true;
       setEnabled(false);
       say('Sending your decision...');
@@ -187,6 +229,31 @@
       });
     });
   }
+
+  actionButtons.forEach(function (button) {
+    button.addEventListener('click', function () {
+      var kind = button.dataset.deckAction;
+      if (submitting || !channel || allowed.indexOf(kind) === -1) { return; }
+      var optionIds = [];
+      if (kind === 'request_changes') {
+        optionIds = Array.prototype.slice.call(document.querySelectorAll('[data-deck-issue]:checked')).map(function (item) { return item.value; });
+      }
+      var text = comment ? comment.value.trim() : '';
+      if ((kind === 'chair_text' || kind === 'reject') && !text) {
+        say('Add a rationale before recording this decision.'); return;
+      }
+      if (kind === 'request_changes' && !optionIds.length && !text) {
+        say('Select a contested point or describe the change needed.'); return;
+      }
+      submitting = true;
+      setEnabled(false);
+      say('Recording your Design decision...');
+      send('submit_intent', {
+        action: { kind: kind, optionIds: optionIds },
+        comment: text
+      });
+    });
+  });
 
   window.addEventListener('message', function (event) {
     if (event.source !== window.parent) { return; }
@@ -205,9 +272,16 @@
       channel = typeof data.channel === 'string' && data.channel ? data.channel : null;
       allowed = Array.isArray(data.allowedActions) ? data.allowedActions.slice(0, 8) : [];
       submitting = false;
-      var live = !!channel && allowed.indexOf('chair_option') !== -1;
+      var live = !!channel && allowed.length > 0;
       setEnabled(live);
-      say(live ? 'Choose an option, then send it to the meeting.' : (typeof data.note === 'string' && data.note ? data.note : 'This round is read-only.'));
+      var prompt = allowed.indexOf('submit_for_review') !== -1
+        ? 'Submit this Design when it is ready for human review.'
+        : (allowed.indexOf('approve') !== -1
+          ? 'Choose a Design verdict.'
+          : (allowed.indexOf('chair_text') !== -1
+            ? 'Answer the chair, then send it to the meeting.'
+            : 'Choose an option, then send it to the meeting.'));
+      say(live ? prompt : (typeof data.note === 'string' && data.note ? data.note : 'This round is read-only.'));
       return;
     }
     if (data.type === 'pending') { submitting = true; setEnabled(false); say('Sending your decision...'); return; }
