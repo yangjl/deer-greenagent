@@ -903,6 +903,60 @@ async def test_a_provider_outage_does_not_create_a_conclusion_deck_or_feedback_s
     assert "server_is_overloaded" in result.note
 
 
+class _FailedDebateMalformedChairDispatcher:
+    """Match a live Light run: both debaters fail and the chair returns prose."""
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def __call__(self, units, *, budget):
+        self.calls.append((units, budget))
+        if len(self.calls) < 3:
+            return [
+                DispatchOutcome(
+                    unit_id=unit.unit_id,
+                    text=None,
+                    error="The configured LLM provider rejected the request.",
+                )
+                for unit in units
+            ]
+        return [
+            DispatchOutcome(
+                unit_id=unit.unit_id,
+                text=('{"status":"completed","summary":"Pilot synthesis","artifact_refs":[{"path":"not-a-string"}]}'),
+            )
+            for unit in units
+        ]
+
+
+@pytest.mark.asyncio
+async def test_light_cannot_turn_a_failed_debate_and_malformed_chair_into_a_conclusion(
+    tmp_path: Path,
+) -> None:
+    """Recoverable chair prose is insufficient when nobody completed the debate."""
+    repo = FakeRepo(_cycle())
+    dispatcher = _FailedDebateMalformedChairDispatcher()
+    config = _runtime_config(tmp_path)
+    config["context"]["dbtl_council_depth"] = "light"
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft a quick pilot design.",
+        state={},
+        config=config,
+    )
+
+    assert result.worker_count == 3
+    assert not result.produced_usable_evidence
+    assert result.artifact_uri is None
+    assert result.deck_uri is None
+    assert result.feedback_surface_id is None
+    assert repo.surfaces == []
+    assert not list(tmp_path.rglob("design-review-*.md"))
+    assert not list(tmp_path.rglob("design-slides-*.html"))
+
+
 class _CappedPilotDispatcher:
     """Reproduce the live failure: capped positions and prose from the chair."""
 

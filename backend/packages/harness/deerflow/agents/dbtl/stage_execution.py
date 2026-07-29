@@ -2642,7 +2642,22 @@ class LiveStageAdapter:
         artifact_hash = None
         artifact_type = None
         artifact_digest = ""
-        design_ready = stage != "design" or (chair_result is not None and chair_result.is_trustworthy and chair_result.status is WorkerStatus.COMPLETED)
+        # A chair cannot turn an empty room into a concluded meeting. Light may
+        # deliberately preserve completed-but-capped participant reports as a
+        # limited pilot draft, but a provider failure or contract rejection is
+        # not a position and is not a red-team argument. A resumed chair is the
+        # exception because those two reports were durably recorded by the
+        # paused round and are supplied through ``resumed_chair``.
+        debate_report_statuses = {WorkerStatus.COMPLETED, WorkerStatus.NEEDS_INPUT}
+        design_debate_complete = (
+            stage != "design"
+            or resumed_chair is not None
+            or (
+                any(unit.role == "position" and result.status in debate_report_statuses for unit, result in unit_result_pairs)
+                and any(unit.role == "red_team" and result.status in debate_report_statuses for unit, result in unit_result_pairs)
+            )
+        )
+        design_ready = stage != "design" or (design_debate_complete and chair_result is not None and chair_result.is_trustworthy and chair_result.status is WorkerStatus.COMPLETED)
         produced_usable_evidence = outcome.produced_usable_evidence and design_ready
         if produced_usable_evidence:
             artifact_uri, artifact_hash, artifact_digest = await asyncio.to_thread(
@@ -2752,7 +2767,7 @@ class LiveStageAdapter:
         # is only an audit record. Rendering the latter as a deck makes a
         # provider outage look like a concluded meeting and creates a feedback
         # surface for a decision that does not exist.
-        chair_has_presentable_outcome = chair_result is not None and (chair_result.is_trustworthy or (chair_result.status is WorkerStatus.NEEDS_INPUT and not chair_result.was_capped))
+        chair_has_presentable_outcome = design_debate_complete and chair_result is not None and (chair_result.is_trustworthy or (chair_result.status is WorkerStatus.NEEDS_INPUT and not chair_result.was_capped))
         deck_uri = None
         deck = None
         surface_plan = None

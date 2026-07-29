@@ -261,7 +261,11 @@ Breeding-workspace note:
   the round that asks for a decision is the one that most needs it. A
   failed/blocked/capped chair result remains recorded for audit but creates no
   deck or feedback surface; otherwise a provider outage is presented as a
-  concluded meeting.
+  concluded meeting. A chair result is also insufficient by itself: the round
+  must contain both a validated independent-position report and a validated
+  red-team report. Light may retain completed-but-capped reports as an
+  explicitly limited pilot, but provider failures and contract rejections are
+  not debate input and cannot be converted into a conclusion.
 - **A paused chair may offer a structured choice, and the deck renders it.**
   `deerflow.dbtl.decision_request` adds an optional `decision_request` beside
   `clarification_question`: two to five options, each with a stable slug id, a

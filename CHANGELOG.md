@@ -228,7 +228,8 @@ This section accumulates work toward the **2.1.0** milestone
   conclusion deck or register a feedback surface for an unfinished meeting;
   completed and intentionally paused (`needs_input`) chairs retain their decks.
   Light pilot fallback now requires actual recoverable chair output instead of
-  manufacturing a review package from cycle metadata alone.
+  manufacturing a review package from cycle metadata alone, and cannot conclude
+  a round unless both an independent position and a red-team report validated.
 - **DBTL:** Pin each participant card's selected model onto the subagent
   executor configuration. Meeting seats no longer display/load tools for one
   model while silently invoking the composer's inherited provider.

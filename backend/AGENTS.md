@@ -2197,7 +2197,13 @@ round that asks for a decision is the one that most needs its context on screen.
 Failed, blocked, and capped chair records remain durable worker evidence but
 must not produce a deck or feedback surface: record existence is not a meeting
 outcome, and rendering a provider failure would falsely present an unfinished
-task as a conclusion.
+task as a conclusion. The chair is necessary but not sufficient: the round must
+also contain both an independent-position report and a red-team report with a
+validated `completed` or `needs_input` status. Light can retain
+completed-but-capped reports as an explicitly limited pilot, while provider
+failures, blocked workers, and contract-rejected output do not count as debate
+input. A resumed chair is allowed because the paused round's validated positions
+are already durable and supplied back to that chair.
 Failure to render or write returns `None` and logs — the deck is a presentation
 of a record already committed, so it must never fail the turn.
 
