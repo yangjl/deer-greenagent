@@ -2,7 +2,7 @@
 
 Status: implementation complete; human exit review pending
 Date: 2026-07-26
-Plan authority: `plan/build/2026-07-25-dbtl-human-visible-phased-implementation-plan.md` § "Phase 7"
+Plan authority: `docs/plans/2026-07-25-dbtl-human-visible-phased-implementation-plan.md` § "Phase 7"
 Design authority: `docs/plans/2026-07-25-dbtl-workflow-final-plan.md` §§ 6.4–6.6
 
 ## Shipped

@@ -11,7 +11,7 @@
 ## 1. Human direction recorded
 
 Resolving the Tester escalation
-(`plan/test/2026-07-24-workspace-oriented-breeding-human-escalation.md`), the
+(`plan/test/2026-07-24-workspace-oriented-breeding-human-escalation.md`, removed with the retired `plan/` tree — see git history), the
 human chose the second offered route and added new UI direction:
 
 1. Route the stale acceptance contract back to **Designer**; redefine this

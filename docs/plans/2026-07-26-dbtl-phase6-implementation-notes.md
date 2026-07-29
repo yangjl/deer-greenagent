@@ -2,7 +2,7 @@
 
 Status: human-approved to proceed; remaining exit decisions explicitly deferred
 Date: 2026-07-26
-Plan authority: `plan/build/2026-07-25-dbtl-human-visible-phased-implementation-plan.md` § "Phase 6"
+Plan authority: `docs/plans/2026-07-25-dbtl-human-visible-phased-implementation-plan.md` § "Phase 6"
 Design authority: `docs/plans/2026-07-25-dbtl-workflow-final-plan.md` §§ 6.3, 7.1–7.3
 
 This is the cumulative handoff record for Phase 6 — what shipped, what it

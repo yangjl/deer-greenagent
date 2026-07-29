@@ -2055,7 +2055,7 @@ and gating it meant a membership change silently pinned a withdrawn claim in
 place. Pinned by
 `test_dbtl_cycles_router.py::test_one_failing_target_does_not_strand_retrieval_in_the_others`.
 
-**Known gaps against the Phase 8 plan** (`plan/build/2026-07-25-dbtl-human-visible-phased-implementation-plan.md`),
+**Known gaps against the Phase 8 plan** (`docs/plans/2026-07-25-dbtl-human-visible-phased-implementation-plan.md`),
 carried deliberately rather than silently:
 
 - The plan's rollout ladder (`… → proposal → supervisor → staged_execution →

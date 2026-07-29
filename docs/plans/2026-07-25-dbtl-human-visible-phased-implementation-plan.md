@@ -6,7 +6,7 @@ Date: 2026-07-25
 Design authority:
 `docs/plans/2026-07-25-dbtl-workflow-final-plan.md`  
 Visual companion:
-`plan/presentations/dbtl-human-visible-roadmap/index.html`
+`plan/presentations/dbtl-human-visible-roadmap/index.html` (removed with the retired `plan/` tree; see git history)
 
 ## Purpose
 
