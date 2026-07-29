@@ -2,7 +2,7 @@
 
 > **Status: superseded and consolidated.** This plan is retained as source
 > material. The authoritative integrated Designer plan is
-> [`workspace-oriented-breeding-system-design.md`](workspace-oriented-breeding-system-design.md).
+> [`docs/plans/2026-07-24-workspace-oriented-breeding-system-design.md`](../../docs/plans/2026-07-24-workspace-oriented-breeding-system-design.md).
 > In particular, the earlier proposal that `.greenagent` remain authoritative
 > is no longer valid: the human has directed that PostgreSQL is the final
 > production authority and `.greenagent` is a temporary development

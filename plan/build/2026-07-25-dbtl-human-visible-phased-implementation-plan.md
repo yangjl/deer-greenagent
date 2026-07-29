@@ -4,7 +4,7 @@ Status: proposed for human review
 Role: Builder  
 Date: 2026-07-25  
 Design authority:
-`plan/design/2026-07-25-dbtl-workflow-final-plan.md`  
+`docs/plans/2026-07-25-dbtl-workflow-final-plan.md`  
 Visual companion:
 `plan/presentations/dbtl-human-visible-roadmap/index.html`
 
