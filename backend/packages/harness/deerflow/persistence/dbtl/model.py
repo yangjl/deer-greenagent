@@ -523,8 +523,11 @@ class DbtlDesignFeedbackSurfaceRow(Base):
     #: Additive Phase 2 discriminator. The legacy table name remains for one
     #: compatibility window so captured Design decks and old foreign keys keep
     #: resolving byte-for-byte.
-    stage: Mapped[str] = mapped_column(String(24), nullable=False, default="design")
-    surface_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # The server defaults mirror migration 0025, which needs them to backfill
+    # rows written before the stage dimension existed. A create_all schema
+    # without them is a different schema, and the bootstrap comparison says so.
+    stage: Mapped[str] = mapped_column(String(24), nullable=False, default="design", server_default="design")
+    surface_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     design_round: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     #: The only conversation this surface may answer. Work continues where it
     #: started; a deck opened from another view may display, never mutate.
@@ -590,7 +593,7 @@ class DbtlDesignFeedbackActionRow(Base):
         nullable=False,
         index=True,
     )
-    stage: Mapped[str] = mapped_column(String(24), nullable=False, default="design")
+    stage: Mapped[str] = mapped_column(String(24), nullable=False, default="design", server_default="design")
     action_group: Mapped[str] = mapped_column(String(32), nullable=False)
     action_kind: Mapped[str] = mapped_column(String(32), nullable=False)
     payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
