@@ -2269,6 +2269,31 @@ are already durable and supplied back to that chair.
 Failure to render or write returns `None` and logs — the deck is a presentation
 of a record already committed, so it must never fail the turn.
 
+**A theme may restyle the deck; it may never add to it.** `dbtl.council_deck_theme_skill`
+names an enabled skill supplying `assets/deck-theme.css`, which
+`render_council_deck(theme_css=...)` appends after its own stylesheet so plain
+selectors win by cascade rather than by an `!important` war. Three rules keep
+this from touching anything that matters. **Refuse, never escape**: inside a
+`<style>` element there is no escaping, so `parse_deck_theme` rejects any
+stylesheet containing `</style`, `<script`, `<!--`, or `javascript:`, plus
+anything over `DECK_THEME_MAX_CHARS` — the deck's exact bytes are hash-registered
+as the actionable gate surface, and a theme that could close the style element
+could add controls to it. **Unthemed is byte-identical to before themes
+existed**, so a re-render does not change a deck's content hash merely because
+the feature shipped. And **every failure costs styling only**: an unknown skill,
+a disabled one, a missing asset, a symlink escaping the skill directory, or an
+unreadable registry each log a reason and render the built-in look
+(`_load_deck_theme`), because the meeting's results are already committed by the
+time this runs. Resolution goes through the enabled-skill registry rather than a
+path join, so disabling the skill turns the theme off and custom-shadows-public
+behaves as it does everywhere else. The theme is named in **operator config**
+and not discovered from disk on purpose: `skills/custom` is agent-writable when
+agent-managed skills are on, and CSS can hide any element including the deck's
+inert notice — an agent that can write a skill directory still cannot make the
+server load one. `skills/public/dbtl-deck-theme/` is the worked example; it is
+asset-only and its frontmatter says so, since it is not a workflow to activate.
+Tests: `test_dbtl_deck_theme.py`.
+
 **A paused chair may return a structured `decision_request`, and the deck renders
 it as an inert choice.** `deerflow.dbtl.decision_request` defines
 `DecisionOption`/`DecisionRequest` plus `parse_decision_request(raw, *,
@@ -2542,11 +2567,31 @@ Writes are unconditional. `dbtl.progressive_gate` (default false,
 transition gate: `transition_assessment` runs once bound Design evidence
 exists, with null model configuration, provider failure, and malformed output
 all falling back to `standard`. The registered deck persists the original
-assessment/rationale in its server-owned decision request, accepts only a
-bounded explicit human override, and exposes server-computed routes. A
-`routine` `advance` action calls `review_stage(auto_submit=True)`, producing
-one normal evidence-bound review and one transition without a separate
-`stage.submitted` event. Park writes an append-only park edge and stores the
+assessment/rationale in its server-owned decision request and exposes
+server-computed routes.
+
+**The gate is one question with three answers.** The deck renders a single
+radio group — **Approve**, **Revise**, **Park** — plus a comment box and one
+"Record my decision" button, and nothing else: no review-depth override select,
+no per-route buttons, no contested-topic checkboxes, no separate submit step.
+The earlier slide offered all of those at once and made the commonest decision
+in the product read as a form. The bridge maps one choice to one intent
+(`revise` → `request_changes`, `park` → `park`, approve → `advance` while the
+route is offered, else `approve`), and both `advance` and a gate-issued
+`request_changes` call `review_stage(auto_submit=True)`, producing one normal
+evidence-bound review and one transition with no separate `stage.submitted`
+event. **Depth changes how carefully a verdict must be justified, not how many
+actions it takes to record one**: the routine-only restriction on one-click
+approval is gone, and high stakes now costs the reviewer their own words on any
+approving or ending verdict rather than an explicit downward override. The
+`difficulty_override` field remains on the API and is still recorded beside the
+assessment when a caller supplies one; the deck no longer sends it. A blocked
+route disables only its own choice and prints its reason beside it — activation
+must not clear a `data-route-blocked` control. Decks with no transition gate
+keep the legacy submit/approve/request-changes/reject controls, so the shared
+bridge script still names them.
+
+Park writes an append-only park edge and stores the
 exact evidence URI/hash as `approval_status=unapproved`; the supervisor sends
 selected-cycle ordinary work to the lead agent with that warning injected into
 request-only project context, and the next gate verdict clears the projection.
@@ -2557,8 +2602,10 @@ creating an audit gap. Tests:
 `test_dbtl_stage_transitions.py` (append per gate, immutability, replay safety,
 real Test→Design revisit, scoping), `test_migration_0024_stage_transitions.py`
 (idempotent backfill + drift + rollback), `test_dbtl_transition_assessment.py`
-(fail-safe assessment), and `test_dbtl_design_feedback_router.py`
-(one-click, override, and deck binding).
+(fail-safe assessment), `test_dbtl_design_feedback_router.py` (one-action
+approve at every depth, one-action revise, high-stakes rationale, and deck
+binding), and `test_dbtl_deck_bridge.py::TestProgressiveTransitionGate` (the
+three choices, blocked-route handling, and the choice→intent mapping).
 
 **Progressive-gate Phases 2-3:** migration
 `0025_dbtl_stage_feedback_surfaces` adds `stage` and `surface_revision` to the

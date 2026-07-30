@@ -593,7 +593,17 @@ async def _design_feedback_read_model(
                 gate = _surface_transition_gate(surface) if dbtl_config.progressive_gate else None
                 if stage_status in {"in_progress", "changes_requested"} and "stage_submit" not in groups:
                     if gate is not None:
-                        allowed_actions = ["submit_for_review"]
+                        # The simple gate card: Approve, Revise, Park — each
+                        # recorded in one action. Legacy decks still render a
+                        # submit button, so that intent stays allowed.
+                        #
+                        # `approve` is offered whether or not the Build edge is
+                        # open. A blocked edge means Build stays locked after
+                        # the verdict, never that the verdict cannot be given:
+                        # approving Design is what opens the reconciliation
+                        # work the edge is waiting on, so gating it on the edge
+                        # deadlocks the cycle.
+                        allowed_actions = ["submit_for_review", "request_changes", "approve"]
                         if "stage_park" not in groups:
                             allowed_actions.append("park")
                         if _route_available(gate, "advance"):
@@ -952,8 +962,8 @@ async def apply_design_feedback_action(
             else None
         )
         if body.action.kind == "advance":
-            if effective_difficulty != "routine":
-                raise DesignFeedbackConflict("One-click Continue to Build is available only at routine review depth.")
+            if effective_difficulty == "high_stakes" and not body.comment.strip():
+                raise DesignFeedbackConflict("A high-stakes approval requires the reviewer's written rationale.")
             if not _route_available(transition_gate or {}, "advance"):
                 raise DesignFeedbackConflict("Continue to Build is currently blocked.")
             cycle = await repo.review_stage(
@@ -961,7 +971,7 @@ async def apply_design_feedback_action(
                 project_id=project_id,
                 stage="design",
                 decision="approve",
-                rationale=body.comment.strip() or "Continued through the routine one-click progressive gate.",
+                rationale=body.comment.strip() or "Approved through the one-action progressive gate.",
                 expected_db_revision=body.expected_db_revision,
                 reviewer_user_id=user_id,
                 reviewer_project_role=str(project["current_user_role"]),
@@ -974,7 +984,7 @@ async def apply_design_feedback_action(
                     "selected_action": "advance",
                     "selected_card_ids": [],
                     "human_comment": body.comment.strip() or None,
-                    "rationale_projection": body.comment.strip() or "Continued through the routine one-click progressive gate.",
+                    "rationale_projection": body.comment.strip() or "Approved through the one-action progressive gate.",
                     "rationale_source": "human" if body.comment.strip() else "server_projection",
                 },
                 progressive_transition=progressive_transition,
@@ -983,7 +993,7 @@ async def apply_design_feedback_action(
             receipt = {
                 "kind": "advance",
                 "db_revision": cycle["db_revision"],
-                "message": "Routine gate recorded in one click. The cycle continued toward Build.",
+                "message": "Approval recorded. The cycle continued toward Build.",
                 "assessed_difficulty": assessed_difficulty,
                 "human_override": human_override,
             }
@@ -1093,6 +1103,20 @@ async def apply_design_feedback_action(
             "rationale_projection": rationale_projection,
             "rationale_source": "server_projection",
         }
+        auto_submit = False
+        if body.action.kind in {"approve", "request_changes"} and transition_gate is not None:
+            # The simple gate card records a verdict in one action while the
+            # stage is still open, materializing the submit and the verdict in
+            # one review — the same shape the routine `advance` route uses.
+            # Approve arrives here rather than through `advance` when the Build
+            # edge is blocked: the Design verdict is still legal, and giving it
+            # is what opens the data work that unblocks the edge.
+            current = await repo.get_cycle(cycle_id, project_id=project_id)
+            current_status = next(
+                (str(item.get("status") or "") for item in (current or {}).get("stages", []) if item.get("stage") == "design"),
+                "",
+            )
+            auto_submit = current_status in {"in_progress", "changes_requested"}
         cycle = await repo.review_stage(
             cycle_id=cycle_id,
             project_id=project_id,
@@ -1105,6 +1129,7 @@ async def apply_design_feedback_action(
             idempotency_key=workflow_key,
             design_feedback_provenance=provenance,
             progressive_transition=progressive_transition,
+            auto_submit=auto_submit,
         )
         refinement_run_id: str | None = None
         if body.action.kind == "request_changes":

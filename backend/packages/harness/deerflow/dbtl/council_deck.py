@@ -33,6 +33,7 @@ from __future__ import annotations
 import html
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from deerflow.dbtl.consensus import Consensus, parse_consensus
@@ -110,6 +111,57 @@ def _disagreement_body(consensus: Consensus) -> str:
     return f'<div class="contested-grid">{"".join(cards)}</div>'
 
 
+#: A theme may restyle the deck; it may never add to it. The bytes of a
+#: registered deck are hash-bound as the actionable gate surface, so anything
+#: that could introduce markup or script is refused rather than escaped:
+#: inside a ``<style>`` element there is no escaping — a closing tag ends the
+#: stylesheet and everything after it is document content.
+DECK_THEME_MAX_CHARS = 128_000
+_THEME_REFUSED_SUBSTRINGS = ("</style", "<script", "<!--", "javascript:")
+
+
+@dataclass(frozen=True)
+class DeckThemeParse:
+    """A validated theme, or the reason there isn't one.
+
+    Never raises, mirroring ``parse_decision_request``: a malformed theme costs
+    the deck its styling, never the meeting whose results are already recorded.
+    """
+
+    css: str = ""
+    refusal: str = ""
+
+    @property
+    def accepted(self) -> bool:
+        return bool(self.css)
+
+
+def parse_deck_theme(raw: object) -> DeckThemeParse:
+    """Accept operator-supplied CSS for the deck, or say why not.
+
+    Only the *shape* is checked here. A theme is trusted operator content in
+    the same sense ``extensions.middlewares`` is — CSS can hide any element it
+    likes, including the inert notice — which is why the theme is named in
+    `config.yaml` rather than discovered from whatever happens to be on disk.
+    An agent that can write a skill directory still cannot make the server load
+    one.
+    """
+    if raw is None:
+        return DeckThemeParse()
+    if not isinstance(raw, str):
+        return DeckThemeParse(refusal=f"A deck theme must be CSS text, not {type(raw).__name__}.")
+    css = raw.strip()
+    if not css:
+        return DeckThemeParse()
+    if len(css) > DECK_THEME_MAX_CHARS:
+        return DeckThemeParse(refusal=f"The deck theme is {len(css)} characters; the cap is {DECK_THEME_MAX_CHARS}.")
+    lowered = css.casefold()
+    for marker in _THEME_REFUSED_SUBSTRINGS:
+        if marker in lowered:
+            return DeckThemeParse(refusal=f"A deck theme may not contain {marker!r}; it is a stylesheet, not markup.")
+    return DeckThemeParse(css=css)
+
+
 #: What the persisted file says instead of accepting an answer. It is the whole
 #: security posture in one sentence: this copy cannot record anything, wherever
 #: it was opened from.
@@ -172,17 +224,42 @@ def _decision_text(question: str) -> str:
     )
 
 
+def _gate_option(
+    *,
+    value: str,
+    label: str,
+    detail: str,
+    recommended: bool = False,
+    note: str = "",
+) -> str:
+    """One gate choice as a radio card, shipped disabled like every control.
+
+    ``note`` states a consequence of choosing this option; it never disables it.
+    A verdict about the Design is not the same claim as a path edge being open,
+    and gating the verdict on the edge is how the gate deadlocks — approving
+    Design is exactly what opens the data work the Build edge waits on.
+    """
+    input_id = f"gate-{value}"
+    badge = '<span class="badge">Recommended</span>' if recommended else ""
+    note_html = f'<span class="route-reason">{html.escape(note)}</span>' if note else ""
+    return (
+        f'<div class="option">'
+        f'<input type="radio" id="{input_id}" name="design-gate" value="{html.escape(value)}" disabled>'
+        f'<label for="{input_id}">'
+        f'<span class="option-label">{html.escape(label)}{badge}</span>'
+        f'<span class="option-value">{html.escape(detail)}</span>'
+        f"</label>{note_html}"
+        f"</div>"
+    )
+
+
 def _review_controls(
     consensus: Consensus | None,
     transition_gate: Mapping[str, object] | None = None,
 ) -> str:
-    issues: list[str] = []
-    if consensus is not None:
-        for index, item in enumerate(consensus.disagreements[:MAX_DISAGREEMENTS]):
-            issue_id = f"issue-{index + 1}"
-            issues.append(f'<label class="review-issue" for="{issue_id}"><input id="{issue_id}" type="checkbox" value="{issue_id}" data-deck-issue disabled><span>{html.escape(_text(item.topic, limit=240))}</span></label>')
-    issue_html = f'<div class="review-issues"><p>Select the points that need another round</p>{"".join(issues)}</div>' if issues else ""
     gate = dict(transition_gate or {})
+    if not gate:
+        return _legacy_review_controls(consensus)
     assessment = gate.get("assessment")
     assessment = dict(assessment) if isinstance(assessment, Mapping) else {}
     difficulty = _text(assessment.get("difficulty") or "standard", limit=32)
@@ -190,40 +267,59 @@ def _review_controls(
     difficulty_label = difficulty.replace("_", " ")
     routes = gate.get("routes")
     route_items = [dict(item) for item in routes if isinstance(item, Mapping)] if isinstance(routes, Sequence) and not isinstance(routes, str) else []
-    route_buttons: list[str] = []
-    for route in route_items:
-        slug = _text(route.get("slug") or "", limit=64)
-        if slug not in {"advance", "park"}:
-            continue
-        blocked = bool(route.get("blocked"))
-        reason = _text(route.get("blocked_reason") or "", limit=600)
-        route_buttons.append(
-            f'<button type="button" data-deck-action="{html.escape(slug)}" data-route-action '
-            f'{"data-route-blocked disabled" if blocked else "disabled"}>'
-            f'{html.escape(_text(route.get("label") or slug, limit=120))}</button>'
-            + (f'<span class="route-reason">{html.escape(reason)}</span>' if blocked and reason else "")
+    advance_route = next((route for route in route_items if _text(route.get("slug") or "", limit=64) == "advance"), {})
+    advance_blocked_reason = _text(advance_route.get("blocked_reason") or "", limit=600) if advance_route.get("blocked") else ""
+    options = (
+        _gate_option(
+            value="approve",
+            label="Approve",
+            # What approving actually opens depends on whether the data work is
+            # already settled. Promising the Build gate while reconciliation is
+            # outstanding describes a stage that will still be locked.
+            detail=("Accept this Design and open the Build gate." if not advance_blocked_reason else "Accept this Design and open Data reconciliation."),
+            recommended=difficulty == "routine",
+            note=advance_blocked_reason,
         )
-    progressive = ""
-    if gate:
-        progressive = (
-            f'<div class="assessment" data-assessed-difficulty="{html.escape(difficulty)}">'
-            f'<p><strong>Agent assessment: {html.escape(difficulty_label)}</strong></p>'
-            f'<p>{html.escape(rationale)}</p>'
-            '<label for="transition-difficulty">Override review depth</label>'
-            '<select id="transition-difficulty" data-deck-difficulty disabled>'
-            '<option value="">Use the agent assessment</option>'
-            '<option value="routine">Routine</option>'
-            '<option value="standard">Standard</option>'
-            '<option value="high_stakes">High stakes</option>'
-            "</select>"
-            '<p class="option-detail">An override is recorded beside the agent assessment. It never changes which routes are legal.</p>'
-            "</div>"
-            + (f'<div class="route-actions">{"".join(route_buttons)}</div>' if route_buttons else "")
+        + _gate_option(
+            value="revise",
+            label="Revise",
+            detail="Send the meeting back with your comment describing what to change.",
         )
+        + _gate_option(
+            value="park",
+            label="Park",
+            detail="Set the gate aside and work on this cycle with the lead agent.",
+        )
+    )
+    comment_hint = "Required for Revise" + (" and for a high-stakes approval" if difficulty == "high_stakes" else "") + "."
+    return (
+        # The legend is the radio group's accessible name, so it states the
+        # question rather than repeating the slide's heading.
+        '<fieldset class="review" disabled><legend>What happens to this Design?</legend>'
+        f'<div class="assessment" data-assessed-difficulty="{html.escape(difficulty)}">'
+        f"<p><strong>Agent assessment: {html.escape(difficulty_label)}</strong></p>"
+        f"<p>{html.escape(rationale)}</p>"
+        "</div>"
+        f'<div class="options">{options}</div>'
+        f'<div class="comment"><label for="design-review-comment">Comment <span class="option-detail">{html.escape(comment_hint)}</span></label>'
+        '<textarea id="design-review-comment" data-deck-comment rows="4" disabled></textarea></div>'
+        '<div class="submit-row"><button type="button" data-deck-gate-submit disabled>Record my decision</button></div>'
+        "</fieldset>"
+        '<p class="inert" data-deck-status role="status" aria-live="polite">' + html.escape(INERT_NOTICE) + "</p>"
+    )
+
+
+def _legacy_review_controls(consensus: Consensus | None) -> str:
+    """The pre-progressive-gate controls, kept for decks without a gate."""
+    issues: list[str] = []
+    if consensus is not None:
+        for index, item in enumerate(consensus.disagreements[:MAX_DISAGREEMENTS]):
+            issue_id = f"issue-{index + 1}"
+            issues.append(f'<label class="review-issue" for="{issue_id}"><input id="{issue_id}" type="checkbox" value="{issue_id}" data-deck-issue disabled><span>{html.escape(_text(item.topic, limit=240))}</span></label>')
+    issue_html = f'<div class="review-issues"><p>Select the points that need another round</p>{"".join(issues)}</div>' if issues else ""
     return (
         '<fieldset class="review" disabled><legend>Move this Design through its human gate</legend>'
         '<p class="option-detail">Submission and the final verdict are separate records. Nothing is approved by opening this deck.</p>'
-        f"{progressive}"
         f"{issue_html}"
         '<div class="comment"><label for="design-review-comment">Rationale or requested change</label>'
         '<textarea id="design-review-comment" data-deck-comment rows="4" disabled></textarea></div>'
@@ -280,16 +376,18 @@ _BRIDGE_TEMPLATE = """
   var fieldset = document.querySelector('fieldset.decision');
   var review = document.querySelector('fieldset.review');
   var submit = document.querySelector('[data-deck-submit]');
+  var gateSubmit = document.querySelector('[data-deck-gate-submit]');
   var actionButtons = Array.prototype.slice.call(document.querySelectorAll('[data-deck-action]'));
   var status = document.querySelector('[data-deck-status]');
   var comment = document.querySelector('[data-deck-comment]');
-  var difficulty = document.querySelector('[data-deck-difficulty]');
   var assessment = document.querySelector('[data-assessed-difficulty]');
-  // The chair's options and the review's contested-topic checkboxes: every one
-  // is rendered disabled, and both submit paths read them back via :checked.
+  // The chair's options, the gate's choice radios, and the legacy review's
+  // contested-topic checkboxes: every one is rendered disabled, and the submit
+  // paths read them back via :checked.
   var choices = Array.prototype.slice.call(
-    document.querySelectorAll('fieldset.decision input[type="radio"], [data-deck-issue]')
+    document.querySelectorAll('fieldset.decision input[type="radio"], fieldset.review input[type="radio"], [data-deck-issue]')
   );
+  var GATE_KINDS = ['advance', 'approve', 'request_changes', 'park'];
 
   function say(text) { if (status) { status.textContent = text; } }
 
@@ -302,32 +400,31 @@ _BRIDGE_TEMPLATE = """
     window.parent.postMessage(payload, '*');
   }
 
+  function gateAllowed() {
+    for (var i = 0; i < GATE_KINDS.length; i += 1) {
+      if (allowed.indexOf(GATE_KINDS[i]) !== -1) { return true; }
+    }
+    return false;
+  }
+
   function setEnabled(on) {
     if (fieldset) { fieldset.disabled = !on; }
     if (submit) { submit.disabled = !on || allowed.indexOf('chair_option') === -1; }
     if (review) { review.disabled = !on; }
+    if (gateSubmit) { gateSubmit.disabled = !on || !gateAllowed(); }
     actionButtons.forEach(function (button) {
       var kind = button.dataset.deckAction;
-      var effective = difficulty && difficulty.value
-        ? difficulty.value
-        : (assessment ? assessment.dataset.assessedDifficulty : 'standard');
-      var depthBlocked = (kind === 'advance' && effective !== 'routine')
-        || (kind === 'submit_for_review' && effective === 'routine');
       button.disabled = !on || button.hasAttribute('data-route-blocked')
-        || allowed.indexOf(kind) === -1 || depthBlocked;
+        || allowed.indexOf(kind) === -1;
     });
     if (comment) { comment.disabled = !on; }
-    if (difficulty) { difficulty.disabled = !on; }
     // Every option ships individually disabled so the persisted file is inert
     // wherever it is opened. An enabled fieldset does not re-enable a control
     // that carries its own `disabled`, so activation has to clear each one --
     // otherwise the submit button comes alive over a choice nobody can make.
-    choices.forEach(function (choice) { choice.disabled = !on; });
-  }
-
-  if (difficulty) {
-    difficulty.addEventListener('change', function () {
-      if (!submitting && channel) { setEnabled(true); }
+    // A route-blocked choice stays disabled: the reason is printed beside it.
+    choices.forEach(function (choice) {
+      choice.disabled = !on || choice.hasAttribute('data-route-blocked');
     });
   }
 
@@ -356,6 +453,36 @@ _BRIDGE_TEMPLATE = """
     });
   }
 
+  if (gateSubmit) {
+    gateSubmit.addEventListener('click', function () {
+      if (submitting || !channel || !gateAllowed()) { return; }
+      var checked = document.querySelector('fieldset.review input[type="radio"]:checked');
+      if (!checked) { say('Choose Approve, Revise, or Park first.'); return; }
+      var value = checked.value;
+      // Approve is one recorded gate action: the submit+approve route when the
+      // stage is still open, the plain verdict once it is awaiting review.
+      var kind = value === 'revise' ? 'request_changes'
+        : value === 'park' ? 'park'
+        : (allowed.indexOf('advance') !== -1 ? 'advance' : 'approve');
+      if (allowed.indexOf(kind) === -1) { say('That choice is not available right now.'); return; }
+      var text = comment ? comment.value.trim() : '';
+      var effective = assessment ? assessment.dataset.assessedDifficulty : 'standard';
+      if (kind === 'request_changes' && !text) {
+        say('Describe what should change before sending the Design back.'); return;
+      }
+      if ((kind === 'advance' || kind === 'approve') && effective === 'high_stakes' && !text) {
+        say('A high-stakes approval needs your written rationale.'); return;
+      }
+      submitting = true;
+      setEnabled(false);
+      say('Recording your decision...');
+      send('submit_intent', {
+        action: { kind: kind, optionIds: [], difficultyOverride: '' },
+        comment: text
+      });
+    });
+  }
+
   actionButtons.forEach(function (button) {
     button.addEventListener('click', function () {
       var kind = button.dataset.deckAction;
@@ -378,7 +505,7 @@ _BRIDGE_TEMPLATE = """
         action: {
           kind: kind,
           optionIds: optionIds,
-          difficultyOverride: difficulty ? difficulty.value : ''
+          difficultyOverride: ''
         },
         comment: text
       });
@@ -412,13 +539,15 @@ _BRIDGE_TEMPLATE = """
       submitting = false;
       var live = !!channel && allowed.length > 0;
       setEnabled(live);
-      var prompt = allowed.indexOf('submit_for_review') !== -1
-        ? 'Submit this Design when it is ready for human review.'
-        : (allowed.indexOf('approve') !== -1
-          ? 'Choose a Design verdict.'
-          : (allowed.indexOf('chair_text') !== -1
-            ? 'Answer the chair, then send it to the meeting.'
-            : 'Choose an option, then send it to the meeting.'));
+      var prompt = gateSubmit && gateAllowed()
+        ? 'Choose Approve, Revise, or Park, then record your decision.'
+        : (allowed.indexOf('submit_for_review') !== -1
+          ? 'Submit this Design when it is ready for human review.'
+          : (allowed.indexOf('approve') !== -1
+            ? 'Choose a Design verdict.'
+            : (allowed.indexOf('chair_text') !== -1
+              ? 'Answer the chair, then send it to the meeting.'
+              : 'Choose an option, then send it to the meeting.')));
       say(live ? prompt : (typeof data.note === 'string' && data.note ? data.note : 'This round is read-only.'));
       return;
     }
@@ -476,9 +605,17 @@ def render_council_deck(
     surface_id: str = "",
     surface_mode: str = "",
     transition_gate: Mapping[str, object] | None = None,
+    theme_css: str = "",
     generated_at: datetime | None = None,
 ) -> str:
-    """The meeting's outcome as one self-contained HTML slide deck."""
+    """The meeting's outcome as one self-contained HTML slide deck.
+
+    ``theme_css`` is appended after the built-in stylesheet so an operator theme
+    overrides it by ordinary cascade rather than by fighting specificity. It is
+    validated by ``parse_deck_theme`` first; an unthemed render is byte-identical
+    to one from before themes existed, which is what keeps a re-rendered deck's
+    content hash stable.
+    """
     chair = _chair_result(results) or {}
     consensus = parse_consensus(chair.get("consensus"))
     summary = _text(chair.get("summary"), limit=MAX_SUMMARY_CHARS)
@@ -554,11 +691,13 @@ def render_council_deck(
         )
     )
 
+    theme = parse_deck_theme(theme_css)
     return _DECK_TEMPLATE.format(
         title=html.escape(f"{cycle_title or 'Design meeting'} — {stage_title}"),
         slides="".join(slides),
         count=len(slides),
         bridge=_bridge_script(surface_id),
+        theme=f"\n<style data-deck-theme>\n{theme.css}\n</style>" if theme.accepted else "",
     )
 
 
@@ -668,7 +807,7 @@ _DECK_TEMPLATE = """<!doctype html>
     .decision input, .review input {{ display: none; }}
     .bar {{ display: none; }}
   }}
-</style>
+</style>{theme}
 </head>
 <body>
 <main class="deck">{slides}</main>

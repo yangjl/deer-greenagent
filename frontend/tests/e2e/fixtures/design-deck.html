@@ -176,16 +176,18 @@
   var fieldset = document.querySelector('fieldset.decision');
   var review = document.querySelector('fieldset.review');
   var submit = document.querySelector('[data-deck-submit]');
+  var gateSubmit = document.querySelector('[data-deck-gate-submit]');
   var actionButtons = Array.prototype.slice.call(document.querySelectorAll('[data-deck-action]'));
   var status = document.querySelector('[data-deck-status]');
   var comment = document.querySelector('[data-deck-comment]');
-  var difficulty = document.querySelector('[data-deck-difficulty]');
   var assessment = document.querySelector('[data-assessed-difficulty]');
-  // The chair's options and the review's contested-topic checkboxes: every one
-  // is rendered disabled, and both submit paths read them back via :checked.
+  // The chair's options, the gate's choice radios, and the legacy review's
+  // contested-topic checkboxes: every one is rendered disabled, and the submit
+  // paths read them back via :checked.
   var choices = Array.prototype.slice.call(
-    document.querySelectorAll('fieldset.decision input[type="radio"], [data-deck-issue]')
+    document.querySelectorAll('fieldset.decision input[type="radio"], fieldset.review input[type="radio"], [data-deck-issue]')
   );
+  var GATE_KINDS = ['advance', 'approve', 'request_changes', 'park'];
 
   function say(text) { if (status) { status.textContent = text; } }
 
@@ -198,32 +200,31 @@
     window.parent.postMessage(payload, '*');
   }
 
+  function gateAllowed() {
+    for (var i = 0; i < GATE_KINDS.length; i += 1) {
+      if (allowed.indexOf(GATE_KINDS[i]) !== -1) { return true; }
+    }
+    return false;
+  }
+
   function setEnabled(on) {
     if (fieldset) { fieldset.disabled = !on; }
     if (submit) { submit.disabled = !on || allowed.indexOf('chair_option') === -1; }
     if (review) { review.disabled = !on; }
+    if (gateSubmit) { gateSubmit.disabled = !on || !gateAllowed(); }
     actionButtons.forEach(function (button) {
       var kind = button.dataset.deckAction;
-      var effective = difficulty && difficulty.value
-        ? difficulty.value
-        : (assessment ? assessment.dataset.assessedDifficulty : 'standard');
-      var depthBlocked = (kind === 'advance' && effective !== 'routine')
-        || (kind === 'submit_for_review' && effective === 'routine');
       button.disabled = !on || button.hasAttribute('data-route-blocked')
-        || allowed.indexOf(kind) === -1 || depthBlocked;
+        || allowed.indexOf(kind) === -1;
     });
     if (comment) { comment.disabled = !on; }
-    if (difficulty) { difficulty.disabled = !on; }
     // Every option ships individually disabled so the persisted file is inert
     // wherever it is opened. An enabled fieldset does not re-enable a control
     // that carries its own `disabled`, so activation has to clear each one --
     // otherwise the submit button comes alive over a choice nobody can make.
-    choices.forEach(function (choice) { choice.disabled = !on; });
-  }
-
-  if (difficulty) {
-    difficulty.addEventListener('change', function () {
-      if (!submitting && channel) { setEnabled(true); }
+    // A route-blocked choice stays disabled: the reason is printed beside it.
+    choices.forEach(function (choice) {
+      choice.disabled = !on || choice.hasAttribute('data-route-blocked');
     });
   }
 
@@ -252,6 +253,36 @@
     });
   }
 
+  if (gateSubmit) {
+    gateSubmit.addEventListener('click', function () {
+      if (submitting || !channel || !gateAllowed()) { return; }
+      var checked = document.querySelector('fieldset.review input[type="radio"]:checked');
+      if (!checked) { say('Choose Approve, Revise, or Park first.'); return; }
+      var value = checked.value;
+      // Approve is one recorded gate action: the submit+approve route when the
+      // stage is still open, the plain verdict once it is awaiting review.
+      var kind = value === 'revise' ? 'request_changes'
+        : value === 'park' ? 'park'
+        : (allowed.indexOf('advance') !== -1 ? 'advance' : 'approve');
+      if (allowed.indexOf(kind) === -1) { say('That choice is not available right now.'); return; }
+      var text = comment ? comment.value.trim() : '';
+      var effective = assessment ? assessment.dataset.assessedDifficulty : 'standard';
+      if (kind === 'request_changes' && !text) {
+        say('Describe what should change before sending the Design back.'); return;
+      }
+      if ((kind === 'advance' || kind === 'approve') && effective === 'high_stakes' && !text) {
+        say('A high-stakes approval needs your written rationale.'); return;
+      }
+      submitting = true;
+      setEnabled(false);
+      say('Recording your decision...');
+      send('submit_intent', {
+        action: { kind: kind, optionIds: [], difficultyOverride: '' },
+        comment: text
+      });
+    });
+  }
+
   actionButtons.forEach(function (button) {
     button.addEventListener('click', function () {
       var kind = button.dataset.deckAction;
@@ -274,7 +305,7 @@
         action: {
           kind: kind,
           optionIds: optionIds,
-          difficultyOverride: difficulty ? difficulty.value : ''
+          difficultyOverride: ''
         },
         comment: text
       });
@@ -308,13 +339,15 @@
       submitting = false;
       var live = !!channel && allowed.length > 0;
       setEnabled(live);
-      var prompt = allowed.indexOf('submit_for_review') !== -1
-        ? 'Submit this Design when it is ready for human review.'
-        : (allowed.indexOf('approve') !== -1
-          ? 'Choose a Design verdict.'
-          : (allowed.indexOf('chair_text') !== -1
-            ? 'Answer the chair, then send it to the meeting.'
-            : 'Choose an option, then send it to the meeting.'));
+      var prompt = gateSubmit && gateAllowed()
+        ? 'Choose Approve, Revise, or Park, then record your decision.'
+        : (allowed.indexOf('submit_for_review') !== -1
+          ? 'Submit this Design when it is ready for human review.'
+          : (allowed.indexOf('approve') !== -1
+            ? 'Choose a Design verdict.'
+            : (allowed.indexOf('chair_text') !== -1
+              ? 'Answer the chair, then send it to the meeting.'
+              : 'Choose an option, then send it to the meeting.')));
       say(live ? prompt : (typeof data.note === 'string' && data.note ? data.note : 'This round is read-only.'));
       return;
     }

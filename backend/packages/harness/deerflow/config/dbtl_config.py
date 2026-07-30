@@ -66,6 +66,16 @@ class DbtlConfig(BaseModel):
         default_factory=DbtlStageMeetingsConfig,
         description=("Per-stage post-evidence meeting rollout. Build, Test, and Learn default off and can be enabled independently."),
     )
+    council_deck_theme_skill: str | None = Field(
+        default=None,
+        description=(
+            "Name of an enabled skill supplying 'assets/deck-theme.css', appended after the meeting deck's built-in "
+            "stylesheet. null renders the built-in look. The theme is named here, in operator config, rather than "
+            "discovered from disk: skills/custom is agent-writable when agent-managed skills are on, and CSS can hide "
+            "any element including the deck's inert notice. A missing, oversized, or markup-bearing asset is refused "
+            "and the deck renders unthemed rather than failing."
+        ),
+    )
 
     setup_draft_model_name: str | None = Field(
         default=None,

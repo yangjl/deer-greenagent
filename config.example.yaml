@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 34
+config_version: 35
 
 # ============================================================================
 # Logging
@@ -1230,10 +1230,21 @@ dbtl:
   # durable deck responses and reviews are retained.
   design_deck_feedback: true
   # Progressive Design gate (Phases 0-1): show the durable path strip and put
-  # the assessment, review-depth override, one-click routine route, and Park
-  # route on registered Design decks. Off restores the uniform two-step gate.
-  # Transition records accumulate either way, so toggling creates no audit gap.
+  # the assessment plus the Approve / Revise / Park choice on registered Design
+  # decks. Off restores the uniform two-step gate. Transition records accumulate
+  # either way, so toggling creates no audit gap.
   progressive_gate: false
+  # Optional look-and-feel for the design meeting's slide deck. Names an enabled
+  # skill that ships `assets/deck-theme.css`; that stylesheet is appended after
+  # the deck's built-in one, so it overrides by ordinary cascade. null keeps the
+  # built-in look.
+  #
+  # This is deliberately operator config rather than something discovered on
+  # disk: skills/custom is agent-writable when agent-managed skills are on, and
+  # CSS can hide any element, including the deck's "open this in DeerFlow"
+  # notice. A missing skill, a missing asset, or a stylesheet containing markup
+  # is refused with a logged reason and the deck renders unthemed.
+  council_deck_theme_skill: null
   # One-shot model that assesses the remaining work as routine, standard, or
   # high_stakes after a Design meeting produces bound evidence. null, provider
   # failure, or malformed output safely selects the standard two-step gate.

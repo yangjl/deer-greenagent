@@ -242,23 +242,71 @@ class TestProgressiveTransitionGate:
             },
         )
 
-    def test_assessment_override_and_routes_are_visible_but_ship_inert(self) -> None:
+    def test_the_gate_is_three_named_choices_and_ships_inert(self) -> None:
+        """One question, three answers: approve, revise, park."""
         html = self._progressive_deck()
 
         assert "Agent assessment: high stakes" in html
         assert "The intervention is irreversible." in html
-        assert "Continue to Build" in html
-        assert "Park — work with the lead agent" in html
-        assert re.search(r"<select[^>]*data-deck-difficulty[^>]*disabled", html)
-        assert re.search(r'<button[^>]*data-deck-action="advance"[^>]*disabled', html)
-        assert re.search(r'<button[^>]*data-deck-action="park"[^>]*disabled', html)
+        for value, label in (("approve", "Approve"), ("revise", "Revise"), ("park", "Park")):
+            assert re.search(rf'<input type="radio" id="gate-{value}" name="design-gate" value="{value}"[^>]*disabled', html)
+            assert label in html
+        assert re.search(r"<button[^>]*data-deck-gate-submit[^>]*disabled", html)
+        # The old controls are gone from the rendered gate: no depth override,
+        # no per-route buttons, no contested-topic checkboxes. The shared
+        # bridge script still names them, because a legacy deck renders them.
+        controls = html.split("<script>")[0]
+        assert "data-deck-difficulty" not in controls
+        assert "data-deck-issue" not in controls
+        assert 'data-deck-action="advance"' not in controls
+        assert 'data-deck-action="reject"' not in controls
 
-    def test_bridge_emits_only_the_bounded_override_value(self) -> None:
+    def test_a_blocked_build_edge_states_a_consequence_without_disabling_approve(self) -> None:
+        """A locked Build edge is not a reason the Design cannot be approved.
+
+        Approving Design is what opens the reconciliation work the Build edge
+        waits on, so disabling Approve here deadlocks the cycle: the matrix can
+        never be settled, and the edge never unblocks.
+        """
+        html = render_council_deck(
+            cycle_title="Genomic selection in maize",
+            stage_title="Design meeting",
+            round_number=2,
+            results=[{"summary": "Run a benchmark.", "consensus": _CONSENSUS}],
+            surface_id=SURFACE_ID,
+            surface_mode="stage_review",
+            transition_gate={
+                "stage": "design",
+                "assessment": {"difficulty": "standard", "rationale": "Ordinary review."},
+                "routes": [
+                    {
+                        "slug": "advance",
+                        "to_stage": "build",
+                        "label": "Continue to Build",
+                        "blocked": True,
+                        "blocked_reason": "Two reconciliation rows are unsettled.",
+                    },
+                    {"slug": "park", "to_stage": "design", "label": "Park"},
+                ],
+            },
+        )
+
+        controls = html.split("<script>")[0]
+        assert "Two reconciliation rows are unsettled." in controls
+        # The reason is shown; the choice stays choosable once activated.
+        assert "data-route-blocked" not in controls
+        # And the label tells the truth about what approving opens next.
+        assert "open Data reconciliation" in controls
+        assert "open the Build gate" not in controls
+
+    def test_the_gate_submit_maps_one_choice_to_one_intent(self) -> None:
         html = self._progressive_deck()
 
-        assert "difficultyOverride: difficulty ? difficulty.value : ''" in html
-        assert "effective !== 'routine'" in html
-        assert "allowed.indexOf(kind)" in html
+        assert "value === 'revise' ? 'request_changes'" in html
+        assert "allowed.indexOf('advance') !== -1 ? 'advance' : 'approve'" in html
+        assert "difficultyOverride: ''" in html
+        # A high-stakes approval cannot be recorded with no rationale.
+        assert "effective === 'high_stakes' && !text" in html
 
 
 class TestStillSelfContained:

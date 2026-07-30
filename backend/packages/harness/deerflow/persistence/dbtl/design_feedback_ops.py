@@ -563,14 +563,15 @@ class DesignFeedbackOpsMixin:
                 # Policy checks happen before the single-use ledger row is
                 # inserted. A refused click must not consume the deck and
                 # prevent the reviewer from correcting their choice.
-                if action_kind == "advance":
-                    if effective_difficulty != "routine":
-                        raise DesignFeedbackConflict("One-click Continue to Build is available only at routine review depth.")
-                    if not route_is_available("advance"):
-                        raise DesignFeedbackConflict("Continue to Build is currently blocked.")
+                if action_kind == "advance" and not route_is_available("advance"):
+                    raise DesignFeedbackConflict("Continue to Build is currently blocked.")
                 if action_kind == "park" and not route_is_available("park"):
                     raise DesignFeedbackConflict("Park is not a legal route from this gate.")
-                if action_kind in {"approve", "request_changes", "reject"} and effective_difficulty == "high_stakes" and not comment:
+                # Depth changes how carefully a verdict must be justified, not
+                # how many actions it takes to record one. High stakes is the
+                # one place it still costs the reviewer something: their own
+                # words, on every approving or ending verdict.
+                if action_kind in {"advance", "approve", "request_changes", "reject"} and effective_difficulty == "high_stakes" and not comment:
                     raise DesignFeedbackConflict("A high-stakes Design verdict requires the reviewer's written rationale.")
                 evidence = expected_evidence or {}
                 exact = {

@@ -43,7 +43,7 @@ from deerflow.dbtl.council import (
     plan_from_proposal,
     recommend_depth,
 )
-from deerflow.dbtl.council_deck import render_council_deck
+from deerflow.dbtl.council_deck import parse_deck_theme, render_council_deck
 from deerflow.dbtl.council_proposal import (
     CouncilProposal,
     build_proposal_prompt,
@@ -89,6 +89,8 @@ from deerflow.dbtl.worker_result import (
     parse_worker_result,
 )
 from deerflow.projects.storage import ensure_project_dirs, project_outputs_dir
+from deerflow.runtime.user_context import DEFAULT_USER_ID
+from deerflow.skills.storage import get_or_new_user_skill_storage
 from deerflow.trace_context import (
     DEERFLOW_TRACE_METADATA_KEY,
     get_current_trace_id,
@@ -504,18 +506,9 @@ def _reconciliation_ready_after_design_approval(
     dataset, matrix, or unreadable-row reason.
     """
     gate = dict((view or {}).get("gate") or {})
-    data_reasons = [
-        str(reason)
-        for reason in gate.get("reasons", [])
-        if "Design stage has not been approved" not in str(reason)
-    ]
-    return bool(
-        gate
-        and (
-            bool(gate.get("ready"))
-            or (not data_reasons and not gate.get("blocking_rows"))
-        )
-    )
+    data_reasons = [str(reason) for reason in gate.get("reasons", []) if "Design stage has not been approved" not in str(reason)]
+    return bool(gate and (bool(gate.get("ready")) or (not data_reasons and not gate.get("blocking_rows"))))
+
 
 #: The deterministic phrases stay the fast path and the audit anchor; this
 #: interpreter reads only the requests they did not match. Human chat input is
@@ -612,10 +605,7 @@ def make_llm_transition_assessor() -> TransitionAssessor | None:
         from deerflow.utils.oneshot_llm import run_oneshot_llm
 
         return await run_oneshot_llm(
-            system_instruction=(
-                "You assess the difficulty of remaining research workflow work. "
-                "You never approve evidence or invent routes. Reply with JSON only."
-            ),
+            system_instruction=("You assess the difficulty of remaining research workflow work. You never approve evidence or invent routes. Reply with JSON only."),
             user_content=prompt,
             run_name="dbtl_transition_assessment",
             app_config=app_config,
@@ -1521,6 +1511,71 @@ class RenderedDeck:
     content_hash: str
 
 
+#: Where a theme skill keeps its stylesheet. One fixed relative path, because a
+#: configurable one inside a configurable skill is two things to get wrong for
+#: no gain — and because the file must be readable without executing the skill.
+DECK_THEME_ASSET = Path("assets") / "deck-theme.css"
+
+
+def _configured_deck_theme_skill() -> str:
+    """The theme skill named in operator config, or nothing."""
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        app_config = get_app_config()
+    except Exception:  # noqa: BLE001 - an unreadable config costs styling only
+        return ""
+    return str(getattr(getattr(app_config, "dbtl", None), "council_deck_theme_skill", None) or "")
+
+
+def _load_deck_theme(skill_name: str, *, user_id: str) -> str:
+    """Read the configured theme skill's stylesheet, or return nothing.
+
+    Blocking file IO; call it off the event loop. Fail-soft throughout: an
+    unknown skill, a disabled one, a missing asset, or an unreadable file each
+    cost the deck its styling and nothing else. The refusal is logged with its
+    reason, because a theme that silently does not apply is worse than one that
+    is visibly rejected.
+
+    Resolution goes through the enabled-skill registry rather than a raw path
+    join so a disabled skill stops theming decks, and so custom-shadows-public
+    behaves the same here as everywhere else.
+    """
+    name = (skill_name or "").strip()
+    if not name:
+        return ""
+    try:
+        storage = get_or_new_user_skill_storage(user_id or DEFAULT_USER_ID)
+        skill = next((item for item in storage.load_skills(enabled_only=True) if item.name == name), None)
+        if skill is None:
+            logger.warning("Design deck theme skill %r is not an enabled skill; rendering the deck unthemed.", name)
+            return ""
+        asset = (skill.skill_dir / DECK_THEME_ASSET).resolve()
+        # The skill directory is the boundary: a symlinked or traversing asset
+        # path must not turn "read this skill's stylesheet" into an arbitrary
+        # file read.
+        if not asset.is_relative_to(skill.skill_dir.resolve()):
+            logger.warning("Design deck theme %r resolves outside its skill directory; rendering the deck unthemed.", name)
+            return ""
+        raw = asset.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        logger.warning("Design deck theme skill %r has no %s; rendering the deck unthemed.", name, DECK_THEME_ASSET.as_posix())
+        return ""
+    except Exception:  # noqa: BLE001 - a presentation must not break the record
+        logger.warning("Could not read the design deck theme from skill %r.", name, exc_info=True)
+        return ""
+
+    theme = parse_deck_theme(raw)
+    if theme.refusal:
+        logger.warning("Design deck theme skill %r was refused: %s", name, theme.refusal)
+    return theme.css
+
+
+def _deck_theme_css(user_id: str) -> str:
+    """Config read plus file read in one hop, for a single ``to_thread`` call."""
+    return _load_deck_theme(_configured_deck_theme_skill(), user_id=user_id)
+
+
 def _write_council_deck(
     *,
     project_root: str,
@@ -1533,6 +1588,7 @@ def _write_council_deck(
     surface_id: str = "",
     surface_mode: str = "",
     transition_gate: Mapping[str, Any] | None = None,
+    theme_css: str = "",
 ) -> RenderedDeck | None:
     """Write the meeting's outcome as a slide deck, beside the review package.
 
@@ -1558,6 +1614,7 @@ def _write_council_deck(
             surface_id=surface_id,
             surface_mode=surface_mode,
             transition_gate=transition_gate,
+            theme_css=theme_css,
         ).encode("utf-8")
     except Exception:  # noqa: BLE001 - a presentation must not break the record
         logger.warning("Could not render the design meeting slide deck.", exc_info=True)
@@ -2991,11 +3048,7 @@ class LiveStageAdapter:
         surface_plan = None
         if stage == "design" and chair_has_presentable_outcome:
             transition_gate = None
-            if (
-                artifact_uri
-                and artifact_hash
-                and bool(getattr(getattr(self._app_config, "dbtl", None), "progressive_gate", False))
-            ):
+            if artifact_uri and artifact_hash and bool(getattr(getattr(self._app_config, "dbtl", None), "progressive_gate", False)):
                 assessment = await self._assess_transition(
                     stage="design",
                     cycle=cycle,
@@ -3009,11 +3062,7 @@ class LiveStageAdapter:
                 # absent. This does not approve reconciliation or bypass its
                 # durable review—it only decides whether the Build edge may be
                 # offered after Design approval.
-                reconciliation_settled = (
-                    _reconciliation_ready_after_design_approval(
-                        reconciliation if isinstance(reconciliation, Mapping) else None
-                    )
-                )
+                reconciliation_settled = _reconciliation_ready_after_design_approval(reconciliation if isinstance(reconciliation, Mapping) else None)
                 routes = compute_stage_routes(
                     RouteContext(
                         stage="design",
@@ -3040,6 +3089,7 @@ class LiveStageAdapter:
                 review_issue_ids=tuple(f"issue-{index + 1}" for index, _item in enumerate(chair_result.consensus.disagreements if chair_result.consensus is not None else ())),
                 transition_gate=transition_gate,
             )
+            theme_css = await asyncio.to_thread(_deck_theme_css, str(user_id or ""))
             deck = await asyncio.to_thread(
                 _write_council_deck,
                 project_root=project_root,
@@ -3052,6 +3102,7 @@ class LiveStageAdapter:
                 surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
                 surface_mode=(surface_plan.mode if surface_plan is not None else ""),
                 transition_gate=transition_gate,
+                theme_css=theme_css,
             )
             if deck is not None:
                 deck_uri = deck.uri

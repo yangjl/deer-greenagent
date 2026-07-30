@@ -492,9 +492,18 @@ Breeding-workspace note:
   `dbtl.progressive_gate` (default off) gates the path read model and the
   progressive Design gate. A one-shot assessor labels remaining work
   `routine`, `standard`, or `high_stakes`; null configuration, outages, and
-  malformed output fall back to standard. The registered deck and parent
-  fallback show the assessment, rationale, explicit override, and legal
-  routes. Routine can submit+approve in one human click. Park keeps the Design
+  malformed output fall back to standard. The gate itself is deliberately one
+  question with three answers — **Approve**, **Revise**, **Park** — as a single
+  radio group with a comment box and one button. Any depth records its verdict
+  in that one action; depth changes how much justification is required, not how
+  many clicks, so a high-stakes approval needs the reviewer's written rationale
+  rather than a depth override. Park keeps the Design
+  The deck's look is themeable: `dbtl.council_deck_theme_skill` names an
+  enabled skill supplying `assets/deck-theme.css` (worked example:
+  `skills/public/dbtl-deck-theme/`), appended after the built-in stylesheet.
+  A theme restyles and never restructures — markup-bearing or oversized CSS is
+  refused and the deck renders unthemed, because the deck's exact bytes are
+  hash-registered as the surface a person answers the gate through. Park keeps the Design
   open and routes ordinary cycle-scoped work to the lead agent with the exact
   evidence hash explicitly marked unapproved; any later gate decision clears
   the marker. Records accumulate with the flag off. Manual checkpoint manifests
