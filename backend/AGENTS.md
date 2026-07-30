@@ -2521,7 +2521,7 @@ reader can always tell the server's sentence from the reviewer's. A **rejection
 still requires the reviewer's own words** (422 otherwise) — it ends the attempt,
 and a generated sentence there tells the next reader nothing.
 
-**Progressive-gate Phase 0: the cycle is a recorded walk over a D/B/T/L stage
+**Progressive-gate Phases 0-1: the cycle is a recorded walk over a D/B/T/L stage
 graph** (plan: `docs/plans/2026-07-29-progressive-dbtl-gate-plan.md`).
 `deerflow.dbtl.stage_routes` is the pure authority for legal edges: the graph's
 nodes are Design, Build, Test, Learn only, and reconciliation is never a
@@ -2537,15 +2537,46 @@ review verdicts, Test validity routes, and cycle closure — so a committed
 decision and its path edge cannot disagree; reconciliation reviews append
 nothing, because data work is not a path event. ORM update/delete of a path row
 is refused: corrections append another edge rather than rewriting history.
-Writes are unconditional;
-`dbtl.progressive_gate` (default false, `config_version` 33) gates only the
-read model: `GET .../dbtl/cycles/{id}` gains a `transitions` array and
-`/api/features` reports `dbtl.progressive_gate` for the frontend's read-only
-path strip. Toggling the flag therefore never creates an audit gap. Tests:
+Writes are unconditional. `dbtl.progressive_gate` (default false,
+`config_version` 34) gates the path read model plus the Phase 1 Design
+transition gate: `transition_assessment` runs once bound Design evidence
+exists, with null model configuration, provider failure, and malformed output
+all falling back to `standard`. The registered deck persists the original
+assessment/rationale in its server-owned decision request, accepts only a
+bounded explicit human override, and exposes server-computed routes. A
+`routine` `advance` action calls `review_stage(auto_submit=True)`, producing
+one normal evidence-bound review and one transition without a separate
+`stage.submitted` event. Park writes an append-only park edge and stores the
+exact evidence URI/hash as `approval_status=unapproved`; the supervisor sends
+selected-cycle ordinary work to the lead agent with that warning injected into
+request-only project context, and the next gate verdict clears the projection.
+`GET .../dbtl/cycles/{id}` exposes transitions and the current gate only while
+the flag is on; toggling it therefore restores the old ceremony without
+creating an audit gap. Tests:
 `test_dbtl_stage_routes.py` (route-legality matrix + Phase 7 golden mapping),
 `test_dbtl_stage_transitions.py` (append per gate, immutability, replay safety,
 real Test→Design revisit, scoping), `test_migration_0024_stage_transitions.py`
-(idempotent backfill + drift + rollback).
+(idempotent backfill + drift + rollback), `test_dbtl_transition_assessment.py`
+(fail-safe assessment), and `test_dbtl_design_feedback_router.py`
+(one-click, override, and deck binding).
+
+**Progressive-gate Phases 2-3:** migration
+`0025_dbtl_stage_feedback_surfaces` adds `stage` and `surface_revision` to the
+existing feedback tables instead of renaming them. This preserves foreign keys,
+captured Design surface ids, and the `design_deck_feedback` rollback path.
+`DesignFeedbackOpsMixin` exposes stage-first registration/read/action methods
+and retains Design-named wrappers; `deerflow.dbtl.stage_feedback` is the
+server-side intent matrix. `/stage-feedback/` is canonical and
+`/design-feedback/` remains an alias.
+
+The Phase 3 policy boundary is `deerflow.dbtl.stage_meetings`: `routine` skips
+a meeting, `standard` makes it optional, and `high_stakes` locks transition
+routes until completion unless a human records an explicit downward override.
+Review contracts are pinned as `generic:test-review:v1`,
+`generic:build-review:v1`, and `generic:learn-review:v1`. Meeting output is
+attached to immutable core evidence through a sanitizer that removes Test
+outcome and Learn promotion/publication claims. Each stage flag under
+`dbtl.stage_meetings` defaults false and is reported through `/api/features`.
 
 **A card's tool-call id must satisfy every provider it may be replayed to.**
 `supervisor.card_request_id` builds every card/present-files id as

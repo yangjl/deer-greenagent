@@ -60,6 +60,7 @@ from deerflow.dbtl.cycle_state import StageStatus, stage_for_state
 from deerflow.dbtl.decision_request import DECISION_REQUEST_CONTRACT, DecisionRequest
 from deerflow.dbtl.review_markdown import render_review_markdown, render_stage_digest
 from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
+from deerflow.dbtl.stage_routes import RouteContext, compute_stage_routes
 from deerflow.dbtl.stage_runner import (
     RESULT_CONTRACT,
     WORKSPACE_PATH_NOTE,
@@ -73,6 +74,12 @@ from deerflow.dbtl.stage_runner import (
     plan_stage,
 )
 from deerflow.dbtl.stage_spec import StageSpec, WorkerBudget, resolve_stage_spec
+from deerflow.dbtl.transition_assessment import (
+    TransitionAssessment,
+    build_transition_assessment_prompt,
+    parse_transition_assessment,
+    standard_assessment,
+)
 from deerflow.dbtl.worker_result import (
     QualityCheck,
     StageWorkerResult,
@@ -484,6 +491,31 @@ RosterWriter = Callable[[str], Any]
 
 #: Same shape as :data:`RosterWriter`: an async callable from prompt to raw text.
 IntentInterpreter = Callable[[str], Any]
+TransitionAssessor = Callable[[str], Any]
+
+
+def _reconciliation_ready_after_design_approval(
+    view: Mapping[str, Any] | None,
+) -> bool:
+    """Whether data-specific Build preconditions are already settled.
+
+    A pre-verdict view always says Design itself is unapproved. The progressive
+    one-click action satisfies that reason atomically; it may not waive any
+    dataset, matrix, or unreadable-row reason.
+    """
+    gate = dict((view or {}).get("gate") or {})
+    data_reasons = [
+        str(reason)
+        for reason in gate.get("reasons", [])
+        if "Design stage has not been approved" not in str(reason)
+    ]
+    return bool(
+        gate
+        and (
+            bool(gate.get("ready"))
+            or (not data_reasons and not gate.get("blocking_rows"))
+        )
+    )
 
 #: The deterministic phrases stay the fast path and the audit anchor; this
 #: interpreter reads only the requests they did not match. Human chat input is
@@ -562,6 +594,35 @@ def make_llm_roster_writer() -> RosterWriter | None:
         )
 
     return write
+
+
+def make_llm_transition_assessor() -> TransitionAssessor | None:
+    """The production remaining-work assessor: one nostream model call."""
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        app_config = get_app_config()
+    except Exception:  # noqa: BLE001 - assessment failure keeps the standard gate
+        return None
+    model_name = getattr(getattr(app_config, "dbtl", None), "transition_assessor_model_name", None)
+    if not model_name:
+        return None
+
+    async def assess(prompt: str) -> str:
+        from deerflow.utils.oneshot_llm import run_oneshot_llm
+
+        return await run_oneshot_llm(
+            system_instruction=(
+                "You assess the difficulty of remaining research workflow work. "
+                "You never approve evidence or invent routes. Reply with JSON only."
+            ),
+            user_content=prompt,
+            run_name="dbtl_transition_assessment",
+            app_config=app_config,
+            model_name=model_name,
+        )
+
+    return assess
 
 
 def _proposed_selection(proposal: CouncilProposal) -> SelectionResult:
@@ -1471,6 +1532,7 @@ def _write_council_deck(
     decision_request: DecisionRequest | None = None,
     surface_id: str = "",
     surface_mode: str = "",
+    transition_gate: Mapping[str, Any] | None = None,
 ) -> RenderedDeck | None:
     """Write the meeting's outcome as a slide deck, beside the review package.
 
@@ -1495,6 +1557,7 @@ def _write_council_deck(
             decision_request=decision_request,
             surface_id=surface_id,
             surface_mode=surface_mode,
+            transition_gate=transition_gate,
         ).encode("utf-8")
     except Exception:  # noqa: BLE001 - a presentation must not break the record
         logger.warning("Could not render the design meeting slide deck.", exc_info=True)
@@ -1586,6 +1649,7 @@ class LiveStageAdapter:
         runtime_config: RunnableConfig | None = None,
         roster_writer: RosterWriter | None = None,
         intent_interpreter: IntentInterpreter | None = None,
+        transition_assessor: TransitionAssessor | None = None,
     ) -> None:
         self._repo = repo
         self._app_config = app_config
@@ -1598,11 +1662,63 @@ class LiveStageAdapter:
         # Injected for the same reason; absent, the deterministic phrase table
         # is the whole re-run decision, which is exactly the pre-LLM behavior.
         self._intent_interpreter = intent_interpreter
+        self._transition_assessor = transition_assessor
+
+    async def _assess_transition(
+        self,
+        *,
+        stage: str,
+        cycle: dict[str, Any],
+        evidence_summary: str,
+    ) -> TransitionAssessment:
+        if not bool(getattr(getattr(self._app_config, "dbtl", None), "progressive_gate", False)):
+            return standard_assessment(source="feature_disabled")
+        if self._transition_assessor is None:
+            return standard_assessment(
+                rationale="No transition assessor model is configured, so the standard human-review path is required.",
+                source="config_default",
+            )
+        prompt = build_transition_assessment_prompt(
+            stage=stage,
+            cycle=cycle,
+            evidence_summary=evidence_summary,
+        )
+        try:
+            reply = self._transition_assessor(prompt)
+            if isawaitable(reply):
+                reply = await reply
+            return parse_transition_assessment(reply)
+        except Exception:  # noqa: BLE001 - fail safely to standard
+            logger.warning("DBTL transition assessment failed; using the standard gate.", exc_info=True)
+            return standard_assessment()
 
     def _runtime(self, config: RunnableConfig) -> dict[str, Any]:
         merged = _runtime_view(self._runtime_config) if self._runtime_config is not None else {}
         merged.update(_runtime_view(config))
         return merged
+
+    async def parked_design_context(
+        self,
+        *,
+        project_id: str | None,
+        cycle_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Return the server-owned unapproved brief for a parked cycle."""
+        if not project_id or not cycle_id:
+            return None
+        cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
+        if not cycle or not cycle.get("parked"):
+            return None
+        evidence = cycle.get("parked_evidence")
+        if not isinstance(evidence, dict) or not evidence.get("content_hash"):
+            return None
+        return {
+            "cycle_id": cycle_id,
+            "cycle_title": str(cycle.get("title") or ""),
+            "stage": str(cycle.get("parked_stage") or "design"),
+            "approval_status": "unapproved",
+            "evidence": dict(evidence),
+        }
 
     async def _interpreted_wants_new_debate(self, request_text: str) -> bool:
         """LLM reading of a re-run request the deterministic phrases missed.
@@ -2131,6 +2247,7 @@ class LiveStageAdapter:
         decision_request: DecisionRequest | None = None,
         chair_worker_run_id: str | None = None,
         review_issue_ids: Sequence[str] = (),
+        transition_gate: Mapping[str, Any] | None = None,
     ) -> _FeedbackSurfacePlan | None:
         """Decide the surface *before* the deck is rendered.
 
@@ -2192,6 +2309,7 @@ class LiveStageAdapter:
             decision_request={
                 **(decision_request.as_dict() if decision_request is not None else {}),
                 **({"review_issue_ids": list(review_issue_ids)} if review_issue_ids else {}),
+                **({"transition_gate": dict(transition_gate)} if transition_gate is not None else {}),
             }
             or None,
             chair_worker_run_id=chair_worker_run_id,
@@ -2215,7 +2333,12 @@ class LiveStageAdapter:
         then be an owner who cannot respond at all.
         """
         try:
-            await self._repo.register_design_feedback_surface(
+            register = getattr(
+                self._repo,
+                "register_stage_feedback_surface",
+                self._repo.register_design_feedback_surface,
+            )
+            kwargs = dict(
                 surface_id=plan.surface_id,
                 project_id=project_id,
                 cycle_id=cycle_id,
@@ -2231,6 +2354,9 @@ class LiveStageAdapter:
                 evidence_artifact_revision=int(plan.evidence["revision"]) if plan.evidence is not None else None,
                 evidence_content_hash=plan.evidence_content_hash or None,
             )
+            if hasattr(self._repo, "register_stage_feedback_surface"):
+                kwargs["stage"] = "design"
+            await register(**kwargs)
         except Exception:  # noqa: BLE001 - a descriptor must not break the record
             logger.warning("Could not register the design feedback surface for cycle %s.", cycle_id, exc_info=True)
 
@@ -2392,7 +2518,7 @@ class LiveStageAdapter:
             )
 
         datasets = await self._repo.list_datasets(cycle_id, project_id=project_id)
-        reconciliation = await self._repo.reconciliation_view(cycle_id, project_id=project_id) if stage in {"reconciliation", "build", "test", "learn"} else None
+        reconciliation = await self._repo.reconciliation_view(cycle_id, project_id=project_id) if stage in {"design", "reconciliation", "build", "test", "learn"} else None
         build_test = await self._repo.build_test_view(cycle_id, project_id=project_id) if stage in {"build", "test", "learn"} else None
         prior_design_runs = (
             await self._repo.list_worker_runs(
@@ -2864,6 +2990,42 @@ class LiveStageAdapter:
         deck = None
         surface_plan = None
         if stage == "design" and chair_has_presentable_outcome:
+            transition_gate = None
+            if (
+                artifact_uri
+                and artifact_hash
+                and bool(getattr(getattr(self._app_config, "dbtl", None), "progressive_gate", False))
+            ):
+                assessment = await self._assess_transition(
+                    stage="design",
+                    cycle=cycle,
+                    evidence_summary=artifact_digest or f"Design evidence: {artifact_uri} ({artifact_hash})",
+                )
+                # Before this Design verdict, the reconciliation evaluator
+                # necessarily includes one reason saying Design is not yet
+                # approved. For the one-click action, approval and route
+                # selection are atomic, so that reason is satisfied by the
+                # click itself; every data-specific reason must already be
+                # absent. This does not approve reconciliation or bypass its
+                # durable review—it only decides whether the Build edge may be
+                # offered after Design approval.
+                reconciliation_settled = (
+                    _reconciliation_ready_after_design_approval(
+                        reconciliation if isinstance(reconciliation, Mapping) else None
+                    )
+                )
+                routes = compute_stage_routes(
+                    RouteContext(
+                        stage="design",
+                        outcome="approved",
+                        reconciliation_settled=reconciliation_settled,
+                    )
+                )
+                transition_gate = {
+                    "stage": "design",
+                    "assessment": assessment.as_dict(),
+                    "routes": [route.as_dict() for route in routes],
+                }
             surface_plan = await self._plan_feedback_surface(
                 cycle_id=cycle_id,
                 project_id=project_id,
@@ -2876,6 +3038,7 @@ class LiveStageAdapter:
                 decision_request=chair_result.decision_request,
                 chair_worker_run_id=chair_worker_run_id,
                 review_issue_ids=tuple(f"issue-{index + 1}" for index, _item in enumerate(chair_result.consensus.disagreements if chair_result.consensus is not None else ())),
+                transition_gate=transition_gate,
             )
             deck = await asyncio.to_thread(
                 _write_council_deck,
@@ -2888,6 +3051,7 @@ class LiveStageAdapter:
                 decision_request=chair_result.decision_request,
                 surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
                 surface_mode=(surface_plan.mode if surface_plan is not None else ""),
+                transition_gate=transition_gate,
             )
             if deck is not None:
                 deck_uri = deck.uri

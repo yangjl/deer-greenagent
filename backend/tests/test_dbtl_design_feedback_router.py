@@ -18,12 +18,14 @@ import anyio
 import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.gateway.auth.models import User
 from app.gateway.routers import dbtl_cycles, workspaces
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.dbtl_config import DbtlConfig
 from deerflow.persistence.dbtl import DbtlCycleRepository
+from deerflow.persistence.dbtl.model import DbtlReviewRow
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
@@ -62,12 +64,22 @@ async def _make_repos(tmp_path: Path):
     return WorkspaceRepository(session_factory), DbtlCycleRepository(session_factory)
 
 
-def _make_app(workspace_repo, cycle_repo, *, mode: str = "manual", user_factory=_user):
+def _make_app(
+    workspace_repo,
+    cycle_repo,
+    *,
+    mode: str = "manual",
+    user_factory=_user,
+    progressive_gate: bool = False,
+):
     app = make_authed_test_app(user_factory=user_factory)
     app.state.workspace_repo = workspace_repo
     app.state.dbtl_cycle_repo = cycle_repo
     app.state.run_event_store = MemoryRunEventStore()
-    app.state.dbtl_config_override = DbtlConfig(mode=mode)
+    app.state.dbtl_config_override = DbtlConfig(
+        mode=mode,
+        progressive_gate=progressive_gate,
+    )
     app.include_router(workspaces.router)
     app.include_router(dbtl_cycles.router)
     return app
@@ -517,6 +529,241 @@ def test_design_submission_and_approval_are_two_bound_deck_transitions(tmp_path:
         assert provenance["input_source"] == "design_deck"
         assert provenance["feedback_surface_id"] == surface["surface_id"]
         assert provenance["deck_content_hash"] == DECK_HASH
+
+
+def test_routine_progressive_gate_records_submit_and_approval_in_one_action(
+    tmp_path: Path,
+) -> None:
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    with TestClient(
+        _make_app(workspace_repo, cycle_repo, progressive_gate=True)
+    ) as client:
+        project_id = _seed_project(client)
+        client.app.state.thread_store.get = AsyncMock(
+            return_value={"thread_id": "thread-1", "project_id": project_id}
+        )
+        cycle = _create_cycle(client, project_id)
+        attached = client.post(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/artifacts",
+            json={
+                "stage": "design",
+                "artifact_type": "design_brief.v2",
+                "uri": "/mnt/user-data/outputs/design-review.md",
+                "content_hash": EVIDENCE_HASH,
+                "expected_db_revision": cycle["db_revision"],
+                "idempotency_key": "artifact-routine",
+            },
+        ).json()
+        cycle = client.get(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}"
+        ).json()
+        gate = {
+            "stage": "design",
+            "assessment": {
+                "difficulty": "routine",
+                "rationale": "All evidence is bounded and the next action is reversible.",
+                "source": "model",
+            },
+            "routes": [
+                {
+                    "slug": "advance",
+                    "to_stage": "build",
+                    "label": "Continue to Build",
+                    "value": "Approve Design and move toward Build.",
+                },
+                {
+                    "slug": "park",
+                    "to_stage": "design",
+                    "label": "Park",
+                    "value": "Work with the lead agent.",
+                },
+            ],
+        }
+        surface = anyio.run(
+            partial(
+                _register,
+                cycle_repo,
+                cycle,
+                mode="stage_review",
+                evidence_artifact_id=attached["id"],
+                evidence_artifact_revision=attached["revision"],
+                evidence_content_hash=EVIDENCE_HASH,
+                decision_request={
+                    "review_issue_ids": [],
+                    "transition_gate": gate,
+                },
+            )
+        )
+        payload = {
+            "version": 1,
+            "action": {
+                "kind": "advance",
+                "option_ids": [],
+                "difficulty_override": None,
+            },
+            "comment": "",
+            "client_submission_id": "advance-routine",
+            "originating_thread_id": "thread-1",
+            "expected_db_revision": cycle["db_revision"],
+            "expected_evidence": {
+                "artifact_id": attached["id"],
+                "revision": attached["revision"],
+                "content_hash": EVIDENCE_HASH,
+            },
+            "expected_deck_hash": DECK_HASH,
+        }
+        response = client.post(
+            f"{_url(project_id, cycle['id'], surface['surface_id'])}/actions",
+            json=payload,
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "review_recorded"
+        design = next(
+            item for item in body["cycle"]["stages"] if item["stage"] == "design"
+        )
+        assert design["status"] == "approved"
+        activity = client.get(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/activity"
+        ).json()["events"]
+        reviewed = [
+            item for item in activity if item["event_type"] == "stage.reviewed"
+        ]
+        submitted = [
+            item for item in activity if item["event_type"] == "stage.submitted"
+        ]
+        assert len(reviewed) == 1
+        assert submitted == []
+        assert reviewed[0]["payload"]["auto_submit"] is True
+        async def load_review():
+            session_factory = get_session_factory()
+            assert session_factory is not None
+            async with session_factory() as session:
+                return await session.scalar(
+                    select(DbtlReviewRow).where(
+                        DbtlReviewRow.cycle_id == cycle["id"]
+                    )
+                )
+
+        review = anyio.run(load_review)
+        assert review is not None
+        assert review.bound_db_revision == cycle["db_revision"] + 1
+        assert review.bound_stage_revision == cycle["db_revision"] + 1
+        assert review.artifact_id == attached["id"]
+        assert review.artifact_revision == attached["revision"]
+        assert review.feedback_surface_id == surface["surface_id"]
+        assert review.deck_content_hash == DECK_HASH
+        assert review.selected_action == "advance"
+        detail = client.get(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}"
+        ).json()
+        transition = detail["transitions"][-1]
+        assert transition["assessed_difficulty"] == "routine"
+        assert transition["assessment_rationale"] == gate["assessment"]["rationale"]
+        assert transition["human_override"] is None
+        assert transition["evidence_hash"] == EVIDENCE_HASH
+
+
+def test_high_stakes_gate_requires_an_explicit_downward_override(
+    tmp_path: Path,
+) -> None:
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    with TestClient(
+        _make_app(workspace_repo, cycle_repo, progressive_gate=True)
+    ) as client:
+        project_id = _seed_project(client)
+        client.app.state.thread_store.get = AsyncMock(
+            return_value={"thread_id": "thread-1", "project_id": project_id}
+        )
+        cycle = _create_cycle(client, project_id)
+        artifact = client.post(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/artifacts",
+            json={
+                "stage": "design",
+                "artifact_type": "design_brief.v2",
+                "uri": "/mnt/user-data/outputs/high-stakes.md",
+                "content_hash": EVIDENCE_HASH,
+                "expected_db_revision": cycle["db_revision"],
+                "idempotency_key": "artifact-high",
+            },
+        ).json()
+        cycle = client.get(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}"
+        ).json()
+        surface = anyio.run(
+            partial(
+                _register,
+                cycle_repo,
+                cycle,
+                mode="stage_review",
+                evidence_artifact_id=artifact["id"],
+                evidence_artifact_revision=artifact["revision"],
+                evidence_content_hash=EVIDENCE_HASH,
+                decision_request={
+                    "review_issue_ids": [],
+                    "transition_gate": {
+                        "stage": "design",
+                        "assessment": {
+                            "difficulty": "high_stakes",
+                            "rationale": "The decision changes an irreversible field protocol.",
+                            "source": "model",
+                        },
+                        "routes": [
+                            {
+                                "slug": "advance",
+                                "to_stage": "build",
+                                "label": "Continue to Build",
+                                "value": "Advance.",
+                            }
+                        ],
+                    },
+                },
+            )
+        )
+        action_url = (
+            f"{_url(project_id, cycle['id'], surface['surface_id'])}/actions"
+        )
+        base = {
+            "version": 1,
+            "comment": "",
+            "originating_thread_id": "thread-1",
+            "expected_db_revision": cycle["db_revision"],
+            "expected_evidence": {
+                "artifact_id": artifact["id"],
+                "revision": artifact["revision"],
+                "content_hash": EVIDENCE_HASH,
+            },
+            "expected_deck_hash": DECK_HASH,
+        }
+        refused = client.post(
+            action_url,
+            json={
+                **base,
+                "action": {"kind": "advance", "option_ids": []},
+                "client_submission_id": "high-no-override",
+            },
+        )
+        assert refused.status_code == 409
+
+        accepted = client.post(
+            action_url,
+            json={
+                **base,
+                "action": {
+                    "kind": "advance",
+                    "option_ids": [],
+                    "difficulty_override": "routine",
+                },
+                "client_submission_id": "high-with-override",
+            },
+        )
+        assert accepted.status_code == 200
+        detail = client.get(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}"
+        ).json()
+        assert detail["transitions"][-1]["assessed_difficulty"] == "high_stakes"
+        assert detail["transitions"][-1]["human_override"] == "routine"
 
 
 def test_request_changes_starts_a_focused_run_in_the_originating_thread(

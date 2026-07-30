@@ -1256,7 +1256,7 @@ def build_supervisor_graph(
         )
         return resolve_branch(text, active)
 
-    def route(state: dict) -> str:
+    async def route(state: dict, config: RunnableConfig) -> str:
         # A review sentence is a control action, not an open-ended prompt. The
         # one-shot cycle selector may already have cleared after the meeting,
         # in which case normal routing would send "I approve the design" to
@@ -1280,6 +1280,17 @@ def build_supervisor_graph(
             return SupervisorBranch.CLARIFICATION.value
 
         decision = decide(state)
+        if decision.branch is SupervisorBranch.CYCLE_CONTINUATION:
+            reader = getattr(stage_adapter, "parked_design_context", None)
+            if callable(reader):
+                parked = reader(
+                    project_id=context.project_id,
+                    cycle_id=decision.cycle_id,
+                )
+                if isawaitable(parked):
+                    parked = await parked
+                if parked is not None:
+                    return SupervisorBranch.ORDINARY.value
         logger.debug(
             "dbtl supervisor route: branch=%s source=%s project=%s cycle=%s",
             decision.branch,
@@ -1559,9 +1570,31 @@ def build_supervisor_graph(
             }
         return {"messages": [AIMessage(content=_render_continuation(decision, result.note))]}
 
+    async def ordinary(state: dict, config: RunnableConfig) -> dict:
+        """Delegate ordinary work, adding parked evidence only for this call."""
+        ordinary_config = config
+        decision = decide(state)
+        if decision.cycle_id:
+            reader = getattr(stage_adapter, "parked_design_context", None)
+            if callable(reader):
+                parked = reader(
+                    project_id=context.project_id,
+                    cycle_id=decision.cycle_id,
+                )
+                if isawaitable(parked):
+                    parked = await parked
+                if parked is not None:
+                    active_context = dict(request_context(config))
+                    active_context["dbtl_parked_design_brief"] = parked
+                    ordinary_config = dict(config)
+                    ordinary_config["context"] = active_context
+                    configurable = dict(ordinary_config.get("configurable") or {})
+                    configurable["context"] = active_context
+                    ordinary_config["configurable"] = configurable
+        return await lead_agent.ainvoke(state, config=ordinary_config)
+
     builder = StateGraph(state_schema)
-    # The ordinary branch is the lead agent itself, unmodified.
-    builder.add_node(SupervisorBranch.ORDINARY.value, lead_agent)
+    builder.add_node(SupervisorBranch.ORDINARY.value, ordinary)
     builder.add_node(SupervisorBranch.CLARIFICATION.value, clarification)
     builder.add_node(SupervisorBranch.CYCLE_SETUP.value, cycle_setup)
     builder.add_node(SupervisorBranch.CYCLE_CONTINUATION.value, cycle_continuation)
@@ -1661,7 +1694,12 @@ def make_project_supervisor(config: RunnableConfig):
     # ``make_lead_agent`` re-freezes the same mode (idempotent) and builds the
     # full middleware chain, so the ordinary branch is the production agent.
     lead_agent = make_lead_agent(config)
-    from deerflow.agents.dbtl.stage_execution import LiveStageAdapter, make_llm_intent_interpreter, make_llm_roster_writer
+    from deerflow.agents.dbtl.stage_execution import (
+        LiveStageAdapter,
+        make_llm_intent_interpreter,
+        make_llm_roster_writer,
+        make_llm_transition_assessor,
+    )
     from deerflow.persistence.dbtl import DbtlCycleRepository
     from deerflow.persistence.engine import get_session_factory
 
@@ -1679,6 +1717,7 @@ def make_project_supervisor(config: RunnableConfig):
             runtime_config=config,
             roster_writer=make_llm_roster_writer(),
             intent_interpreter=make_llm_intent_interpreter(),
+            transition_assessor=make_llm_transition_assessor(),
         ),
     )
     return graph.compile()

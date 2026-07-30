@@ -37,6 +37,7 @@ class DbtlFeature(BaseModel):
     graph_execution_enabled: bool
     design_deck_feedback: bool
     progressive_gate: bool
+    stage_meetings: dict[str, bool]
     reason: str
 
 
@@ -57,6 +58,8 @@ class FeaturesResponse(BaseModel):
 async def list_features(config: AppConfig = Depends(get_config)) -> FeaturesResponse:
     """Return availability of optional, config-gated frontend features."""
     browser = browser_capability(config)
+    stage_meetings = getattr(config.dbtl, "stage_meetings", None)
+    stage_meeting_flags = stage_meetings.model_dump() if hasattr(stage_meetings, "model_dump") else {"build": False, "test": False, "learn": False}
     return FeaturesResponse(
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         browser_control=BrowserControlFeature(enabled=browser.available),
@@ -66,6 +69,7 @@ async def list_features(config: AppConfig = Depends(get_config)) -> FeaturesResp
             graph_execution_enabled=config.dbtl.graph_execution_enabled,
             design_deck_feedback=config.dbtl.design_deck_feedback,
             progressive_gate=config.dbtl.progressive_gate,
+            stage_meetings=stage_meeting_flags,
             reason=dbtl_mode_reason(config.dbtl),
         ),
     )

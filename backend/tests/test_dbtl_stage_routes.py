@@ -34,7 +34,12 @@ class TestRouteLegalityMatrix:
     @pytest.mark.parametrize("settled", [True, False])
     def test_design_approved_offers_build_revise_close(self, settled: bool) -> None:
         routes = compute_stage_routes(RouteContext("design", "approve", reconciliation_settled=settled))
-        assert _slugs(routes) == [RouteSlug.ADVANCE, RouteSlug.REVISE_HERE, RouteSlug.CLOSE_CYCLE]
+        assert _slugs(routes) == [
+            RouteSlug.ADVANCE,
+            RouteSlug.REVISE_HERE,
+            RouteSlug.PARK,
+            RouteSlug.CLOSE_CYCLE,
+        ]
         advance = routes[0]
         assert advance.to_stage == "build"
         assert advance.blocked is (not settled)
@@ -43,7 +48,12 @@ class TestRouteLegalityMatrix:
 
     def test_build_approved_offers_test(self) -> None:
         routes = compute_stage_routes(RouteContext("build", "approve", reconciliation_settled=True))
-        assert _slugs(routes) == [RouteSlug.ADVANCE, RouteSlug.REVISE_HERE, RouteSlug.CLOSE_CYCLE]
+        assert _slugs(routes) == [
+            RouteSlug.ADVANCE,
+            RouteSlug.REVISE_HERE,
+            RouteSlug.PARK,
+            RouteSlug.CLOSE_CYCLE,
+        ]
         assert routes[0].to_stage == "test"
         assert not routes[0].blocked
 

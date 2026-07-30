@@ -3,7 +3,10 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 const mutate = rs.fn();
 const featureState = { designDeckFeedback: false, progressiveGate: false };
-const detailState: { transitions?: Array<Record<string, unknown>> } = {};
+const detailState: {
+  transitions?: Array<Record<string, unknown>>;
+  transitionGate?: Record<string, unknown>;
+} = {};
 
 rs.mock("@/core/dbtl", () => ({
   CYCLE_STATE_LABELS: { design: "Design" },
@@ -77,6 +80,9 @@ rs.mock("@/core/dbtl", () => ({
       ...(detailState.transitions
         ? { transitions: detailState.transitions }
         : {}),
+      ...(detailState.transitionGate
+        ? { transition_gate: detailState.transitionGate }
+        : {}),
     },
     error: null,
     isPending: false,
@@ -113,6 +119,7 @@ afterEach(() => {
   featureState.designDeckFeedback = false;
   featureState.progressiveGate = false;
   delete detailState.transitions;
+  delete detailState.transitionGate;
 });
 
 function renderSheet(stage: "design" | "build" = "design") {
@@ -213,6 +220,50 @@ describe("CycleStageSheet Design read-only review", () => {
     expect(
       screen.queryByRole("button", { name: "Submit for review" }),
     ).toBeNull();
+  });
+
+  it("shows the progressive assessment, legal routes, and parked state", () => {
+    featureState.designDeckFeedback = true;
+    featureState.progressiveGate = true;
+    detailState.transitionGate = {
+      stage: "design",
+      assessment: {
+        difficulty: "high_stakes",
+        rationale: "The field intervention cannot be reversed.",
+        source: "model",
+      },
+      routes: [
+        {
+          slug: "advance",
+          to_stage: "build",
+          label: "Continue to Build",
+          value: "Open Build.",
+          blocked: true,
+          blocked_reason: "Reconciliation is incomplete.",
+        },
+        {
+          slug: "park",
+          to_stage: "design",
+          label: "Park — work with the lead agent",
+          value: "Keep Design open.",
+        },
+      ],
+      surface_id: "surface-1",
+      deck_uri: "/mnt/user-data/outputs/design.html",
+      originating_thread_id: "thread-1",
+      parked: true,
+    };
+
+    renderSheet();
+
+    expect(screen.getByText(/Agent assessment:/)).toBeTruthy();
+    expect(
+      screen.getByText("The field intervention cannot be reversed."),
+    ).toBeTruthy();
+    expect(screen.getByText("Continue to Build")).toBeTruthy();
+    expect(screen.getByText("Reconciliation is incomplete.")).toBeTruthy();
+    expect(screen.getByText("Park — work with the lead agent")).toBeTruthy();
+    expect(screen.getByText(/Parked — ordinary requests/)).toBeTruthy();
   });
 
   it("leaves a non-design stage's submit control in place", () => {

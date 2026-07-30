@@ -45,6 +45,7 @@ from deerflow.dbtl import (
     render_claim_markdown,
     validate_candidate_grade,
 )
+from deerflow.dbtl.stage_feedback import filter_stage_feedback_intents
 from deerflow.persistence.dbtl import (
     DbtlRevisionConflict,
     DbtlWorkflowRefused,
@@ -57,6 +58,35 @@ logger = logging.getLogger(__name__)
 
 StageName = Literal["design", "reconciliation", "build", "test", "learn"]
 CycleWeight = Literal["full", "light", "retroactive"]
+_TRANSITION_DIFFICULTIES = frozenset({"routine", "standard", "high_stakes"})
+
+
+def _surface_transition_gate(surface: dict[str, Any]) -> dict[str, Any] | None:
+    request_payload = surface.get("decision_request")
+    gate = request_payload.get("transition_gate") if isinstance(request_payload, dict) else None
+    if not isinstance(gate, dict):
+        return None
+    assessment = gate.get("assessment")
+    routes = gate.get("routes")
+    if not isinstance(assessment, dict) or not isinstance(routes, list):
+        return None
+    difficulty = str(assessment.get("difficulty") or "")
+    rationale = str(assessment.get("rationale") or "").strip()
+    if difficulty not in _TRANSITION_DIFFICULTIES or not rationale:
+        return None
+    return {
+        "stage": str(gate.get("stage") or "design"),
+        "assessment": {
+            "difficulty": difficulty,
+            "rationale": rationale,
+            "source": str(assessment.get("source") or ""),
+        },
+        "routes": [dict(item) for item in routes if isinstance(item, dict)],
+    }
+
+
+def _route_available(gate: dict[str, Any], slug: str) -> bool:
+    return any(str(route.get("slug") or "") == slug and not bool(route.get("blocked")) for route in gate.get("routes", []) if isinstance(route, dict))
 
 
 async def _post_design_meeting_progress(
@@ -241,8 +271,15 @@ class DesignFeedbackAction(BaseModel):
         "approve",
         "request_changes",
         "reject",
+        "advance",
+        "park",
+        "convene_review_meeting",
+        "choose_route",
+        "recommend_promotion",
+        "close_without_candidate",
     ]
     option_ids: list[str] = Field(default_factory=list, max_length=16)
+    difficulty_override: Literal["routine", "standard", "high_stakes"] | None = None
 
     @field_validator("option_ids")
     @classmethod
@@ -388,11 +425,49 @@ async def get_cycle(project_id: str, cycle_id: str, request: Request, repo=Depen
     cycle = await repo.get_cycle(cycle_id, project_id=project_id)
     if cycle is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cycle not found")
-    if config.dbtl.progressive_gate:
+    dbtl_config = getattr(request.app.state, "dbtl_config_override", config.dbtl)
+    if dbtl_config.progressive_gate:
         # The read model for the path strip. Records accumulate regardless of
         # the flag; only their exposure is gated, so turning the flag on shows
         # the history that was already being kept.
         cycle["transitions"] = await repo.list_stage_transitions(cycle_id=cycle_id, project_id=project_id)
+        surface = await repo.latest_stage_feedback_surface(
+            project_id=project_id,
+            cycle_id=cycle_id,
+            stage="design",
+            mode="stage_review",
+        )
+        gate = _surface_transition_gate(surface or {})
+        design = next(
+            (item for item in cycle.get("stages", []) if item.get("stage") == "design"),
+            None,
+        )
+        attempt_artifacts = [item for item in cycle.get("artifacts", []) if surface is not None and item.get("stage_attempt_id") == surface.get("stage_attempt_id")]
+        newest_evidence = max(
+            attempt_artifacts,
+            key=lambda item: int(item.get("revision") or 0),
+            default=None,
+        )
+        evidence_matches = bool(
+            surface is not None
+            and newest_evidence
+            and newest_evidence.get("id") == surface.get("evidence_artifact_id")
+            and newest_evidence.get("revision") == surface.get("evidence_artifact_revision")
+            and newest_evidence.get("content_hash") == surface.get("evidence_content_hash")
+        )
+        gate_is_pending = str((design or {}).get("status") or "") in {
+            "in_progress",
+            "changes_requested",
+            "awaiting_review",
+        }
+        if surface is not None and gate is not None and evidence_matches and gate_is_pending:
+            cycle["transition_gate"] = {
+                **gate,
+                "surface_id": surface["surface_id"],
+                "deck_uri": surface["deck_uri"],
+                "originating_thread_id": surface["originating_thread_id"],
+                "parked": bool(cycle.get("parked", False)),
+            }
     return cycle
 
 
@@ -414,14 +489,19 @@ async def _design_feedback_read_model(
     repo,
 ) -> dict[str, Any]:
     _project, user_id = await _require_project(project_id, request)
-    surface = await repo.get_design_feedback_surface(surface_id, project_id=project_id)
+    surface = await repo.get_stage_feedback_surface(surface_id, project_id=project_id)
     if surface is None or (cycle_id is not None and surface["cycle_id"] != cycle_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Feedback surface not found")
 
     resolved_cycle_id = str(surface["cycle_id"])
-    newest = await repo.latest_design_feedback_surface(project_id=project_id, cycle_id=resolved_cycle_id)
+    surface_stage = str(surface.get("stage") or "design")
+    newest = await repo.latest_stage_feedback_surface(
+        project_id=project_id,
+        cycle_id=resolved_cycle_id,
+        stage=surface_stage,
+    )
     cycle = await repo.get_cycle(resolved_cycle_id, project_id=project_id)
-    actions = await repo.design_feedback_actions(surface_id, project_id=project_id)
+    actions = await repo.stage_feedback_actions(surface_id, project_id=project_id)
     latest_action = actions[-1] if actions else None
     # A chair answer starts a background run. A provider/executor failure can
     # still leave that parent run terminal-successful because the failed worker
@@ -441,7 +521,7 @@ async def _design_feedback_read_model(
         run_status = str(getattr(raw_status, "value", raw_status) or "")
         if run_status in {"success", "error", "timeout", "interrupted"}:
             message = "The Design chair could not produce a follow-up deck from that run. Your recorded choice is still here; try sending it again."
-            latest_action = await repo.update_design_feedback_action(
+            latest_action = await repo.update_stage_feedback_action(
                 str(latest_action["client_submission_id"]),
                 project_id=project_id,
                 status="failed",
@@ -463,9 +543,10 @@ async def _design_feedback_read_model(
     surface_is_live = bool(surface["is_current"])
     evidence_matches = True
     if surface["mode"] == "stage_review":
-        newest_review = await repo.latest_design_feedback_surface(
+        newest_review = await repo.latest_stage_feedback_surface(
             project_id=project_id,
             cycle_id=resolved_cycle_id,
+            stage=surface_stage,
             stage_attempt_id=surface.get("stage_attempt_id"),
             mode="stage_review",
         )
@@ -493,7 +574,7 @@ async def _design_feedback_read_model(
             viewer_matches = False
 
     if dbtl_config.design_deck_feedback and dbtl_config.mutations_enabled and getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE and viewer_matches and surface_is_live and evidence_matches and cycle is not None:
-        stage = next((item for item in cycle["stages"] if item["stage"] == "design"), None)
+        stage = next((item for item in cycle["stages"] if item["stage"] == surface_stage), None)
         stage_status = str((stage or {}).get("status") or "")
         groups = {str(item["action_group"]): item for item in actions}
         if latest_action is not None:
@@ -509,19 +590,30 @@ async def _design_feedback_read_model(
                 allowed_actions = ["chair_option"] if options else ["chair_text"]
         elif surface["mode"] == "stage_review":
             if "stage_review" not in groups:
+                gate = _surface_transition_gate(surface) if dbtl_config.progressive_gate else None
                 if stage_status in {"in_progress", "changes_requested"} and "stage_submit" not in groups:
-                    allowed_actions = ["submit_for_review"]
+                    if gate is not None:
+                        allowed_actions = ["submit_for_review"]
+                        if "stage_park" not in groups:
+                            allowed_actions.append("park")
+                        if _route_available(gate, "advance"):
+                            allowed_actions.append("advance")
+                    else:
+                        allowed_actions = ["submit_for_review"]
                 elif stage_status == "awaiting_review":
                     allowed_actions = ["approve", "request_changes", "reject"]
+                    if gate is not None and "stage_park" not in groups:
+                        allowed_actions.append("park")
+        allowed_actions = filter_stage_feedback_intents(surface_stage, allowed_actions)
         interactive = bool(allowed_actions)
 
     note = ""
     if not surface_is_live:
-        note = "A newer Design round replaced this deck."
+        note = f"A newer {surface_stage.title()} surface replaced this deck."
     elif not evidence_matches:
-        note = "The Design evidence changed after this deck was rendered. Regenerate the feedback deck."
+        note = f"The {surface_stage.title()} evidence changed after this deck was rendered. Regenerate the feedback deck."
     elif not viewer_matches:
-        note = "Open this deck in the conversation where the Design meeting started."
+        note = f"Open this deck in the conversation where the {surface_stage.title()} work started."
     elif not dbtl_config.design_deck_feedback:
         note = "Design deck feedback is disabled; use the fallback Design controls."
     elif latest_action and latest_action.get("status") in {
@@ -534,6 +626,8 @@ async def _design_feedback_read_model(
     elif latest_action and latest_action.get("status") == "failed":
         receipt = latest_action.get("receipt")
         note = str(receipt.get("message")) if isinstance(receipt, dict) and receipt.get("message") else "The previous attempt did not produce a follow-up deck. Try sending your answer again."
+    elif cycle and cycle.get("parked"):
+        note = "This cycle is parked. Ordinary cycle-scoped requests go to the lead agent with the bound Design package clearly marked unapproved."
 
     logger.info(
         "design_feedback.surface_opened",
@@ -548,20 +642,26 @@ async def _design_feedback_read_model(
             }
         },
     )
+    lifecycle_state = "superseded" if not surface_is_live else "consumed" if not interactive and latest_action is not None and latest_action.get("status") not in {"failed", "pending"} else "open"
     return {
         **surface,
+        "lifecycle_state": lifecycle_state,
         "newest_surface_id": (newest or {}).get("surface_id"),
+        "newest_surface_uri": (newest or {}).get("deck_uri"),
         "allowed_actions": allowed_actions,
         "interactive": interactive,
         "current_db_revision": int(cycle["db_revision"]) if cycle else None,
-        "current_stage_status": (next((item["status"] for item in cycle["stages"] if item["stage"] == "design"), None) if cycle else None),
+        "current_stage_status": (next((item["status"] for item in cycle["stages"] if item["stage"] == surface_stage), None) if cycle else None),
         "originating_conversation_id": surface["originating_thread_id"],
         "receipt": latest_action,
         "note": note,
+        "transition_gate": (_surface_transition_gate(surface) if dbtl_config.progressive_gate else None),
+        "parked": bool((cycle or {}).get("parked", False)),
     }
 
 
 @router.get("/projects/{project_id}/dbtl/cycles/{cycle_id}/design-feedback/{surface_id}")
+@router.get("/projects/{project_id}/dbtl/cycles/{cycle_id}/stage-feedback/{surface_id}")
 @require_permission("threads", "read")
 async def get_design_feedback_surface(
     project_id: str,
@@ -584,6 +684,7 @@ async def get_design_feedback_surface(
 
 
 @router.get("/projects/{project_id}/dbtl/design-feedback/{surface_id}")
+@router.get("/projects/{project_id}/dbtl/stage-feedback/{surface_id}")
 @require_permission("threads", "read")
 async def resolve_design_feedback_surface(
     project_id: str,
@@ -633,6 +734,7 @@ def _feedback_event(
 
 
 @router.post("/projects/{project_id}/dbtl/cycles/{cycle_id}/design-feedback/{surface_id}/actions")
+@router.post("/projects/{project_id}/dbtl/cycles/{cycle_id}/stage-feedback/{surface_id}/actions")
 @require_permission("threads", "write")
 async def apply_design_feedback_action(
     project_id: str,
@@ -673,7 +775,7 @@ async def apply_design_feedback_action(
 
     expected_evidence = body.expected_evidence.model_dump() if body.expected_evidence else None
     try:
-        surface, action, replayed = await repo.reserve_design_feedback_action(
+        surface, action, replayed = await repo.reserve_stage_feedback_action(
             project_id=project_id,
             cycle_id=cycle_id,
             surface_id=surface_id,
@@ -685,6 +787,7 @@ async def apply_design_feedback_action(
             expected_db_revision=body.expected_db_revision,
             expected_evidence=expected_evidence,
             expected_deck_hash=body.expected_deck_hash,
+            difficulty_override=body.action.difficulty_override,
         )
     except Exception as exc:  # noqa: BLE001
         _feedback_event(
@@ -804,7 +907,7 @@ async def apply_design_feedback_action(
                 "originating_thread_id": body.originating_thread_id,
                 "message": "Recorded. The Design chair is resuming in the originating conversation.",
             }
-            updated = await repo.update_design_feedback_action(
+            updated = await repo.update_stage_feedback_action(
                 action_id,
                 project_id=project_id,
                 status="resume_started",
@@ -829,6 +932,98 @@ async def apply_design_feedback_action(
             "evidence": expected_evidence,
         }
         workflow_key = f"design-deck:{action_id}"
+        transition_gate = _surface_transition_gate(surface) if dbtl_config.progressive_gate else None
+        if body.action.kind in {"advance", "park"} and transition_gate is None:
+            raise DesignFeedbackConflict("This deck does not carry a progressive transition gate.")
+        assessment = dict((transition_gate or {}).get("assessment") or {})
+        assessed_difficulty = str(assessment.get("difficulty") or "")
+        assessment_rationale = str(assessment.get("rationale") or "")
+        human_override = body.action.difficulty_override
+        effective_difficulty = human_override or assessed_difficulty
+        offered_routes = [str(route.get("slug")) for route in (transition_gate or {}).get("routes", []) if isinstance(route, dict) and route.get("slug") and not route.get("blocked")]
+        progressive_transition = (
+            {
+                "assessed_difficulty": assessed_difficulty,
+                "assessment_rationale": assessment_rationale,
+                "human_override": human_override,
+                "offered_routes": offered_routes,
+            }
+            if transition_gate is not None
+            else None
+        )
+        if body.action.kind == "advance":
+            if effective_difficulty != "routine":
+                raise DesignFeedbackConflict("One-click Continue to Build is available only at routine review depth.")
+            if not _route_available(transition_gate or {}, "advance"):
+                raise DesignFeedbackConflict("Continue to Build is currently blocked.")
+            cycle = await repo.review_stage(
+                cycle_id=cycle_id,
+                project_id=project_id,
+                stage="design",
+                decision="approve",
+                rationale=body.comment.strip() or "Continued through the routine one-click progressive gate.",
+                expected_db_revision=body.expected_db_revision,
+                reviewer_user_id=user_id,
+                reviewer_project_role=str(project["current_user_role"]),
+                idempotency_key=workflow_key,
+                design_feedback_provenance={
+                    "input_source": "design_deck",
+                    "feedback_surface_id": surface_id,
+                    "deck_content_hash": surface["deck_content_hash"],
+                    "deck_schema_version": surface["deck_schema_version"],
+                    "selected_action": "advance",
+                    "selected_card_ids": [],
+                    "human_comment": body.comment.strip() or None,
+                    "rationale_projection": body.comment.strip() or "Continued through the routine one-click progressive gate.",
+                    "rationale_source": "human" if body.comment.strip() else "server_projection",
+                },
+                progressive_transition=progressive_transition,
+                auto_submit=True,
+            )
+            receipt = {
+                "kind": "advance",
+                "db_revision": cycle["db_revision"],
+                "message": "Routine gate recorded in one click. The cycle continued toward Build.",
+                "assessed_difficulty": assessed_difficulty,
+                "human_override": human_override,
+            }
+            updated = await repo.update_stage_feedback_action(
+                action_id,
+                project_id=project_id,
+                status="review_recorded",
+                receipt=receipt,
+            )
+            return {**updated, "cycle": cycle, "replayed": replayed}
+        if body.action.kind == "park":
+            if not _route_available(transition_gate or {}, "park"):
+                raise DesignFeedbackConflict("Park is not a legal route from this gate.")
+            cycle = await repo.park_cycle(
+                cycle_id=cycle_id,
+                project_id=project_id,
+                stage="design",
+                expected_db_revision=body.expected_db_revision,
+                actor_user_id=user_id,
+                idempotency_key=workflow_key,
+                decision_surface_id=surface_id,
+                assessed_difficulty=assessed_difficulty,
+                assessment_rationale=assessment_rationale,
+                human_override=human_override,
+                offered_routes=offered_routes,
+            )
+            receipt = {
+                "kind": "park",
+                "db_revision": cycle["db_revision"],
+                "message": "Cycle parked. Ordinary cycle-scoped requests now go to the lead agent with this Design marked unapproved.",
+                "assessed_difficulty": assessed_difficulty,
+                "human_override": human_override,
+            }
+            updated = await repo.update_stage_feedback_action(
+                action_id,
+                project_id=project_id,
+                status="accepted",
+                receipt=receipt,
+            )
+            return {**updated, "cycle": cycle, "replayed": replayed}
         if body.action.kind == "submit_for_review":
             cycle = await repo.submit_stage_for_review(
                 cycle_id=cycle_id,
@@ -843,8 +1038,10 @@ async def apply_design_feedback_action(
                 "kind": "submit_for_review",
                 "db_revision": cycle["db_revision"],
                 "message": "The Design package is submitted for human review.",
+                "assessed_difficulty": assessed_difficulty or None,
+                "human_override": human_override,
             }
-            updated = await repo.update_design_feedback_action(
+            updated = await repo.update_stage_feedback_action(
                 action_id,
                 project_id=project_id,
                 status="accepted",
@@ -861,6 +1058,23 @@ async def apply_design_feedback_action(
             )
             return {**updated, "cycle": cycle, "replayed": replayed}
 
+        if transition_gate is not None and human_override is None:
+            prior_actions = await repo.stage_feedback_actions(surface_id, project_id=project_id)
+            prior_submit = next(
+                (item for item in reversed(prior_actions) if item.get("action_group") == "stage_submit" and isinstance(item.get("receipt"), dict)),
+                None,
+            )
+            prior_receipt = dict((prior_submit or {}).get("receipt") or {})
+            prior_override = prior_receipt.get("human_override")
+            if prior_override in _TRANSITION_DIFFICULTIES:
+                human_override = str(prior_override)
+                effective_difficulty = human_override
+                progressive_transition = {
+                    **(progressive_transition or {}),
+                    "human_override": human_override,
+                }
+        if effective_difficulty == "high_stakes" and not body.comment.strip():
+            raise DesignFeedbackConflict("A high-stakes Design verdict requires the reviewer's written rationale.")
         if body.action.kind == "reject" and not body.comment.strip():
             raise DesignFeedbackConflict(f"{body.action.kind.replace('_', ' ').title()} requires a comment.")
         rationale = body.comment.strip() or ("Approved from the registered Design feedback deck." if body.action.kind == "approve" else "Selected contested Design issues require refinement.")
@@ -890,6 +1104,7 @@ async def apply_design_feedback_action(
             reviewer_project_role=str(project["current_user_role"]),
             idempotency_key=workflow_key,
             design_feedback_provenance=provenance,
+            progressive_transition=progressive_transition,
         )
         refinement_run_id: str | None = None
         if body.action.kind == "request_changes":
@@ -929,7 +1144,7 @@ async def apply_design_feedback_action(
         if refinement_run_id:
             receipt["run_id"] = refinement_run_id
             receipt["originating_thread_id"] = body.originating_thread_id
-        updated = await repo.update_design_feedback_action(
+        updated = await repo.update_stage_feedback_action(
             action_id,
             project_id=project_id,
             status="review_recorded",
@@ -947,7 +1162,7 @@ async def apply_design_feedback_action(
         )
         return {**updated, "cycle": cycle, "replayed": replayed}
     except HTTPException as exc:
-        await repo.update_design_feedback_action(
+        await repo.update_stage_feedback_action(
             action_id,
             project_id=project_id,
             status="failed",
@@ -955,7 +1170,7 @@ async def apply_design_feedback_action(
         )
         raise
     except Exception as exc:  # noqa: BLE001
-        await repo.update_design_feedback_action(
+        await repo.update_stage_feedback_action(
             action_id,
             project_id=project_id,
             status="failed",

@@ -78,6 +78,31 @@ def build_current_project_data(project_root: str | None) -> str | None:
     return f"<current_project_data>\nname: {name}\nhuman_path: {safe_root}\nagent_workspace: /mnt/user-data/workspace\n</current_project_data>"
 
 
+def build_parked_design_reminder(value: object) -> str | None:
+    """Framework-owned context for ordinary work while a DBTL cycle is parked."""
+    if not isinstance(value, dict) or value.get("approval_status") != "unapproved":
+        return None
+    evidence = value.get("evidence")
+    if not isinstance(evidence, dict):
+        return None
+    uri = str(evidence.get("uri") or "").strip()
+    content_hash = str(evidence.get("content_hash") or "").strip()
+    if not uri or not content_hash:
+        return None
+    title = escape(str(value.get("cycle_title") or value.get("cycle_id") or "DBTL cycle"), quote=False)
+    return (
+        "<parked_dbtl_context>\n"
+        f"The DBTL cycle '{title}' is parked for ordinary work with the lead agent.\n"
+        "The following Design package is context only and is explicitly UNAPPROVED. "
+        "You may discuss, inspect, or help revise it, but must not describe it as gate passage "
+        "or use it to start Build/Test/Learn.\n"
+        f"uri: {escape(uri, quote=False)}\n"
+        f"sha256: {escape(content_hash, quote=False)}\n"
+        "The project owner must return to the authenticated feedback deck to move the cycle.\n"
+        "</parked_dbtl_context>"
+    )
+
+
 def _insert_before_latest_visible_user(messages: list, message: HumanMessage) -> list:
     for index in range(len(messages) - 1, -1, -1):
         candidate = messages[index]
@@ -152,6 +177,7 @@ class ProjectContextMiddleware(AgentMiddleware[AgentState]):
             for block in (
                 build_project_reminder(context.get("project_root")),
                 build_mounts_reminder(self._mounts_provider(), context.get("project_root")),
+                build_parked_design_reminder(context.get("dbtl_parked_design_brief")),
             )
             if block is not None
         ]

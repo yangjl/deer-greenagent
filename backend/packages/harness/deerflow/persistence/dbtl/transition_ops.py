@@ -45,6 +45,9 @@ class TransitionOpsMixin:
         evidence_hash: str | None = None,
         decision_surface_id: str | None = None,
         offered_routes: list[str] | None = None,
+        assessed_difficulty: str | None = None,
+        assessment_rationale: str | None = None,
+        human_override: str | None = None,
     ) -> None:
         """Record one decided edge in the caller's open transaction.
 
@@ -71,6 +74,9 @@ class TransitionOpsMixin:
                 stage_attempt_id=stage_attempt.id if stage_attempt is not None else None,
                 chosen_route=chosen_route,
                 to_stage=target,
+                assessed_difficulty=assessed_difficulty,
+                assessment_rationale=assessment_rationale,
+                human_override=human_override,
                 offered_routes=offered_routes,
                 decided_by=decided_by,
                 decision_surface_id=decision_surface_id,
@@ -101,6 +107,7 @@ def _transition_payload(row: DbtlStageTransitionRow) -> dict[str, Any]:
         "chosen_route": row.chosen_route,
         "to_stage": row.to_stage,
         "assessed_difficulty": row.assessed_difficulty,
+        "assessment_rationale": row.assessment_rationale,
         "human_override": row.human_override,
         "offered_routes": row.offered_routes,
         "decided_by": row.decided_by,

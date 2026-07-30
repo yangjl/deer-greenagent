@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from deerflow.agents.middlewares.project_context_middleware import (
     ProjectContextMiddleware,
     build_mounts_reminder,
+    build_parked_design_reminder,
     build_project_reminder,
 )
 
@@ -60,6 +61,42 @@ class TestBuildMountsReminder:
     def test_no_mounts_means_no_reminder(self):
         assert build_mounts_reminder([]) is None
         assert build_mounts_reminder(None) is None
+
+
+class TestBuildParkedDesignReminder:
+    def test_marks_the_bound_package_unapproved_and_forbids_downstream_work(self):
+        reminder = build_parked_design_reminder(
+            {
+                "cycle_id": "cycle-1",
+                "cycle_title": "Drought trial",
+                "approval_status": "unapproved",
+                "evidence": {
+                    "uri": "/mnt/user-data/outputs/design.md",
+                    "content_hash": "a" * 64,
+                },
+            }
+        )
+
+        assert reminder is not None
+        assert "UNAPPROVED" in reminder
+        assert "/mnt/user-data/outputs/design.md" in reminder
+        assert "a" * 64 in reminder
+        assert "must not" in reminder
+        assert "Build/Test/Learn" in reminder
+
+    def test_refuses_context_that_is_not_server_marked_unapproved(self):
+        assert (
+            build_parked_design_reminder(
+                {
+                    "approval_status": "approved",
+                    "evidence": {
+                        "uri": "/tmp/design.md",
+                        "content_hash": "a" * 64,
+                    },
+                }
+            )
+            is None
+        )
 
 
 class TestMiddleware:

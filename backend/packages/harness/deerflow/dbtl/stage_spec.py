@@ -150,6 +150,7 @@ class StageSpec:
     required_artifact_types: tuple[str, ...]
     output_schema: str
     required_capabilities: tuple[Capability, ...]
+    variant: str | None = None
     optional_capabilities: tuple[Capability, ...] = ()
     allowed_tools: tuple[str, ...] = ()
     memory_read_policy: MemoryReadPolicy = MemoryReadPolicy.PROJECT_SCOPED
@@ -181,7 +182,8 @@ class StageSpec:
         profile, and version. A recorded attempt that cannot name its contract
         cannot have its approval invalidated when the contract moves.
         """
-        return f"{self.domain_profile}:{self.stage}:v{self.version}"
+        stage_key = f"{self.stage}-{self.variant}" if self.variant else self.stage
+        return f"{self.domain_profile}:{stage_key}:v{self.version}"
 
     def applies_to(self, cycle_class: CycleClass, weight: CycleWeight) -> bool:
         return cycle_class in self.cycle_classes and weight in self.cycle_weights
@@ -355,6 +357,58 @@ LEARN_SPEC_V1 = StageSpec(
     memory_write_policy=MemoryWritePolicy.CANDIDATE_ONLY,
 )
 
+TEST_REVIEW_SPEC_V1 = StageSpec(
+    stage="test",
+    variant="review",
+    domain_profile=GENERIC_PROFILE,
+    version=1,
+    title="Test validity review meeting",
+    purpose=("Red-team the immutable computed validity outcome and its pack for leakage, fold integrity, holdout validity, ceiling or direction failures, and reproducibility."),
+    cycle_classes=_ALL_CLASSES,
+    cycle_weights=_ALL_WEIGHTS,
+    required_inputs=("computed_test_outcome", "validity_pack"),
+    required_artifact_types=("test_review_meeting",),
+    output_schema="test_review_meeting.v1",
+    required_capabilities=(Capability.VALIDITY_ASSESSMENT,),
+    optional_capabilities=(Capability.STATISTICAL_ANALYSIS, Capability.FIELD_TRIAL_QC),
+    validity_gates=("computed_outcome_immutable", "outcome_compatible_route"),
+)
+
+BUILD_REVIEW_SPEC_V1 = StageSpec(
+    stage="build",
+    variant="review",
+    domain_profile=GENERIC_PROFILE,
+    version=1,
+    title="Build execution review meeting",
+    purpose=("Review the recorded environment, code and configuration revisions, versioned outputs, deviations, and reproducibility without reopening the scientific design."),
+    cycle_classes=_ALL_CLASSES,
+    cycle_weights=_ALL_WEIGHTS,
+    required_inputs=("approved_design_binding", "build_lineage", "build_package"),
+    required_artifact_types=("build_review_meeting",),
+    output_schema="build_review_meeting.v1",
+    required_capabilities=(Capability.SOFTWARE_ENGINEERING,),
+    optional_capabilities=(Capability.STATISTICAL_ANALYSIS,),
+    validity_gates=("execution_evidence_bound", "design_scope_not_reopened"),
+)
+
+LEARN_REVIEW_SPEC_V1 = StageSpec(
+    stage="learn",
+    variant="review",
+    domain_profile=GENERIC_PROFILE,
+    version=1,
+    title="Learn candidate review meeting",
+    purpose=("Compare evidence-bound provisional candidates and recommend what merits human promotion while granting no promotion or publication authority."),
+    cycle_classes=_ALL_CLASSES,
+    cycle_weights=_ALL_WEIGHTS,
+    required_inputs=("human_test_outcome", "provisional_candidates"),
+    required_artifact_types=("learn_review_meeting",),
+    output_schema="learn_review_meeting.v1",
+    required_capabilities=(Capability.KNOWLEDGE_SYNTHESIS,),
+    optional_capabilities=(Capability.SCIENTIFIC_REPORTING, Capability.LITERATURE_REVIEW),
+    validity_gates=("candidate_evidence_traceability", "promotion_and_publication_human_only"),
+    memory_write_policy=MemoryWritePolicy.CANDIDATE_ONLY,
+)
+
 
 _REGISTRY: dict[str, StageSpec] = {
     spec.spec_key: spec
@@ -365,6 +419,9 @@ _REGISTRY: dict[str, StageSpec] = {
         BUILD_SPEC_V1,
         TEST_SPEC_V1,
         LEARN_SPEC_V1,
+        TEST_REVIEW_SPEC_V1,
+        BUILD_REVIEW_SPEC_V1,
+        LEARN_REVIEW_SPEC_V1,
     )
 }
 
@@ -436,6 +493,16 @@ def resolve_spec_by_key(spec_key: str) -> StageSpec:
 def registered_spec_keys() -> tuple[str, ...]:
     """Every spec key, sorted — for readiness reporting and tests."""
     return tuple(sorted(_REGISTRY))
+
+
+def resolve_review_stage_spec(stage: str) -> StageSpec:
+    """Return the pinned post-evidence review-meeting contract."""
+    normalized = (stage or "").strip().lower()
+    key = f"{GENERIC_PROFILE}:{normalized}-review:v1"
+    spec = _REGISTRY.get(key)
+    if spec is None:
+        raise StageSpecNotFound(f"No review meeting spec registered for stage {stage!r}.")
+    return spec
 
 
 def current_spec_keys(domain_profile: str = GENERIC_PROFILE) -> tuple[str, ...]:

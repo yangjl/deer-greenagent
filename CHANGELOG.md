@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 This section accumulates work toward the **2.1.0** milestone
 
+- **DBTL:** Progressive-gate Phase 2 generalizes registered feedback surfaces
+  with migration `0025`. Existing Design rows are backfilled in place and the
+  legacy URLs remain compatibility aliases, while new stage-aware URLs,
+  server-side intent declarations, monotonic surface revisions, and visible
+  `open | consumed | superseded` lifecycle state share the existing scope,
+  evidence-hash, stale-state, and single-use action protections.
+- **DBTL:** Phase 3 introduces independent default-off
+  `dbtl.stage_meetings.{build,test,learn}` flags and pinned
+  `generic:{build,test,learn}-review:v1` contracts. The convening policy is
+  deterministic (`routine` skips, `standard` offers, `high_stakes` requires
+  unless explicitly overridden), and meeting attachments structurally cannot
+  rewrite Test's computed outcome or grant Learn promotion/publication.
+- **DBTL:** Progressive-gate Phase 1 adds a fail-safe, evidence-bound
+  `routine | standard | high_stakes` assessment to the registered Design deck
+  and its parent fallback state. Reviewers may record an explicit override;
+  routine work can submit and approve Design in one ledger-bound click, while
+  standard/high-stakes work retain fuller review. A new Park route keeps the
+  cycle open and sends ordinary cycle-scoped requests to the lead agent with
+  the exact Design hash prominently marked **unapproved**; returning through
+  the deck clears the park marker. The agent assessment, rationale, override,
+  offered routes, reviewer, surface, and evidence hash are retained on the
+  append-only transition record. The whole slice remains default-off behind
+  `dbtl.progressive_gate`.
 - **DBTL:** A paused-chair answer no longer disappears into a terminal worker
   failure. The feedback deck now follows the background resume run, refreshes
   the originating conversation when a successor deck appears, and restores the

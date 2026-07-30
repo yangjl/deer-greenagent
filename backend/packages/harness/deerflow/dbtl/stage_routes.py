@@ -42,6 +42,7 @@ class RouteSlug(StrEnum):
     REVISE_HERE = "revise_here"
     RETURN_TO_BUILD = "return_to_build"
     RETURN_TO_DESIGN = "return_to_design"
+    PARK = "park"
     CLOSE_CYCLE = "close_cycle"
 
 
@@ -111,6 +112,15 @@ def _close() -> StageRoute:
     return StageRoute(RouteSlug.CLOSE_CYCLE, ABANDONED, "Close the cycle", "End this cycle; all evidence and history are retained.")
 
 
+def _park(stage: str) -> StageRoute:
+    return StageRoute(
+        RouteSlug.PARK,
+        stage,
+        "Park — work with the lead agent",
+        "Keep this cycle open and discuss the bound, explicitly unapproved evidence with the lead agent.",
+    )
+
+
 def _return_to_build(*, reconciliation_settled: bool) -> StageRoute:
     blocked = not reconciliation_settled
     return StageRoute(
@@ -164,6 +174,7 @@ def compute_stage_routes(context: RouteContext) -> tuple[StageRoute, ...]:
         return (
             _advance(stage, reconciliation_settled=context.reconciliation_settled),
             *(() if stage == "learn" else (_revise(stage),)),
+            *(() if stage == "learn" else (_park(stage),)),
             *(() if stage == "learn" else (_close(),)),
         )
     if outcome in {"request_changes", "changes_requested"}:
@@ -195,6 +206,8 @@ def transition_target(stage: str, chosen_route: str) -> str:
         return "build"
     if route == "return_to_design":
         return "design"
+    if route == "park":
+        return stage
     if route in {"close_cycle", "abandon"}:
         return ABANDONED
     raise StageRoutesRefused(f"Unknown route {chosen_route!r} from stage {stage!r}.")

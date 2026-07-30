@@ -90,6 +90,7 @@ export interface DbtlStageTransition {
   chosen_route: string;
   to_stage: string;
   assessed_difficulty: string | null;
+  assessment_rationale: string | null;
   human_override: string | null;
   offered_routes: string[] | null;
   decided_by: string;
@@ -100,6 +101,27 @@ export interface DbtlStageTransition {
   policy_version: string | null;
   backfilled: boolean;
   decided_at: string;
+}
+
+export interface CycleTransitionGate {
+  stage: "design";
+  assessment: {
+    difficulty: "routine" | "standard" | "high_stakes";
+    rationale: string;
+    source: string;
+  };
+  routes: Array<{
+    slug: string;
+    to_stage: string;
+    label: string;
+    value: string;
+    blocked?: boolean;
+    blocked_reason?: string;
+  }>;
+  surface_id: string;
+  deck_uri: string;
+  originating_thread_id: string;
+  parked: boolean;
 }
 
 export interface CycleRecord {
@@ -122,6 +144,9 @@ export interface CycleRecord {
   work_items?: CycleWorkItem[];
   /** Present only when the backend's `dbtl.progressive_gate` flag is on. */
   transitions?: DbtlStageTransition[];
+  transition_gate?: CycleTransitionGate;
+  parked?: boolean;
+  parked_stage?: string | null;
 }
 
 export interface ActivityEvent {

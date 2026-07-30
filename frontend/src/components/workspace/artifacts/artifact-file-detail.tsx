@@ -485,6 +485,8 @@ export function ArtifactFilePreview({
   const [deckProgress, setDeckProgress] = useState<DeckProgress | null>(null);
   const deckChannelRef = useRef<string | null>(null);
   const deckSurfaceRef = useRef<DesignFeedbackSurface | null>(null);
+  const [deckSurface, setDeckSurface] =
+    useState<DesignFeedbackSurface | null>(null);
   const deckSubmissionIdRef = useRef<string | null>(null);
   const deckChairPollingSurfaceRef = useRef<string | null>(null);
   const citationSources = useMemo(
@@ -597,6 +599,7 @@ export function ArtifactFilePreview({
             });
             if (cancelled) return;
             deckSurfaceRef.current = refreshed;
+            setDeckSurface(refreshed);
 
             if (
               refreshed.receipt?.status === "failed" &&
@@ -690,6 +693,7 @@ export function ArtifactFilePreview({
           const channel = uuid();
           deckChannelRef.current = channel;
           deckSurfaceRef.current = surface;
+          setDeckSurface(surface);
           if (
             surface.receipt?.status === "failed" &&
             surface.receipt.client_submission_id
@@ -772,27 +776,35 @@ export function ArtifactFilePreview({
           clientSubmissionId: submissionId,
         });
         if (cancelled) return;
-        if (intent.action.kind === "submit_for_review") {
+        if (
+          intent.action.kind === "submit_for_review" ||
+          intent.action.kind === "park"
+        ) {
           const refreshed = await fetchDesignFeedbackSurface({
             projectId,
             surfaceId,
             viewerThreadId: threadId,
           });
           deckSurfaceRef.current = refreshed;
+          setDeckSurface(refreshed);
           deckSubmissionIdRef.current = null;
           send(surfaceId, channel, {
             type: "initialize",
             allowedActions: refreshed.allowed_actions,
             note:
               result.receipt?.message ??
-              "Submitted. Choose the final Design verdict.",
+              (intent.action.kind === "park"
+                ? "Cycle parked. You can continue from this deck when ready."
+                : "Submitted. Choose the final Design verdict."),
           });
           setDeckProgress({
             surfaceId,
             state: "completed",
             note:
               result.receipt?.message ??
-              "Submitted. Choose the final Design verdict.",
+              (intent.action.kind === "park"
+                ? "Cycle parked. You can continue from this deck when ready."
+                : "Submitted. Choose the final Design verdict."),
           });
         } else if (
           result.status === "resume_started" &&
@@ -827,6 +839,7 @@ export function ArtifactFilePreview({
             });
             if (cancelled) return;
             deckSurfaceRef.current = refreshed;
+            setDeckSurface(refreshed);
             if (
               !refreshed.is_current ||
               refreshed.current_db_revision !== surface.current_db_revision ||
@@ -909,6 +922,7 @@ export function ArtifactFilePreview({
       window.removeEventListener("message", onMessage);
       deckChannelRef.current = null;
       deckSurfaceRef.current = null;
+      setDeckSurface(null);
       deckSubmissionIdRef.current = null;
       deckChairPollingSurfaceRef.current = null;
     };
@@ -956,6 +970,41 @@ export function ArtifactFilePreview({
   if (language === "html") {
     return (
       <div className="flex size-full min-h-0 flex-col">
+        {deckSurface && (
+          <div
+            className={cn(
+              "flex shrink-0 items-center justify-between border-b px-4 py-2 text-xs",
+              deckSurface.lifecycle_state === "superseded"
+                ? "border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-100"
+                : "bg-muted/40 text-muted-foreground",
+            )}
+            data-testid="dbtl-stage-surface-header"
+          >
+            <span className="font-medium">
+              {deckSurface.stage.charAt(0).toUpperCase() +
+                deckSurface.stage.slice(1)}{" "}
+              · {deckSurface.lifecycle_state}
+            </span>
+            <span className="flex items-center gap-3">
+              <span>Surface revision {deckSurface.surface_revision}</span>
+              {deckSurface.lifecycle_state === "superseded" &&
+                deckSurface.newest_surface_uri && (
+                  <a
+                    className="underline underline-offset-2"
+                    href={urlOfArtifact({
+                      filepath: deckSurface.newest_surface_uri,
+                      threadId,
+                      isMock: false,
+                    })}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Open latest surface
+                  </a>
+                )}
+            </span>
+          </div>
+        )}
         {deckProgress && (
           <div
             className={cn(

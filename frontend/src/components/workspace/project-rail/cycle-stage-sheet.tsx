@@ -22,6 +22,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import {
   CYCLE_STATE_LABELS,
+  type CycleTransitionGate,
   type DbtlStage,
   type PathStripItem,
   STAGE_LABELS,
@@ -153,6 +154,67 @@ function PathStrip({
   );
 }
 
+function TransitionGateFallback({
+  gate,
+  override,
+}: {
+  gate: CycleTransitionGate | undefined;
+  override: string | null;
+}) {
+  if (!gate) return null;
+  const difficulty = gate.assessment.difficulty.replace("_", " ");
+  return (
+    <div className="border-border space-y-3 rounded-md border border-dashed p-4">
+      <div>
+        <p className="text-sm font-medium">
+          Agent assessment: <span className="capitalize">{difficulty}</span>
+        </p>
+        <p className="text-muted-foreground mt-1 text-sm leading-relaxed">
+          {gate.assessment.rationale}
+        </p>
+        {override && (
+          <p className="mt-1 text-xs">
+            Human override recorded:{" "}
+            <span className="font-medium capitalize">
+              {override.replace("_", " ")}
+            </span>
+          </p>
+        )}
+      </div>
+      <div>
+        <p className="text-muted-foreground text-[11px] font-semibold tracking-widest uppercase">
+          Legal next routes
+        </p>
+        <ul className="mt-1.5 space-y-1.5">
+          {gate.routes.map((route) => (
+            <li key={route.slug} className="text-sm">
+              <span className={cn(route.blocked && "text-muted-foreground")}>
+                {route.label}
+              </span>
+              {route.blocked && route.blocked_reason && (
+                <span className="text-muted-foreground block text-xs">
+                  {route.blocked_reason}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+      {gate.parked && (
+        <p className="text-sm font-medium">
+          Parked — ordinary requests go to the lead agent with this Design
+          explicitly marked unapproved.
+        </p>
+      )}
+      <p className="text-muted-foreground text-xs">
+        Open the registered feedback deck in conversation{" "}
+        <span className="font-mono">{gate.originating_thread_id}</span> to
+        override the assessment or choose a route.
+      </p>
+    </div>
+  );
+}
+
 export function CycleStageSheet({
   projectId,
   cycleId,
@@ -218,6 +280,12 @@ export function CycleStageSheet({
     return [...cycle.transitions].sort(
       (left, right) => left.seq - right.seq,
     ).at(-1)?.id ?? null;
+  }, [cycle?.transitions]);
+  const latestDifficultyOverride = useMemo(() => {
+    if (!cycle?.transitions?.length) return null;
+    return [...cycle.transitions]
+      .sort((left, right) => left.seq - right.seq)
+      .at(-1)?.human_override ?? null;
   }, [cycle?.transitions]);
 
   function act(decision: ReviewDecision) {
@@ -639,17 +707,27 @@ export function CycleStageSheet({
                     {t.dbtl.designSheet.readOnly}
                   </p>
                   {dbtl.feature?.design_deck_feedback && (
-                    <div className="border-border rounded-md border border-dashed p-4">
-                      <p className="text-sm font-medium">
-                        Open the feedback deck
-                      </p>
-                      <p className="text-muted-foreground mt-1 text-sm leading-relaxed">
-                        Return to the conversation where this Design meeting ran
-                        and open its slide deck. The chair question, submission
-                        step, and final verdict are recorded there against the
-                        exact deck and evidence hashes.
-                      </p>
-                    </div>
+                    <>
+                      {dbtl.feature?.progressive_gate &&
+                      cycle.transition_gate ? (
+                        <TransitionGateFallback
+                          gate={cycle.transition_gate}
+                          override={latestDifficultyOverride}
+                        />
+                      ) : (
+                        <div className="border-border rounded-md border border-dashed p-4">
+                          <p className="text-sm font-medium">
+                            Open the feedback deck
+                          </p>
+                          <p className="text-muted-foreground mt-1 text-sm leading-relaxed">
+                            Return to the conversation where this Design meeting
+                            ran and open its slide deck. The chair question,
+                            submission step, and final verdict are recorded
+                            there against the exact deck and evidence hashes.
+                          </p>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               ) : canSubmitStage(record.status) ? (

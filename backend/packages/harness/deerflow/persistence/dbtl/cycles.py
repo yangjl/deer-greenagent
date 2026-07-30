@@ -64,7 +64,16 @@ CYCLE_WEIGHTS = frozenset({"full", "light", "retroactive"})
 
 # Descriptive fields stored alongside the hashed projection. They describe the
 # research record rather than its state, so every revision must carry them.
-_DETAIL_KEYS = ("research_question", "objective", "success_criteria", "cycle_weight", "idempotency_key")
+_DETAIL_KEYS = (
+    "research_question",
+    "objective",
+    "success_criteria",
+    "cycle_weight",
+    "idempotency_key",
+    "parked",
+    "parked_stage",
+    "parked_evidence",
+)
 
 
 class DbtlWorkflowRefused(ValueError):
@@ -139,6 +148,9 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
             "research_question": detail.get("research_question", ""),
             "objective": detail.get("objective", ""),
             "success_criteria": detail.get("success_criteria", ""),
+            "parked": bool(detail.get("parked", False)),
+            "parked_stage": detail.get("parked_stage"),
+            "parked_evidence": detail.get("parked_evidence"),
             "created_by": cycle.created_by,
             "created_at": _iso(cycle.created_at),
             "updated_at": _iso(cycle.updated_at),
@@ -680,6 +692,103 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
             await session.commit()
             return self._cycle_payload(cycle, stages)
 
+    async def park_cycle(
+        self,
+        *,
+        cycle_id: str,
+        project_id: str,
+        stage: str,
+        expected_db_revision: int,
+        actor_user_id: str,
+        idempotency_key: str,
+        decision_surface_id: str,
+        assessed_difficulty: str,
+        assessment_rationale: str,
+        human_override: str | None,
+        offered_routes: list[str],
+    ) -> dict[str, Any]:
+        """Hold a reviewable stage while ordinary chat goes to the lead agent."""
+        async with self._sf() as session:
+            loaded = await self._load(session, cycle_id, project_id, for_update=True)
+            if loaded is None:
+                raise DbtlWorkflowRefused("Cycle not found.")
+            cycle, stages = loaded
+            expected_payload = {
+                "stage": stage,
+                "expected_db_revision": expected_db_revision,
+                "actor_user_id": actor_user_id,
+                "decision_surface_id": decision_surface_id,
+                "assessed_difficulty": assessed_difficulty,
+                "assessment_rationale": assessment_rationale,
+                "human_override": human_override,
+                "offered_routes": offered_routes,
+            }
+            if (
+                await self._replay_event(
+                    session,
+                    cycle_id,
+                    idempotency_key,
+                    event_type="cycle.parked",
+                    expected_payload=expected_payload,
+                )
+                is not None
+            ):
+                return self._cycle_payload(cycle, stages)
+            self._require_revision(cycle, expected_db_revision)
+            if stage not in GRAPH_STAGES:
+                raise DbtlWorkflowRefused("Only a DBTL graph stage can be parked.")
+            attempt = next((row for row in stages if row.stage == stage), None)
+            if attempt is None or attempt.status not in {
+                str(StageStatus.IN_PROGRESS),
+                str(StageStatus.AWAITING_REVIEW),
+                str(StageStatus.CHANGES_REQUESTED),
+            }:
+                raise DbtlWorkflowRefused(f"Stage {stage!r} cannot be parked from status {(attempt.status if attempt else 'missing')!r}.")
+            evidence = await self._latest_artifact(session, attempt.id)
+            if evidence is None:
+                raise DbtlWorkflowRefused(f"Stage {stage!r} has no evidence to park.")
+            detail = dict(cycle.projection_json or {})
+            detail.update(
+                {
+                    "parked": True,
+                    "parked_stage": stage,
+                    "parked_evidence": {
+                        "artifact_id": evidence.id,
+                        "revision": evidence.revision,
+                        "content_hash": evidence.content_hash,
+                        "uri": evidence.uri,
+                        "approval_status": "unapproved",
+                    },
+                }
+            )
+            cycle.projection_json = detail
+            self._commit_revision(cycle, self._statuses(stages))
+            for row in stages:
+                row.db_revision = cycle.db_revision
+            await self._append_stage_transition(
+                session,
+                cycle=cycle,
+                from_stage=stage,
+                chosen_route="park",
+                decided_by=actor_user_id,
+                stage_attempt=attempt,
+                evidence_hash=evidence.content_hash,
+                decision_surface_id=decision_surface_id,
+                assessed_difficulty=assessed_difficulty,
+                assessment_rationale=assessment_rationale,
+                human_override=human_override,
+                offered_routes=offered_routes,
+            )
+            await self._record_event(
+                session,
+                cycle=cycle,
+                event_type="cycle.parked",
+                actor_user_id=actor_user_id,
+                payload={**expected_payload, "idempotency_key": idempotency_key},
+            )
+            await session.commit()
+            return self._cycle_payload(cycle, stages)
+
     async def review_stage(
         self,
         *,
@@ -693,6 +802,8 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
         reviewer_project_role: str,
         idempotency_key: str,
         design_feedback_provenance: dict[str, Any] | None = None,
+        progressive_transition: dict[str, Any] | None = None,
+        auto_submit: bool = False,
     ) -> dict[str, Any]:
         """Apply one human verdict, advancing the cycle only when legal."""
         if not rationale.strip():
@@ -720,16 +831,37 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                         "reviewer_user_id": reviewer_user_id,
                         "reviewer_project_role": reviewer_project_role,
                         "design_feedback_provenance": design_feedback_provenance,
+                        "progressive_transition": progressive_transition,
+                        "auto_submit": auto_submit,
                     },
                 )
                 is not None
             ):
                 return self._cycle_payload(cycle, stages)
             self._require_revision(cycle, expected_db_revision)
-            bound_projection_hash = cycle.projection_hash
 
+            statuses = self._statuses(stages)
+            review_bound_revision = expected_db_revision
+            if auto_submit:
+                if statuses.get(stage) not in {StageStatus.IN_PROGRESS, StageStatus.CHANGES_REQUESTED}:
+                    raise DbtlWorkflowRefused(f"Stage {stage!r} cannot use the one-click gate from status {statuses.get(stage)!s}.")
+                attempt = next(row for row in stages if row.stage == stage)
+                if await self._latest_artifact(session, attempt.id) is None:
+                    raise DbtlWorkflowRefused(f"Stage {stage!r} has no artifact to review.")
+                statuses[stage] = StageStatus.AWAITING_REVIEW
+                attempt.status = str(StageStatus.AWAITING_REVIEW)
+                # Materialize the same reviewable projection the explicit
+                # submit call would have produced, but keep it inside this one
+                # action/transaction and emit no separate submitted event.
+                # The review row therefore binds the same stage status,
+                # revision shape, and projection hash as the two-step path.
+                self._commit_revision(cycle, statuses)
+                for row in stages:
+                    row.db_revision = cycle.db_revision
+                review_bound_revision = cycle.db_revision
+            bound_projection_hash = cycle.projection_hash
             try:
-                updated = apply_review(self._statuses(stages), stage, verdict)
+                updated = apply_review(statuses, stage, verdict)
             except TransitionRefused as exc:
                 raise DbtlWorkflowRefused(str(exc)) from exc
 
@@ -744,6 +876,11 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                 except TransitionRefused:
                     logger.debug("Cycle %s stays in %s after approving %s", cycle.id, cycle.state, stage)
 
+            # Any gate decision resumes a parked cycle. The former binding
+            # remains in the append-only park transition and event.
+            detail = dict(cycle.projection_json or {})
+            detail.update({"parked": False, "parked_stage": None, "parked_evidence": None})
+            cycle.projection_json = detail
             self._commit_revision(cycle, updated)
             for row in stages:
                 row.db_revision = cycle.db_revision
@@ -771,8 +908,8 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                     # an approval it was never shown to a reviewer for.
                     artifact_id=evidence.id,
                     artifact_revision=evidence.revision,
-                    bound_db_revision=expected_db_revision,
-                    bound_stage_revision=expected_db_revision,
+                    bound_db_revision=review_bound_revision,
+                    bound_stage_revision=review_bound_revision,
                     bound_projection_hash=bound_projection_hash,
                     policy_version=cycle.policy_version,
                     idempotency_key=idempotency_key,
@@ -801,6 +938,10 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                 stage_attempt=attempt_row,
                 evidence_hash=evidence.content_hash,
                 decision_surface_id=(provenance.get("feedback_surface_id") if provenance else None),
+                assessed_difficulty=(progressive_transition or {}).get("assessed_difficulty"),
+                assessment_rationale=(progressive_transition or {}).get("assessment_rationale"),
+                human_override=(progressive_transition or {}).get("human_override"),
+                offered_routes=list((progressive_transition or {}).get("offered_routes") or []) or None,
             )
             await self._record_event(
                 session,
@@ -817,6 +958,8 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                     "reviewer_project_role": reviewer_project_role,
                     "state": cycle.state,
                     "design_feedback_provenance": design_feedback_provenance,
+                    "progressive_transition": progressive_transition,
+                    "auto_submit": auto_submit,
                 },
             )
             await session.commit()

@@ -193,6 +193,10 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
   chat records no verdict; the two former Design branches (deck handoff and
   legacy) collapsed into one read-only body, and `dbtl.design_deck_feedback`
   now only decides whether the deck pointer is shown beside that notice.
+  With `dbtl.progressive_gate`, that inspection-only fallback also mirrors the
+  registered deck's agent assessment/rationale, explicit recorded override,
+  legal routes with blocked reasons, and parked marker; authority still stays
+  in the authenticated deck bridge.
   Every other stage keeps its controls
   unchanged. Blocker creation lives in that sheet, not the rail: a durable record
   is written from the surface that shows the evidence it refers to. The Cycles
@@ -742,10 +746,25 @@ uninvented. Keep this separate from `DebatePanel`: that panel is the rich
 live-run view with inspectable step events, while this card is the durable
 fallback for a run started by the authenticated deck parent.
 
-The Design gate is deliberately two-step in the same deck: submit first, then
-refresh and show the three verdicts. A deck-backed Human Input request stays in
+The Design gate is two-step in the same deck at standard depth: submit first,
+then refresh and show the three verdicts. With `dbtl.progressive_gate`, the
+deck also shows the agent assessment/rationale, records a bounded explicit
+difficulty override, exposes the legal server routes, collapses routine
+submit+approve to one `advance` intent, and can Park the cycle. Park refreshes
+the same still-live deck instead of settling it, so the user can return and
+continue; a later gate decision clears the parked state. A deck-backed Human
+Input request stays in
 thread state for supervisor recovery but `MessageList` suppresses the duplicate
 card and `hasOpenHumanInputRequest` leaves the ordinary composer unlocked.
 With `design_deck_feedback` enabled, the project rail says **Open feedback
 deck** and the Design stage sheet points at it; Reconciliation, Build,
 Test, and Learn sheets are unchanged.
+
+Progressive-gate Phase 2 makes this parent bridge stage-aware without changing
+its security model. `cycles-api.ts` uses the canonical `/stage-feedback/`
+aliases and surfaces include `stage`, monotonic `surface_revision`, and the
+server-derived lifecycle `open | consumed | superseded`.
+`ArtifactFilePreview` renders those fields above the opaque iframe and gives a
+superseded surface a link to the registered newest deck. The server, not the
+TypeScript parser, remains the intent authority. Phase 3 rollout flags are
+available as `dbtl.stage_meetings.{build,test,learn}` and default false.

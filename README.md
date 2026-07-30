@@ -56,6 +56,13 @@ Design–Build–Test–Learn (DBTL) governance.
   participant’s complete recorded report. When synthesis finishes, the review
   Markdown and registered approval/request-changes/reject deck are delivered as
   normal chat artifacts.
+  Registered feedback surfaces are stage-aware while retaining compatibility
+  with captured Design decks: the artifact parent labels the owning stage,
+  lifecycle (`open`, `consumed`, or `superseded`), and surface revision, and a
+  superseded deck points to its replacement. Build, Test, and Learn review
+  meetings have independent default-off rollout flags; their pinned contracts
+  preserve the computed Test outcome and keep Learn promotion/publication as
+  separate human actions.
 - **One native setup interaction** — DBTL setup and confirmation are emitted
   through DeerFlow's existing `ask_clarification` Human Input Card in the chat
   transcript. Internal model prompts, structured drafting responses, subagent

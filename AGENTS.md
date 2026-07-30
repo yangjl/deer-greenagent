@@ -483,16 +483,22 @@ Breeding-workspace note:
   run request carries `context` at the top level, but LangGraph relocates it to
   `configurable["context"]` before a node sees it, so code running on both sides
   must look in both places or silently read nothing on one of them.
-- **Progressive-gate Phase 0** records every gate decision as an append-only
+- **Progressive-gate Phases 0-1** record every gate decision as an append-only
   edge on a Design/Build/Test/Learn stage graph (`dbtl_stage_transitions`);
   reconciliation is a Build-edge precondition, not a path node, so data work
   never writes an edge. The production Test-validity router consults that graph
   and refuses the legacy `return_to_reconciliation` destination before any
   state change; transition rows also refuse ORM update/delete.
-  `dbtl.progressive_gate` (default off) gates only the read model — a read-only
-  path strip on the cycle sheet, including the latest `dst-…` record id — while
-  records accumulate either way. Manual checkpoint manifests may record the
-  expected head, assessment, offered routes, and next action. See
+  `dbtl.progressive_gate` (default off) gates the path read model and the
+  progressive Design gate. A one-shot assessor labels remaining work
+  `routine`, `standard`, or `high_stakes`; null configuration, outages, and
+  malformed output fall back to standard. The registered deck and parent
+  fallback show the assessment, rationale, explicit override, and legal
+  routes. Routine can submit+approve in one human click. Park keeps the Design
+  open and routes ordinary cycle-scoped work to the lead agent with the exact
+  evidence hash explicitly marked unapproved; any later gate decision clears
+  the marker. Records accumulate with the flag off. Manual checkpoint manifests
+  may record the expected head, assessment, offered routes, and next action. See
   [docs/plans/2026-07-29-progressive-dbtl-gate-plan.md](docs/plans/2026-07-29-progressive-dbtl-gate-plan.md)
   and [backend/AGENTS.md](backend/AGENTS.md) for the route-legality and
   transition-write contracts.
@@ -574,6 +580,18 @@ production stage bypass; it adds no Gateway route or config flag; see
 - Security policy → **[SECURITY.md](SECURITY.md)**
 - Changes → **[CHANGELOG.md](CHANGELOG.md)**
 - Cutting a release → **[RELEASING.md](RELEASING.md)**
+
+## Progressive DBTL feedback surfaces
+
+Progressive-gate Phase 2 keeps the physical
+`dbtl_design_feedback_{surfaces,actions}` names for a one-release compatibility
+window, while migration `0025` adds server-owned `stage` and
+`surface_revision` fields. New code uses the `/stage-feedback/` API aliases and
+generalized repository methods; captured Design decks continue through the
+legacy aliases. The artifact parent renders the stage, lifecycle, and revision.
+Phase 3 review-meeting contracts are pinned as
+`generic:{build,test,learn}-review:v1`; rollout flags live under
+`dbtl.stage_meetings` and default off independently.
 
 ## Cross-Cutting Conventions
 

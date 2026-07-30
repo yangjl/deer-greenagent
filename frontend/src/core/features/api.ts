@@ -13,6 +13,7 @@ export interface DbtlFeature {
   graph_execution_enabled: boolean;
   design_deck_feedback?: boolean;
   progressive_gate?: boolean;
+  stage_meetings?: { build: boolean; test: boolean; learn: boolean };
   reason: string;
 }
 
@@ -22,6 +23,7 @@ const DISABLED_DBTL_FEATURE: DbtlFeature = {
   graph_execution_enabled: false,
   design_deck_feedback: false,
   progressive_gate: false,
+  stage_meetings: { build: false, test: false, learn: false },
   reason:
     "The backend did not publish a DBTL safety contract, so workflow controls are disabled.",
 };

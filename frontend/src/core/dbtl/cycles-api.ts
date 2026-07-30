@@ -22,12 +22,40 @@ export type DesignFeedbackActionKind =
   | "submit_for_review"
   | "approve"
   | "request_changes"
-  | "reject";
+  | "reject"
+  | "advance"
+  | "park"
+  | "convene_review_meeting"
+  | "choose_route"
+  | "recommend_promotion"
+  | "close_without_candidate";
+
+export type TransitionDifficulty = "routine" | "standard" | "high_stakes";
+
+export interface TransitionGate {
+  stage: "design";
+  assessment: {
+    difficulty: TransitionDifficulty;
+    rationale: string;
+    source: string;
+  };
+  routes: Array<{
+    slug: string;
+    to_stage: string;
+    label: string;
+    value: string;
+    blocked?: boolean;
+    blocked_reason?: string;
+  }>;
+}
 
 export interface DesignFeedbackSurface {
   surface_id: string;
   project_id: string;
   cycle_id: string;
+  stage: "design" | "build" | "test" | "learn";
+  surface_revision: number;
+  lifecycle_state: "open" | "consumed" | "superseded";
   originating_thread_id: string;
   mode: "chair_feedback" | "stage_review" | "read_only";
   deck_content_hash: string;
@@ -37,6 +65,7 @@ export interface DesignFeedbackSurface {
   evidence_content_hash: string | null;
   is_current: boolean;
   newest_surface_id: string | null;
+  newest_surface_uri: string | null;
   allowed_actions: DesignFeedbackActionKind[];
   interactive: boolean;
   current_db_revision: number | null;
@@ -49,6 +78,8 @@ export interface DesignFeedbackSurface {
     receipt?: { message?: string; run_id?: string; db_revision?: number };
   } | null;
   note: string;
+  transition_gate: TransitionGate | null;
+  parked: boolean;
 }
 
 async function parseError(response: Response, fallback: string) {
@@ -136,11 +167,11 @@ export async function fetchDesignFeedbackSurface(input: {
     viewer_thread_id: input.viewerThreadId,
   });
   const response = await fetch(
-    `${base(input.projectId)}/design-feedback/${encodeURIComponent(input.surfaceId)}?${params}`,
+    `${base(input.projectId)}/stage-feedback/${encodeURIComponent(input.surfaceId)}?${params}`,
   );
   if (!response.ok) {
     throw new DbtlRequestError(
-      await parseError(response, "Could not verify this Design feedback deck"),
+      await parseError(response, "Could not verify this stage feedback deck"),
       response.status,
     );
   }
@@ -151,7 +182,11 @@ export async function applyDesignFeedbackAction(input: {
   projectId: string;
   surface: DesignFeedbackSurface;
   viewerThreadId: string;
-  action: { kind: DesignFeedbackActionKind; optionIds: string[] };
+  action: {
+    kind: DesignFeedbackActionKind;
+    optionIds: string[];
+    difficultyOverride?: TransitionDifficulty | null;
+  };
   comment: string;
   clientSubmissionId: string;
 }) {
@@ -161,12 +196,13 @@ export async function applyDesignFeedbackAction(input: {
     receipt?: { message?: string; run_id?: string; db_revision?: number };
     replayed: boolean;
   }>(
-    `${base(input.projectId)}/cycles/${encodeURIComponent(input.surface.cycle_id)}/design-feedback/${encodeURIComponent(input.surface.surface_id)}/actions`,
+    `${base(input.projectId)}/cycles/${encodeURIComponent(input.surface.cycle_id)}/stage-feedback/${encodeURIComponent(input.surface.surface_id)}/actions`,
     {
       version: 1,
       action: {
         kind: input.action.kind,
         option_ids: input.action.optionIds,
+        difficulty_override: input.action.difficultyOverride ?? null,
       },
       comment: input.comment,
       client_submission_id: input.clientSubmissionId,
@@ -181,7 +217,7 @@ export async function applyDesignFeedbackAction(input: {
         : null,
       expected_deck_hash: input.surface.deck_content_hash,
     },
-    "Could not record the Design feedback",
+    "Could not record the stage feedback",
   );
 }
 

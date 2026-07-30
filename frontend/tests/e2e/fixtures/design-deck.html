@@ -42,6 +42,12 @@
     letter-spacing: .05em; text-transform: uppercase; border: 1px solid currentColor; }
   .verdict--open { color: var(--warn); }
   .verdict--settled span { color: var(--accent); }
+  .assessment { margin: 1rem 0; padding: .9rem; border: 1px solid var(--line); border-radius: .7rem; background: var(--card); }
+  .assessment p { margin: .2rem 0 .55rem; }
+  .assessment label { display: block; margin: .75rem 0 .3rem; font-weight: 650; }
+  .assessment select { width: 100%; padding: .55rem; border: 1px solid var(--line); border-radius: .45rem; background: var(--bg); color: var(--fg); }
+  .route-actions { display: grid; gap: .45rem; margin: .8rem 0; }
+  .route-reason { color: var(--warn); font-size: .82rem; }
   .slide--decide li { font-size: 1.15rem; }
   .decision { margin: 0 0 1.1rem; padding: 0; border: 0; }
   .review { margin: 0; padding: 0; border: 0; }
@@ -173,6 +179,8 @@
   var actionButtons = Array.prototype.slice.call(document.querySelectorAll('[data-deck-action]'));
   var status = document.querySelector('[data-deck-status]');
   var comment = document.querySelector('[data-deck-comment]');
+  var difficulty = document.querySelector('[data-deck-difficulty]');
+  var assessment = document.querySelector('[data-assessed-difficulty]');
   // The chair's options and the review's contested-topic checkboxes: every one
   // is rendered disabled, and both submit paths read them back via :checked.
   var choices = Array.prototype.slice.call(
@@ -195,14 +203,28 @@
     if (submit) { submit.disabled = !on || allowed.indexOf('chair_option') === -1; }
     if (review) { review.disabled = !on; }
     actionButtons.forEach(function (button) {
-      button.disabled = !on || allowed.indexOf(button.dataset.deckAction) === -1;
+      var kind = button.dataset.deckAction;
+      var effective = difficulty && difficulty.value
+        ? difficulty.value
+        : (assessment ? assessment.dataset.assessedDifficulty : 'standard');
+      var depthBlocked = (kind === 'advance' && effective !== 'routine')
+        || (kind === 'submit_for_review' && effective === 'routine');
+      button.disabled = !on || button.hasAttribute('data-route-blocked')
+        || allowed.indexOf(kind) === -1 || depthBlocked;
     });
     if (comment) { comment.disabled = !on; }
+    if (difficulty) { difficulty.disabled = !on; }
     // Every option ships individually disabled so the persisted file is inert
     // wherever it is opened. An enabled fieldset does not re-enable a control
     // that carries its own `disabled`, so activation has to clear each one --
     // otherwise the submit button comes alive over a choice nobody can make.
     choices.forEach(function (choice) { choice.disabled = !on; });
+  }
+
+  if (difficulty) {
+    difficulty.addEventListener('change', function () {
+      if (!submitting && channel) { setEnabled(true); }
+    });
   }
 
   function selected() {
@@ -249,7 +271,11 @@
       setEnabled(false);
       say('Recording your Design decision...');
       send('submit_intent', {
-        action: { kind: kind, optionIds: optionIds },
+        action: {
+          kind: kind,
+          optionIds: optionIds,
+          difficultyOverride: difficulty ? difficulty.value : ''
+        },
         comment: text
       });
     });

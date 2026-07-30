@@ -208,6 +208,59 @@ class TestActivationReachesEveryControl:
         assert "choice.disabled = true" not in body
 
 
+class TestProgressiveTransitionGate:
+    @staticmethod
+    def _progressive_deck() -> str:
+        return render_council_deck(
+            cycle_title="Genomic selection in maize",
+            stage_title="Design meeting",
+            round_number=2,
+            results=[{"summary": "Run a benchmark.", "consensus": _CONSENSUS}],
+            surface_id=SURFACE_ID,
+            surface_mode="stage_review",
+            transition_gate={
+                "stage": "design",
+                "assessment": {
+                    "difficulty": "high_stakes",
+                    "rationale": "The intervention is irreversible.",
+                    "source": "model",
+                },
+                "routes": [
+                    {
+                        "slug": "advance",
+                        "to_stage": "build",
+                        "label": "Continue to Build",
+                        "value": "Open Build.",
+                    },
+                    {
+                        "slug": "park",
+                        "to_stage": "design",
+                        "label": "Park — work with the lead agent",
+                        "value": "Keep Design open.",
+                    },
+                ],
+            },
+        )
+
+    def test_assessment_override_and_routes_are_visible_but_ship_inert(self) -> None:
+        html = self._progressive_deck()
+
+        assert "Agent assessment: high stakes" in html
+        assert "The intervention is irreversible." in html
+        assert "Continue to Build" in html
+        assert "Park — work with the lead agent" in html
+        assert re.search(r"<select[^>]*data-deck-difficulty[^>]*disabled", html)
+        assert re.search(r'<button[^>]*data-deck-action="advance"[^>]*disabled', html)
+        assert re.search(r'<button[^>]*data-deck-action="park"[^>]*disabled', html)
+
+    def test_bridge_emits_only_the_bounded_override_value(self) -> None:
+        html = self._progressive_deck()
+
+        assert "difficultyOverride: difficulty ? difficulty.value : ''" in html
+        assert "effective !== 'routine'" in html
+        assert "allowed.indexOf(kind)" in html
+
+
 class TestStillSelfContained:
     def test_the_bridge_adds_no_network_dependency(self) -> None:
         html = _deck(decision=_request())

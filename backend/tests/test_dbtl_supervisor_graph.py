@@ -29,6 +29,7 @@ from deerflow.agents.dbtl.supervisor import (
 )
 from deerflow.agents.thread_state import get_thread_state_schema
 from deerflow.dbtl.branches import SupervisorBranch, SupervisorContext
+from deerflow.dbtl.council import request_context
 from deerflow.dbtl.routing import ExplicitChoice
 from deerflow.dbtl.setup_questions import SetupQuestion
 from deerflow.dbtl.stage_stub import ManualStageAdapter, StageStubResult
@@ -249,6 +250,69 @@ class TestCompleteThreadStateOnEveryBranch:
 
         assert marker == ["lead_agent"]
         assert final["messages"][-1].content == "the workspace has 2 files"
+
+    @pytest.mark.asyncio
+    async def test_a_parked_cycle_routes_to_lead_with_unapproved_bound_context(self):
+        seen_context: dict[str, object] = {}
+
+        def model(_state, config):
+            seen_context.update(request_context(config))
+            return {
+                "messages": [
+                    AIMessage(content="I can discuss the parked Design.", id="ai-parked")
+                ]
+            }
+
+        lead = StateGraph(SCHEMA)
+        lead.add_node("model", model)
+        lead.add_edge(START, "model")
+        lead.add_edge("model", END)
+
+        class ParkedAdapter:
+            async def parked_design_context(self, **_kwargs):
+                return {
+                    "cycle_id": "cyc-1",
+                    "cycle_title": "Drought trial",
+                    "stage": "design",
+                    "approval_status": "unapproved",
+                    "evidence": {
+                        "uri": "/mnt/user-data/outputs/design.md",
+                        "content_hash": "a" * 64,
+                    },
+                }
+
+            async def execute(self, **_kwargs):
+                raise AssertionError("a parked cycle must not dispatch stage workers")
+
+        graph = build_supervisor_graph(
+            lead_agent=lead.compile(checkpointer=False),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id="cyc-1",
+            ),
+            stage_adapter=ParkedAdapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    HumanMessage(
+                        content="Draft the design package.",
+                        id="parked-request",
+                    )
+                ],
+            },
+            config={"configurable": {"thread_id": "parked-cycle"}},
+        )
+
+        assert final["messages"][-1].content == "I can discuss the parked Design."
+        brief = seen_context["dbtl_parked_design_brief"]
+        assert isinstance(brief, dict)
+        assert brief["approval_status"] == "unapproved"
+        assert brief["evidence"]["content_hash"] == "a" * 64
 
     @pytest.mark.asyncio
     async def test_genomic_simulation_request_uses_native_dbtl_inquiry_without_lead_agent(self):

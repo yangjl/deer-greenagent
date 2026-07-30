@@ -172,23 +172,65 @@ def _decision_text(question: str) -> str:
     )
 
 
-def _review_controls(consensus: Consensus | None) -> str:
+def _review_controls(
+    consensus: Consensus | None,
+    transition_gate: Mapping[str, object] | None = None,
+) -> str:
     issues: list[str] = []
     if consensus is not None:
         for index, item in enumerate(consensus.disagreements[:MAX_DISAGREEMENTS]):
             issue_id = f"issue-{index + 1}"
             issues.append(f'<label class="review-issue" for="{issue_id}"><input id="{issue_id}" type="checkbox" value="{issue_id}" data-deck-issue disabled><span>{html.escape(_text(item.topic, limit=240))}</span></label>')
     issue_html = f'<div class="review-issues"><p>Select the points that need another round</p>{"".join(issues)}</div>' if issues else ""
+    gate = dict(transition_gate or {})
+    assessment = gate.get("assessment")
+    assessment = dict(assessment) if isinstance(assessment, Mapping) else {}
+    difficulty = _text(assessment.get("difficulty") or "standard", limit=32)
+    rationale = _text(assessment.get("rationale") or "", limit=2_000)
+    difficulty_label = difficulty.replace("_", " ")
+    routes = gate.get("routes")
+    route_items = [dict(item) for item in routes if isinstance(item, Mapping)] if isinstance(routes, Sequence) and not isinstance(routes, str) else []
+    route_buttons: list[str] = []
+    for route in route_items:
+        slug = _text(route.get("slug") or "", limit=64)
+        if slug not in {"advance", "park"}:
+            continue
+        blocked = bool(route.get("blocked"))
+        reason = _text(route.get("blocked_reason") or "", limit=600)
+        route_buttons.append(
+            f'<button type="button" data-deck-action="{html.escape(slug)}" data-route-action '
+            f'{"data-route-blocked disabled" if blocked else "disabled"}>'
+            f'{html.escape(_text(route.get("label") or slug, limit=120))}</button>'
+            + (f'<span class="route-reason">{html.escape(reason)}</span>' if blocked and reason else "")
+        )
+    progressive = ""
+    if gate:
+        progressive = (
+            f'<div class="assessment" data-assessed-difficulty="{html.escape(difficulty)}">'
+            f'<p><strong>Agent assessment: {html.escape(difficulty_label)}</strong></p>'
+            f'<p>{html.escape(rationale)}</p>'
+            '<label for="transition-difficulty">Override review depth</label>'
+            '<select id="transition-difficulty" data-deck-difficulty disabled>'
+            '<option value="">Use the agent assessment</option>'
+            '<option value="routine">Routine</option>'
+            '<option value="standard">Standard</option>'
+            '<option value="high_stakes">High stakes</option>'
+            "</select>"
+            '<p class="option-detail">An override is recorded beside the agent assessment. It never changes which routes are legal.</p>'
+            "</div>"
+            + (f'<div class="route-actions">{"".join(route_buttons)}</div>' if route_buttons else "")
+        )
     return (
         '<fieldset class="review" disabled><legend>Move this Design through its human gate</legend>'
         '<p class="option-detail">Submission and the final verdict are separate records. Nothing is approved by opening this deck.</p>'
+        f"{progressive}"
         f"{issue_html}"
         '<div class="comment"><label for="design-review-comment">Rationale or requested change</label>'
         '<textarea id="design-review-comment" data-deck-comment rows="4" disabled></textarea></div>'
         '<div class="review-actions">'
         '<button type="button" data-deck-action="submit_for_review" disabled>Submit for review</button>'
-        '<button type="button" data-deck-action="approve" disabled>Approve</button>'
-        '<button type="button" data-deck-action="request_changes" disabled>Request changes</button>'
+        '<button type="button" data-deck-action="approve" disabled>Continue to Build</button>'
+        '<button type="button" data-deck-action="request_changes" disabled>Revise Design</button>'
         '<button type="button" data-deck-action="reject" disabled>Reject</button>'
         "</div></fieldset>"
         '<p class="inert" data-deck-status role="status" aria-live="polite">' + html.escape(INERT_NOTICE) + "</p>"
@@ -241,6 +283,8 @@ _BRIDGE_TEMPLATE = """
   var actionButtons = Array.prototype.slice.call(document.querySelectorAll('[data-deck-action]'));
   var status = document.querySelector('[data-deck-status]');
   var comment = document.querySelector('[data-deck-comment]');
+  var difficulty = document.querySelector('[data-deck-difficulty]');
+  var assessment = document.querySelector('[data-assessed-difficulty]');
   // The chair's options and the review's contested-topic checkboxes: every one
   // is rendered disabled, and both submit paths read them back via :checked.
   var choices = Array.prototype.slice.call(
@@ -263,14 +307,28 @@ _BRIDGE_TEMPLATE = """
     if (submit) { submit.disabled = !on || allowed.indexOf('chair_option') === -1; }
     if (review) { review.disabled = !on; }
     actionButtons.forEach(function (button) {
-      button.disabled = !on || allowed.indexOf(button.dataset.deckAction) === -1;
+      var kind = button.dataset.deckAction;
+      var effective = difficulty && difficulty.value
+        ? difficulty.value
+        : (assessment ? assessment.dataset.assessedDifficulty : 'standard');
+      var depthBlocked = (kind === 'advance' && effective !== 'routine')
+        || (kind === 'submit_for_review' && effective === 'routine');
+      button.disabled = !on || button.hasAttribute('data-route-blocked')
+        || allowed.indexOf(kind) === -1 || depthBlocked;
     });
     if (comment) { comment.disabled = !on; }
+    if (difficulty) { difficulty.disabled = !on; }
     // Every option ships individually disabled so the persisted file is inert
     // wherever it is opened. An enabled fieldset does not re-enable a control
     // that carries its own `disabled`, so activation has to clear each one --
     // otherwise the submit button comes alive over a choice nobody can make.
     choices.forEach(function (choice) { choice.disabled = !on; });
+  }
+
+  if (difficulty) {
+    difficulty.addEventListener('change', function () {
+      if (!submitting && channel) { setEnabled(true); }
+    });
   }
 
   function selected() {
@@ -317,7 +375,11 @@ _BRIDGE_TEMPLATE = """
       setEnabled(false);
       say('Recording your Design decision...');
       send('submit_intent', {
-        action: { kind: kind, optionIds: optionIds },
+        action: {
+          kind: kind,
+          optionIds: optionIds,
+          difficultyOverride: difficulty ? difficulty.value : ''
+        },
         comment: text
       });
     });
@@ -413,6 +475,7 @@ def render_council_deck(
     decision_request: DecisionRequest | None = None,
     surface_id: str = "",
     surface_mode: str = "",
+    transition_gate: Mapping[str, object] | None = None,
     generated_at: datetime | None = None,
 ) -> str:
     """The meeting's outcome as one self-contained HTML slide deck."""
@@ -477,7 +540,7 @@ def render_council_deck(
                 kind="review",
                 eyebrow="Human gate",
                 title="Review the Design",
-                body=_review_controls(consensus),
+                body=_review_controls(consensus, transition_gate),
             )
         )
     next_actions = _bullets(list(chair.get("recommended_next_actions") or []))
@@ -543,6 +606,12 @@ _DECK_TEMPLATE = """<!doctype html>
     letter-spacing: .05em; text-transform: uppercase; border: 1px solid currentColor; }}
   .verdict--open {{ color: var(--warn); }}
   .verdict--settled span {{ color: var(--accent); }}
+  .assessment {{ margin: 1rem 0; padding: .9rem; border: 1px solid var(--line); border-radius: .7rem; background: var(--card); }}
+  .assessment p {{ margin: .2rem 0 .55rem; }}
+  .assessment label {{ display: block; margin: .75rem 0 .3rem; font-weight: 650; }}
+  .assessment select {{ width: 100%; padding: .55rem; border: 1px solid var(--line); border-radius: .45rem; background: var(--bg); color: var(--fg); }}
+  .route-actions {{ display: grid; gap: .45rem; margin: .8rem 0; }}
+  .route-reason {{ color: var(--warn); font-size: .82rem; }}
   .slide--decide li {{ font-size: 1.15rem; }}
   .decision {{ margin: 0 0 1.1rem; padding: 0; border: 0; }}
   .review {{ margin: 0; padding: 0; border: 0; }}

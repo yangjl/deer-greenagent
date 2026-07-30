@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 33
+config_version: 34
 
 # ============================================================================
 # Logging
@@ -1229,10 +1229,22 @@ dbtl:
   # the registered feedback deck. Set false for the one-release rollback path;
   # durable deck responses and reviews are retained.
   design_deck_feedback: true
-  # Progressive-gate read model (Phase 0): show the stage-transition path strip
-  # for a cycle. Off restores the uniform four-stage display. Transition
-  # records accumulate either way, so toggling this never creates an audit gap.
+  # Progressive Design gate (Phases 0-1): show the durable path strip and put
+  # the assessment, review-depth override, one-click routine route, and Park
+  # route on registered Design decks. Off restores the uniform two-step gate.
+  # Transition records accumulate either way, so toggling creates no audit gap.
   progressive_gate: false
+  # One-shot model that assesses the remaining work as routine, standard, or
+  # high_stakes after a Design meeting produces bound evidence. null, provider
+  # failure, or malformed output safely selects the standard two-step gate.
+  transition_assessor_model_name: null
+  # Optional post-evidence review meetings. Each stage rolls out independently.
+  # routine skips; standard offers; high_stakes requires completion unless a
+  # human explicitly lowers the assessment.
+  stage_meetings:
+    build: false
+    test: false
+    learn: false
 
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider

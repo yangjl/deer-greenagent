@@ -211,6 +211,68 @@ async def test_replayed_review_does_not_duplicate_the_edge(tmp_path: Path) -> No
     assert len(await _transitions(repo)) == 1
 
 
+async def test_park_binds_unapproved_evidence_and_a_gate_action_unparks(
+    tmp_path: Path,
+) -> None:
+    repo = await _repo(tmp_path)
+    await _attach(repo, "design", "parked-design")
+    before_park = await repo.get_cycle("cycle-1", project_id="project-1")
+    assert before_park is not None
+    artifact_id = before_park["artifacts"][-1]["id"]
+    parked = await repo.park_cycle(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="design",
+        expected_db_revision=await _revision(repo),
+        actor_user_id="reviewer-1",
+        idempotency_key="park-design",
+        decision_surface_id="surface-1",
+        assessed_difficulty="routine",
+        assessment_rationale="The next action is bounded and reversible.",
+        human_override=None,
+        offered_routes=["advance", "park"],
+    )
+
+    assert parked["parked"] is True
+    assert parked["parked_stage"] == "design"
+    assert parked["parked_evidence"] == {
+        "artifact_id": artifact_id,
+        "revision": 1,
+        "content_hash": HASH_B,
+        "uri": "/mnt/user-data/outputs/design-parked-design.json",
+        "approval_status": "unapproved",
+    }
+    rows = await _transitions(repo)
+    assert [(row["chosen_route"], row["to_stage"]) for row in rows] == [
+        ("park", "design")
+    ]
+
+    resumed = await repo.review_stage(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="design",
+        decision="approve",
+        rationale="Continue after discussion.",
+        expected_db_revision=parked["db_revision"],
+        reviewer_user_id="reviewer-1",
+        reviewer_project_role="owner",
+        idempotency_key="approve-parked-design",
+        progressive_transition={
+            "assessed_difficulty": "routine",
+            "assessment_rationale": "The next action is bounded and reversible.",
+            "human_override": None,
+            "offered_routes": ["advance", "park"],
+        },
+        auto_submit=True,
+    )
+
+    assert resumed["parked"] is False
+    assert resumed["parked_stage"] is None
+    assert resumed["parked_evidence"] is None
+    rows = await _transitions(repo)
+    assert [row["chosen_route"] for row in rows] == ["park", "approve"]
+
+
 async def test_transition_rows_refuse_update_and_delete(tmp_path: Path) -> None:
     repo = await _repo(tmp_path)
     await _approve(repo, "design", "design")

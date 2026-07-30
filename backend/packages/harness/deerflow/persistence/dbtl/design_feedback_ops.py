@@ -26,10 +26,15 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from deerflow.dbtl.stage_feedback import (
+    STAGE_FEEDBACK_STAGES,
+    allowed_stage_feedback_intents,
+    validate_stage_feedback_intent,
+)
 from deerflow.persistence.dbtl.model import (
     DbtlArtifactRow,
     DbtlCycleRow,
@@ -49,16 +54,8 @@ SURFACE_MODES = ("chair_feedback", "stage_review", "read_only")
 #: would have to understand. A review records it beside the content hash, so a
 #: reader can tell a re-render from a redesign.
 DECK_SCHEMA_VERSION = "1"
-DESIGN_FEEDBACK_ACTIONS = frozenset(
-    {
-        "chair_option",
-        "chair_text",
-        "submit_for_review",
-        "approve",
-        "request_changes",
-        "reject",
-    }
-)
+DESIGN_FEEDBACK_ACTIONS = allowed_stage_feedback_intents("design")
+TRANSITION_DIFFICULTIES = frozenset({"routine", "standard", "high_stakes"})
 _ACTION_GROUP = {
     "chair_option": "chair_response",
     "chair_text": "chair_response",
@@ -66,6 +63,12 @@ _ACTION_GROUP = {
     "approve": "stage_review",
     "request_changes": "stage_review",
     "reject": "stage_review",
+    "advance": "stage_review",
+    "park": "stage_park",
+    "convene_review_meeting": "review_meeting",
+    "choose_route": "stage_review",
+    "recommend_promotion": "stage_review",
+    "close_without_candidate": "stage_review",
 }
 
 
@@ -89,6 +92,8 @@ class DesignFeedbackOpsMixin:
             "project_id": row.project_id,
             "cycle_id": row.cycle_id,
             "stage_attempt_id": row.stage_attempt_id,
+            "stage": row.stage,
+            "surface_revision": row.surface_revision,
             "design_round": row.design_round,
             "originating_thread_id": row.originating_thread_id,
             "mode": row.mode,
@@ -108,6 +113,7 @@ class DesignFeedbackOpsMixin:
             # Derived rather than stored: "current" is the absence of a
             # successor, and a second column saying so could disagree with it.
             "is_current": row.superseded_by_surface_id is None,
+            "lifecycle_state": ("superseded" if row.superseded_by_surface_id is not None else "open"),
             "created_at": _iso(row.created_at),
         }
 
@@ -120,6 +126,7 @@ class DesignFeedbackOpsMixin:
             "project_id": row.project_id,
             "cycle_id": row.cycle_id,
             "surface_id": row.surface_id,
+            "stage": row.stage,
             "action_group": row.action_group,
             "action_kind": row.action_kind,
             "selected_card_ids": list(row.selected_card_ids or []),
@@ -135,9 +142,10 @@ class DesignFeedbackOpsMixin:
             "updated_at": _iso(row.updated_at),
         }
 
-    async def register_design_feedback_surface(
+    async def register_stage_feedback_surface(
         self,
         *,
+        stage: str,
         project_id: str,
         cycle_id: str,
         stage_attempt_id: str,
@@ -155,7 +163,7 @@ class DesignFeedbackOpsMixin:
         evidence_artifact_revision: int | None = None,
         evidence_content_hash: str | None = None,
     ) -> dict[str, Any]:
-        """Record that this workflow produced this deck, and supersede the last.
+        """Record that this workflow produced this stage deck and supersede the last.
 
         Re-registering identical bytes for the same attempt and mode returns the
         existing descriptor: a retried turn re-renders the same file, and minting
@@ -170,6 +178,9 @@ class DesignFeedbackOpsMixin:
         """
         from deerflow.persistence.dbtl.cycles import DbtlWorkflowRefused
 
+        normalized_stage = (stage or "").strip().lower()
+        if normalized_stage not in STAGE_FEEDBACK_STAGES:
+            raise DbtlWorkflowRefused(f"Stage {stage!r} cannot own a feedback surface.")
         if mode not in SURFACE_MODES:
             allowed = ", ".join(SURFACE_MODES)
             raise DbtlWorkflowRefused(f"Unknown feedback surface mode {mode!r}; expected one of: {allowed}")
@@ -209,6 +220,8 @@ class DesignFeedbackOpsMixin:
             )
             if attempt is None:
                 raise DbtlWorkflowRefused("That stage attempt does not belong to this cycle.")
+            if attempt.stage != normalized_stage:
+                raise DbtlWorkflowRefused("The feedback stage does not match its stage attempt.")
 
             if evidence_bound:
                 artifact = await session.scalar(
@@ -227,6 +240,7 @@ class DesignFeedbackOpsMixin:
             existing = await session.scalar(
                 select(DbtlDesignFeedbackSurfaceRow).where(
                     DbtlDesignFeedbackSurfaceRow.stage_attempt_id == stage_attempt_id,
+                    DbtlDesignFeedbackSurfaceRow.stage == normalized_stage,
                     DbtlDesignFeedbackSurfaceRow.mode == mode,
                     DbtlDesignFeedbackSurfaceRow.deck_content_hash == deck_content_hash,
                 )
@@ -248,6 +262,19 @@ class DesignFeedbackOpsMixin:
                 project_id=project_id,
                 cycle_id=cycle_id,
                 stage_attempt_id=stage_attempt_id,
+                stage=normalized_stage,
+                surface_revision=int(
+                    (
+                        await session.scalar(
+                            select(func.max(DbtlDesignFeedbackSurfaceRow.surface_revision)).where(
+                                DbtlDesignFeedbackSurfaceRow.cycle_id == cycle_id,
+                                DbtlDesignFeedbackSurfaceRow.stage == normalized_stage,
+                            )
+                        )
+                        or 0
+                    )
+                    + 1
+                ),
                 design_round=max(1, int(design_round)),
                 originating_thread_id=thread_id,
                 mode=mode,
@@ -269,7 +296,12 @@ class DesignFeedbackOpsMixin:
 
             # Every earlier live surface on this attempt now describes a deck
             # nobody should answer. They keep their rows; they gain a successor.
-            superseded = await self._live_surfaces(session, stage_attempt_id, exclude_id=row.id)
+            superseded = await self._live_surfaces(
+                session,
+                stage_attempt_id,
+                stage=normalized_stage,
+                exclude_id=row.id,
+            )
             for stale in superseded:
                 stale.superseded_by_surface_id = row.id
 
@@ -284,6 +316,7 @@ class DesignFeedbackOpsMixin:
                         "thread_id": thread_id,
                         "surface_id": row.id,
                         "round": row.design_round,
+                        "stage": normalized_stage,
                         "mode": mode,
                     }
                 },
@@ -303,6 +336,10 @@ class DesignFeedbackOpsMixin:
                     },
                 )
             return payload
+
+    async def register_design_feedback_surface(self, **kwargs: Any) -> dict[str, Any]:
+        """Compatibility wrapper for pre-Phase 2 callers and captured decks."""
+        return await self.register_stage_feedback_surface(stage="design", **kwargs)
 
     async def bind_design_feedback_request(
         self,
@@ -392,6 +429,7 @@ class DesignFeedbackOpsMixin:
                 project_id=project_id,
                 cycle_id=surface.cycle_id,
                 surface_id=surface.id,
+                stage=surface.stage,
                 action_group="chair_response",
                 action_kind="chair_text",
                 payload_hash=digest,
@@ -415,7 +453,7 @@ class DesignFeedbackOpsMixin:
                 # boundary; the unique action group is the arbiter.
                 await session.rollback()
 
-    async def reserve_design_feedback_action(
+    async def reserve_stage_feedback_action(
         self,
         *,
         project_id: str,
@@ -429,16 +467,17 @@ class DesignFeedbackOpsMixin:
         expected_db_revision: int,
         expected_evidence: dict[str, Any] | None,
         expected_deck_hash: str,
+        difficulty_override: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], bool]:
-        """Validate and reserve one single-use deck intent.
+        """Validate and reserve one single-use stage-deck intent.
 
         Returns ``(surface, action, replayed)``. The unique surface/action-group
         constraint is the atomic arbiter when two tabs submit concurrently.
         """
         from deerflow.persistence.dbtl.cycles import DbtlWorkflowRefused
 
-        if action_kind not in DESIGN_FEEDBACK_ACTIONS:
-            raise DbtlWorkflowRefused("Unknown Design feedback action.")
+        if difficulty_override is not None and difficulty_override not in TRANSITION_DIFFICULTIES:
+            raise DbtlWorkflowRefused("Unknown transition difficulty override.")
         if not _is_sha256(expected_deck_hash):
             raise DbtlWorkflowRefused("The expected deck hash must be a lowercase SHA-256.")
         submission_id = client_submission_id.strip()
@@ -459,6 +498,7 @@ class DesignFeedbackOpsMixin:
             "expected_db_revision": expected_db_revision,
             "expected_evidence": expected_evidence,
             "expected_deck_hash": expected_deck_hash,
+            "difficulty_override": difficulty_override,
         }
         payload_hash = hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
         action_group = _ACTION_GROUP[action_kind]
@@ -473,6 +513,10 @@ class DesignFeedbackOpsMixin:
             )
             if surface is None:
                 raise DesignFeedbackConflict("Feedback surface not found.")
+            try:
+                validate_stage_feedback_intent(surface.stage, action_kind)
+            except ValueError as exc:
+                raise DbtlWorkflowRefused(str(exc)) from exc
             if surface.superseded_by_surface_id is not None:
                 raise DesignFeedbackConflict("A newer Design feedback deck replaced this one.")
             if surface.originating_thread_id != originating_thread_id:
@@ -506,6 +550,28 @@ class DesignFeedbackOpsMixin:
             else:
                 if surface.mode != "stage_review" or surface.evidence_artifact_id is None:
                     raise DesignFeedbackConflict("This deck is not bound to reviewable Design evidence.")
+                request_payload = surface.decision_request or {}
+                transition_gate = request_payload.get("transition_gate") if isinstance(request_payload, dict) else None
+                assessment = transition_gate.get("assessment") if isinstance(transition_gate, dict) else None
+                assessed_difficulty = str(assessment.get("difficulty") or "") if isinstance(assessment, dict) else ""
+                effective_difficulty = difficulty_override or assessed_difficulty
+                routes = transition_gate.get("routes") if isinstance(transition_gate, dict) else []
+
+                def route_is_available(slug: str) -> bool:
+                    return any(isinstance(route, dict) and route.get("slug") == slug and not bool(route.get("blocked")) for route in (routes if isinstance(routes, list) else []))
+
+                # Policy checks happen before the single-use ledger row is
+                # inserted. A refused click must not consume the deck and
+                # prevent the reviewer from correcting their choice.
+                if action_kind == "advance":
+                    if effective_difficulty != "routine":
+                        raise DesignFeedbackConflict("One-click Continue to Build is available only at routine review depth.")
+                    if not route_is_available("advance"):
+                        raise DesignFeedbackConflict("Continue to Build is currently blocked.")
+                if action_kind == "park" and not route_is_available("park"):
+                    raise DesignFeedbackConflict("Park is not a legal route from this gate.")
+                if action_kind in {"approve", "request_changes", "reject"} and effective_difficulty == "high_stakes" and not comment:
+                    raise DesignFeedbackConflict("A high-stakes Design verdict requires the reviewer's written rationale.")
                 evidence = expected_evidence or {}
                 exact = {
                     "artifact_id": surface.evidence_artifact_id,
@@ -524,6 +590,8 @@ class DesignFeedbackOpsMixin:
                         raise DesignFeedbackConflict("Request changes must select issues shown in this deck.")
                     if not card_ids and not comment:
                         raise DesignFeedbackConflict("Request changes requires a selected issue or a comment.")
+                if action_kind in {"advance", "park"} and card_ids:
+                    raise DesignFeedbackConflict("A progressive route action cannot select issue cards.")
 
             existing = await session.scalar(
                 select(DbtlDesignFeedbackActionRow).where(
@@ -565,6 +633,7 @@ class DesignFeedbackOpsMixin:
                 project_id=project_id,
                 cycle_id=cycle_id,
                 surface_id=surface_id,
+                stage=surface.stage,
                 action_group=action_group,
                 action_kind=action_kind,
                 payload_hash=payload_hash,
@@ -591,7 +660,11 @@ class DesignFeedbackOpsMixin:
                 return self._surface_payload(surface), self._action_payload(winner), True
             return self._surface_payload(surface), self._action_payload(row), False
 
-    async def update_design_feedback_action(
+    async def reserve_design_feedback_action(self, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any], bool]:
+        """Compatibility wrapper for callers using the former Design name."""
+        return await self.reserve_stage_feedback_action(**kwargs)
+
+    async def update_stage_feedback_action(
         self,
         action_id: str,
         *,
@@ -617,7 +690,11 @@ class DesignFeedbackOpsMixin:
             await session.commit()
             return self._action_payload(row)
 
-    async def design_feedback_actions(self, surface_id: str, *, project_id: str) -> list[dict[str, Any]]:
+    async def update_design_feedback_action(self, action_id: str, **kwargs: Any) -> dict[str, Any]:
+        """Compatibility wrapper for callers using the former Design name."""
+        return await self.update_stage_feedback_action(action_id, **kwargs)
+
+    async def stage_feedback_actions(self, surface_id: str, *, project_id: str) -> list[dict[str, Any]]:
         async with self._sf() as session:  # type: ignore[attr-defined]
             rows = (
                 await session.execute(
@@ -631,16 +708,22 @@ class DesignFeedbackOpsMixin:
             ).scalars()
             return [self._action_payload(row) for row in rows]
 
+    async def design_feedback_actions(self, surface_id: str, *, project_id: str) -> list[dict[str, Any]]:
+        """Compatibility wrapper for callers using the former Design name."""
+        return await self.stage_feedback_actions(surface_id, project_id=project_id)
+
     @staticmethod
     async def _live_surfaces(
         session: AsyncSession,
         stage_attempt_id: str,
         *,
+        stage: str,
         exclude_id: str,
     ) -> list[DbtlDesignFeedbackSurfaceRow]:
         result = await session.execute(
             select(DbtlDesignFeedbackSurfaceRow).where(
                 DbtlDesignFeedbackSurfaceRow.stage_attempt_id == stage_attempt_id,
+                DbtlDesignFeedbackSurfaceRow.stage == stage,
                 DbtlDesignFeedbackSurfaceRow.superseded_by_surface_id.is_(None),
                 DbtlDesignFeedbackSurfaceRow.id != exclude_id,
             )
@@ -648,6 +731,10 @@ class DesignFeedbackOpsMixin:
         return list(result.scalars())
 
     async def get_design_feedback_surface(self, surface_id: str, *, project_id: str) -> dict[str, Any] | None:
+        """Compatibility wrapper for the generalized stage surface lookup."""
+        return await self.get_stage_feedback_surface(surface_id, project_id=project_id)
+
+    async def get_stage_feedback_surface(self, surface_id: str, *, project_id: str) -> dict[str, Any] | None:
         """Resolve one surface within its own project. Never leaks across."""
         async with self._sf() as session:  # type: ignore[attr-defined]
             row = await session.scalar(
@@ -666,7 +753,25 @@ class DesignFeedbackOpsMixin:
         stage_attempt_id: str | None = None,
         mode: str | None = None,
     ) -> dict[str, Any] | None:
-        """The newest surface for a cycle, for pointing a stale deck forward.
+        """Compatibility wrapper for the generalized latest-surface lookup."""
+        return await self.latest_stage_feedback_surface(
+            project_id=project_id,
+            cycle_id=cycle_id,
+            stage="design",
+            stage_attempt_id=stage_attempt_id,
+            mode=mode,
+        )
+
+    async def latest_stage_feedback_surface(
+        self,
+        *,
+        project_id: str,
+        cycle_id: str,
+        stage: str,
+        stage_attempt_id: str | None = None,
+        mode: str | None = None,
+    ) -> dict[str, Any] | None:
+        """The newest surface for a cycle and stage, for stale-deck forwarding.
 
         ``mode`` narrows that to one kind of surface. Callers deciding whether a
         deck may still *act* must pass ``stage_review``: supersession records
@@ -679,6 +784,7 @@ class DesignFeedbackOpsMixin:
             statement = select(DbtlDesignFeedbackSurfaceRow).where(
                 DbtlDesignFeedbackSurfaceRow.project_id == project_id,
                 DbtlDesignFeedbackSurfaceRow.cycle_id == cycle_id,
+                DbtlDesignFeedbackSurfaceRow.stage == stage,
             )
             if stage_attempt_id is not None:
                 statement = statement.where(DbtlDesignFeedbackSurfaceRow.stage_attempt_id == stage_attempt_id)

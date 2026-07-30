@@ -19,6 +19,7 @@ function transition(
     chosen_route: "approve",
     to_stage: "build",
     assessed_difficulty: null,
+    assessment_rationale: null,
     human_override: null,
     offered_routes: null,
     decided_by: "user-1",
@@ -32,6 +33,22 @@ function transition(
     ...overrides,
   };
 }
+
+it("keeps a parked edge in audit history without inventing a stage attempt", () => {
+  const strip = derivePathStrip(
+    [
+      transition({
+        chosen_route: "park",
+        to_stage: "design",
+        assessed_difficulty: "standard",
+      }),
+    ],
+    "design",
+  );
+  expect(strip).toEqual([
+    { stage: "design", attempt: 1, status: "current", backfilled: false },
+  ]);
+});
 
 describe("derivePathStrip", () => {
   it("derives the head from the cycle state when there are no transitions", () => {

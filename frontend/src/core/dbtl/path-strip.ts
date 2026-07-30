@@ -66,6 +66,12 @@ export function derivePathStrip(
   cycleState: string,
 ): PathStripItem[] {
   const ordered = [...transitions].sort((left, right) => left.seq - right.seq);
+  // Parking is an audited routing choice, not the conclusion of a stage
+  // attempt. Keep its transition in durable history without rendering a
+  // phantom revised Design round in the path strip.
+  const attemptTransitions = ordered.filter(
+    (transition) => transition.chosen_route !== "park",
+  );
 
   // The displayed number is which round of that stage this was, counted from
   // the walk itself — not the durable `attempt_number`, which stays at 1 while
@@ -73,7 +79,7 @@ export function derivePathStrip(
   // would print two different rounds as the same item.
   const rounds = new Map<string, number>();
   let items: PathStripItem[] = [];
-  for (const transition of ordered) {
+  for (const transition of attemptTransitions) {
     if (transition.to_stage === "design") {
       items = items.map((item) =>
         item.status === "passed"
@@ -98,7 +104,7 @@ export function derivePathStrip(
     return items;
   }
 
-  const last = ordered.at(-1);
+  const last = attemptTransitions.at(-1);
   const headStage = last
     ? GRAPH_STAGES.has(last.to_stage)
       ? last.to_stage

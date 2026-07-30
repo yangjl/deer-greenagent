@@ -1,7 +1,9 @@
 # Progressive DBTL gates over a non-linear stage graph
 
-**Status:** Phase 0 implemented; focused automated checks pass; manual
-vertical-slice acceptance and checkpoint recapture pending
+**Status:** Phase 0 owner-approved. Phase 1 implemented behind the default-off
+feature flag; focused automated checks pass, while the named manual
+checkpoints, vertical-slice walkthrough, and uncached live-assessor smoke test
+remain acceptance work.
 **Date:** 2026-07-29
 **Scope:** Replace the uniform post-meeting human gate with a progressive gate
 driven by a per-transition difficulty assessment; model a cycle as a recorded
@@ -253,6 +255,17 @@ manual walkthrough is recorded.
 
 ### Phase 1 — Assessment + progressive gate + park (Design→Build first)
 
+**Implementation status (2026-07-29):** code complete behind
+`dbtl.progressive_gate`. The Design deck and parent fallback expose the
+assessment/rationale, legal routes, explicit override, and parked state;
+one-click routine approval and two-step review write the same evidence-bound
+review/transition facts; Park persists an unapproved hash binding and routes
+ordinary selected-cycle work through the lead agent until a gate action clears
+it. Automated coverage pins fail-safe assessment, sticky high-stakes override,
+one-click equivalence, Park/unpark, lead-agent context, and stale/forged
+intent refusal. The four named checkpoints and manual walkthrough below are
+not yet captured.
+
 - Config: add `dbtl.transition_assessor_model_name` (default `null` → every
   transition is `standard`, i.e. today's flow) under the Phase 0 master switch.
 - For the Design-first slice, `transition_assessment` runs when the completed
@@ -299,6 +312,13 @@ manual walkthrough is recorded.
 
 ### Phase 2 — Stage-agnostic feedback surfaces
 
+**Implementation status (2026-07-29):** code complete behind the existing
+deck-feedback/progressive-gate rollout. Migration `0025` uses additive stage
+and revision columns so legacy Design surfaces remain valid; canonical
+stage-feedback APIs, stage intent enforcement, lifecycle headers, successor
+links, and compatibility wrappers are covered by migration, repository,
+router, and frontend tests. Manual checkpoints are not yet captured.
+
 - Migration `0025`: generalize `dbtl_design_feedback_surfaces` /
   `dbtl_design_feedback_actions` with a `stage` dimension (new tables +
   compatibility views, or column + backfill — decide at implementation
@@ -339,6 +359,14 @@ manual walkthrough is recorded.
   flag (`dbtl.design_deck_feedback`) working unchanged.
 
 ### Phase 3 — Stage meetings, delivered one at a time
+
+**Implementation status (2026-07-29):** policy and contract foundation
+complete, execution/UI rollout still default-off. The three pinned review
+StageSpecs, independent flags, deterministic convening gate, server intent
+matrix, and Test-outcome/Learn-authority immunity are implemented and tested.
+The end-to-end preflight/dispatch/deck supersession paths for 3A/3B/3C and
+their manual checkpoints remain to be implemented before these flags can be
+enabled.
 
 - New StageSpecs: `generic:test-review:v1`, then `generic:build-review:v1`,
   then `generic:learn-review:v1`, reusing roster proposal, preflight,

@@ -101,6 +101,42 @@ describe("parseDeckIntent", () => {
     ).not.toBeNull();
   });
 
+  it("accepts progressive route actions with a bounded difficulty override", () => {
+    const advance = submitIntent({
+      action: {
+        kind: "advance",
+        optionIds: [],
+        difficultyOverride: "routine",
+      },
+    });
+    const parsed = parseDeckIntent(advance, {
+      surfaceId: SURFACE_ID,
+      channel: CHANNEL,
+    });
+
+    if (parsed?.type !== "submit_intent")
+      throw new Error("expected submit_intent");
+    expect(parsed.action.kind).toBe("advance");
+    expect(parsed.action.difficultyOverride).toBe("routine");
+  });
+
+  it("refuses a forged difficulty override", () => {
+    const advance = submitIntent({
+      action: {
+        kind: "advance",
+        optionIds: [],
+        difficultyOverride: "skip_review",
+      },
+    });
+
+    expect(
+      parseDeckIntent(advance, {
+        surfaceId: SURFACE_ID,
+        channel: CHANNEL,
+      }),
+    ).toBeNull();
+  });
+
   it("accepts a written change request without a recorded issue card", () => {
     const changes = submitIntent({
       action: { kind: "request_changes", optionIds: [] },

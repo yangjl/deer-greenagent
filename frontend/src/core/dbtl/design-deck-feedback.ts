@@ -41,12 +41,19 @@ export const DECK_ACTION_KINDS = [
   "approve",
   "request_changes",
   "reject",
+  "advance",
+  "park",
+  "convene_review_meeting",
+  "choose_route",
+  "recommend_promotion",
+  "close_without_candidate",
 ] as const;
 export type DeckActionKind = (typeof DECK_ACTION_KINDS)[number];
 
 export interface DeckSubmitAction {
   kind: DeckActionKind;
   optionIds: string[];
+  difficultyOverride?: "routine" | "standard" | "high_stakes" | null;
 }
 
 export type DeckIntent =
@@ -114,11 +121,22 @@ function parseAction(value: unknown): DeckSubmitAction | null {
   if (
     kind !== "chair_option" &&
     kind !== "request_changes" &&
+    kind !== "choose_route" &&
     optionIds.length !== 0
   ) {
     return null;
   }
-  return { kind: kind as DeckActionKind, optionIds };
+  const rawOverride = value.difficultyOverride;
+  const difficultyOverride =
+    rawOverride === "" || rawOverride === undefined
+      ? null
+      : rawOverride === "routine" ||
+          rawOverride === "standard" ||
+          rawOverride === "high_stakes"
+        ? rawOverride
+        : undefined;
+  if (difficultyOverride === undefined) return null;
+  return { kind: kind as DeckActionKind, optionIds, difficultyOverride };
 }
 
 /**

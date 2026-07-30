@@ -176,16 +176,12 @@ class DbtlStageTransitionRow(Base):
 
 @event.listens_for(DbtlStageTransitionRow, "before_update")
 def _refuse_stage_transition_update(*_args: object) -> None:
-    raise DbtlStageTransitionImmutable(
-        "DBTL stage transitions are append-only and cannot be updated."
-    )
+    raise DbtlStageTransitionImmutable("DBTL stage transitions are append-only and cannot be updated.")
 
 
 @event.listens_for(DbtlStageTransitionRow, "before_delete")
 def _refuse_stage_transition_delete(*_args: object) -> None:
-    raise DbtlStageTransitionImmutable(
-        "DBTL stage transitions are append-only and cannot be deleted."
-    )
+    raise DbtlStageTransitionImmutable("DBTL stage transitions are append-only and cannot be deleted.")
 
 
 class DbtlDatasetRow(Base):
@@ -524,6 +520,11 @@ class DbtlDesignFeedbackSurfaceRow(Base):
         nullable=False,
         index=True,
     )
+    #: Additive Phase 2 discriminator. The legacy table name remains for one
+    #: compatibility window so captured Design decks and old foreign keys keep
+    #: resolving byte-for-byte.
+    stage: Mapped[str] = mapped_column(String(24), nullable=False, default="design")
+    surface_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     design_round: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     #: The only conversation this surface may answer. Work continues where it
     #: started; a deck opened from another view may display, never mutate.
@@ -589,6 +590,7 @@ class DbtlDesignFeedbackActionRow(Base):
         nullable=False,
         index=True,
     )
+    stage: Mapped[str] = mapped_column(String(24), nullable=False, default="design")
     action_group: Mapped[str] = mapped_column(String(32), nullable=False)
     action_kind: Mapped[str] = mapped_column(String(32), nullable=False)
     payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)

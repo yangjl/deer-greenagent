@@ -7,6 +7,17 @@ from pydantic import BaseModel, Field
 DbtlMode = Literal["disabled", "audit_only", "manual", "graph_enabled"]
 
 
+class DbtlStageMeetingsConfig(BaseModel):
+    """Independent rollout switches for post-evidence review meetings."""
+
+    build: bool = False
+    test: bool = False
+    learn: bool = False
+
+    def enabled_for(self, stage: str) -> bool:
+        return bool(getattr(self, (stage or "").strip().lower(), False))
+
+
 class DbtlConfig(BaseModel):
     """Controls DBTL visibility and mutation boundaries.
 
@@ -42,10 +53,18 @@ class DbtlConfig(BaseModel):
     progressive_gate: bool = Field(
         default=False,
         description=(
-            "Enable the progressive-gate read model: the stage-transition path strip and, in later phases, "
-            "per-transition difficulty assessment and the route-chooser deck. Off restores the uniform "
+            "Enable the progressive gate: the stage-transition path strip, per-transition difficulty "
+            "assessment, route-chooser deck, one-click routine gate, and park/resume behavior. Off restores the uniform "
             "four-stage display. Transition records accumulate either way, so toggling this never creates an audit gap."
         ),
+    )
+    transition_assessor_model_name: str | None = Field(
+        default=None,
+        description=("Model used for the nostream assessment of work remaining at a stage boundary. null, an unavailable model, or malformed output fails safely to the standard review path."),
+    )
+    stage_meetings: DbtlStageMeetingsConfig = Field(
+        default_factory=DbtlStageMeetingsConfig,
+        description=("Per-stage post-evidence meeting rollout. Build, Test, and Learn default off and can be enabled independently."),
     )
 
     setup_draft_model_name: str | None = Field(

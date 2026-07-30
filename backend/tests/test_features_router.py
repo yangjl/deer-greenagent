@@ -53,6 +53,11 @@ def test_features_reports_agents_api_enabled() -> None:
             "graph_execution_enabled": False,
             "design_deck_feedback": True,
             "progressive_gate": False,
+            "stage_meetings": {
+                "build": False,
+                "test": False,
+                "learn": False,
+            },
             "reason": "DBTL records are available for inspection, but all DBTL mutations and graph execution are disabled.",
         },
     }
