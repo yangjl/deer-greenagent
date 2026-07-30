@@ -65,8 +65,10 @@ DEFAULT_RESERVE_CALLS = 3
 #: Measured from the real chain and pinned by
 #: ``tests/test_finalization_deadline_middleware.py::TestTheTurnCostAssumption``:
 #: if a middleware gains or loses a hook, that test fails and names the new
-#: number rather than letting every stage worker quietly lose budget.
-SUBAGENT_SUPERSTEPS_PER_TURN = 9
+#: number rather than letting every stage worker quietly lose budget. It did
+#: exactly that when upstream #4497/#4538 added hooks to the shared subagent
+#: chain, taking the real cost from 9 to 11.
+SUBAGENT_SUPERSTEPS_PER_TURN = 11
 
 #: Super-steps held back so the forced final answer has somewhere to land.
 #: Roughly one turn's worth: at the moment the deadline fires, the graph still

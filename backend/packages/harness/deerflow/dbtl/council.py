@@ -151,6 +151,13 @@ class DepthPolicy:
 #: reported prose. Turns and wall-clock time remain bounded, but token use is
 #: metered rather than enforced for every council depth. That prevents a chair
 #: from losing the synthesis at the end of an otherwise useful meeting.
+#:
+#: The model-call count is the contract; ``max_turns`` is the derived knob. When
+#: upstream #4497/#4538 added two hook nodes to the shared subagent chain, the
+#: real per-turn cost went from 9 super-steps to 11 and every depth silently
+#: lost about a quarter of its calls — Light fell under the six-call floor.
+#: These numbers are re-derived so each depth buys what it always intended:
+#: 6, 12, and 20 model calls respectively.
 DEPTH_POLICIES: Mapping[CouncilDepth, DepthPolicy] = MappingProxyType(
     {
         CouncilDepth.HUMAN_INPUT: DepthPolicy(
@@ -177,7 +184,7 @@ DEPTH_POLICIES: Mapping[CouncilDepth, DepthPolicy] = MappingProxyType(
             max_positions=1,
             budget=WorkerBudget(
                 max_workers=1,
-                max_turns=63,
+                max_turns=77,
                 max_tokens=24_000,
                 timeout_seconds=180,
                 token_limit_enforced=False,
@@ -190,7 +197,7 @@ DEPTH_POLICIES: Mapping[CouncilDepth, DepthPolicy] = MappingProxyType(
             max_positions=2,
             budget=WorkerBudget(
                 max_workers=2,
-                max_turns=120,
+                max_turns=143,
                 max_tokens=400_000,
                 timeout_seconds=900,
                 token_limit_enforced=False,
@@ -203,7 +210,7 @@ DEPTH_POLICIES: Mapping[CouncilDepth, DepthPolicy] = MappingProxyType(
             max_positions=4,
             budget=WorkerBudget(
                 max_workers=4,
-                max_turns=190,
+                max_turns=231,
                 max_tokens=900_000,
                 timeout_seconds=1800,
                 token_limit_enforced=False,

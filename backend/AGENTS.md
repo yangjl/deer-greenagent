@@ -2083,7 +2083,9 @@ useless.** `recursion_limit` counts super-steps, and LangGraph gives *every*
 middleware `before_model`/`after_model` hook its own graph node — so a turn is
 the model node, plus one node per hook in the shared subagent chain, plus the
 tools node, plus this middleware's own `after_model`. That is
-`SUBAGENT_SUPERSTEPS_PER_TURN` (currently 9), not 2. Halving `max_turns` set the
+`SUBAGENT_SUPERSTEPS_PER_TURN` (currently 11 — upstream #4497/#4538 added two
+hook nodes to the shared subagent chain, and the depth budgets were re-derived
+so each still buys its intended 6/12/20 model calls), not 2. Halving `max_turns` set the
 deadline at more than four times the calls a worker could actually make, so it
 fired after the graph had already aborted and every council seat reported prose.
 `model_call_budget` divides by the real cost and reserves a turn's worth of
