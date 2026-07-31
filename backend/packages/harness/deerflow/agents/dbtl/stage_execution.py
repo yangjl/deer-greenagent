@@ -1479,9 +1479,13 @@ class _FeedbackSurfacePlan:
 
     surface_id: str
     mode: str
+    #: Which DBTL stage this deck speaks for. A verdict recorded against
+    #: another stage's attempt is a verdict on the wrong document, so this
+    #: travels with the plan rather than being assumed by the writer.
+    stage: str
     stage_attempt_id: str
     originating_thread_id: str
-    design_round: int
+    round_number: int
     evidence: Mapping[str, Any] | None = None
     evidence_content_hash: str = ""
     decision_request: Mapping[str, Any] | None = None
@@ -1582,6 +1586,7 @@ def _write_council_deck(
     cycle: dict[str, Any],
     results: Sequence[Mapping[str, Any]],
     round_number: int,
+    stage: str = "design",
     package_path: str,
     clarification_question: str,
     decision_request: DecisionRequest | None = None,
@@ -1605,7 +1610,7 @@ def _write_council_deck(
     try:
         document = render_council_deck(
             cycle_title=str(cycle.get("title") or ""),
-            stage_title="Design meeting",
+            stage_title=f"{stage.title()} meeting",
             round_number=round_number,
             results=results,
             package_path=package_path,
@@ -1627,10 +1632,10 @@ def _write_council_deck(
         stage_dir = stage_output_dir(
             cycle_id=str(cycle["id"]),
             cycle_title=str(cycle.get("title") or ""),
-            stage="design",
+            stage=stage,
         )
         relative = stage_dir / stage_file_name(
-            stage="design",
+            stage=stage,
             kind="slides",
             revision=cycle.get("db_revision"),
             content_hash=content_hash,
@@ -2293,10 +2298,11 @@ class LiveStageAdapter:
     async def _plan_feedback_surface(
         self,
         *,
+        stage: str,
         cycle_id: str,
         project_id: str,
         execution_key: str,
-        design_round: int,
+        round_number: int,
         originating_thread_id: str,
         paused: bool,
         artifact_uri: str,
@@ -2332,7 +2338,7 @@ class LiveStageAdapter:
             return None
         if cycle is None:
             return None
-        attempt_row_id = _stage_attempt_row_id(cycle, "design")
+        attempt_row_id = _stage_attempt_row_id(cycle, stage)
         if not attempt_row_id:
             return None
 
@@ -2352,15 +2358,21 @@ class LiveStageAdapter:
             # document nobody confirmed this deck was rendered from.
             mode = "read_only"
 
-        digest = hashlib.sha256("\x1f".join((execution_key, mode, str(design_round))).encode("utf-8")).hexdigest()
+        # The stage is deliberately absent from the digest: Design ids were
+        # derived before stages were a parameter, and adding one would move
+        # every already-registered Design surface off the row a retry must
+        # land back on. One execution never spans two stages, so the attempt
+        # id inside ``execution_key`` already separates them.
+        digest = hashlib.sha256("\x1f".join((execution_key, mode, str(round_number))).encode("utf-8")).hexdigest()
         return _FeedbackSurfacePlan(
             surface_id=f"dfs-{digest[:32]}",
             mode=mode,
+            stage=stage,
             stage_attempt_id=attempt_row_id,
             # A read-only surface still needs a non-empty column; it names no
             # live conversation and is refused as an answer target.
             originating_thread_id=thread_id or "unbound",
-            design_round=design_round,
+            round_number=round_number,
             evidence=evidence if mode == "stage_review" else None,
             evidence_content_hash=artifact_hash if mode == "stage_review" and evidence is not None else "",
             decision_request={
@@ -2400,7 +2412,7 @@ class LiveStageAdapter:
                 project_id=project_id,
                 cycle_id=cycle_id,
                 stage_attempt_id=plan.stage_attempt_id,
-                design_round=plan.design_round,
+                design_round=plan.round_number,
                 originating_thread_id=plan.originating_thread_id,
                 mode=plan.mode,
                 chair_worker_run_id=plan.chair_worker_run_id,
@@ -2412,10 +2424,10 @@ class LiveStageAdapter:
                 evidence_content_hash=plan.evidence_content_hash or None,
             )
             if hasattr(self._repo, "register_stage_feedback_surface"):
-                kwargs["stage"] = "design"
+                kwargs["stage"] = plan.stage
             await register(**kwargs)
         except Exception:  # noqa: BLE001 - a descriptor must not break the record
-            logger.warning("Could not register the design feedback surface for cycle %s.", cycle_id, exc_info=True)
+            logger.warning("Could not register the %s feedback surface for cycle %s.", plan.stage, cycle_id, exc_info=True)
 
     async def bind_feedback_request(
         self,
@@ -3076,10 +3088,11 @@ class LiveStageAdapter:
                     "routes": [route.as_dict() for route in routes],
                 }
             surface_plan = await self._plan_feedback_surface(
+                stage=stage,
                 cycle_id=cycle_id,
                 project_id=project_id,
                 execution_key=execution_key,
-                design_round=design_round,
+                round_number=design_round,
                 originating_thread_id=str(runtime.get("thread_id") or ""),
                 paused=bool(clarification_question),
                 artifact_uri=artifact_uri or "",
@@ -3096,6 +3109,7 @@ class LiveStageAdapter:
                 cycle=cycle,
                 results=results,
                 round_number=design_round,
+                stage=stage,
                 package_path=artifact_uri or "",
                 clarification_question=clarification_question or "",
                 decision_request=chair_result.decision_request,

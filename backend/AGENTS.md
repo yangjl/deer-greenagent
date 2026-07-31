@@ -2815,6 +2815,18 @@ and retains Design-named wrappers; `deerflow.dbtl.stage_feedback` is the
 server-side intent matrix. `/stage-feedback/` is canonical and
 `/design-feedback/` remains an alias.
 
+**A feedback surface belongs to a stage, not to Design.** `_FeedbackSurfacePlan`
+carries `stage` and `round_number`, `_plan_feedback_surface(stage=...)` binds
+that stage's own `dbtl_stage_runs` attempt, `_register_feedback_surface` records
+it, and `_write_council_deck(stage=...)` writes under that stage's output
+directory with its own deck title. The stage is deliberately **absent from the
+surface-id digest**: Design ids were derived before stages were a parameter, and
+adding one would move every already-registered Design surface off the row a
+retried turn must land back on — one execution never spans two stages, so the
+attempt id inside `execution_key` already separates them. Design output stays
+byte-identical, pinned by `test_dbtl_deck_fixture_drift.py`. Tests:
+`tests/test_dbtl_stage_meeting_surface.py`.
+
 The Phase 3 policy boundary is `deerflow.dbtl.stage_meetings`: `routine` skips
 a meeting, `standard` makes it optional, and `high_stakes` locks transition
 routes until completion unless a human records an explicit downward override.

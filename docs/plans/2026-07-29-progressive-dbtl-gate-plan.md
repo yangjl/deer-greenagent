@@ -1,9 +1,10 @@
 # Progressive DBTL gates over a non-linear stage graph
 
 **Status:** Phase 0 owner-approved. Phase 1 implemented behind the default-off
-feature flag; focused automated checks pass, while the named manual
-checkpoints, vertical-slice walkthrough, and uncached live-assessor smoke test
-remain acceptance work.
+feature flag; focused automated checks pass and the owner approved the manual
+walkthrough on 2026-07-31 (park → approve recorded against cycle `b9e8cade`
+in the isolated manual profile). Phase 2 is code complete behind the same
+flags; its named manual checkpoints are the open acceptance work.
 **Date:** 2026-07-29
 **Scope:** Replace the uniform post-meeting human gate with a progressive gate
 driven by a per-transition difficulty assessment; model a cycle as a recorded
@@ -312,12 +313,21 @@ not yet captured.
 
 ### Phase 2 — Stage-agnostic feedback surfaces
 
-**Implementation status (2026-07-29):** code complete behind the existing
+**Implementation status (2026-07-31):** code complete behind the existing
 deck-feedback/progressive-gate rollout. Migration `0025` uses additive stage
 and revision columns so legacy Design surfaces remain valid; canonical
 stage-feedback APIs, stage intent enforcement, lifecycle headers, successor
 links, and compatibility wrappers are covered by migration, repository,
-router, and frontend tests. Manual checkpoints are not yet captured.
+router, and frontend tests. The producer side is now stage-generic too, so a
+non-Design surface can be registered at all. Manual checkpoints are not yet
+captured; the walkthrough below maps onto the existing manual scenarios as
+`design-awaiting-verdict` (pre-0025 legacy open), `after-meeting`
+(post-0025 open + a migrated superseded chain), and a `design-surface-consumed`
+capture of the Phase 1 result.
+
+Note that no automated test covers the parent surface's lifecycle header
+strings (`Design · open`, `Surface revision N`, `Open latest surface`), so
+those are manual-only.
 
 - Migration `0025`: generalize `dbtl_design_feedback_surfaces` /
   `dbtl_design_feedback_actions` with a `stage` dimension (new tables +
@@ -360,13 +370,34 @@ router, and frontend tests. Manual checkpoints are not yet captured.
 
 ### Phase 3 — Stage meetings, delivered one at a time
 
-**Implementation status (2026-07-29):** policy and contract foundation
+**Implementation status (2026-07-31):** policy and contract foundation
 complete, execution/UI rollout still default-off. The three pinned review
 StageSpecs, independent flags, deterministic convening gate, server intent
 matrix, and Test-outcome/Learn-authority immunity are implemented and tested.
-The end-to-end preflight/dispatch/deck supersession paths for 3A/3B/3C and
-their manual checkpoints remain to be implemented before these flags can be
-enabled.
+The shared producer prerequisite is now done: the deck/feedback-surface path in
+`LiveStageAdapter` is stage-generic (`_FeedbackSurfacePlan.stage`,
+`_plan_feedback_surface(stage=...)`, `_register_feedback_surface`,
+`_write_council_deck(stage=...)`), with Design output byte-identical.
+
+Still to implement before any `dbtl.stage_meetings.*` flag can be enabled, in
+dependency order:
+
+1. **Convening decision.** `meeting_gate()` and
+   `DbtlStageMeetingsConfig.enabled_for()` still have zero production callers;
+   the flags reach only `/api/features`. Nothing joins an assessment, the flag,
+   and the gate into something a person can see.
+2. **A pre-meeting deck for a non-Design stage.** Build/Test/Learn produce no
+   deck today, so there is no surface to carry the gate. This needs a renderer
+   over stage evidence (Test: computed outcome + validity pack) rather than
+   over a chair result, since no meeting has happened yet.
+3. **Read-model exposure.** `filter_stage_feedback_intents` is a whitelist
+   filter that can only remove, so `convene_review_meeting` and `choose_route`
+   can never currently be offered; the read model also returns no meeting gate.
+4. **A `convene_review_meeting` POST branch** that starts the meeting run in the
+   originating conversation (the `chair_option` branch is the template), and
+5. **Review-meeting dispatch** through the council machinery against
+   `resolve_review_stage_spec(stage)`, recording output through
+   `attach_meeting_to_core_evidence` and superseding the pre-meeting deck.
 
 - New StageSpecs: `generic:test-review:v1`, then `generic:build-review:v1`,
   then `generic:learn-review:v1`, reusing roster proposal, preflight,
