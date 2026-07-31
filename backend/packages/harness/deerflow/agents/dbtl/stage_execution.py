@@ -60,6 +60,12 @@ from deerflow.dbtl.cycle_state import StageStatus, stage_for_state
 from deerflow.dbtl.decision_request import DECISION_REQUEST_CONTRACT, DecisionRequest
 from deerflow.dbtl.review_markdown import render_review_markdown, render_stage_digest
 from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
+from deerflow.dbtl.revision_intent import (
+    REVISION_INTENT_INSTRUCTION,
+    RevisionInterpreter,
+    RevisionVerdict,
+    interpret_revision,
+)
 from deerflow.dbtl.stage_routes import RouteContext, compute_stage_routes
 from deerflow.dbtl.stage_runner import (
     RESULT_CONTRACT,
@@ -549,6 +555,38 @@ def make_llm_intent_interpreter() -> IntentInterpreter | None:
             system_instruction=_DEBATE_INTENT_INSTRUCTION,
             user_content=prompt,
             run_name="dbtl_debate_intent",
+            app_config=app_config,
+            model_name=model_name,
+        )
+
+    return interpret
+
+
+def make_llm_revision_interpreter() -> RevisionInterpreter | None:
+    """The production revision-route reader: one nostream model call.
+
+    Returns ``None`` when no drafting model is configured, which the adapter
+    reads as "take the cheap route". Same fail-soft contract as its siblings,
+    with the direction of the failure chosen deliberately: an unavailable
+    reader must never be the reason a full meeting reconvenes.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        app_config = get_app_config()
+    except Exception:  # noqa: BLE001 - config trouble degrades the reading, not the run
+        return None
+    model_name = getattr(getattr(app_config, "dbtl", None), "setup_draft_model_name", None)
+    if not model_name:
+        return None
+
+    async def interpret(prompt: str) -> str:
+        from deerflow.utils.oneshot_llm import run_oneshot_llm
+
+        return await run_oneshot_llm(
+            system_instruction=REVISION_INTENT_INSTRUCTION,
+            user_content=prompt,
+            run_name="dbtl_revision_intent",
             app_config=app_config,
             model_name=model_name,
         )
@@ -1206,10 +1244,17 @@ def _resumed_chair_unit(
     question: str,
     answer: str,
     round_number: int,
+    objection: str = "",
     settings: Mapping[str, ParticipantSettings] | None = None,
     prior_execution: Mapping[str, Any] | None = None,
 ) -> WorkUnit | None:
     """The chair, resuming the meeting it paused — no new positions dispatched.
+
+    ``objection`` switches this to the other single-chair round: a reviewer
+    asked for changes, and the reading of their objection said the recorded
+    positions already contain what is needed to answer it. Same mechanism,
+    different framing — the chair re-weighs the positions it already had, so
+    the two share one prompt body rather than drifting into two.
 
     A chair that returns ``needs_input`` has not failed and has not finished; it
     is waiting. Re-running the whole meeting on the answer spends a second
@@ -1232,8 +1277,21 @@ def _resumed_chair_unit(
     prior_reasoning = str(prior.get("reasoning") or "").strip()
     raw_tokens = prior.get("max_tokens")
     prior_tokens = raw_tokens if isinstance(raw_tokens, int) and not isinstance(raw_tokens, bool) and raw_tokens > 0 else None
-    prompt = "\n".join(
-        [
+    if objection:
+        framing = [
+            "You chair the design meeting for this DBTL research cycle, and you are revising its conclusion.",
+            "",
+            "A human reviewer read the design you wrote and asked for changes, quoted exactly:",
+            '"""',
+            objection,
+            '"""',
+            "",
+            "Their request is a decision, not a suggestion. Revise the synthesis so it answers them.",
+            "The meeting has not been re-run: the positions below are the ones you already weighed.",
+            "Change what their request touches and leave the settled parts of the debate alone.",
+        ]
+    else:
+        framing = [
             "You chair the design meeting for this DBTL research cycle, and you are resuming it.",
             "",
             "You previously paused and asked the project owner one question:",
@@ -1247,6 +1305,10 @@ def _resumed_chair_unit(
             "Their answer is a decision, not a suggestion. Treat it as settled and synthesize on top of it.",
             "The meeting has not been re-run: the positions below are the ones you already weighed.",
             "Do not ask the same question again, and do not re-open the parts of the debate their answer does not touch.",
+        ]
+    prompt = "\n".join(
+        [
+            *framing,
             "",
             "Project context:",
             stage_context,
@@ -1297,7 +1359,7 @@ def _resumed_chair_unit(
             via_generalist=bool(prior.get("via_generalist", seat.via_generalist)),
             model=prior_model or seat.model,
             role="chair",
-            focus="resumes the meeting on the owner's answer",
+            focus=("revises the meeting's conclusion on the reviewer's request" if objection else "resumes the meeting on the owner's answer"),
             round=round_number,
             max_tokens=prior_tokens if prior_tokens is not None else seat.max_tokens,
             reasoning=prior_reasoning or seat.reasoning,
@@ -1307,17 +1369,30 @@ def _resumed_chair_unit(
     )
 
 
-def _resumed_selection(unit: WorkUnit, *, positions: Sequence[Mapping[str, Any]]) -> SelectionResult:
+def _resumed_selection(
+    unit: WorkUnit,
+    *,
+    positions: Sequence[Mapping[str, Any]],
+    revision_reason: str = "",
+) -> SelectionResult:
     """Record that a resume happened, and that no new positions were seated.
 
     Without this the package would list one worker and no explanation, which
     reads as a meeting that lost its participants rather than one that finished
-    the synthesis it had already started.
+    the synthesis it had already started. ``revision_reason`` says the same
+    thing for the other single-chair round — a reviewer asked for changes and
+    the reading of their objection said no new argument was needed — and states
+    that reading, so a reader can disagree with it.
     """
+    opening = (
+        f"Revised the existing meeting rather than reconvening it: {revision_reason}"
+        if revision_reason
+        else "Resumed the existing meeting: the project owner answered the chair's question, so the chair completed the synthesis it had paused."
+    )
     return SelectionResult(
         assignments=(),
         notes=(
-            "Resumed the existing meeting: the project owner answered the chair's question, so the chair completed the synthesis it had paused.",
+            opening,
             f"No new positions were dispatched; the chair re-weighed {len(positions)} position(s) already recorded for this cycle.",
             f"Chair: {unit.agent_name} ({unit.model or 'inherited model'}).",
         ),
@@ -1711,6 +1786,7 @@ class LiveStageAdapter:
         runtime_config: RunnableConfig | None = None,
         roster_writer: RosterWriter | None = None,
         intent_interpreter: IntentInterpreter | None = None,
+        revision_interpreter: RevisionInterpreter | None = None,
         transition_assessor: TransitionAssessor | None = None,
     ) -> None:
         self._repo = repo
@@ -1724,6 +1800,11 @@ class LiveStageAdapter:
         # Injected for the same reason; absent, the deterministic phrase table
         # is the whole re-run decision, which is exactly the pre-LLM behavior.
         self._intent_interpreter = intent_interpreter
+        # Injected on the same fail-soft contract. Absent, every "request
+        # changes" takes the cheap route — the chair revises its own synthesis
+        # — because reconvening a whole meeting is the spend this reading
+        # exists to justify, and an unavailable reader justifies nothing.
+        self._revision_interpreter = revision_interpreter
         self._transition_assessor = transition_assessor
 
     async def _assess_transition(
@@ -2619,6 +2700,23 @@ class LiveStageAdapter:
         resumed_answer = (clarification_answer or "").strip() if pending_question else ""
         resumed_positions = _prior_positions(prior_design_runs) if resumed_answer else []
 
+        # "Request changes" used to reconvene the whole meeting the moment it
+        # was clicked, whatever the objection said. Most objections are
+        # corrections the chair can fold into the synthesis it already wrote,
+        # over positions that are already recorded, so the objection is read
+        # first and the reading picks the route. Every failure of that reading
+        # takes the cheap route: an unavailable reader must never be the reason
+        # four workers run.
+        revision_verdict: RevisionVerdict | None = None
+        revision_positions: list[dict[str, Any]] = []
+        if stage == "design" and change_request and not resumed_answer and authored_design is None:
+            revision_positions = _prior_positions(prior_design_runs)
+            revision_verdict = await interpret_revision(
+                change_request,
+                positions=tuple(str(item.get("summary") or "") for item in revision_positions),
+                interpreter=self._revision_interpreter,
+            )
+
         # Nothing outstanding, a package already on the table, and no request to
         # argue again: hold. A Design stage stays ``in_progress`` until a person
         # submits it for review, so without this every later message in the
@@ -2751,6 +2849,8 @@ class LiveStageAdapter:
         )
         proposal: CouncilProposal | None = None
         resumed_chair: WorkUnit | None = None
+        #: The positions the single-chair round re-weighs, whichever round it is.
+        chair_positions: Sequence[Mapping[str, Any]] = resumed_positions
         if stage == "design" and council_plan is not None and resumed_positions:
             resumed_chair = _resumed_chair_unit(
                 council_plan,
@@ -2759,6 +2859,22 @@ class LiveStageAdapter:
                 positions=resumed_positions,
                 question=str(pending_question or ""),
                 answer=resumed_answer,
+                round_number=design_round,
+                settings=participant_settings,
+                prior_execution=_prior_chair_execution(prior_design_runs),
+            )
+        elif stage == "design" and council_plan is not None and revision_verdict is not None and not revision_verdict.reconvenes and revision_positions:
+            chair_positions = revision_positions
+            resumed_chair = _resumed_chair_unit(
+                council_plan,
+                attempt_id=attempt_id,
+                stage_context=stage_context,
+                positions=revision_positions,
+                question="",
+                answer="",
+                # Verbatim. The reading chose the route; the reviewer's own
+                # words are what the chair has to answer.
+                objection=change_request or "",
                 round_number=design_round,
                 settings=participant_settings,
                 prior_execution=_prior_chair_execution(prior_design_runs),
@@ -2781,13 +2897,21 @@ class LiveStageAdapter:
                     change_request=change_request,
                 ),
                 # Carried from the preflight the person approved, so the roster
-                # that runs is the one they were shown.
-                adjustment=council_adjustment,
+                # that runs is the one they were shown. A reconvene decided by
+                # the revision reading contributes what the objection says the
+                # new seats have to argue — the reviewer's own words still
+                # travel separately as ``change_request``, so this adds focus
+                # rather than replacing them.
+                adjustment=council_adjustment or (revision_verdict.roster_note if revision_verdict is not None and revision_verdict.reconvenes else None),
             )
         if resumed_chair is not None:
             resume_plan = StageExecutionPlan(
                 spec=spec,
-                selection=_resumed_selection(resumed_chair, positions=resumed_positions),
+                selection=_resumed_selection(
+                    resumed_chair,
+                    positions=chair_positions,
+                    revision_reason=(revision_verdict.reason if revision_verdict is not None and not revision_verdict.reconvenes and not resumed_positions else ""),
+                ),
                 units=(resumed_chair,),
             )
             outcome = collect_results(resume_plan, await dispatcher((resumed_chair,), budget=spec.budget))
@@ -3128,6 +3252,16 @@ class LiveStageAdapter:
                         project_id=project_id,
                     )
 
+        # A revision round has to say which route it took and why. The failure
+        # this replaces was silence: four workers ran, three of them died, and
+        # the only visible symptom was a card that never came back.
+        revision_prefix = ""
+        if revision_verdict is not None:
+            if not revision_verdict.reconvenes and not resumed_positions:
+                revision_prefix = f"Your requested changes were read as something the meeting chair can settle on its own, so no participants were re-run. {revision_verdict.reason}".strip() + "\n\n"
+            elif revision_verdict.reconvenes:
+                revision_prefix = f"Your requested changes were read as needing an argument nobody made yet, so the meeting reconvened. {revision_verdict.reason}".strip() + "\n\n"
+
         if clarification_question and resumed_chair is not None:
             note = "The meeting chair resumed on your answer and still needs one more decision before it can write the design up for review. No participants were re-run."
         elif clarification_question and failed_participant_count:
@@ -3159,7 +3293,7 @@ class LiveStageAdapter:
         return LiveStageResult(
             stage=stage,
             cycle_id=cycle_id,
-            note=note,
+            note=revision_prefix + note,
             worker_count=len(results),
             produced_usable_evidence=produced_usable_evidence,
             artifact_uri=artifact_uri,

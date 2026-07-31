@@ -1697,6 +1697,7 @@ def make_project_supervisor(config: RunnableConfig):
     from deerflow.agents.dbtl.stage_execution import (
         LiveStageAdapter,
         make_llm_intent_interpreter,
+        make_llm_revision_interpreter,
         make_llm_roster_writer,
         make_llm_transition_assessor,
     )
@@ -1717,6 +1718,7 @@ def make_project_supervisor(config: RunnableConfig):
             runtime_config=config,
             roster_writer=make_llm_roster_writer(),
             intent_interpreter=make_llm_intent_interpreter(),
+            revision_interpreter=make_llm_revision_interpreter(),
             transition_assessor=make_llm_transition_assessor(),
         ),
     )

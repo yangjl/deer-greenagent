@@ -473,6 +473,19 @@ Breeding-workspace note:
   re-litigating the parts the reviewer accepted, while a single voice with no
   red team is not a debate at all.
 
+  **"Request changes" chooses a route before it spends a meeting.**
+  `deerflow.dbtl.revision_intent` reads the reviewer's objection — verbatim,
+  alongside the positions already argued — and returns `chair_only` or
+  `reconvene`. `chair_only` dispatches the chair alone over the recorded
+  positions; `reconvene` runs the existing refinement round and contributes the
+  verdict's roster note as the roster writer's adjustment, while the reviewer's
+  own words still travel separately. **Every failure takes the cheap route** —
+  no configured reader, a provider outage, an unparseable reply — because an
+  unavailable reader must never be the reason four workers run. The round's
+  note states which route it took and why: the failure this replaces was
+  silence, where four workers ran, three died on an expired credential, and the
+  only visible symptom was a review card that never came back.
+
   **Build, Test, and Learn receive the approved design.** `_approved_design_brief`
   puts the human-approved Design package into `stage_context` with its content
   hash, since the approval bound a specific document and a stage naming only the
