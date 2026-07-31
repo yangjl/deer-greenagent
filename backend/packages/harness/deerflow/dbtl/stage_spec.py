@@ -348,6 +348,38 @@ BUILD_SPEC_V2 = StageSpec(
 )
 
 
+BUILD_SPEC_V3 = StageSpec(
+    stage="build",
+    domain_profile=GENERIC_PROFILE,
+    version=3,
+    title="Build",
+    purpose=(
+        "Produce and execute a rerunnable implementation from the approved design, discover the data actually used, "
+        "and bind those inputs to server-computed content hashes."
+    ),
+    cycle_classes=_ALL_CLASSES,
+    cycle_weights=_ALL_WEIGHTS,
+    required_inputs=BUILD_SPEC_V2.required_inputs,
+    required_artifact_types=("build_package",),
+    output_schema="build_package.v3",
+    required_capabilities=(Capability.SOFTWARE_ENGINEERING,),
+    optional_capabilities=BUILD_SPEC_V2.optional_capabilities,
+    validity_gates=BUILD_SPEC_V2.validity_gates,
+    memory_write_policy=MemoryWritePolicy.NONE,
+    # The v1/v2 default of 40 LangGraph super-steps buys only four model
+    # calls after middleware overhead: enough to read a design and one CSV,
+    # but not enough to write and execute the implementation. Twelve calls
+    # leaves room for targeted inspection, execution, diagnostics, and the
+    # structured final result while remaining bounded.
+    budget=WorkerBudget(
+        max_workers=3,
+        max_turns=143,
+        max_tokens=400_000,
+        timeout_seconds=900,
+    ),
+)
+
+
 TEST_SPEC_V1 = StageSpec(
     stage="test",
     domain_profile=GENERIC_PROFILE,
@@ -367,6 +399,33 @@ TEST_SPEC_V1 = StageSpec(
     ),
     validity_gates=("generic-predictive:v1",),
     memory_write_policy=MemoryWritePolicy.NONE,
+)
+
+
+TEST_SPEC_V2 = StageSpec(
+    stage="test",
+    domain_profile=GENERIC_PROFILE,
+    version=2,
+    title="Test",
+    purpose=TEST_SPEC_V1.purpose,
+    cycle_classes=_ALL_CLASSES,
+    cycle_weights=_ALL_WEIGHTS,
+    required_inputs=TEST_SPEC_V1.required_inputs,
+    required_artifact_types=TEST_SPEC_V1.required_artifact_types,
+    output_schema=TEST_SPEC_V1.output_schema,
+    required_capabilities=TEST_SPEC_V1.required_capabilities,
+    optional_capabilities=TEST_SPEC_V1.optional_capabilities,
+    validity_gates=TEST_SPEC_V1.validity_gates,
+    memory_write_policy=MemoryWritePolicy.NONE,
+    # Test must inspect Build outputs and execute validity checks before it can
+    # report; the old four-call effective default had the same read-only
+    # finalization failure as Build.
+    budget=WorkerBudget(
+        max_workers=3,
+        max_turns=143,
+        max_tokens=400_000,
+        timeout_seconds=900,
+    ),
 )
 
 LEARN_SPEC_V1 = StageSpec(
@@ -450,7 +509,9 @@ _REGISTRY: dict[str, StageSpec] = {
         RECONCILIATION_SPEC_V1,
         BUILD_SPEC_V1,
         BUILD_SPEC_V2,
+        BUILD_SPEC_V3,
         TEST_SPEC_V1,
+        TEST_SPEC_V2,
         LEARN_SPEC_V1,
         TEST_REVIEW_SPEC_V1,
         BUILD_REVIEW_SPEC_V1,
@@ -465,8 +526,8 @@ _CURRENT: MappingProxyType[tuple[str, str], int] = MappingProxyType(
     {
         (GENERIC_PROFILE, "design"): DESIGN_SPEC_V2.version,
         (GENERIC_PROFILE, "reconciliation"): RECONCILIATION_SPEC_V1.version,
-        (GENERIC_PROFILE, "build"): BUILD_SPEC_V2.version,
-        (GENERIC_PROFILE, "test"): TEST_SPEC_V1.version,
+        (GENERIC_PROFILE, "build"): BUILD_SPEC_V3.version,
+        (GENERIC_PROFILE, "test"): TEST_SPEC_V2.version,
         (GENERIC_PROFILE, "learn"): LEARN_SPEC_V1.version,
     }
 )

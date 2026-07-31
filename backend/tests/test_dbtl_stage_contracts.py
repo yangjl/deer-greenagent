@@ -30,12 +30,14 @@ from deerflow.dbtl.stage_runner import (
 from deerflow.dbtl.stage_spec import (
     BUILD_SPEC_V1,
     BUILD_SPEC_V2,
+    BUILD_SPEC_V3,
     DESIGN_SPEC_V1,
     DESIGN_SPEC_V2,
     EXECUTABLE_STAGES,
     LEARN_SPEC_V1,
     RECONCILIATION_SPEC_V1,
     TEST_SPEC_V1,
+    TEST_SPEC_V2,
     CycleWeight,
     MemoryWritePolicy,
     StageSpec,
@@ -114,8 +116,8 @@ class TestStageSpecRegistry:
         assert current_spec_keys() == (
             "generic:design:v2",
             "generic:reconciliation:v1",
-            "generic:build:v2",
-            "generic:test:v1",
+            "generic:build:v3",
+            "generic:test:v2",
             "generic:learn:v1",
         )
 
@@ -154,6 +156,11 @@ class TestStageSpecRegistry:
         assert "server_bound_input_lineage" in BUILD_SPEC_V2.validity_gates
         assert BUILD_SPEC_V2.output_schema == "build_package.v2"
 
+    def test_current_build_has_enough_bounded_turns_to_execute(self) -> None:
+        assert BUILD_SPEC_V3.required_inputs == BUILD_SPEC_V2.required_inputs
+        assert BUILD_SPEC_V3.budget.max_turns == 143
+        assert BUILD_SPEC_V3.output_schema == "build_package.v3"
+
     def test_learn_can_only_create_candidates(self) -> None:
         assert LEARN_SPEC_V1.output_schema == "learn_summary.v1"
         assert LEARN_SPEC_V1.memory_write_policy is MemoryWritePolicy.CANDIDATE_ONLY
@@ -161,6 +168,7 @@ class TestStageSpecRegistry:
 
     def test_test_uses_a_versioned_validity_pack(self) -> None:
         assert "generic-predictive:v1" in TEST_SPEC_V1.validity_gates
+        assert TEST_SPEC_V2.budget.max_turns == 143
 
     def test_a_spec_without_required_capabilities_is_refused(self) -> None:
         with pytest.raises(ValueError, match="no required capabilities"):

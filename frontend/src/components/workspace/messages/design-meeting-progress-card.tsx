@@ -260,6 +260,7 @@ function participantAsSubtask(
     prompt: "",
     result,
     councilSeat: {
+      stage: "design",
       role: participant.role,
       roleLabel: participant.roleLabel,
       focus: "",

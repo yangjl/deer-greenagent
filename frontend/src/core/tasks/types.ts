@@ -40,6 +40,8 @@ export interface Subtask {
 }
 
 export interface CouncilSeatIdentity {
+  /** DBTL stage whose review meeting this participant belongs to. */
+  stage: string;
   role: "position" | "red_team" | "chair" | string;
   roleLabel: string;
   /** A few words naming what this seat brings. Empty for a selected seat. */

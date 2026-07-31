@@ -2253,9 +2253,16 @@ membership rather than request data.
 
 `LiveStageAdapter` maps `ready_for_build` to Build, runs Build/Test through the
 same bounded fan-out, and creates Build lineage after the content-addressed
-Build package is committed. `generic:build:v2` makes the approved Design plus
+Build package is committed. `generic:build:v3` makes the approved Design plus
 the files examined during Build its inputs; the server snapshot excludes newly
-generated outputs and refuses a source changed during the run. It records
+generated outputs and refuses a source changed during the run. V3 raises the
+bounded allowance from the four model calls effectively available under the
+old 40-super-step default to twelve calls (143 super-steps), so a worker can
+inspect, write, execute, diagnose, and still return its structured result in
+the same request. `generic:test:v2` carries the same correction for executable
+validity checks. Ordinary stage workers omit `council_seat` from lifecycle
+events; actual review meetings carry their stage in that identity so the
+frontend uses Design, Build, Test, or Learn meeting copy correctly. It records
 `workspace:unversioned` plus a deviation
 when the runtime provides no source-control revision rather than manufacturing
 one. Tests: `test_dbtl_validity.py`, `test_dbtl_build_test_repository.py`,

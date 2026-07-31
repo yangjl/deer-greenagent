@@ -518,6 +518,14 @@ Breeding-workspace note:
   checks against that lineage. People do not declare a dataset or paste a
   digest before Build can start; what optional mode gives up is the
   human-settled judgement matrix.
+  `generic:build:v3` gives executable Build work twelve bounded model calls
+  (143 LangGraph super-steps) rather than the four-call effective default that
+  could only read the Design and one input before finalizing.
+  `generic:test:v2` uses the same bounded allowance so it can execute validity
+  checks rather than stop after inspecting Build artifacts. Ordinary
+  Build/Test/Learn worker events do not carry `council_seat`; only actual
+  meetings do, and meeting seat identity carries its DBTL stage so the frontend
+  cannot label Build work as a Design meeting.
   The rule is published through `/api/features` because the UI cannot infer
   it: a stage locked because it was skipped and one locked because it has
   not been reached are the same status, so `stageBlockReason` takes it as an

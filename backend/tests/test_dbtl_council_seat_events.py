@@ -40,6 +40,7 @@ class TestSeatIdentity:
     def test_it_names_the_role_without_parsing_the_unit_id(self):
         identity = _seat_identity(_unit(role="red_team", focus="argues against the design"), model="gpt-5.6-sol")
 
+        assert identity["stage"] == "design"
         assert identity["role"] == "red_team"
         assert identity["role_label"] == "Red team"
         assert identity["focus"] == "argues against the design"
@@ -132,6 +133,25 @@ class TestTerminalSeatEvent:
         )
 
         assert json.loads(event["result"])["summary"] == "Use two seasons."
+
+    def test_ordinary_stage_work_is_not_mislabeled_as_a_design_meeting(self):
+        event = _terminal_seat_event(
+            _unit(role="position"),
+            DispatchOutcome(
+                unit_id="dbtl-build-1",
+                text=(
+                    '{"status":"completed","summary":"Built it.",'
+                    '"artifact_refs":[],"claims":[],"evidence_refs":[],'
+                    '"limitations":[],"quality_checks":[],'
+                    '"recommended_next_actions":[],"provenance":{}}'
+                ),
+            ),
+            model="gpt-5.6-sol",
+            meeting_stage=None,
+        )
+
+        assert event["type"] == "task_completed"
+        assert "council_seat" not in event
 
     def test_a_named_structured_claim_completes_instead_of_showing_no_result(self):
         event = _terminal_seat_event(

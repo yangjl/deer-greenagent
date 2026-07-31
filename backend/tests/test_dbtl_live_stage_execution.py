@@ -1098,7 +1098,7 @@ async def test_ready_for_build_runs_build_and_records_reproducibility_lineage(
     )
 
     assert result.stage == "build"
-    assert repo.recorded[0]["stage_spec_key"] == "generic:build:v2"
+    assert repo.recorded[0]["stage_spec_key"] == "generic:build:v3"
     assert len(repo.lineage) == 1
     assert repo.lineage[0]["expected_db_revision"] == 4
     assert repo.lineage[0]["output_artifacts"][0]["content_hash"]

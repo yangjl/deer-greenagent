@@ -395,7 +395,7 @@ def _seat_description(unit: WorkUnit) -> str:
     return f"{role}: {unit.capability.replace('_', ' ')}"
 
 
-def _seat_identity(unit: WorkUnit, *, model: str) -> dict[str, Any]:
+def _seat_identity(unit: WorkUnit, *, model: str, stage: str = "design") -> dict[str, Any]:
     """Who is speaking, in what role, on whose behalf.
 
     Carried on the event rather than left for a consumer to parse out of the
@@ -404,6 +404,7 @@ def _seat_identity(unit: WorkUnit, *, model: str) -> dict[str, Any]:
     away from labelling every seat wrong.
     """
     return {
+        "stage": stage,
         "role": unit.role,
         "role_label": _SEAT_ROLE_LABELS.get(unit.role, "Council seat"),
         "focus": unit.focus,
@@ -459,11 +460,13 @@ def _terminal_seat_event(
     outcome: DispatchOutcome,
     *,
     model: str,
+    meeting_stage: str | None = "design",
 ) -> dict[str, Any]:
     """Report contract-valid evidence progress, not child-graph termination."""
     base = {
         "task_id": unit.unit_id,
-        "council_seat": _seat_identity(unit, model=model),
+        **({"council_seat": _seat_identity(unit, model=model, stage=meeting_stage)} if meeting_stage else {}),
+        **({"dbtl_stage": meeting_stage} if meeting_stage else {}),
         **({"usage": dict(outcome.token_usage)} if outcome.token_usage else {}),
     }
     if outcome.error or not outcome.text:
@@ -2351,6 +2354,8 @@ class LiveStageAdapter:
         state: dict[str, Any],
         project_id: str,
         project_root: str,
+        stage: str = "design",
+        meeting: bool = True,
     ) -> AsyncWorkerDispatcher:
         runtime = self._runtime(config)
         metadata = dict(config.get("metadata", {}) or {})
@@ -2369,6 +2374,8 @@ class LiveStageAdapter:
                 metadata=metadata,
                 project_id=project_id,
                 project_root=project_root,
+                stage=stage,
+                meeting=meeting,
             )
 
         return dispatch
@@ -2384,6 +2391,8 @@ class LiveStageAdapter:
         metadata: dict[str, Any],
         project_id: str,
         project_root: str,
+        stage: str,
+        meeting: bool,
     ) -> Sequence[DispatchOutcome]:
         from langgraph.config import get_stream_writer
 
@@ -2481,9 +2490,10 @@ class LiveStageAdapter:
                 {
                     "type": "task_started",
                     "task_id": unit.unit_id,
-                    "description": _seat_description(unit),
+                    "description": (_seat_description(unit) if meeting else f"{stage.title()} work: {unit.capability.replace('_', ' ')}"),
                     "model_name": effective_model,
-                    "council_seat": _seat_identity(unit, model=effective_model),
+                    "dbtl_stage": stage,
+                    **({"council_seat": _seat_identity(unit, model=effective_model, stage=stage)} if meeting else {}),
                 }
             )
             holder = SubagentResult(
@@ -2504,7 +2514,8 @@ class LiveStageAdapter:
                         "type": "task_failed",
                         "task_id": unit.unit_id,
                         "error": "DBTL stage run cancelled.",
-                        "council_seat": _seat_identity(unit, model=effective_model),
+                        "dbtl_stage": stage,
+                        **({"council_seat": _seat_identity(unit, model=effective_model, stage=stage)} if meeting else {}),
                     }
                 )
                 raise
@@ -2524,6 +2535,7 @@ class LiveStageAdapter:
                         unit,
                         dispatch_outcome,
                         model=effective_model,
+                        meeting_stage=stage if meeting else None,
                     )
                 )
                 return dispatch_outcome
@@ -2541,6 +2553,7 @@ class LiveStageAdapter:
                     unit,
                     dispatch_outcome,
                     model=effective_model,
+                    meeting_stage=stage if meeting else None,
                 )
             )
             return dispatch_outcome
@@ -2886,6 +2899,8 @@ class LiveStageAdapter:
             state=state,
             project_id=project_id,
             project_root=project_root,
+            stage=normalized,
+            meeting=True,
         )
         outcome = collect_results(plan, await dispatcher(units, budget=spec.budget))
         results = [
@@ -3333,6 +3348,8 @@ class LiveStageAdapter:
             state=state,
             project_id=project_id,
             project_root=project_root,
+            stage=stage,
+            meeting=stage == "design",
         )
         proposal: CouncilProposal | None = None
         resumed_chair: WorkUnit | None = None

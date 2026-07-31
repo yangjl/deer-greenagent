@@ -31,7 +31,7 @@ import { cn } from "@/lib/utils";
 import { MeetingParticipantInspector } from "./meeting-participant-inspector";
 
 /**
- * The Design council, while it is arguing.
+ * A DBTL review meeting, while it is arguing.
  *
  * The seats already streamed as anonymous progress cards; what was missing was
  * *who* — a reader could not tell the red team from a position, could not see
@@ -68,6 +68,7 @@ export function DebatePanel({
     (total, seat) => total + (seat.usage?.totalTokens ?? 0),
     0,
   );
+  const meetingTitle = stageMeetingTitle(seats[0]?.councilSeat?.stage);
 
   return (
     <section
@@ -75,13 +76,13 @@ export function DebatePanel({
         "border-border/60 bg-card/40 rounded-xl border backdrop-blur-sm",
         className,
       )}
-      aria-label="Design meeting debate"
+      aria-label={`${meetingTitle} debate`}
     >
       <header className="border-border/60 space-y-2.5 border-b px-4 py-3">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h3 className="text-foreground text-sm font-medium tracking-tight">
-              Design meeting
+              {meetingTitle}
             </h3>
             <p className="text-muted-foreground mt-0.5 text-xs">
               Round {currentRound} · {reported} of {seats.length} participants
@@ -142,6 +143,21 @@ export function DebatePanel({
       />
     </section>
   );
+}
+
+function stageMeetingTitle(stage: string | undefined): string {
+  switch (stage) {
+    case "build":
+      return "Build review meeting";
+    case "test":
+      return "Test review meeting";
+    case "learn":
+      return "Learn review meeting";
+    case "reconciliation":
+      return "Data reconciliation meeting";
+    default:
+      return "Design meeting";
+  }
 }
 
 const CONSENSUS_COPY: Record<ConsensusState, { label: string; hint: string }> =

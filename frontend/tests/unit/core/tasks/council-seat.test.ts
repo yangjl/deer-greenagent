@@ -44,8 +44,15 @@ describe("readCouncilSeat", () => {
     const seat = readCouncilSeat(seatEvent({ role: "red_team" }));
 
     expect(seat?.role).toBe("red_team");
+    expect(seat?.stage).toBe("design");
     expect(seat?.agentName).toBe("quant-geneticist");
     expect(seat?.model).toBe("gpt-5.6-sol");
+  });
+
+  it("carries the stage for a non-Design review meeting", () => {
+    expect(readCouncilSeat(seatEvent({ stage: "build" }))?.stage).toBe(
+      "build",
+    );
   });
 
   it("keeps a stand-in generalist visible", () => {

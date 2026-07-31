@@ -19,6 +19,8 @@ export function readCouncilSeat(value: unknown): CouncilSeatIdentity | null {
     return null;
   }
   return {
+    // Older recorded Design events predate the stage field.
+    stage: str(value.stage) || "design",
     role,
     roleLabel: str(value.role_label) || "Meeting participant",
     focus: str(value.focus),

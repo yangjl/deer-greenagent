@@ -34,6 +34,11 @@ Design–Build–Test–Learn (DBTL) governance.
   Learn creates provisional candidates from eligible outcomes; only an explicit
   human promotion creates project knowledge, and publication to each additional
   project is a separate, retractable decision.
+- **Executable Build handoff** — when Reconciliation is optional, Design
+  approval opens Build directly; Build binds the files it uses automatically
+  and receives enough bounded execution turns to produce and run the approved
+  implementation in one stage request. Live worker cards use the actual DBTL
+  stage instead of presenting Build work as another Design meeting.
 - **Human-controlled automation** — AI may recommend or route DBTL work, but it
   cannot satisfy scientific gates or create authoritative results by itself.
   Starting a cycle launches a project-grounded Design council: independent
