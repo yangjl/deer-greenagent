@@ -261,9 +261,12 @@ Breeding-workspace note:
   for seats that do not name one; inheriting the composer's meant a meeting
   convened from an expensive chat quietly ran four workers on that model. An
   unconfigured name warns and falls back rather than failing the meeting.
-  Known limitation: a held Design answers any cycle-scoped message with the
-  same pointer, so ordinary questions about the design are not routed to the
-  lead agent.
+  Known limitation, narrowed by the progressive gate's Park route: a held,
+  unparked Design still answers any cycle-scoped message with the same
+  pointer, so ordinary questions about the design are not routed to the lead
+  agent. Parking the cycle from the deck inverts this — parked cycles send
+  ordinary cycle-scoped requests to the lead agent with the design brief
+  carried hash-bound and explicitly marked unapproved.
 - **Every round with a real chair outcome ends with a slide deck.**
   `deerflow.dbtl.council_deck` renders a trustworthy completed chair result or
   an uncapped `needs_input` result as one self-contained HTML deck (inline
@@ -608,7 +611,7 @@ configuration changes remain hot-reloaded.
 The local DBTL manual pipeline lives in `scripts/dbtl_manual.py` and stores all
 generated state under gitignored `.deer-flow/manual-dbtl/`. Its generated
 profile forces unified SQLite plus an isolated `projects.root`, enables the
-graph, Design-deck feedback, and the progressive-gate path strip, and disables
+graph, Design-deck feedback, and the progressive-gate cycle timeline, and disables
 background memory/scheduler/channel writers. A scenario is a matched SQLite backup + project tree + integrity
 manifest captured only at a quiescent human-decision boundary. Restore refuses
 while Gateway port 8001 is listening, validates both hashes, backs up the prior
@@ -656,14 +659,18 @@ intents while one is required — never the chair or park intents, or convening
 the meeting that unlocks the gate would be unreachable. Design surfaces get a
 null gate and are untouched.
 
-Phase 3A's first visible piece: the **Test stage now registers a review page of
-its own**, rendered from that stage's evidence rather than from a chair result,
-because no meeting has happened when it is written. It carries the transition
-assessment (so the meeting gate has a difficulty to read) and **deliberately no
-route menu** — a Test outcome is computed at review time from the validity
-pack, and a menu rendered before that would pre-empt the computation. The page
-is registered whether or not `progressive_gate` is on; only the gate rides on
-that flag.
+Phase 3A registered a review page for Test; Phases 3B and 3C extend the same
+page to Build and Learn, so **every `REVIEW_MEETING_STAGES` stage now registers
+a pre-meeting review page of its own**, rendered from that stage's evidence
+rather than from a chair result, because no meeting has happened when it is
+written. Each carries the transition assessment (so the meeting gate has a
+difficulty to read) and **deliberately no route menu** — the stage's verdict is
+taken at review time against this evidence (Test's outcome is computed there
+from the validity pack; Build's verdict and Learn's promotion are decisions a
+human takes then), and a menu rendered beforehand would pre-empt the decision
+it exists to record. Learn's page can never promote or publish — no deck
+intent may stand in for those separate human acts. The page is registered
+whether or not `progressive_gate` is on; only the gate rides on that flag.
 
 **Convening now runs a real meeting, and a meeting is a reader.** The
 `convene_review_meeting` intent starts a run in the originating conversation
@@ -692,9 +699,32 @@ receives a new assessment and must not inherit the previous attempt's meeting.
 Before this, `meeting_completed` was a parameter nothing passed as true, so a
 *required* meeting could never be satisfied.
 
-Still to come in Phase 3: the Build (3B) and Learn (3C) meetings, each behind its
-own `dbtl.stage_meetings.*` flag. Tests:
-`tests/test_dbtl_test_review_surface.py`, `tests/test_dbtl_meeting_gate_surface.py`,
+**A deck-started round that dies mid-flight says so in chat.** A revision
+round ("Request changes") and a convened review meeting both run in the
+originating conversation, and their explanation rides on their own reply — so
+a run that ends in error used to say nothing. `app.gateway.dbtl_round_watch`
+polls the run's durable status on a detached task and, on a terminal failure
+(`error`/`timeout`/`interrupted`), appends one server-owned visible
+`llm.ai.response` to the thread feed naming what stopped and how to retry. It
+is deliberately a visibility aid: it never touches cycle state, writes nothing
+for a successful run (the round's own reply is the explanation), is
+process-local (a Gateway restart loses the watcher), and its message identity
+binds the surface and run so replays dedupe through `put_if_absent`. Tests:
+`tests/test_dbtl_round_failure_watcher.py`.
+
+**The timeline can open the deck that decided an edge.**
+`list_stage_transitions` joins `decided_in_thread_id` onto each transition row
+from the deciding surface's `originating_thread_id` — the transition names
+only the surface, and the surface alone knows which conversation it may
+answer; a client cannot resolve that itself because the surface read endpoint
+requires a viewer thread the project rail does not have. Off-deck decisions
+carry null.
+
+The Build (3B) and Learn (3C) meetings ride the same generic
+`_execute_review_meeting` path and remain gated behind their own
+`dbtl.stage_meetings.*` flags. Tests:
+`tests/test_dbtl_test_review_surface.py`, `tests/test_dbtl_stage_review_pages.py`,
+`tests/test_dbtl_meeting_gate_surface.py`,
 `tests/test_dbtl_review_meeting.py`, `tests/test_dbtl_review_meeting_dispatch.py`.
 
 ## Cross-Cutting Conventions

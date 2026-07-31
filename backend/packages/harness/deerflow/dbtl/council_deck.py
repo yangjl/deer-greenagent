@@ -333,6 +333,63 @@ def _legacy_review_controls(consensus: Consensus | None) -> str:
     )
 
 
+def _stage_review_controls(
+    stage: str,
+    transition_gate: Mapping[str, object] | None,
+) -> str:
+    """Review controls for Build, Test, and Learn feedback surfaces.
+
+    Design keeps its byte-stable, three-choice control above.  The other
+    stages previously rendered that same Design-only form, which meant the
+    server could offer a review meeting but the deck had no control capable of
+    emitting ``convene_review_meeting``.  Render the stage's real vocabulary;
+    every button still ships disabled and the authenticated parent enables only
+    the actions returned by the server read model.
+    """
+    normalized = (stage or "").strip().lower()
+    gate = dict(transition_gate or {})
+    assessment = gate.get("assessment")
+    assessment = dict(assessment) if isinstance(assessment, Mapping) else {}
+    difficulty = _text(assessment.get("difficulty") or "standard", limit=32)
+    rationale = _text(assessment.get("rationale") or "", limit=2_000)
+    assessment_html = (
+        f'<div class="assessment" data-assessed-difficulty="{html.escape(difficulty)}">'
+        f"<p><strong>Agent assessment: {html.escape(difficulty.replace('_', ' '))}</strong></p>"
+        f"<p>{html.escape(rationale)}</p></div>"
+        if assessment
+        else ""
+    )
+
+    buttons = [
+        '<button type="button" data-deck-action="convene_review_meeting" disabled>Convene review meeting</button>',
+        '<button type="button" data-deck-action="submit_for_review" disabled>Submit for review</button>',
+    ]
+    if normalized in {"build", "learn"}:
+        buttons.extend(
+            [
+                '<button type="button" data-deck-action="approve" disabled>Approve</button>',
+                '<button type="button" data-deck-action="request_changes" disabled>Revise here</button>',
+                '<button type="button" data-deck-action="reject" disabled>Reject</button>',
+            ]
+        )
+    test_note = (
+        '<p class="option-detail">The scientific outcome and route are computed from the structured validity review; the meeting may annotate that pack but cannot choose an outcome.</p>'
+        if normalized == "test"
+        else ""
+    )
+    stage_label = normalized.title() or "Stage"
+    return (
+        f'<fieldset class="review" disabled><legend>Move this {html.escape(stage_label)} evidence through its human gate</legend>'
+        f"{assessment_html}{test_note}"
+        f'<div class="comment"><label for="stage-review-comment">Reviewer comment or meeting brief</label>'
+        '<textarea id="stage-review-comment" data-deck-comment rows="4" disabled></textarea></div>'
+        f'<div class="review-actions">{"".join(buttons)}</div></fieldset>'
+        '<p class="inert" data-deck-status role="status" aria-live="polite">'
+        + html.escape(INERT_NOTICE)
+        + "</p>"
+    )
+
+
 def _bridge_script(surface_id: str) -> str:
     """The deck's half of the handshake, or nothing at all.
 
@@ -350,6 +407,24 @@ def _bridge_script(surface_id: str) -> str:
     # prevents a literal ``</script>`` inside the value from closing this block.
     encoded = json.dumps(surface_id).replace("</", "<\\/")
     return _BRIDGE_TEMPLATE.replace("__SURFACE_ID__", encoded).replace("__PROTOCOL__", str(BRIDGE_PROTOCOL_VERSION)).replace("__SOURCE__", json.dumps(DECK_MESSAGE_SOURCE))
+
+
+def _bridge_script_for_stage(surface_id: str, stage: str) -> str:
+    """Keep Design's pinned bytes while making later-stage prompts truthful."""
+    script = _bridge_script(surface_id)
+    normalized = (stage or "design").strip().lower()
+    if normalized == "design" or not script:
+        return script
+    label = normalized.title()
+    replacements = {
+        "sending the Design back": f"sending the {label} back",
+        "Recording your Design decision...": f"Recording your {label} decision...",
+        "Submit this Design when it is ready for human review.": f"Submit this {label} evidence when it is ready for human review.",
+        "Choose a Design verdict.": f"Choose a {label} verdict.",
+    }
+    for before, after in replacements.items():
+        script = script.replace(before, after)
+    return script
 
 
 _BRIDGE_TEMPLATE = """
@@ -605,6 +680,7 @@ def render_council_deck(
     surface_id: str = "",
     surface_mode: str = "",
     transition_gate: Mapping[str, object] | None = None,
+    stage: str = "design",
     theme_css: str = "",
     generated_at: datetime | None = None,
 ) -> str:
@@ -672,12 +748,17 @@ def render_council_deck(
     if limitations:
         slides.append(_slide(kind="limits", eyebrow="Read the synthesis against these", title="Limitations", body=_list_body(limitations, empty="")))
     if surface_mode == "stage_review":
+        normalized_stage = (stage or "design").strip().lower()
         slides.append(
             _slide(
                 kind="review",
                 eyebrow="Human gate",
-                title="Review the Design",
-                body=_review_controls(consensus, transition_gate),
+                title=f"Review the {normalized_stage.title()}",
+                body=(
+                    _review_controls(consensus, transition_gate)
+                    if normalized_stage == "design"
+                    else _stage_review_controls(normalized_stage, transition_gate)
+                ),
             )
         )
     next_actions = _bullets(list(chair.get("recommended_next_actions") or []))
@@ -696,7 +777,7 @@ def render_council_deck(
         title=html.escape(f"{cycle_title or 'Design meeting'} — {stage_title}"),
         slides="".join(slides),
         count=len(slides),
-        bridge=_bridge_script(surface_id),
+        bridge=_bridge_script_for_stage(surface_id, stage),
         theme=f"\n<style data-deck-theme>\n{theme.css}\n</style>" if theme.accepted else "",
     )
 

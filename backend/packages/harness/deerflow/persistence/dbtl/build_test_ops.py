@@ -386,7 +386,14 @@ class BuildTestOpsMixin:
             test = attempts["test"]
             if cycle.state != "test" or test.status != StageStatus.AWAITING_REVIEW.value:
                 raise DbtlWorkflowRefused("Test must be awaiting review before validity can be assessed.")
-            evidence = await self._latest_artifact(session, test.id)
+            # A review meeting annotates the validity pack; it never replaces
+            # it.  Bind the human-owned outcome to Test's core evidence even
+            # when a newer ``test_review_meeting`` artifact sits beside it.
+            evidence = await self._latest_reviewable_artifact(
+                session,
+                test.id,
+                "test",
+            )
             if evidence is None:
                 raise DbtlWorkflowRefused("Test has no evidence artifact to assess.")
             lineage = await self._latest_build_lineage(session, cycle_id)

@@ -17,6 +17,7 @@ from deerflow.config.database_config import DatabaseConfig
 from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK
 from deerflow.persistence.dbtl import DbtlCycleRepository
 from deerflow.persistence.dbtl.model import (
+    DbtlReviewRow,
     DbtlStageTransitionImmutable,
     DbtlStageTransitionRow,
 )
@@ -170,6 +171,62 @@ async def test_design_approval_appends_one_design_to_build_edge(tmp_path: Path) 
     assert row["policy_version"] == "greenagent-dbtl-v2-draft"
 
 
+async def test_review_meeting_annotation_never_replaces_core_verdict_evidence(tmp_path: Path) -> None:
+    repo = await _repo(tmp_path)
+    core = await repo.attach_artifact(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="design",
+        artifact_type="design_package",
+        uri="/mnt/user-data/outputs/design-package.json",
+        content_hash=HASH_B,
+        created_by="user-1",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="artifact-design-core",
+    )
+    await repo.attach_artifact(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="design",
+        artifact_type="design_review_meeting",
+        uri="/mnt/user-data/outputs/design-review-meeting.json",
+        content_hash=HASH_A,
+        created_by="user-1",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="artifact-design-meeting",
+    )
+    meeting = await repo.attach_artifact(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="design",
+        artifact_type="design_review_meeting",
+        uri="/mnt/user-data/outputs/design-review-meeting-rev2.json",
+        content_hash="c" * 64,
+        created_by="user-1",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="artifact-design-meeting-rev2",
+    )
+    assert meeting["revision"] > core["revision"]
+
+    await _submit(repo, "design", "core-after-meeting")
+    await _review(repo, "design", "core-after-meeting")
+
+    sf = get_session_factory()
+    assert sf is not None
+    async with sf() as session:
+        review = await session.scalar(
+            select(DbtlReviewRow).where(
+                DbtlReviewRow.cycle_id == "cycle-1",
+            )
+        )
+    assert review is not None
+    assert review.artifact_id == core["id"]
+    assert review.artifact_revision == core["revision"]
+
+    rows = await _transitions(repo)
+    assert rows[-1]["evidence_hash"] == HASH_B
+
+
 async def test_reconciliation_review_appends_no_edge(tmp_path: Path) -> None:
     repo = await _repo(tmp_path)
     await _approve(repo, "design", "design")
@@ -243,9 +300,7 @@ async def test_park_binds_unapproved_evidence_and_a_gate_action_unparks(
         "approval_status": "unapproved",
     }
     rows = await _transitions(repo)
-    assert [(row["chosen_route"], row["to_stage"]) for row in rows] == [
-        ("park", "design")
-    ]
+    assert [(row["chosen_route"], row["to_stage"]) for row in rows] == [("park", "design")]
 
     resumed = await repo.review_stage(
         cycle_id="cycle-1",
@@ -296,9 +351,7 @@ async def test_transition_rows_refuse_update_and_delete(tmp_path: Path) -> None:
         await session.rollback()
 
     rows = await _transitions(repo)
-    assert [(row["from_stage"], row["to_stage"]) for row in rows] == [
-        ("design", "build")
-    ]
+    assert [(row["from_stage"], row["to_stage"]) for row in rows] == [("design", "build")]
 
 
 async def test_test_assessment_appends_a_test_edge_with_the_recommended_route(tmp_path: Path) -> None:
@@ -383,9 +436,7 @@ async def test_return_to_design_records_revisit_and_invalidates_forward_stage_st
             "check": item.value,
             "status": "failed" if item.value == "leakage" else "passed",
             "detail": f"{item.value} evidence",
-            "evidence_refs": (
-                [f"artifact://{item.value}"] if item.value != "leakage" else []
-            ),
+            "evidence_refs": ([f"artifact://{item.value}"] if item.value != "leakage" else []),
         }
         for item in DEFAULT_VALIDITY_PACK.required_checks
     ]
@@ -411,9 +462,7 @@ async def test_return_to_design_records_revisit_and_invalidates_forward_stage_st
     )
 
     assert result["cycle"]["state"] == "design"
-    statuses = {
-        item["stage"]: item["status"] for item in result["cycle"]["stages"]
-    }
+    statuses = {item["stage"]: item["status"] for item in result["cycle"]["stages"]}
     assert statuses == {
         "design": "changes_requested",
         "reconciliation": "locked",
@@ -422,10 +471,7 @@ async def test_return_to_design_records_revisit_and_invalidates_forward_stage_st
         "learn": "locked",
     }
     rows = await _transitions(repo)
-    assert [
-        (row["from_stage"], row["chosen_route"], row["to_stage"])
-        for row in rows
-    ] == [
+    assert [(row["from_stage"], row["chosen_route"], row["to_stage"]) for row in rows] == [
         ("design", "approve", "build"),
         ("build", "approve", "test"),
         ("test", "return_to_design", "design"),
@@ -446,6 +492,55 @@ async def test_abandon_records_a_close_edge_from_the_working_stage(tmp_path: Pat
     rows = await _transitions(repo)
     assert len(rows) == 1
     assert (rows[0]["from_stage"], rows[0]["chosen_route"], rows[0]["to_stage"]) == ("design", "close_cycle", "abandoned")
+
+
+async def test_an_edge_decided_on_a_deck_names_the_conversation_that_deck_answers(tmp_path: Path) -> None:
+    """The timeline's deck link needs a destination. The transition row names
+    only the surface; the surface row alone knows which conversation it may
+    answer, so the read model joins the two — a client cannot, because the
+    surface read endpoint requires a viewer thread the rail does not have."""
+    repo = await _repo(tmp_path)
+    await _attach(repo, "design", "deck-design")
+    cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+    assert cycle is not None
+    attempt_id = next(item["id"] for item in cycle["stages"] if item["stage"] == "design")
+    surface = await repo.register_stage_feedback_surface(
+        stage="design",
+        project_id="project-1",
+        cycle_id="cycle-1",
+        stage_attempt_id=attempt_id,
+        design_round=1,
+        originating_thread_id="thread-1",
+        mode="read_only",
+        deck_uri="/mnt/user-data/outputs/design-slides.html",
+        deck_content_hash="c" * 64,
+    )
+    await repo.park_cycle(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="design",
+        expected_db_revision=await _revision(repo),
+        actor_user_id="reviewer-1",
+        idempotency_key="park-on-deck",
+        decision_surface_id=surface["surface_id"],
+        assessed_difficulty="routine",
+        assessment_rationale="Bounded next action.",
+        human_override=None,
+        offered_routes=["advance", "park"],
+    )
+
+    rows = await _transitions(repo)
+    assert rows[-1]["decision_surface_id"] == surface["surface_id"]
+    assert rows[-1]["decided_in_thread_id"] == "thread-1"
+
+
+async def test_an_edge_decided_off_deck_carries_no_thread_link(tmp_path: Path) -> None:
+    repo = await _repo(tmp_path)
+    await _approve(repo, "design", "design")
+
+    rows = await _transitions(repo)
+    assert rows[-1]["decision_surface_id"] is None
+    assert rows[-1]["decided_in_thread_id"] is None
 
 
 async def test_history_is_ordered_and_scoped_to_the_cycle(tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ import type {
   CycleClass,
   CycleRecord,
   CycleWeight,
+  DbtlGraphStage,
   DbtlStage,
   ReviewDecision,
 } from "./cycle-view";
@@ -33,7 +34,7 @@ export type DesignFeedbackActionKind =
 export type TransitionDifficulty = "routine" | "standard" | "high_stakes";
 
 export interface TransitionGate {
-  stage: "design";
+  stage: DbtlGraphStage;
   assessment: {
     difficulty: TransitionDifficulty;
     rationale: string;
@@ -47,6 +48,15 @@ export interface TransitionGate {
     blocked?: boolean;
     blocked_reason?: string;
   }>;
+}
+
+export interface MeetingGate {
+  stage: Exclude<DbtlGraphStage, "design">;
+  assessed_difficulty: TransitionDifficulty;
+  effective_difficulty: TransitionDifficulty;
+  requirement: "skipped" | "optional" | "required" | "complete";
+  transition_routes_locked: boolean;
+  can_convene: boolean;
 }
 
 export interface DesignFeedbackSurface {
@@ -79,6 +89,7 @@ export interface DesignFeedbackSurface {
   } | null;
   note: string;
   transition_gate: TransitionGate | null;
+  meeting_gate: MeetingGate | null;
   parked: boolean;
 }
 

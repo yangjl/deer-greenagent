@@ -1116,6 +1116,20 @@ export const enUS: Translations = {
       backfilled: "Reconstructed from review history",
       record: "Path record",
     },
+    timeline: {
+      showDetail: "Show how each step was decided",
+      hideDetail: "Hide decision detail",
+      parked: "This cycle is parked.",
+      invalidatedWork:
+        "Work approved before Design was reopened no longer counts.",
+      assessed: "Assessed",
+      overrode: "Recorded instead",
+      offered: "Also offered",
+      decidedBy: "Decided by",
+      evidence: "Evidence",
+      deck: "Open the deck this was decided on",
+      current: "In progress",
+    },
     designSheet: {
       readOnly:
         "This sheet is for inspection only. Design is submitted and decided in the meeting's registered slide deck.",

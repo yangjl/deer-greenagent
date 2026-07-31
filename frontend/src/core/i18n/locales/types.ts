@@ -885,6 +885,19 @@ export interface Translations {
       backfilled: string;
       record: string;
     };
+    timeline: {
+      showDetail: string;
+      hideDetail: string;
+      parked: string;
+      invalidatedWork: string;
+      assessed: string;
+      overrode: string;
+      offered: string;
+      decidedBy: string;
+      evidence: string;
+      deck: string;
+      current: string;
+    };
     designSheet: {
       readOnly: string;
     };

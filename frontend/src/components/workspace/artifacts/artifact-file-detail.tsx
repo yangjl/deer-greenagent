@@ -592,10 +592,13 @@ export function ArtifactFilePreview({
         return;
       }
       deckChairPollingSurfaceRef.current = surfaceId;
+      const activeStage = deckSurfaceRef.current?.stage ?? "design";
+      const followUpLabel =
+        activeStage === "design" ? "Design chair" : `${activeStage} review meeting`;
       setDeckProgress({
         surfaceId,
         state: "running",
-        note: "The Design chair is running. The follow-up deck will appear in this conversation.",
+        note: `The ${followUpLabel} is running. The follow-up deck will appear in this conversation.`,
       });
       try {
         for (let poll = 0; poll < DESIGN_CHAIR_MAX_POLLS; poll += 1) {
@@ -615,8 +618,10 @@ export function ArtifactFilePreview({
 
             if (
               refreshed.receipt?.status === "failed" &&
-              refreshed.allowed_actions.some((action) =>
-                action.startsWith("chair_"),
+              refreshed.allowed_actions.some(
+                (action) =>
+                  action.startsWith("chair_") ||
+                  action === "convene_review_meeting",
               )
             ) {
               const note =
@@ -772,10 +777,12 @@ export function ArtifactFilePreview({
       if (intent?.type !== "submit_intent") return;
 
       const submissionId = (deckSubmissionIdRef.current ??= uuid());
+      const stageLabel =
+        surface.stage.charAt(0).toUpperCase() + surface.stage.slice(1);
       setDeckProgress({
         surfaceId,
         state: "submitting",
-        note: "Recording your Design feedback…",
+        note: `Recording your ${stageLabel} feedback…`,
       });
       send(surfaceId, channel, { type: "pending" });
       try {
@@ -810,7 +817,7 @@ export function ArtifactFilePreview({
               result.receipt?.message ??
               (intent.action.kind === "park"
                 ? "Cycle parked. You can continue from this deck when ready."
-                : "Submitted. Choose the final Design verdict."),
+                : `Submitted. Choose the final ${stageLabel} verdict.`),
           });
           setDeckProgress({
             surfaceId,
@@ -819,11 +826,12 @@ export function ArtifactFilePreview({
               result.receipt?.message ??
               (intent.action.kind === "park"
                 ? "Cycle parked. You can continue from this deck when ready."
-                : "Submitted. Choose the final Design verdict."),
+                : `Submitted. Choose the final ${stageLabel} verdict.`),
           });
         } else if (
           result.status === "resume_started" &&
-          intent.action.kind.startsWith("chair_")
+          (intent.action.kind.startsWith("chair_") ||
+            intent.action.kind === "convene_review_meeting")
         ) {
           // This REST action starts a run outside the page's normal LangGraph
           // stream, so waiting for the POST alone would freeze the old deck
@@ -877,8 +885,10 @@ export function ArtifactFilePreview({
             }
             if (
               refreshed.receipt?.status === "failed" &&
-              refreshed.allowed_actions.some((action) =>
-                action.startsWith("chair_"),
+              refreshed.allowed_actions.some(
+                (action) =>
+                  action.startsWith("chair_") ||
+                  action === "convene_review_meeting",
               )
             ) {
               if (refreshed.receipt.client_submission_id) {
@@ -915,7 +925,7 @@ export function ArtifactFilePreview({
         const note =
           error instanceof Error
             ? error.message
-            : "That Design feedback could not be recorded.";
+            : `That ${stageLabel} feedback could not be recorded.`;
         setDeckProgress({
           surfaceId,
           state: "failed",

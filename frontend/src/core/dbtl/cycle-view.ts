@@ -95,6 +95,9 @@ export interface DbtlStageTransition {
   offered_routes: string[] | null;
   decided_by: string;
   decision_surface_id: string | null;
+  /** The conversation the deciding deck answers, server-joined from the
+   * registered surface; null when the decision was taken off-deck. */
+  decided_in_thread_id?: string | null;
   evidence_hash: string | null;
   dataset_fingerprint: string | null;
   stage_spec_version: string | null;
@@ -104,7 +107,7 @@ export interface DbtlStageTransition {
 }
 
 export interface CycleTransitionGate {
-  stage: "design";
+  stage: DbtlGraphStage;
   assessment: {
     difficulty: "routine" | "standard" | "high_stakes";
     rationale: string;
@@ -335,11 +338,17 @@ export function stageBlockReason(
     // a stage nothing was waiting for. The rule has to be passed in: stage
     // statuses alone cannot tell "locked because skipped" from "locked
     // because not reached yet", since both look identical here.
-    const priors = reconciliationRequired ? (["design", "reconciliation"] as const) : (["design"] as const);
-    const outstanding = priors.filter((prior) => stageOf(cycle, prior)?.status !== "approved").map((prior) => STAGE_LABELS[prior]);
+    const priors = reconciliationRequired
+      ? (["design", "reconciliation"] as const)
+      : (["design"] as const);
+    const outstanding = priors
+      .filter((prior) => stageOf(cycle, prior)?.status !== "approved")
+      .map((prior) => STAGE_LABELS[prior]);
     return {
       blocked: true,
-      reason: outstanding.length ? `Build opens once ${outstanding.join(" and ")} ${outstanding.length === 1 ? "is" : "are"} approved.` : "Build is not open yet.",
+      reason: outstanding.length
+        ? `Build opens once ${outstanding.join(" and ")} ${outstanding.length === 1 ? "is" : "are"} approved.`
+        : "Build is not open yet.",
     };
   }
   const index = DBTL_STAGES.indexOf(stage);

@@ -581,9 +581,15 @@ class DesignFeedbackOpsMixin:
                 }
                 if evidence != exact:
                     raise DesignFeedbackConflict("The submitted evidence binding differs from the deck's evidence.")
-                artifact = await session.scalar(select(DbtlArtifactRow).where(DbtlArtifactRow.stage_attempt_id == surface.stage_attempt_id).order_by(DbtlArtifactRow.revision.desc()).limit(1))
+                artifact = await self._latest_reviewable_artifact(
+                    session,
+                    surface.stage_attempt_id,
+                    surface.stage,
+                )
                 if artifact is None or artifact.id != surface.evidence_artifact_id or artifact.revision != surface.evidence_artifact_revision or artifact.content_hash != surface.evidence_content_hash:
-                    raise DesignFeedbackConflict("The Design evidence changed after this deck was rendered.")
+                    raise DesignFeedbackConflict(
+                        f"The {surface.stage.title()} evidence changed after this deck was rendered."
+                    )
                 if action_kind == "request_changes":
                     request_payload = surface.decision_request or {}
                     issue_ids = {str(value) for value in request_payload.get("review_issue_ids", []) if isinstance(value, str)}

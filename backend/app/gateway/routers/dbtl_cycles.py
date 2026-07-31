@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -23,6 +24,7 @@ from langchain_core.messages import AIMessage
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.gateway.authz import require_permission
+from app.gateway.dbtl_round_watch import watch_background_round
 from app.gateway.deps import (
     get_config,
     get_dbtl_cycle_repo,
@@ -46,7 +48,12 @@ from deerflow.dbtl import (
     validate_candidate_grade,
 )
 from deerflow.dbtl.stage_feedback import filter_stage_feedback_intents
-from deerflow.dbtl.stage_meetings import apply_meeting_gate, review_meeting_recorded, surface_meeting_gate
+from deerflow.dbtl.stage_meetings import (
+    TRANSITION_INTENTS,
+    apply_meeting_gate,
+    review_meeting_recorded,
+    surface_meeting_gate,
+)
 from deerflow.persistence.dbtl import (
     DbtlRevisionConflict,
     DbtlWorkflowRefused,
@@ -541,13 +548,27 @@ async def _design_feedback_read_model(
     cycle = await repo.get_cycle(resolved_cycle_id, project_id=project_id)
     actions = await repo.stage_feedback_actions(surface_id, project_id=project_id)
     latest_action = actions[-1] if actions else None
-    # A chair answer starts a background run. A provider/executor failure can
+    # A chair answer or review-meeting request starts a background run. A
+    # provider/executor failure can
     # still leave that parent run terminal-successful because the failed worker
     # is an audited stage outcome rather than an exception. If the run is
     # terminal and produced no successor feedback surface, the answer did not
     # yield a chair outcome. Release the same payload-bound action for retry
     # instead of leaving the only deck permanently consumed.
-    if surface["mode"] == "chair_feedback" and surface["is_current"] and latest_action and latest_action.get("action_group") == "chair_response" and latest_action.get("status") == "resume_started" and latest_action.get("run_id"):
+    background_round = bool(
+        latest_action
+        and (
+            (
+                surface["mode"] == "chair_feedback"
+                and latest_action.get("action_group") == "chair_response"
+            )
+            or (
+                surface["mode"] == "stage_review"
+                and latest_action.get("action_group") == "review_meeting"
+            )
+        )
+    )
+    if background_round and surface["is_current"] and latest_action and latest_action.get("status") == "resume_started" and latest_action.get("run_id"):
         try:
             run = await get_run_store(request).get(
                 str(latest_action["run_id"]),
@@ -558,7 +579,12 @@ async def _design_feedback_read_model(
         raw_status = (run or {}).get("status") if isinstance(run, dict) else None
         run_status = str(getattr(raw_status, "value", raw_status) or "")
         if run_status in {"success", "error", "timeout", "interrupted"}:
-            message = "The Design chair could not produce a follow-up deck from that run. Your recorded choice is still here; try sending it again."
+            round_label = (
+                "Design chair"
+                if surface["mode"] == "chair_feedback"
+                else f"{surface_stage.title()} review meeting"
+            )
+            message = f"The {round_label} could not produce a follow-up deck from that run. Your recorded choice is still here; try sending it again."
             latest_action = await repo.update_stage_feedback_action(
                 str(latest_action["client_submission_id"]),
                 project_id=project_id,
@@ -589,7 +615,17 @@ async def _design_feedback_read_model(
             mode="stage_review",
         )
         surface_is_live = newest_review is None or str(newest_review["surface_id"]) == surface_id
-        attempt_artifacts = [item for item in (cycle or {}).get("artifacts", []) if item.get("stage_attempt_id") == surface.get("stage_attempt_id")]
+        # A review-meeting package annotates the core stage evidence.  The
+        # registered gate remains bound to the Build/Test/Learn artifact the
+        # meeting reviewed, so a newly written meeting package must not make
+        # that surface look stale merely because it has a higher revision.
+        meeting_artifact_type = f"{surface_stage}_review_meeting"
+        attempt_artifacts = [
+            item
+            for item in (cycle or {}).get("artifacts", [])
+            if item.get("stage_attempt_id") == surface.get("stage_attempt_id")
+            and item.get("artifact_type") != meeting_artifact_type
+        ]
         artifact = max(
             attempt_artifacts,
             key=lambda item: int(item.get("revision") or 0),
@@ -642,7 +678,7 @@ async def _design_feedback_read_model(
                         # work the edge is waiting on, so gating it on the edge
                         # deadlocks the cycle.
                         allowed_actions = ["submit_for_review", "request_changes", "approve"]
-                        if "stage_park" not in groups:
+                        if surface_stage == "design" and "stage_park" not in groups:
                             allowed_actions.append("park")
                         if _route_available(gate, "advance"):
                             allowed_actions.append("advance")
@@ -650,7 +686,7 @@ async def _design_feedback_read_model(
                         allowed_actions = ["submit_for_review"]
                 elif stage_status == "awaiting_review":
                     allowed_actions = ["approve", "request_changes", "reject"]
-                    if gate is not None and "stage_park" not in groups:
+                    if gate is not None and surface_stage == "design" and "stage_park" not in groups:
                         allowed_actions.append("park")
         # The convening decision is folded in before the stage's own intent
         # matrix has the last word: the gate may add ``convene_review_meeting``
@@ -797,6 +833,35 @@ def _feedback_event(
     )
 
 
+def _watch_round_if_possible(
+    request: Request,
+    *,
+    user_id: str,
+    thread_id: str,
+    run_id: str,
+    surface_id: str,
+    explanation: str,
+    success_has_follow_up: Callable[[], Awaitable[bool]] | None = None,
+) -> None:
+    """Spawn the failed-round announcer; a visibility aid must never fail the verdict."""
+    try:
+        run_store = get_run_store(request)
+        event_store = get_run_event_store(request)
+    except HTTPException:
+        logger.warning("Round-failure watcher unavailable for run %s: stores not configured", run_id)
+        return
+    watch_background_round(
+        run_store,
+        event_store,
+        user_id=user_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        surface_id=surface_id,
+        explanation=explanation,
+        success_has_follow_up=success_has_follow_up,
+    )
+
+
 @router.post("/projects/{project_id}/dbtl/cycles/{cycle_id}/design-feedback/{surface_id}/actions")
 @router.post("/projects/{project_id}/dbtl/cycles/{cycle_id}/stage-feedback/{surface_id}/actions")
 @require_permission("threads", "write")
@@ -867,6 +932,17 @@ async def apply_design_feedback_action(
         raise _translate(exc) from exc
 
     action_id = str(action["client_submission_id"])
+    surface_stage = str(surface.get("stage") or "design")
+
+    async def round_has_follow_up() -> bool:
+        latest = await repo.latest_stage_feedback_surface(
+            project_id=project_id,
+            cycle_id=cycle_id,
+            stage=surface_stage,
+            stage_attempt_id=surface.get("stage_attempt_id"),
+        )
+        return bool(latest and str(latest.get("surface_id") or "") != surface_id)
+
     if replayed and action["status"] in {"accepted", "resume_started", "review_recorded"}:
         _feedback_event(
             "design_feedback.replayed",
@@ -990,7 +1066,6 @@ async def apply_design_feedback_action(
             return {**updated, "replayed": replayed}
 
         if body.action.kind == "convene_review_meeting":
-            surface_stage = str(surface.get("stage") or "design")
             cycle_now = await repo.get_cycle(cycle_id, project_id=project_id)
             stage_row = next(
                 (item for item in (cycle_now or {}).get("stages", []) if item.get("stage") == surface_stage),
@@ -1032,6 +1107,17 @@ async def apply_design_feedback_action(
                 body.originating_thread_id,
                 request,
             )
+            # Same silence gap as the revision round: the meeting reports
+            # through its own reply, so a run that dies must be announced.
+            _watch_round_if_possible(
+                request,
+                user_id=user_id,
+                thread_id=body.originating_thread_id,
+                run_id=record.run_id,
+                surface_id=surface_id,
+                explanation=(f"The {surface_stage.title()} review meeting stopped before it could report. No meeting was recorded — you can convene it again from the stage's review page."),
+                success_has_follow_up=round_has_follow_up,
+            )
             receipt = {
                 "kind": "convene_review_meeting",
                 "run_id": record.run_id,
@@ -1064,8 +1150,32 @@ async def apply_design_feedback_action(
         }
         workflow_key = f"design-deck:{action_id}"
         transition_gate = _surface_transition_gate(surface) if dbtl_config.progressive_gate else None
+        if surface_stage != "design" and body.action.kind in TRANSITION_INTENTS:
+            current_cycle = await repo.get_cycle(cycle_id, project_id=project_id)
+            current_stage = next(
+                (
+                    item
+                    for item in (current_cycle or {}).get("stages", [])
+                    if item.get("stage") == surface_stage
+                ),
+                None,
+            )
+            meeting_gate = _surface_meeting_gate(
+                surface,
+                dbtl_config,
+                stage=current_stage,
+                cycle=current_cycle,
+            )
+            if meeting_gate is not None and meeting_gate.transition_routes_locked:
+                raise DesignFeedbackConflict(
+                    f"The {surface_stage.title()} gate requires its review meeting before this decision can be recorded."
+                )
         if body.action.kind in {"advance", "park"} and transition_gate is None:
             raise DesignFeedbackConflict("This deck does not carry a progressive transition gate.")
+        if body.action.kind in {"advance", "park"} and surface_stage != "design":
+            raise DesignFeedbackConflict(
+                f"The {body.action.kind.replace('_', ' ')} intent is not implemented for the {surface_stage.title()} gate."
+            )
         assessment = dict((transition_gate or {}).get("assessment") or {})
         assessed_difficulty = str(assessment.get("difficulty") or "")
         assessment_rationale = str(assessment.get("rationale") or "")
@@ -1159,7 +1269,7 @@ async def apply_design_feedback_action(
             cycle = await repo.submit_stage_for_review(
                 cycle_id=cycle_id,
                 project_id=project_id,
-                stage="design",
+                stage=surface_stage,
                 expected_db_revision=body.expected_db_revision,
                 actor_user_id=user_id,
                 idempotency_key=workflow_key,
@@ -1168,7 +1278,7 @@ async def apply_design_feedback_action(
             receipt = {
                 "kind": "submit_for_review",
                 "db_revision": cycle["db_revision"],
-                "message": "The Design package is submitted for human review.",
+                "message": f"The {surface_stage.title()} package is submitted for human review.",
                 "assessed_difficulty": assessed_difficulty or None,
                 "human_override": human_override,
             }
@@ -1204,17 +1314,35 @@ async def apply_design_feedback_action(
                     **(progressive_transition or {}),
                     "human_override": human_override,
                 }
+        if body.action.kind in {
+            "choose_route",
+            "recommend_promotion",
+            "close_without_candidate",
+        }:
+            raise DesignFeedbackConflict(
+                f"The {body.action.kind.replace('_', ' ')} intent requires its stage-specific review record."
+            )
         if effective_difficulty == "high_stakes" and not body.comment.strip():
-            raise DesignFeedbackConflict("A high-stakes Design verdict requires the reviewer's written rationale.")
+            raise DesignFeedbackConflict(
+                f"A high-stakes {surface_stage.title()} verdict requires the reviewer's written rationale."
+            )
         if body.action.kind == "reject" and not body.comment.strip():
             raise DesignFeedbackConflict(f"{body.action.kind.replace('_', ' ').title()} requires a comment.")
-        rationale = body.comment.strip() or ("Approved from the registered Design feedback deck." if body.action.kind == "approve" else "Selected contested Design issues require refinement.")
+        rationale = body.comment.strip() or (
+            f"Approved from the registered {surface_stage.title()} feedback deck."
+            if body.action.kind == "approve"
+            else f"Selected contested {surface_stage.title()} issues require refinement."
+        )
         rationale_projection = rationale
         if body.action.kind == "request_changes":
-            target = f"the recorded issues {', '.join(body.action.option_ids)}" if body.action.option_ids else "the Design described in the reviewer's comment"
+            target = (
+                f"the recorded issues {', '.join(body.action.option_ids)}"
+                if body.action.option_ids
+                else f"the {surface_stage.title()} evidence described in the reviewer's comment"
+            )
             rationale_projection = f"Requested changes to {target}.\n\n{rationale}"
         provenance = {
-            "input_source": "design_deck",
+            "input_source": "design_deck" if surface_stage == "design" else "stage_deck",
             "feedback_surface_id": surface_id,
             "deck_content_hash": surface["deck_content_hash"],
             "deck_schema_version": surface["deck_schema_version"],
@@ -1234,14 +1362,18 @@ async def apply_design_feedback_action(
             # is what opens the data work that unblocks the edge.
             current = await repo.get_cycle(cycle_id, project_id=project_id)
             current_status = next(
-                (str(item.get("status") or "") for item in (current or {}).get("stages", []) if item.get("stage") == "design"),
+                (
+                    str(item.get("status") or "")
+                    for item in (current or {}).get("stages", [])
+                    if item.get("stage") == surface_stage
+                ),
                 "",
             )
             auto_submit = current_status in {"in_progress", "changes_requested"}
         cycle = await repo.review_stage(
             cycle_id=cycle_id,
             project_id=project_id,
-            stage="design",
+            stage=surface_stage,
             decision=body.action.kind,
             rationale=rationale_projection,
             expected_db_revision=body.expected_db_revision,
@@ -1253,7 +1385,7 @@ async def apply_design_feedback_action(
             auto_submit=auto_submit,
         )
         refinement_run_id: str | None = None
-        if body.action.kind == "request_changes":
+        if body.action.kind == "request_changes" and surface_stage == "design":
             refinement_target = f"these recorded issues: {', '.join(body.action.option_ids)}" if body.action.option_ids else "the reviewer's written objection"
             refinement_request = f"Refine the approved Design candidate for {refinement_target}.\n\n{rationale}"
             record = await start_run(
@@ -1282,10 +1414,26 @@ async def apply_design_feedback_action(
                 request,
             )
             refinement_run_id = record.run_id
+            # The round's explanation rides on its own reply, so a run that
+            # dies mid-flight says nothing in chat. The watcher speaks only on
+            # a terminal failure; a finished round explains itself.
+            _watch_round_if_possible(
+                request,
+                user_id=user_id,
+                thread_id=body.originating_thread_id,
+                run_id=refinement_run_id,
+                surface_id=surface_id,
+                explanation=("The Design revision round stopped before it could reply. Your “Request changes” verdict is recorded and nothing was lost — say “run the meeting again” in this conversation to retry the round."),
+                success_has_follow_up=round_has_follow_up,
+            )
         receipt = {
             "kind": body.action.kind,
             "db_revision": cycle["db_revision"],
-            "message": ("Design changes were recorded and a focused refinement started." if refinement_run_id else f"Design review recorded: {body.action.kind.replace('_', ' ')}."),
+            "message": (
+                "Design changes were recorded and a focused refinement started."
+                if refinement_run_id
+                else f"{surface_stage.title()} review recorded: {body.action.kind.replace('_', ' ')}."
+            ),
         }
         if refinement_run_id:
             receipt["run_id"] = refinement_run_id

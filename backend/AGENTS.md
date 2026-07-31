@@ -2835,6 +2835,19 @@ Review contracts are pinned as `generic:test-review:v1`,
 attached to immutable core evidence through a sanitizer that removes Test
 outcome and Learn promotion/publication claims. Each stage flag under
 `dbtl.stage_meetings` defaults false and is reported through `/api/features`.
+The meeting artifact is an annotation, never the stage result: gate submission,
+park, review verdicts, Test validity assessment, feedback-surface currency, and
+the successor deck all select the latest non-`<stage>_review_meeting` artifact.
+This prevents a completed chair summary from replacing the Build record, Test
+validity pack, or Learn synthesis in the eventual evidence-bound human record.
+Non-Design decks render their own stage label and a real
+`convene_review_meeting` control; the server still enables only the intents in
+the authenticated surface read model. A terminal background meeting run with
+no successor surface marks the initiating ledger action failed/retryable, just
+like a failed Design chair resume. `dbtl_round_watch` posts the bounded failure
+notice to the originating conversation on an error/timeout/interruption and on
+the audited-worker case where the parent reports success but no successor
+surface appears after the consistency grace period.
 
 **A card's tool-call id must satisfy every provider it may be replayed to.**
 `supervisor.card_request_id` builds every card/present-files id as

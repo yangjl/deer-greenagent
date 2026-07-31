@@ -23,7 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.dbtl.stage_routes import GRAPH_STAGES, StageRoutesRefused, transition_target
-from deerflow.persistence.dbtl.model import DbtlCycleRow, DbtlStageAttemptRow, DbtlStageTransitionRow
+from deerflow.persistence.dbtl.model import DbtlCycleRow, DbtlDesignFeedbackSurfaceRow, DbtlStageAttemptRow, DbtlStageTransitionRow
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -90,13 +90,33 @@ class TransitionOpsMixin:
         )
 
     async def list_stage_transitions(self, *, cycle_id: str, project_id: str) -> list[dict[str, Any]]:
-        """The cycle's path history, ordered by ``seq``."""
+        """The cycle's path history, ordered by ``seq``.
+
+        Rows decided on a registered deck also carry ``decided_in_thread_id``,
+        joined from that surface's binding. The transition names only the
+        surface, and the surface alone knows which conversation it may answer;
+        a client cannot resolve that itself because the surface read endpoint
+        requires a viewer thread the project rail does not have.
+        """
         async with self._sf() as session:  # type: ignore[attr-defined]
             rows = (await session.execute(select(DbtlStageTransitionRow).where(DbtlStageTransitionRow.cycle_id == cycle_id, DbtlStageTransitionRow.project_id == project_id).order_by(DbtlStageTransitionRow.seq))).scalars().all()
-            return [_transition_payload(row) for row in rows]
+            surface_ids = {row.decision_surface_id for row in rows if row.decision_surface_id}
+            surface_threads: dict[str, str] = {}
+            if surface_ids:
+                surface_rows = (
+                    await session.execute(
+                        select(DbtlDesignFeedbackSurfaceRow.id, DbtlDesignFeedbackSurfaceRow.originating_thread_id).where(
+                            DbtlDesignFeedbackSurfaceRow.id.in_(surface_ids),
+                            DbtlDesignFeedbackSurfaceRow.project_id == project_id,
+                            DbtlDesignFeedbackSurfaceRow.cycle_id == cycle_id,
+                        )
+                    )
+                ).all()
+                surface_threads = {surface_id: thread_id for surface_id, thread_id in surface_rows}
+            return [_transition_payload(row, surface_threads) for row in rows]
 
 
-def _transition_payload(row: DbtlStageTransitionRow) -> dict[str, Any]:
+def _transition_payload(row: DbtlStageTransitionRow, surface_threads: dict[str, str] | None = None) -> dict[str, Any]:
     return {
         "id": row.id,
         "cycle_id": row.cycle_id,
@@ -112,6 +132,7 @@ def _transition_payload(row: DbtlStageTransitionRow) -> dict[str, Any]:
         "offered_routes": row.offered_routes,
         "decided_by": row.decided_by,
         "decision_surface_id": row.decision_surface_id,
+        "decided_in_thread_id": (surface_threads or {}).get(row.decision_surface_id) if row.decision_surface_id else None,
         "evidence_hash": row.evidence_hash,
         "dataset_fingerprint": row.dataset_fingerprint,
         "stage_spec_version": row.stage_spec_version,

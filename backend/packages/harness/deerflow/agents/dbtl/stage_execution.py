@@ -1819,6 +1819,7 @@ def _write_council_deck(
             surface_id=surface_id,
             surface_mode=surface_mode,
             transition_gate=transition_gate,
+            stage=stage,
             theme_css=theme_css,
         ).encode("utf-8")
     except Exception:  # noqa: BLE001 - a presentation must not break the record
@@ -2705,6 +2706,41 @@ class LiveStageAdapter:
                 cycle_id=cycle_id,
                 note=(f"The {normalized} stage has recorded no evidence yet, so there is nothing for a review meeting to argue about. No participants were run."),
             )
+
+        # Carry the assessment from the pre-meeting surface onto the successor
+        # deck.  The meeting is an attachment to that assessment, not a fresh
+        # transition that gets to reassess itself.  Repository doubles used by
+        # older integrations may not expose the generalized surface read yet;
+        # missing it safely leaves the legacy gate in place.
+        transition_gate = None
+        latest_surface = getattr(self._repo, "latest_stage_feedback_surface", None)
+        if callable(latest_surface):
+            try:
+                prior_surface = await latest_surface(
+                    project_id=project_id,
+                    cycle_id=cycle_id,
+                    stage=normalized,
+                    stage_attempt_id=attempt_id,
+                    mode="stage_review",
+                )
+                request_payload = (
+                    prior_surface.get("decision_request")
+                    if isinstance(prior_surface, Mapping)
+                    else None
+                )
+                candidate_gate = (
+                    request_payload.get("transition_gate")
+                    if isinstance(request_payload, Mapping)
+                    else None
+                )
+                if isinstance(candidate_gate, Mapping):
+                    transition_gate = dict(candidate_gate)
+            except Exception:  # noqa: BLE001 - losing a label must not lose the meeting
+                logger.warning(
+                    "Could not recover the %s transition assessment for its review meeting.",
+                    normalized,
+                    exc_info=True,
+                )
         try:
             spec = resolve_review_stage_spec(normalized)
         except StageSpecNotFound:
@@ -2809,9 +2845,13 @@ class LiveStageAdapter:
                 round_number=1,
                 originating_thread_id=str(runtime.get("thread_id") or ""),
                 paused=False,
-                artifact_uri=artifact_uri,
-                artifact_hash=artifact_hash,
+                # The surface and eventual human verdict stay bound to the
+                # core evidence the meeting reviewed.  The meeting package is
+                # presented by the deck below, but never replaces this binding.
+                artifact_uri=str(evidence.get("uri") or ""),
+                artifact_hash=str(evidence.get("content_hash") or ""),
                 review_issue_ids=(tuple(f"issue-{index + 1}" for index, _item in enumerate(chair_result.consensus.disagreements)) if chair_result is not None and chair_result.consensus is not None else ()),
+                transition_gate=transition_gate,
             )
             theme_css = await asyncio.to_thread(_deck_theme_css, str(user_id or ""))
             deck = await asyncio.to_thread(
@@ -2826,7 +2866,7 @@ class LiveStageAdapter:
                 decision_request=None,
                 surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
                 surface_mode=(surface_plan.mode if surface_plan is not None else ""),
-                transition_gate=None,
+                transition_gate=transition_gate,
                 theme_css=theme_css,
             )
             if deck is not None:
@@ -3512,28 +3552,28 @@ class LiveStageAdapter:
         deck_uri = None
         deck = None
         surface_plan = None
-        # Test's deck is the *pre-meeting* decision surface, so it is rendered
-        # from the stage's own evidence rather than from a chair result — there
-        # is no meeting yet, and its outcome is computed at review time from the
-        # validity pack, never here. It carries no routes for the same reason:
-        # a route menu that pre-empted the outcome computation would be the one
-        # thing Phase 7 forbids.
-        test_has_reviewable_evidence = stage == "test" and produced_usable_evidence and bool(artifact_uri and artifact_hash)
-        if (stage == "design" and chair_has_presentable_outcome) or test_has_reviewable_evidence:
+        # Build, Test, and Learn each get a *pre-meeting* decision surface,
+        # rendered from the stage's own evidence rather than from a chair result
+        # — no meeting has happened when it is written. None of them carries a
+        # route menu: each stage's verdict is taken at review time against this
+        # evidence (Test's outcome is computed there from the validity pack),
+        # and a menu rendered beforehand would pre-empt the decision it exists
+        # to record. Design is the exception in the other direction: its deck
+        # *is* a chair result, so it needs one to exist.
+        stage_has_reviewable_evidence = stage in REVIEW_MEETING_STAGES and produced_usable_evidence and bool(artifact_uri and artifact_hash)
+        if (stage == "design" and chair_has_presentable_outcome) or stage_has_reviewable_evidence:
             transition_gate = None
-            if test_has_reviewable_evidence:
+            if stage_has_reviewable_evidence:
                 if bool(getattr(getattr(self._app_config, "dbtl", None), "progressive_gate", False)):
                     assessment = await self._assess_transition(
-                        stage="test",
+                        stage=stage,
                         cycle=cycle,
-                        evidence_summary=artifact_digest or f"Test evidence: {artifact_uri} ({artifact_hash})",
+                        evidence_summary=artifact_digest or f"{stage.title()} evidence: {artifact_uri} ({artifact_hash})",
                     )
                     # Assessment only. The difficulty is what decides whether a
-                    # validity meeting is skipped, offered, or required; the
-                    # legal routes are not knowable until a person's review
-                    # computes the outcome.
+                    # review meeting is skipped, offered, or required.
                     transition_gate = {
-                        "stage": "test",
+                        "stage": stage,
                         "assessment": assessment.as_dict(),
                         "routes": [],
                     }

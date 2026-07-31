@@ -298,6 +298,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
       {project && (
         <CycleStageSheet
           projectId={project.id}
+          projectSlug={projectSlug}
           cycleId={selected?.id ?? null}
           stage={openStage}
           open={openStage !== null}

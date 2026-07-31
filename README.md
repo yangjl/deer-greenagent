@@ -62,7 +62,13 @@ Design–Build–Test–Learn (DBTL) governance.
   superseded deck points to its replacement. Build, Test, and Learn review
   meetings have independent default-off rollout flags; their pinned contracts
   preserve the computed Test outcome and keep Learn promotion/publication as
-  separate human actions.
+  separate human actions. Their registered decks use stage-specific controls,
+  including **Convene review meeting** when server policy offers it. The
+  artifact parent follows that background run to the successor deck (or
+  restores the same action for retry after a terminal failure or a successful
+  parent run that produces no successor), while every
+  successor remains bound to the original Build record, Test validity pack, or
+  Learn synthesis—not to the meeting's newer chair-summary attachment.
 - **One native setup interaction** — DBTL setup and confirmation are emitted
   through DeerFlow's existing `ask_clarification` Human Input Card in the chat
   transcript. Internal model prompts, structured drafting responses, subagent

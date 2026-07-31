@@ -309,6 +309,54 @@ class TestProgressiveTransitionGate:
         assert "effective === 'high_stakes' && !text" in html
 
 
+class TestNonDesignStageGate:
+    def test_a_test_deck_can_emit_the_convene_intent_the_server_offers(self) -> None:
+        html = render_council_deck(
+            cycle_title="Genomic selection in maize",
+            stage_title="Test meeting",
+            stage="test",
+            round_number=1,
+            results=[{"summary": "The validity pack needs red-team review.", "consensus": _CONSENSUS}],
+            surface_id=SURFACE_ID,
+            surface_mode="stage_review",
+            transition_gate={
+                "stage": "test",
+                "assessment": {
+                    "difficulty": "high_stakes",
+                    "rationale": "The metric sits near the threshold.",
+                    "source": "model",
+                },
+                "routes": [],
+            },
+        )
+
+        controls = html.split("<script>")[0]
+        assert "Review the Test" in controls
+        assert "Agent assessment: high stakes" in controls
+        assert 'data-deck-action="convene_review_meeting"' in controls
+        assert "Convene review meeting" in controls
+        assert "Move this Design" not in controls
+        assert "Recording your Test decision..." in html
+        assert "Submit this Test evidence when it is ready for human review." in html
+
+    def test_build_and_learn_decks_render_their_real_verdict_controls(self) -> None:
+        for stage in ("build", "learn"):
+            html = render_council_deck(
+                cycle_title="Genomic selection in maize",
+                stage_title=f"{stage.title()} meeting",
+                stage=stage,
+                round_number=1,
+                results=[{"summary": "Review the evidence.", "consensus": _CONSENSUS}],
+                surface_id=SURFACE_ID,
+                surface_mode="stage_review",
+            )
+            controls = html.split("<script>")[0]
+            assert 'data-deck-action="submit_for_review"' in controls
+            assert 'data-deck-action="approve"' in controls
+            assert 'data-deck-action="request_changes"' in controls
+            assert 'data-deck-action="reject"' in controls
+
+
 class TestStillSelfContained:
     def test_the_bridge_adds_no_network_dependency(self) -> None:
         html = _deck(decision=_request())

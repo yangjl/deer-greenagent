@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 This section accumulates work toward the **2.1.0** milestone
 
+- **DBTL:** Progressive-gate Phases 3B/3C register pre-meeting review pages
+  for Build and Learn, completing the per-stage decision surfaces: every
+  reviewable Build/Test/Learn attempt now gets a deck rendered from its own
+  recorded evidence, carrying the transition assessment and stage-specific
+  controls. The decks can now actually emit the offered **Convene review
+  meeting** action; the parent follows the background run to its successor or
+  restores a retry after terminal failure. Successor decks and later verdicts
+  stay bound to the original Build/Test/Learn artifact rather than silently
+  switching to the newer meeting-summary attachment, and Learn's page remains
+  structurally unable to promote or publish.
+- **DBTL:** Progressive-gate Phase 4 replaces the read-only path strip with
+  the full non-linear cycle timeline: a compact `Design 1 → Build 1 → …` walk
+  plus an on-demand audit view showing each decided edge's assessment,
+  recorded override, routes not taken, decider, bound evidence file and hash,
+  durable record id, and a link to the conversation whose registered deck
+  recorded the decision. Parked cycles and design-revisit invalidation are
+  stated in words on the timeline itself.
+- **DBTL:** A revision round or review meeting that dies mid-flight no longer
+  stays silent: a fail-soft watcher follows the deck-started background run
+  and posts one server-owned message to the originating conversation naming
+  what stopped and how to retry. It also catches the audited-worker case where
+  the parent run reports success but no successor surface appears after a
+  short grace period. The verdict that started the round remains recorded
+  either way.
 - **DBTL:** Progressive-gate Phase 2 generalizes registered feedback surfaces
   with migration `0025`. Existing Design rows are backfilled in place and the
   legacy URLs remain compatibility aliases, while new stage-aware URLs,

@@ -190,8 +190,15 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
   one**, the submit/review panel with a required rationale, and the activity
   timeline with actor and revision — using the existing right-side inspection
   pattern. **Design is the exception: its sheet is inspection-only.** It keeps
-  the path strip (including the latest durable `dst-…` path-record id for
-  manual evidence), review package, evidence, open blockers with their recording
+  the cycle timeline (`src/core/dbtl/timeline.ts`, which replaced the Phase 0
+  path strip: a compact `Design 1 → Build 1 → …` walk plus an explicit
+  disclosure revealing each decided edge's assessment, recorded override,
+  routes not taken, decider, the bound evidence file — matched by content hash
+  against the cycle's artifact list, with the hash prefix kept either way —
+  the durable `dst-…` record id, and a link to the conversation whose
+  registered deck recorded the decision, built from the server-joined
+  `decided_in_thread_id` on the transition row),
+  review package, evidence, open blockers with their recording
   form, and the activity timeline, but carries no submit control and no
   Approve/Request changes/Reject panel, and says so. Design is submitted and
   decided in the meeting's registered slide deck and nowhere else — project
@@ -571,7 +578,7 @@ unit-tested): **bottom of the transcript while the run is in flight**, and
 **immediately above the closing answer once it settles**, so the conclusion
 reads below the meeting that produced it. The panel still belongs to the run
 rather than to a message; only its placement is anchored. Do not anchor it to
-the *request* instead — that puts it above the preflight card, far up a long
+the _request_ instead — that puts it above the preflight card, far up a long
 transcript, where it is mounted and streaming but effectively invisible.
 Out-of-range positions clamp rather than dropping the panel.
 
@@ -680,7 +687,7 @@ recomputes consensus, and the approval remains bound to the Markdown bytes.
 `src/core/dbtl/design-deck-feedback.ts` is the parent's half of the Design deck
 bridge: **pure**, React-free, and the security-critical boundary between an
 agent-rendered page and the application. A deck runs in an opaque-origin iframe
-and may *collect* a decision; it may never authorize one. Everything it sends is
+and may _collect_ a decision; it may never authorize one. Everything it sends is
 an intent parsed into a closed vocabulary (`ready`, `submit_intent`,
 `open_evidence_intent`, `open_originating_conversation_intent`), and everything
 sent back is state (`initialize`, `pending`, `accepted`, `stale`, `failed`). No
@@ -773,3 +780,9 @@ server-derived lifecycle `open | consumed | superseded`.
 superseded surface a link to the registered newest deck. The server, not the
 TypeScript parser, remains the intent authority. Phase 3 rollout flags are
 available as `dbtl.stage_meetings.{build,test,learn}` and default false.
+Build/Test/Learn decks can emit `convene_review_meeting`; the parent treats it
+as a background successor-producing action, polls the authenticated surface
+read model, refreshes the originating conversation, and remounts the successor
+deck. A terminal run with no successor restores the ledger-bound action for an
+identical retry. Progress and failure copy uses the surface's stage instead of
+calling every action Design.

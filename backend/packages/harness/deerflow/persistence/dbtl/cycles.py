@@ -224,6 +224,33 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
         """The newest artifact revision on a stage attempt, if any."""
         return await session.scalar(select(DbtlArtifactRow).where(DbtlArtifactRow.stage_attempt_id == stage_attempt_id).order_by(DbtlArtifactRow.revision.desc()).limit(1))
 
+    async def _latest_reviewable_artifact(
+        self,
+        session: AsyncSession,
+        stage_attempt_id: str,
+        stage: str,
+    ) -> DbtlArtifactRow | None:
+        """The newest *core* artifact a stage verdict may bind.
+
+        A post-evidence review meeting writes an annotation beside the stage's
+        result.  It is useful evidence that the meeting happened, but it is not
+        the Build record, Test validity pack, or Learn synthesis the meeting
+        reviewed.  Treating that annotation as simply "the latest artifact"
+        lets a later verdict bind to the chair's summary instead of the core
+        stage evidence.  Keep the generic latest-artifact helper for audit and
+        presentation reads; gate writes use this narrower helper.
+        """
+        meeting_artifact_type = f"{stage.strip().lower()}_review_meeting"
+        return await session.scalar(
+            select(DbtlArtifactRow)
+            .where(
+                DbtlArtifactRow.stage_attempt_id == stage_attempt_id,
+                DbtlArtifactRow.artifact_type != meeting_artifact_type,
+            )
+            .order_by(DbtlArtifactRow.revision.desc())
+            .limit(1)
+        )
+
     async def _next_sequence(self, session: AsyncSession, cycle_id: str) -> int:
         current = await session.scalar(select(func.max(DbtlEventRow.sequence)).where(DbtlEventRow.cycle_id == cycle_id))
         return int(current or 0) + 1
@@ -656,7 +683,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
             # A review must have something to review. Without this a stage
             # could be approved on no evidence at all, which is precisely what
             # the durable review record exists to prevent.
-            if await self._latest_artifact(session, row.id) is None:
+            if await self._latest_reviewable_artifact(session, row.id, stage) is None:
                 raise DbtlWorkflowRefused(f"Stage {stage!r} has no artifact to review; attach evidence first.")
             if stage == "reconciliation":
                 # The readiness gate is checked *before* a reviewer is asked, not
@@ -745,7 +772,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                 str(StageStatus.CHANGES_REQUESTED),
             }:
                 raise DbtlWorkflowRefused(f"Stage {stage!r} cannot be parked from status {(attempt.status if attempt else 'missing')!r}.")
-            evidence = await self._latest_artifact(session, attempt.id)
+            evidence = await self._latest_reviewable_artifact(session, attempt.id, stage)
             if evidence is None:
                 raise DbtlWorkflowRefused(f"Stage {stage!r} has no evidence to park.")
             detail = dict(cycle.projection_json or {})
@@ -847,7 +874,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                 if statuses.get(stage) not in {StageStatus.IN_PROGRESS, StageStatus.CHANGES_REQUESTED}:
                     raise DbtlWorkflowRefused(f"Stage {stage!r} cannot use the one-click gate from status {statuses.get(stage)!s}.")
                 attempt = next(row for row in stages if row.stage == stage)
-                if await self._latest_artifact(session, attempt.id) is None:
+                if await self._latest_reviewable_artifact(session, attempt.id, stage) is None:
                     raise DbtlWorkflowRefused(f"Stage {stage!r} has no artifact to review.")
                 statuses[stage] = StageStatus.AWAITING_REVIEW
                 attempt.status = str(StageStatus.AWAITING_REVIEW)
@@ -894,7 +921,11 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                 # approval into Build, and nothing can tell that it did.
                 await self._bind_stage_approval(session, cycle, attempt_row, stages)
 
-            evidence = await self._latest_artifact(session, stage_attempt_id)
+            evidence = await self._latest_reviewable_artifact(
+                session,
+                stage_attempt_id,
+                stage,
+            )
             if evidence is None:
                 raise DbtlWorkflowRefused(f"Stage {stage!r} has no artifact to review.")
             provenance = design_feedback_provenance or {}

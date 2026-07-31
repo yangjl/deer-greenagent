@@ -4,7 +4,21 @@
 feature flag; focused automated checks pass and the owner approved the manual
 walkthrough on 2026-07-31 (park → approve recorded against cycle `b9e8cade`
 in the isolated manual profile). Phase 2 is code complete behind the same
-flags.
+flags. Phase 3 is code complete (2026-07-31): the convening gate reaches the
+read model, `convene_review_meeting` starts a real meeting run, review-meeting
+dispatch/attachment/deck registration are stage-generic, and Build (3B) and
+Learn (3C) register pre-meeting review pages like Test's — all still
+default-off behind `dbtl.stage_meetings.*`. A final implementation audit fixed
+the missing non-Design deck control and successor polling, and made every
+post-meeting surface/verdict continue to bind the core stage artifact instead
+of the newer meeting-summary attachment. Phase 4's timeline is implemented:
+the non-linear cycle timeline replaced the Phase 0 path strip (compact walk +
+on-demand audit detail with assessment, override, routes not taken, decider,
+bound evidence, record id, and a link to the deciding deck's conversation).
+Outstanding Phase 4 work is operational, not code: the manual checkpoints, the
+telemetry review of assessed-vs-overridden rates before defaulting
+`dbtl.progressive_gate=true`, and retiring the 0025 compatibility aliases
+after the one-release window.
 
 Owner-approved on 2026-07-31 against cycle `0bbcd8b9` (scenarios
 `after-meeting`, `meeting-approve`, `post-meeting-revise`, `revise-park`):
@@ -27,8 +41,14 @@ Still unverified by a person:
 - one uncached end-to-end smoke test through every changed stage, per the
   manual-pipeline runbook, before merge.
 
-Known gap, not yet fixed: a revision round that dies mid-flight still says
-nothing in chat, because the explanation rides on the round's own reply.
+Fixed (2026-07-31): a revision round or review meeting that dies mid-flight no
+longer says nothing in chat — a fail-soft watcher
+(`app.gateway.dbtl_round_watch`) follows the deck-started background run and
+posts one server-owned message to the originating conversation naming what
+stopped and how to retry. Because a rejected worker may be an audited outcome
+inside a parent run that reports `success`, the watcher also verifies that a
+successor surface appeared after a short consistency grace period.
+
 **Date:** 2026-07-29
 **Scope:** Replace the uniform post-meeting human gate with a progressive gate
 driven by a per-transition difficulty assessment; model a cycle as a recorded
@@ -403,25 +423,33 @@ The shared producer prerequisite is now done: the deck/feedback-surface path in
 `_plan_feedback_surface(stage=...)`, `_register_feedback_surface`,
 `_write_council_deck(stage=...)`), with Design output byte-identical.
 
-Still to implement before any `dbtl.stage_meetings.*` flag can be enabled, in
-dependency order:
+All five dependency-ordered blockers are implemented (2026-07-31):
 
-1. **Convening decision.** `meeting_gate()` and
-   `DbtlStageMeetingsConfig.enabled_for()` still have zero production callers;
-   the flags reach only `/api/features`. Nothing joins an assessment, the flag,
-   and the gate into something a person can see.
-2. **A pre-meeting deck for a non-Design stage.** Build/Test/Learn produce no
-   deck today, so there is no surface to carry the gate. This needs a renderer
-   over stage evidence (Test: computed outcome + validity pack) rather than
-   over a chair result, since no meeting has happened yet.
-3. **Read-model exposure.** `filter_stage_feedback_intents` is a whitelist
-   filter that can only remove, so `convene_review_meeting` and `choose_route`
-   can never currently be offered; the read model also returns no meeting gate.
-4. **A `convene_review_meeting` POST branch** that starts the meeting run in the
-   originating conversation (the `chair_option` branch is the template), and
-5. **Review-meeting dispatch** through the council machinery against
-   `resolve_review_stage_spec(stage)`, recording output through
-   `attach_meeting_to_core_evidence` and superseding the pre-meeting deck.
+1. **Convening decision** — `surface_meeting_gate` derives a stage's gate from
+   the assessment its own deck was rendered against, and `apply_meeting_gate`
+   joins it with the per-stage flag in the surface read model.
+2. **A pre-meeting deck for every non-Design stage** — Test (3A), then Build
+   and Learn (3B/3C), each rendered from the stage's own recorded evidence
+   with the assessment aboard and stage-specific controls
+   (`tests/test_dbtl_stage_review_pages.py`).
+3. **Read-model exposure** — `apply_meeting_gate` adds
+   `convene_review_meeting` when one may be convened and withholds transition
+   intents while one is required.
+4. **The `convene_review_meeting` POST branch** starts the meeting run in the
+   originating conversation carrying the server-owned
+   `dbtl_review_meeting_stage`.
+5. **Review-meeting dispatch** runs `generic:<stage>-review:v1` through
+   `LiveStageAdapter._execute_review_meeting`, sanitizes attachments on the
+   write path, and registers the meeting's own `stage_review` deck. That
+   successor carries forward the original core evidence binding and transition
+   assessment; the meeting artifact is an annotation and is excluded anywhere
+   a later gate or Test outcome selects reviewable evidence.
+   `review_meeting_recorded` closes the gate per stage attempt. The artifact
+   parent follows the background run to this successor, and terminal runs with
+   no successor restore the ledger-bound action for an identical retry.
+
+What remains for Phase 3 is acceptance, not code: the per-stage manual
+checkpoints and walkthroughs below, and the flag-enable decision.
 
 - New StageSpecs: `generic:test-review:v1`, then `generic:build-review:v1`,
   then `generic:learn-review:v1`, reusing roster proposal, preflight,
@@ -505,6 +533,17 @@ dependency order:
   (default `false`), independent of Phases 1–2.
 
 ### Phase 4 — Cutover and cleanup
+
+**Implementation status (2026-07-31):** the timeline is done —
+`frontend/src/core/dbtl/timeline.ts` replaced the path strip with the compact
+walk plus an expanded audit view (assessment, override, routes not taken,
+decider, bound evidence file and hash, durable record id, and a link to the
+conversation whose registered deck recorded each edge; the backend joins
+`decided_in_thread_id` onto transition rows from the deciding surface).
+CHANGELOG and AGENTS docs are updated, and the pointer-loop limitation note is
+narrowed to the unparked case. Remaining: the manual checkpoints and
+walkthrough below, the telemetry review before `dbtl.progressive_gate=true`,
+and retiring the compatibility views after the one-release window.
 
 - Replace the Phase 0 path strip with the complete non-linear timeline in the
   rail: attempts, loops, assessments, overrides, invalidations, park/resume,

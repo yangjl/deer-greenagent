@@ -111,6 +111,21 @@ class _Repo:
         self.surfaces.append(kwargs)
         return {"surface_id": kwargs["surface_id"], **kwargs}
 
+    async def latest_stage_feedback_surface(self, **_kwargs):
+        return {
+            "decision_request": {
+                "transition_gate": {
+                    "stage": "test",
+                    "assessment": {
+                        "difficulty": "high_stakes",
+                        "rationale": "The metric sits near the threshold.",
+                        "source": "model",
+                    },
+                    "routes": [],
+                }
+            }
+        }
+
 
 class _Dispatcher:
     """Answers every seat with a contract-valid report, recording what it saw."""
@@ -261,6 +276,21 @@ class TestTheMeetingRecordsItsOwnEvidence:
         assert surface["stage"] == "test"
         assert surface["stage_attempt_id"] == "attempt-test"
         assert surface["mode"] == "stage_review"
+
+    @pytest.mark.asyncio
+    async def test_the_successor_surface_stays_bound_to_the_core_test_pack(self, tmp_path: Path):
+        """The meeting package is an annotation, not a replacement validity
+        pack.  The deck may present both, but the eventual human outcome must
+        still bind the exact Test artifact the meeting reviewed."""
+        repo = _Repo()
+
+        await _convene(repo, tmp_path)
+
+        surface = repo.surfaces[-1]
+        assert surface["evidence_artifact_id"] == "artifact-test-1"
+        assert surface["evidence_content_hash"] == PACKAGE_HASH
+        gate = surface["decision_request"]["transition_gate"]
+        assert gate["assessment"]["difficulty"] == "high_stakes"
 
 
 class TestItRefusesWhatItCannotReview:

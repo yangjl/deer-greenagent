@@ -3,23 +3,60 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 const mutate = rs.fn();
 const featureState = { designDeckFeedback: false, progressiveGate: false };
+const timelineState = { parked: false, invalidated: false };
 const detailState: {
   transitions?: Array<Record<string, unknown>>;
   transitionGate?: Record<string, unknown>;
 } = {};
+
+const emptyEntry = {
+  assessedDifficulty: null,
+  assessmentRationale: null,
+  humanOverride: null,
+  overrodeAssessment: false,
+  offeredRoutes: [],
+  decidedAt: null,
+  decisionSurfaceId: null,
+  decidedInThreadId: null,
+  evidenceHash: null,
+  backfilled: false,
+};
 
 rs.mock("@/core/dbtl", () => ({
   CYCLE_STATE_LABELS: { design: "Design" },
   STAGE_LABELS: { build: "Build", design: "Design" },
   STATUS_LABELS: { in_progress: "In progress" },
   activityRevision: () => null,
-  derivePathStrip: (transitions: unknown[]) =>
-    transitions.length > 0
-      ? [
-          { stage: "design", attempt: 1, status: "passed", backfilled: false },
-          { stage: "build", attempt: 1, status: "current", backfilled: false },
-        ]
-      : [],
+  deriveCycleTimeline: (transitions: unknown[]) => ({
+    entries:
+      transitions.length > 0
+        ? [
+            {
+              ...emptyEntry,
+              stage: "design",
+              round: 1,
+              status: timelineState.invalidated ? "invalidated" : "passed",
+              chosenRoute: "approve",
+              recordId: "transition-1",
+              decidedBy: "user-1",
+              decisionSurfaceId: "surface-1",
+              decidedInThreadId: "thread-7",
+            },
+            {
+              ...emptyEntry,
+              stage: "build",
+              round: 1,
+              status: "current",
+              chosenRoute: null,
+              recordId: null,
+              decidedBy: null,
+            },
+          ]
+        : [],
+    parked: timelineState.parked,
+    parkedStage: timelineState.parked ? "design" : null,
+    hasInvalidatedWork: timelineState.invalidated,
+  }),
   artifactAttachmentReadiness: (
     artifactType: string,
     artifactUri: string,
@@ -118,6 +155,8 @@ afterEach(() => {
   mutate.mockReset();
   featureState.designDeckFeedback = false;
   featureState.progressiveGate = false;
+  timelineState.parked = false;
+  timelineState.invalidated = false;
   delete detailState.transitions;
   delete detailState.transitionGate;
 });
@@ -127,6 +166,7 @@ function renderSheet(stage: "design" | "build" = "design") {
     <I18nProvider initialLocale="en-US">
       <CycleStageSheet
         projectId="project-1"
+        projectSlug="drought"
         cycleId="cycle-1"
         stage={stage}
         open
@@ -276,7 +316,7 @@ describe("CycleStageSheet Design read-only review", () => {
   });
 });
 
-describe("CycleStageSheet path strip", () => {
+describe("CycleStageSheet cycle timeline", () => {
   const transitions = [
     {
       id: "transition-1",
@@ -288,7 +328,7 @@ describe("CycleStageSheet path strip", () => {
     },
   ];
 
-  it("renders no strip while the progressive gate flag is off", () => {
+  it("renders no timeline while the progressive gate flag is off", () => {
     detailState.transitions = transitions;
 
     renderSheet();
@@ -297,7 +337,7 @@ describe("CycleStageSheet path strip", () => {
     expect(screen.queryByText("Design 1")).toBeNull();
   });
 
-  it("renders no strip when the flag is on but the payload has no transitions", () => {
+  it("renders no timeline when the flag is on but the payload has no transitions", () => {
     featureState.progressiveGate = true;
 
     renderSheet();
@@ -315,7 +355,55 @@ describe("CycleStageSheet path strip", () => {
     expect(screen.getByText("Design 1")).toBeTruthy();
     const head = screen.getByText("Build 1");
     expect(head.className).toContain("font-semibold");
-    expect(screen.getByText("Path record: transition-1")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Design 1" })).toBeNull();
+  });
+
+  it("keeps the audit detail behind an explicit disclosure", () => {
+    featureState.progressiveGate = true;
+    detailState.transitions = transitions;
+
+    renderSheet();
+
+    expect(screen.queryByText("transition-1")).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show how each step was decided" }),
+    );
+
+    expect(screen.getByText("transition-1")).toBeTruthy();
+    expect(screen.getByText("user-1")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Hide decision detail" }),
+    ).toBeTruthy();
+  });
+
+  it("links a deck-decided edge to the conversation its deck answers", () => {
+    featureState.progressiveGate = true;
+    detailState.transitions = transitions;
+
+    renderSheet();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show how each step was decided" }),
+    );
+
+    const link = screen.getByRole("link", {
+      name: "Open the deck this was decided on",
+    });
+    expect(link.getAttribute("href")).toContain("thread-7");
+    expect(link.getAttribute("href")).toContain("drought");
+  });
+
+  it("states a parked cycle and invalidated work in words", () => {
+    featureState.progressiveGate = true;
+    detailState.transitions = transitions;
+    timelineState.parked = true;
+    timelineState.invalidated = true;
+
+    renderSheet();
+
+    expect(screen.getByText("This cycle is parked.")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Work approved before Design was reopened no longer counts.",
+      ),
+    ).toBeTruthy();
   });
 });
