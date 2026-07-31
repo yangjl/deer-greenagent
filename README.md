@@ -81,6 +81,11 @@ Design–Build–Test–Learn (DBTL) governance.
   parent run that produces no successor), while every
   successor remains bound to the original Build record, Test validity pack, or
   Learn synthesis—not to the meeting's newer chair-summary attachment.
+  Test's actual human path is chat-first: a typed, server-evaluated Test package
+  produces a Human Input Card that offers the configured review meeting, then
+  a second card records one outcome-compatible route. The right-side stage
+  sheet is a read-only evidence and audit inspector; free-form PASS prose and
+  files created by ordinary chat do not unlock Learn.
 - **One native setup interaction** — DBTL setup and confirmation are emitted
   through DeerFlow's existing `ask_clarification` Human Input Card in the chat
   transcript. Internal model prompts, structured drafting responses, subagent

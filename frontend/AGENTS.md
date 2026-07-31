@@ -467,10 +467,14 @@ designNotes` and are handed to the council as the owner's decisions rather
   one restrained provenance ledger (dataset binding, stage contract,
   code/config, environment, versioned outputs, deviations). Test renders
   headline metrics beside validity checks, with the computed scientific outcome
-  visually dominant. The Test stage sheet never exposes the generic review
-  controls; an authenticated human submits the versioned validity pack and only
-  outcome-compatible rework routes are offered. Status always has a text label
-  and never depends on colour alone.
+  visually dominant. The generic stage sheet is inspection-only: it renders
+  evidence, computed outcomes, transition context, blockers, and activity but
+  mounts no generic evidence, submission, blocker, or verdict inputs.
+  Specialized Reconciliation/Learn controls remain during their chat migration.
+  Test's authenticated Human Input Cards live in the originating conversation:
+  the first offers or requires the configured review meeting, and the second
+  offers only routes allowed by the server-computed outcome. Status always has
+  a text label and never depends on colour alone.
 - DBTL Phase 8 lives in `src/core/dbtl/knowledge-{view,api,hooks}.ts` and
   `project-rail/learn-review.tsx`. The Learn sheet labels every agent-created
   item as a provisional candidate and keeps candidate disposition, human

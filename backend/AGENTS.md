@@ -2277,8 +2277,21 @@ old 40-super-step default to twelve calls (143 super-steps), so a worker can
 inspect, write, execute, diagnose, and still return its structured result in
 the same request. `generic:test:v3` retains that allowance and pins
 `generic-predictive:v2`, its exact required-check list, optional-Reconciliation
-semantics, and the no-invented-gates rule into the worker context. Ordinary
-stage workers omit `council_seat` from lifecycle
+semantics, and the no-invented-gates rule into the worker context. Test
+completion additionally requires `provenance.validity_assessment` with typed
+headline metrics and exactly the pinned checks. The server reconstructs the
+validity objects, owns the optional-mode Build-lineage check, and computes the
+outcome; a prose PASS or an unregistered JSON/Markdown file remains
+non-reviewable. The Supervisor presents the meeting choice and final legal
+route as `ask_clarification` cards bound to that snapshot. A card answer
+recovers its cycle from the server-emitted request and records the authenticated
+user/project role, so the one-shot composer scope is not an authority or a
+resume dependency. Build/Test/Learn decks remain registered evidence but carry
+no feedback bridge; only Design keeps its deck bridge during migration. The
+cycle read model also projects the narrowly known
+Build-approved/Test-active rollout shape as Test, and the Test decision commits
+that cursor repair with its normal audited revision. Ordinary stage workers
+omit `council_seat` from lifecycle
 events; actual review meetings carry their stage in that identity so the
 frontend uses Design, Build, Test, or Learn meeting copy correctly. It records
 the explicit Build checkpoint inside a one-click approval before advancing to

@@ -177,55 +177,24 @@ function renderSheet(stage: "design" | "build" = "design") {
 }
 
 describe("CycleStageSheet evidence guidance", () => {
-  it("labels required inputs and explains the disabled attach action", () => {
+  it("keeps the evidence inspector read-only and points decisions to chat", () => {
     renderSheet("build");
 
-    expect(screen.getByLabelText(/Artifact type/)).toBeTruthy();
-    expect(screen.getByLabelText(/Workspace file path/)).toBeTruthy();
-    expect(screen.getByLabelText(/SHA-256/)).toBeTruthy();
-
+    expect(screen.queryByLabelText(/Artifact type/)).toBeNull();
+    expect(screen.queryByLabelText(/Workspace file path/)).toBeNull();
+    expect(screen.queryByLabelText(/SHA-256/)).toBeNull();
+    expect(screen.getByText("Continue in chat")).toBeTruthy();
     expect(
-      screen.getByText("Add artifact URI and SHA-256 to continue."),
-    ).toBeTruthy();
+      screen.queryByRole("button", { name: "Attach evidence" }),
+    ).toBeNull();
     expect(
-      screen.getByText(
-        "Attach at least one evidence file above to enable review submission.",
-      ),
-    ).toBeTruthy();
-    expect(
-      screen
-        .getByRole("button", { name: "Attach evidence" })
-        .hasAttribute("disabled"),
-    ).toBe(true);
-    expect(
-      screen
-        .getByRole("button", { name: "Submit for review" })
-        .hasAttribute("disabled"),
-    ).toBe(true);
-  });
-
-  it("enables evidence attachment after a valid path and hash are entered", () => {
-    renderSheet();
-
-    fireEvent.change(screen.getByLabelText(/Workspace file path/), {
-      target: { value: "/mnt/user-data/workspace/design.json" },
-    });
-    fireEvent.change(screen.getByLabelText(/SHA-256/), {
-      target: { value: "a".repeat(64) },
-    });
-
-    expect(screen.getByText("Ready to attach this evidence.")).toBeTruthy();
-    expect(
-      screen
-        .getByRole("button", { name: "Attach evidence" })
-        .hasAttribute("disabled"),
-    ).toBe(false);
+      screen.queryByRole("button", { name: "Submit for review" }),
+    ).toBeNull();
   });
 });
 
 describe("CycleStageSheet Design read-only review", () => {
-  const READ_ONLY =
-    "This sheet is for inspection only. Design is submitted and decided in the meeting's registered slide deck.";
+  const READ_ONLY = "Continue in chat";
 
   it("offers no submit or verdict control on Design", () => {
     renderSheet();
@@ -247,7 +216,7 @@ describe("CycleStageSheet Design read-only review", () => {
     expect(screen.getByText("Evidence")).toBeTruthy();
     expect(screen.getByText("Open blockers")).toBeTruthy();
     expect(screen.getByText("Activity")).toBeTruthy();
-    expect(screen.getByLabelText("Record a blocker")).toBeTruthy();
+    expect(screen.queryByLabelText("Record a blocker")).toBeNull();
   });
 
   it("also points at the deck when the cutover flag is enabled", () => {
@@ -255,7 +224,6 @@ describe("CycleStageSheet Design read-only review", () => {
 
     renderSheet();
 
-    expect(screen.getByText("Open the feedback deck")).toBeTruthy();
     expect(screen.getByText(READ_ONLY)).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: "Submit for review" }),
@@ -306,13 +274,13 @@ describe("CycleStageSheet Design read-only review", () => {
     expect(screen.getByText(/Parked — ordinary requests/)).toBeTruthy();
   });
 
-  it("leaves a non-design stage's submit control in place", () => {
+  it("keeps a non-design stage read-only too", () => {
     renderSheet("build");
 
     expect(
-      screen.getByRole("button", { name: "Submit for review" }),
-    ).toBeTruthy();
-    expect(screen.queryByText(READ_ONLY)).toBeNull();
+      screen.queryByRole("button", { name: "Submit for review" }),
+    ).toBeNull();
+    expect(screen.getByText(READ_ONLY)).toBeTruthy();
   });
 });
 

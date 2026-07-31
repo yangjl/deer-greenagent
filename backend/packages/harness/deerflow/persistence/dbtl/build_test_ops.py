@@ -75,10 +75,7 @@ def _server_owned_optional_provenance(checks: list[ValidityCheck]) -> list[Valid
     authoritative = ValidityCheck(
         check=ValidityCheckName.RECONCILED_INPUTS,
         status=CheckStatus.PASSED,
-        detail=(
-            "The Build lineage binds every examined input to a server-computed content hash; "
-            "Data Reconciliation is intentionally not required in this deployment."
-        ),
+        detail=("The Build lineage binds every examined input to a server-computed content hash; Data Reconciliation is intentionally not required in this deployment."),
         evidence_refs=("server://dbtl/build-lineage",),
     )
     replaced = False
@@ -423,6 +420,11 @@ class BuildTestOpsMixin:
             self._require_revision(cycle, expected_db_revision)
             attempts = {item.stage: item for item in stages}
             test = attempts["test"]
+            if cycle.state == "build" and attempts["build"].status == StageStatus.APPROVED.value and test.status == StageStatus.AWAITING_REVIEW.value:
+                # Repair the same bounded rollout shape projected by
+                # ``_cycle_payload``. The assessment event below commits the
+                # corrected cursor and the human decision in one revision.
+                cycle.state = "test"
             if cycle.state != "test" or test.status != StageStatus.AWAITING_REVIEW.value:
                 raise DbtlWorkflowRefused("Test must be awaiting review before validity can be assessed.")
             # A review meeting annotates the validity pack; it never replaces

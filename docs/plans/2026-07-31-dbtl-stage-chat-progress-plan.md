@@ -364,3 +364,34 @@ human authority.
 4. Confirm that Lead Agent execution remains deferred until Phases 1–3 are
    evaluated manually.
 
+## 12. 2026-07-31 Test-gate correction (implemented)
+
+Manual testing exposed a separate authority gap: an unscoped follow-up went to
+the Lead Agent, which could write convincing Test reports and say PASS while the
+durable Test attempt remained in progress. The right-side sheet also offered a
+second, high-friction input path that required people to transcribe hashes,
+metrics, and checks.
+
+The correction is intentionally chat-first:
+
+- Test evidence is reviewable only when a stage worker returns typed metrics
+  and every check in the server-pinned validity pack; prose and arbitrary files
+  cannot satisfy this contract.
+- The server owns the optional-Reconciliation Build-lineage check and computes
+  the outcome deterministically.
+- The originating conversation renders a meeting-choice card, followed by an
+  outcome-compatible route card. Each card embeds the server-owned cycle and
+  evidence snapshot; the answer turn therefore survives loss of the one-shot
+  composer scope.
+- A meeting reads and annotates the core Test evidence, then returns to the same
+  route card. It cannot rewrite the computed outcome.
+- The generic stage sheet is read-only evidence/audit UI. It no longer mounts
+  generic evidence, blocker, submission, or verdict inputs; specialized
+  Reconciliation/Learn controls remain a later chat migration.
+- The exact historical Build-approved/Test-active cursor mismatch is projected
+  as Test and repaired transactionally when the human outcome is recorded.
+
+Acceptance is pinned by `test_dbtl_test_chat_review.py`, the DBTL backend suite,
+and the stage-sheet DOM suite. The next manual checkpoint should be captured
+only after both the optional meeting route and direct outcome route survive a
+hard refresh.

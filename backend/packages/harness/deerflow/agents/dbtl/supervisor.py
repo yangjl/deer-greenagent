@@ -121,6 +121,8 @@ DESIGN_CLARIFICATION_PREFIX = "dbtl-design__"
 # things: a clarification answer feeds a council that already ran, this one
 # *is* the design, submitted where no council ran at all.
 DESIGN_AUTHORING_PREFIX = "dbtl-design-write__"
+TEST_REVIEW_PREFIX = "dbtl-test-review__"
+TEST_OUTCOME_PREFIX = "dbtl-test-outcome__"
 # Not a card: the id of the ``present_files`` pair that delivers a finished
 # package. Same provider constraint, same failure mode.
 PRESENT_ARTIFACT_PREFIX = "dbtl-present__"
@@ -850,6 +852,125 @@ def _design_authoring_message(
     )
 
 
+def _test_card_messages(
+    decision: BranchDecision,
+    snapshot: dict[str, Any],
+    *,
+    request_nonce: str,
+    outcome: bool,
+) -> tuple[AIMessage, ToolMessage]:
+    """Render the Test meeting/route decision in the conversation."""
+    evaluation = dict(snapshot.get("evaluation") or {})
+    outcome_name = str(evaluation.get("outcome") or "inconclusive")
+    meeting = dict(snapshot.get("meeting") or {})
+    requirement = str(meeting.get("requirement") or "skipped")
+    if outcome:
+        prefix = TEST_OUTCOME_PREFIX
+        title = "Decide the Test outcome"
+        question = f"The server computed Test as {outcome_name.replace('_', ' ')}. What should this cycle do?"
+        allowed = {str(item) for item in evaluation.get("allowed_recommendations", [])}
+        labels = {
+            "advance_to_learn": "Accept outcome and advance to Learn",
+            "repeat_test": "Repeat Test",
+            "return_to_build": "Return to Build",
+            "return_to_design": "Return to Design",
+            "close_cycle": "Close this cycle",
+        }
+        options = [{"id": route, "label": labels[route], "value": route} for route in labels if route in allowed]
+    else:
+        prefix = TEST_REVIEW_PREFIX
+        title = "Test evidence is ready"
+        question = "Would you like a Test review meeting before deciding the outcome?"
+        options = []
+        if requirement in {"optional", "required"}:
+            options.append(
+                {
+                    "id": "convene_review_meeting",
+                    "label": "Convene Test review meeting",
+                    "value": "convene_review_meeting",
+                }
+            )
+        if requirement != "required":
+            options.append(
+                {
+                    "id": "continue_to_outcome",
+                    "label": "Continue to outcome decision",
+                    "value": "continue_to_outcome",
+                }
+            )
+    request_id = card_request_id(prefix, decision.cycle_id or "", request_nonce, str(snapshot.get("evidence_hash") or ""))
+    context = f"Bound evidence: {snapshot.get('evidence_uri') or 'the recorded Test package'}\nValidity pack: {evaluation.get('validity_pack_key') or 'server default'}"
+    request = {
+        "version": 1,
+        "kind": "human_input_request",
+        "source": "ask_clarification",
+        "request_id": request_id,
+        "clarification_type": "dbtl_test_outcome" if outcome else "dbtl_test_review",
+        "title": title,
+        "question": question,
+        "context": context,
+        "input_mode": "single_choice",
+        "options": options,
+        "dbtl_cycle_id": decision.cycle_id,
+        "test_review_snapshot": snapshot,
+    }
+    return (
+        AIMessage(
+            id=f"{request_id}:call",
+            content="",
+            tool_calls=[
+                {
+                    "name": "ask_clarification",
+                    "args": {
+                        "question": question,
+                        "context": context,
+                        "clarification_type": request["clarification_type"],
+                        "options": options,
+                    },
+                    "id": request_id,
+                    "type": "tool_call",
+                }
+            ],
+        ),
+        ToolMessage(
+            id=request_id,
+            name="ask_clarification",
+            tool_call_id=request_id,
+            content=f"{context}\n\n{question}",
+            artifact={"human_input": request},
+        ),
+    )
+
+
+def _answered_test_card(state: dict, prefix: str) -> tuple[str, str, dict[str, Any]] | None:
+    from deerflow.agents.human_input import read_human_input_response
+
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if not response or response.get("source") != "ask_clarification":
+            return None
+        request_id = str(response.get("request_id") or "")
+        if not request_id.startswith(prefix) or response.get("response_kind") != "option":
+            return None
+        emitted = _emitted_card_request(state, request_id)
+        snapshot = dict((emitted or {}).get("test_review_snapshot") or {})
+        if not snapshot or not (emitted or {}).get("dbtl_cycle_id"):
+            return None
+        option_id = str(response.get("option_id") or "")
+        option = next(
+            (item for item in (emitted or {}).get("options", []) if isinstance(item, dict) and item.get("id") == option_id),
+            None,
+        )
+        if option is None:
+            return None
+        # The emitted option is the authority. The reply's duplicate value is
+        # display compatibility and may be stale or forged.
+        return request_id, str(option.get("value") or ""), snapshot
+    return None
+
+
 def _authored_design(state: dict) -> str | None:
     """The design text, only when the server itself asked for it.
 
@@ -1348,6 +1469,88 @@ def build_supervisor_graph(
         config: RunnableConfig,
     ) -> dict:
         decision = decide(state)
+        raw_context = request_context(config)
+        request_nonce = str(raw_context.get("run_id") or "")
+
+        outcome_answer = _answered_test_card(state, TEST_OUTCOME_PREFIX)
+        if outcome_answer is not None:
+            request_id, recommendation, snapshot = outcome_answer
+            recorder = getattr(stage_adapter, "record_test_outcome", None)
+            if not callable(recorder):
+                return {"messages": [AIMessage(content="This runtime cannot record a Test outcome from chat yet; no decision was written.")]}
+            try:
+                recorded = recorder(
+                    project_id=str(context.project_id or ""),
+                    cycle_id=str(decision.cycle_id or ""),
+                    snapshot=snapshot,
+                    recommendation=recommendation,
+                    config=config,
+                    idempotency_key=f"{request_id}:{recommendation}",
+                )
+                if isawaitable(recorded):
+                    recorded = await recorded
+            except Exception as exc:  # noqa: BLE001 - refusal must be visible in chat
+                logger.warning("Could not record the Test outcome from chat.", exc_info=True)
+                return {"messages": [AIMessage(content=f"The Test decision was not recorded: {exc}")]}
+            assessment = dict(recorded.get("validity_assessment") or {}) if isinstance(recorded, dict) else {}
+            next_state = dict(recorded.get("cycle") or {}).get("state") if isinstance(recorded, dict) else None
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            f"Recorded your Test decision as {assessment.get('recommendation', recommendation).replace('_', ' ')} "
+                            f"with outcome {str(assessment.get('outcome') or snapshot.get('evaluation', {}).get('outcome') or '').replace('_', ' ')}. "
+                            f"The cycle is now at {next_state or 'its recorded next stage'}."
+                        )
+                    )
+                ]
+            }
+
+        review_answer = _answered_test_card(state, TEST_REVIEW_PREFIX)
+        if review_answer is not None:
+            _request_id, choice, snapshot = review_answer
+            presented: list = []
+            if choice == "convene_review_meeting":
+                result = stage_adapter.execute(
+                    project_id=context.project_id,
+                    cycle_id=decision.cycle_id,
+                    request_text="Convene the Test review meeting for the recorded evidence.",
+                    state=state,
+                    config=config,
+                    review_meeting_stage="test",
+                )
+                if isawaitable(result):
+                    result = await result
+                if not getattr(result, "produced_usable_evidence", False):
+                    return {"messages": [AIMessage(content=_render_continuation(decision, result.note))]}
+                if getattr(result, "artifact_uri", None):
+                    presented.extend(
+                        _present_artifact_messages(
+                            decision,
+                            note=result.note,
+                            artifact_uri=result.artifact_uri,
+                            request_nonce=request_nonce,
+                            deck_uri=getattr(result, "deck_uri", None),
+                        )
+                    )
+            snapshot_reader = getattr(stage_adapter, "test_review_snapshot", None)
+            if callable(snapshot_reader):
+                refreshed = snapshot_reader(
+                    project_id=str(context.project_id or ""),
+                    cycle_id=str(decision.cycle_id or ""),
+                )
+                if isawaitable(refreshed):
+                    refreshed = await refreshed
+                if isinstance(refreshed, dict):
+                    snapshot = refreshed
+            return {
+                "messages": [
+                    *presented,
+                    *_test_card_messages(decision, snapshot, request_nonce=request_nonce, outcome=True),
+                ],
+                **({"artifacts": [path for path in (result.artifact_uri, getattr(result, "deck_uri", None)) if path]} if choice == "convene_review_meeting" and getattr(result, "artifact_uri", None) else {}),
+            }
+
         request_text = _latest_cycle_request_text(state)
         review_intent = _review_intent(request_text)
         if review_intent is not None:
@@ -1593,16 +1796,37 @@ def build_supervisor_graph(
         if isinstance(artifact_uri, str) and artifact_uri:
             raw_context = request_context(config)
             request_nonce = str(raw_context.get("run_id") or "")
-            return {
-                "messages": list(
-                    _present_artifact_messages(
-                        decision,
-                        note=result.note,
-                        artifact_uri=artifact_uri,
-                        request_nonce=request_nonce,
-                        deck_uri=deck_uri,
+            presented = list(
+                _present_artifact_messages(
+                    decision,
+                    note=result.note,
+                    artifact_uri=artifact_uri,
+                    request_nonce=request_nonce,
+                    deck_uri=deck_uri,
+                )
+            )
+            if getattr(result, "stage", None) == "test":
+                snapshot_reader = getattr(stage_adapter, "test_review_snapshot", None)
+                snapshot = None
+                if callable(snapshot_reader):
+                    snapshot = snapshot_reader(
+                        project_id=str(context.project_id or ""),
+                        cycle_id=str(decision.cycle_id or ""),
                     )
-                ),
+                    if isawaitable(snapshot):
+                        snapshot = await snapshot
+                if isinstance(snapshot, dict):
+                    requirement = str(dict(snapshot.get("meeting") or {}).get("requirement") or "skipped")
+                    presented.extend(
+                        _test_card_messages(
+                            decision,
+                            snapshot,
+                            request_nonce=request_nonce,
+                            outcome=requirement in {"skipped", "complete"},
+                        )
+                    )
+            return {
+                "messages": presented,
                 "artifacts": [path for path in (artifact_uri, deck_uri) if path],
             }
         return {"messages": [AIMessage(content=_render_continuation(decision, result.note))]}

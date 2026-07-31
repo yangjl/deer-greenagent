@@ -101,10 +101,11 @@ Breeding-workspace note:
   at `/workspace/chats`. Cycles/to-dos are a browser-local review projection —
   DBTL orchestration is deferred per the 2026-07-25 foundation-demo rescope.
 - **The chatbox is the primary input and interaction channel.** Both left rails
-  are navigation, summary, and review only — they contain no text inputs, and a
-  rail action that needs input arms the composer (sets its scope, moves the
-  cursor there) rather than opening a form. Structured review actions that must
-  cite evidence live in the right-side inspection sheets, not the rails. See
+  are navigation, evidence, summary, and audit surfaces only. The generic stage
+  sheet is inspection-only; current Test meeting/outcome decisions return to
+  the originating conversation as server-bound Human Input Cards. Specialized
+  Reconciliation/Learn controls and the Design-deck migration remain explicit
+  exceptions until their chat flows are implemented. See
   [frontend/AGENTS.md](frontend/AGENTS.md) for the `extraTools` / `focusSignal`
   slots that keep this out of the generic composer.
 - The project folder tree appears only under the expandable project rows in
@@ -181,6 +182,11 @@ Breeding-workspace note:
   Design, Reconciliation, Build, or cycle closure. See
   [backend/AGENTS.md](backend/AGENTS.md) for persistence and routing contracts
   and [frontend/AGENTS.md](frontend/AGENTS.md) for the two-column review model.
+  A current Test worker must also return a typed metric/check payload; prose or
+  arbitrary workspace files cannot become review evidence. The server computes
+  the outcome, then chat offers the policy-selected review meeting and a second
+  outcome-compatible route card. Card replies recover their cycle from the
+  emitted request, so losing the next-request cycle scope cannot strand Test.
 - DBTL Phase 8 makes Learn executable and keeps knowledge authority deliberately
   split. Structured Learn workers may synthesize evidence-bound candidates only
   from a human-owned Test outcome; inconclusive and invalidated results can

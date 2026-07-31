@@ -62,7 +62,7 @@ class _Repo:
         return {}
 
     async def build_test_view(self, cycle_id: str, *, project_id: str):
-        return {"cycle_id": cycle_id, "build_lineage": None, "validity_assessment": None}
+        return {"cycle_id": cycle_id, "build_lineage": {"id": "lineage-1"}, "validity_assessment": None}
 
     async def list_worker_runs(self, cycle_id: str, *, project_id: str, stage: str):
         return []
@@ -106,7 +106,40 @@ class _Dispatcher:
                 "limitations": [],
                 "quality_checks": [{"name": "no leakage", "passed": True, "detail": ""}],
                 "recommended_next_actions": ["Review the validity pack."],
-                "provenance": {"inputs_examined": ["validity pack"]},
+                "provenance": {
+                    "inputs_examined": ["validity pack"],
+                    "validity_assessment": {
+                        "metrics": [
+                            {
+                                "name": "held_out_rank_correlation",
+                                "value": 0.46,
+                                "threshold": 0.4,
+                                "criterion": "gte",
+                                "plausible_max": 1.0,
+                                "unit": "",
+                            }
+                        ],
+                        "checks": [
+                            {
+                                "check": check,
+                                "status": "passed",
+                                "detail": f"{check} passed against the recorded Test evidence.",
+                                "evidence_refs": ["/mnt/user-data/outputs/validity.json"],
+                            }
+                            for check in (
+                                "fold_composition",
+                                "predictive_ceiling",
+                                "direction",
+                                "leakage",
+                                "tester_holdout",
+                                "reproducibility",
+                                "reconciled_inputs",
+                            )
+                        ],
+                        "limitations": [],
+                        "rationale": "Every required check passed.",
+                    },
+                },
             }
         )
         return [DispatchOutcome(unit_id=unit.unit_id, text=payload) for unit in units]
@@ -167,6 +200,18 @@ class TestTheTestStageGetsAReviewPage:
         assert result.deck_uri
         assert "/test/" in result.deck_uri
         assert "test-slides" in result.deck_uri
+
+    @pytest.mark.asyncio
+    async def test_the_test_deck_is_inert_because_chat_owns_the_decision(self, tmp_path: Path):
+        repo = _Repo()
+
+        result = await _run(repo, tmp_path)
+
+        relative = result.deck_uri.removeprefix("/mnt/user-data/outputs/")
+        html = (tmp_path / "outputs" / relative).read_text(encoding="utf-8")
+        assert repo.surfaces, "the inert deck must still be registered for provenance"
+        assert repo.surfaces[0]["surface_id"] not in html
+        assert "deerflow:design-feedback" not in html
 
 
 class TestItCarriesAnAssessmentButNoRoutes:

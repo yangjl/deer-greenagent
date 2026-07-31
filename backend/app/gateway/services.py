@@ -407,6 +407,7 @@ async def apply_project_scope_context(
     workspace_repo=None,
     request=None,
     dbtl_cycle_repo=None,
+    owner_user_id: str | None = None,
 ) -> None:
     """Stamp the conversation's owning project into the run context.
 
@@ -416,18 +417,22 @@ async def apply_project_scope_context(
     replaced from the conversation's durable ``threads_meta`` row (and the
     project's ``root_path``). An unfiled conversation, a missing row, or a
     store failure all leave no project scope, which falls back to
-    conversation-scoped storage.
+    conversation-scoped storage. The membership-scoped lookup also stamps the
+    current project role for chat-backed human DBTL decisions; like the root,
+    that role is runtime-only and never accepted from the client.
     """
     context = config.setdefault("context", {})
     context.pop("project_id", None)
     context.pop("project_root", None)
     context.pop("project_name", None)
+    context.pop("project_role", None)
     context.pop("dbtl_project_cycle_count", None)
     context.pop("dbtl_has_unfinished_cycles", None)
     configurable = config.get("configurable", {})
     configurable.pop("project_id", None)
     configurable.pop("project_root", None)
     configurable.pop("project_name", None)
+    configurable.pop("project_role", None)
     configurable.pop("dbtl_project_cycle_count", None)
     configurable.pop("dbtl_has_unfinished_cycles", None)
 
@@ -463,8 +468,14 @@ async def apply_project_scope_context(
     try:
         from app.gateway.project_scope import ensure_project_root
 
-        project = await workspace_repo.get_project_record(project_id)
+        project = await workspace_repo.get_project(project_id, user_id=owner_user_id) if owner_user_id else await workspace_repo.get_project_record(project_id)
         if project is not None:
+            project_role = project.get("current_user_role")
+            if isinstance(project_role, str) and project_role.strip():
+                # Server-owned identity for chat-backed human review records.
+                # It is deliberately not copied to configurable/checkpointed
+                # state, because membership may change between turns.
+                context["project_role"] = project_role.strip()
             project_name = project.get("name")
             if isinstance(project_name, str) and project_name.strip():
                 context["project_name"] = project_name.strip()
@@ -1329,6 +1340,7 @@ async def start_run(
             workspace_repo=getattr(request.app.state, "workspace_repo", None) if request is not None else None,
             request=request,
             dbtl_cycle_repo=getattr(request.app.state, "dbtl_cycle_repo", None) if request is not None else None,
+            owner_user_id=owner_user_id,
         )
         internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
         inject_authenticated_user_context(

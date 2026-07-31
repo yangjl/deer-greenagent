@@ -135,6 +135,15 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
         work_items: list[WorkItemRow] | None = None,
     ) -> dict[str, Any]:
         detail = dict(cycle.projection_json or {})
+        statuses = cls._statuses(stages)
+        effective_state = cycle.state
+        # Compatibility for cycles created during the short rollout where a
+        # Build approval unlocked Test but left the denormalized cycle cursor
+        # at Build. Stage attempts are the durable authority; only this exact
+        # forward shape is projected as Test, so terminal/reopened cycles are
+        # never guessed forward.
+        if cycle.state == "build" and statuses.get("build") is StageStatus.APPROVED and statuses.get("test") in {StageStatus.IN_PROGRESS, StageStatus.AWAITING_REVIEW}:
+            effective_state = "test"
         payload: dict[str, Any] = {
             "id": cycle.id,
             "project_id": cycle.project_id,
@@ -142,7 +151,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
             "title": cycle.title,
             "cycle_class": cycle.cycle_class,
             "cycle_weight": detail.get("cycle_weight", "full"),
-            "state": cycle.state,
+            "state": effective_state,
             "policy_version": cycle.policy_version,
             "db_revision": cycle.db_revision,
             "projection_hash": cycle.projection_hash,

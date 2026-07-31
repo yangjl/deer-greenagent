@@ -465,6 +465,11 @@ export function CycleStageSheet({
             "Run Build in this cycle context to record reproducibility lineage before review.",
         }
       : submissionReadiness;
+  // Human decisions are made in the originating conversation. This sheet is
+  // intentionally an evidence/audit inspector; keeping the old handlers wired
+  // but unmounted preserves a narrow rollback path while preventing two
+  // competing authority surfaces.
+  const readOnlyInspector = true;
 
   function attachEvidence(event: React.FormEvent) {
     event.preventDefault();
@@ -500,7 +505,8 @@ export function CycleStageSheet({
             )}
           </SheetTitle>
           <SheetDescription className="sr-only">
-            Attach evidence and manage the review state for this cycle stage.
+            Inspect evidence, review history, and the current state of this
+            cycle stage.
           </SheetDescription>
         </SheetHeader>
 
@@ -613,109 +619,115 @@ export function CycleStageSheet({
                   ))}
                 </ul>
               )}
-              {canSubmitStage(record.status) && !block?.blocked && (
-                <form
-                  onSubmit={attachEvidence}
-                  className="border-border mt-3 space-y-3 rounded-md border border-dashed p-3"
-                >
-                  <div>
-                    <p className="text-sm font-medium">Attach evidence</p>
-                    <p className="text-muted-foreground mt-0.5 text-xs">
-                      Reference the exact workspace file that a reviewer should
-                      inspect.
-                    </p>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
+              {!readOnlyInspector &&
+                canSubmitStage(record.status) &&
+                !block?.blocked && (
+                  <form
+                    onSubmit={attachEvidence}
+                    className="border-border mt-3 space-y-3 rounded-md border border-dashed p-3"
+                  >
+                    <div>
+                      <p className="text-sm font-medium">Attach evidence</p>
+                      <p className="text-muted-foreground mt-0.5 text-xs">
+                        Reference the exact workspace file that a reviewer
+                        should inspect.
+                      </p>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="space-y-1.5">
+                        <span className="flex items-center justify-between gap-2 text-xs font-medium">
+                          Artifact type
+                          <span className="text-muted-foreground text-[10px] font-normal uppercase">
+                            Required
+                          </span>
+                        </span>
+                        <Input
+                          value={artifactType}
+                          onChange={(event) =>
+                            setArtifactType(event.target.value)
+                          }
+                          placeholder="stage_package"
+                          required
+                        />
+                      </label>
+                      <label className="space-y-1.5">
+                        <span className="flex items-center justify-between gap-2 text-xs font-medium">
+                          Workspace file path
+                          <span className="text-muted-foreground text-[10px] font-normal uppercase">
+                            Required
+                          </span>
+                        </span>
+                        <Input
+                          value={artifactUri}
+                          onChange={(event) =>
+                            setArtifactUri(event.target.value)
+                          }
+                          placeholder="/mnt/user-data/workspace/design.json"
+                          spellCheck={false}
+                          required
+                        />
+                      </label>
+                    </div>
                     <label className="space-y-1.5">
                       <span className="flex items-center justify-between gap-2 text-xs font-medium">
-                        Artifact type
+                        SHA-256
                         <span className="text-muted-foreground text-[10px] font-normal uppercase">
                           Required
                         </span>
                       </span>
                       <Input
-                        value={artifactType}
+                        value={artifactHash}
                         onChange={(event) =>
-                          setArtifactType(event.target.value)
+                          setArtifactHash(
+                            event.target.value.trim().toLowerCase(),
+                          )
                         }
-                        placeholder="stage_package"
-                        required
-                      />
-                    </label>
-                    <label className="space-y-1.5">
-                      <span className="flex items-center justify-between gap-2 text-xs font-medium">
-                        Workspace file path
-                        <span className="text-muted-foreground text-[10px] font-normal uppercase">
-                          Required
-                        </span>
-                      </span>
-                      <Input
-                        value={artifactUri}
-                        onChange={(event) => setArtifactUri(event.target.value)}
-                        placeholder="/mnt/user-data/workspace/design.json"
+                        placeholder="64 lowercase hexadecimal characters"
+                        aria-invalid={
+                          artifactHash.length > 0 &&
+                          !/^[0-9a-f]{64}$/.test(artifactHash)
+                        }
                         spellCheck={false}
                         required
+                        className="font-mono text-xs"
                       />
-                    </label>
-                  </div>
-                  <label className="space-y-1.5">
-                    <span className="flex items-center justify-between gap-2 text-xs font-medium">
-                      SHA-256
-                      <span className="text-muted-foreground text-[10px] font-normal uppercase">
-                        Required
+                      <span className="text-muted-foreground block text-[11px]">
+                        macOS:{" "}
+                        <code className="font-mono">
+                          shasum -a 256 &lt;file&gt;
+                        </code>
                       </span>
-                    </span>
-                    <Input
-                      value={artifactHash}
-                      onChange={(event) =>
-                        setArtifactHash(event.target.value.trim().toLowerCase())
-                      }
-                      placeholder="64 lowercase hexadecimal characters"
-                      aria-invalid={
-                        artifactHash.length > 0 &&
-                        !/^[0-9a-f]{64}$/.test(artifactHash)
-                      }
-                      spellCheck={false}
-                      required
-                      className="font-mono text-xs"
-                    />
-                    <span className="text-muted-foreground block text-[11px]">
-                      macOS:{" "}
-                      <code className="font-mono">
-                        shasum -a 256 &lt;file&gt;
-                      </code>
-                    </span>
-                  </label>
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                    <Button
-                      type="submit"
-                      size="sm"
-                      variant="outline"
-                      disabled={!artifactReadiness.ready || attach.isPending}
-                      aria-describedby="artifact-attachment-readiness"
-                    >
-                      {attach.isPending ? "Attaching…" : "Attach evidence"}
-                    </Button>
-                    <p
-                      id="artifact-attachment-readiness"
-                      className={cn(
-                        "text-xs",
-                        artifactReadiness.ready
-                          ? "text-emerald-700 dark:text-emerald-400"
-                          : "text-muted-foreground",
-                      )}
-                      aria-live="polite"
-                    >
-                      {artifactReadiness.message}
-                    </p>
-                  </div>
-                  {attach.error && (
-                    <p className="text-destructive text-sm" role="alert">
-                      {attach.error.message}
-                    </p>
-                  )}
-                </form>
-              )}
+                    </label>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                      <Button
+                        type="submit"
+                        size="sm"
+                        variant="outline"
+                        disabled={!artifactReadiness.ready || attach.isPending}
+                        aria-describedby="artifact-attachment-readiness"
+                      >
+                        {attach.isPending ? "Attaching…" : "Attach evidence"}
+                      </Button>
+                      <p
+                        id="artifact-attachment-readiness"
+                        className={cn(
+                          "text-xs",
+                          artifactReadiness.ready
+                            ? "text-emerald-700 dark:text-emerald-400"
+                            : "text-muted-foreground",
+                        )}
+                        aria-live="polite"
+                      >
+                        {artifactReadiness.message}
+                      </p>
+                    </div>
+                    {attach.error && (
+                      <p className="text-destructive text-sm" role="alert">
+                        {attach.error.message}
+                      </p>
+                    )}
+                  </form>
+                )}
             </Section>
 
             {/* Recording a blocker lives here, in the review surface, rather
@@ -736,7 +748,7 @@ export function CycleStageSheet({
                       className="border-border rounded-md border px-3 py-2"
                     >
                       <p className="text-sm">{item.title}</p>
-                      {resolutionFor === item.id ? (
+                      {!readOnlyInspector && resolutionFor === item.id ? (
                         <div className="mt-2 space-y-2">
                           <Textarea
                             value={resolution}
@@ -785,7 +797,7 @@ export function CycleStageSheet({
                             </p>
                           )}
                         </div>
-                      ) : (
+                      ) : !readOnlyInspector ? (
                         <Button
                           size="sm"
                           variant="ghost"
@@ -794,54 +806,57 @@ export function CycleStageSheet({
                         >
                           Resolve…
                         </Button>
-                      )}
+                      ) : null}
                     </li>
                   ))}
                 </ul>
               )}
-              <form
-                className="space-y-2"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  if (!blockerDraft.trim() || createWorkItem.isPending) return;
-                  createWorkItem.mutate(
-                    {
-                      cycleId: cycle.id,
-                      title: blockerDraft.trim(),
-                      kind: "blocker",
-                      expectedDbRevision: cycle.db_revision,
-                      idempotencyKey: `work-${uuid()}`,
-                    },
-                    { onSuccess: () => setBlockerDraft("") },
-                  );
-                }}
-              >
-                <label
-                  className="text-muted-foreground block text-xs"
-                  htmlFor="stage-blocker-title"
+              {!readOnlyInspector && (
+                <form
+                  className="space-y-2"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (!blockerDraft.trim() || createWorkItem.isPending)
+                      return;
+                    createWorkItem.mutate(
+                      {
+                        cycleId: cycle.id,
+                        title: blockerDraft.trim(),
+                        kind: "blocker",
+                        expectedDbRevision: cycle.db_revision,
+                        idempotencyKey: `work-${uuid()}`,
+                      },
+                      { onSuccess: () => setBlockerDraft("") },
+                    );
+                  }}
                 >
-                  Record a blocker
-                </label>
-                <Input
-                  id="stage-blocker-title"
-                  value={blockerDraft}
-                  onChange={(event) => setBlockerDraft(event.target.value)}
-                  placeholder="What is blocking this cycle?"
-                />
-                <Button
-                  size="sm"
-                  type="submit"
-                  variant="outline"
-                  disabled={!blockerDraft.trim() || createWorkItem.isPending}
-                >
-                  {createWorkItem.isPending ? "Recording…" : "Record blocker"}
-                </Button>
-                {createWorkItem.error && (
-                  <p className="text-destructive text-sm" role="alert">
-                    {createWorkItem.error.message}
-                  </p>
-                )}
-              </form>
+                  <label
+                    className="text-muted-foreground block text-xs"
+                    htmlFor="stage-blocker-title"
+                  >
+                    Record a blocker
+                  </label>
+                  <Input
+                    id="stage-blocker-title"
+                    value={blockerDraft}
+                    onChange={(event) => setBlockerDraft(event.target.value)}
+                    placeholder="What is blocking this cycle?"
+                  />
+                  <Button
+                    size="sm"
+                    type="submit"
+                    variant="outline"
+                    disabled={!blockerDraft.trim() || createWorkItem.isPending}
+                  >
+                    {createWorkItem.isPending ? "Recording…" : "Record blocker"}
+                  </Button>
+                  {createWorkItem.error && (
+                    <p className="text-destructive text-sm" role="alert">
+                      {createWorkItem.error.message}
+                    </p>
+                  )}
+                </form>
+              )}
             </Section>
 
             {/* Design is inspection-only here. Submitting it and recording a
@@ -850,7 +865,24 @@ export function CycleStageSheet({
                 deck — so this sheet keeps the evidence and the history but
                 offers no decision. */}
             <Section icon={History} title="Review">
-              {stage === "design" ? (
+              {readOnlyInspector ? (
+                <div className="space-y-3">
+                  {dbtl.feature?.progressive_gate && cycle.transition_gate && (
+                    <TransitionGateFallback
+                      gate={cycle.transition_gate}
+                      override={latestDifficultyOverride}
+                    />
+                  )}
+                  <div className="border-border rounded-md border border-dashed p-4">
+                    <p className="text-sm font-medium">Continue in chat</p>
+                    <p className="text-muted-foreground mt-1 text-sm leading-relaxed">
+                      This panel shows evidence and history only. Return to the
+                      originating conversation to submit, convene a meeting, or
+                      record a human decision against the bound evidence.
+                    </p>
+                  </div>
+                </div>
+              ) : stage === "design" ? (
                 <div className="space-y-3">
                   <p className="text-muted-foreground text-sm">
                     {t.dbtl.designSheet.readOnly}

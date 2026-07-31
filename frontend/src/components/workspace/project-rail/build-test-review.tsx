@@ -214,7 +214,8 @@ function RecordedAssessment({ view }: { view: BuildTestView }) {
   );
 }
 
-function AssessmentForm({
+/** @deprecated Rollback-only; the stage inspector no longer mounts inputs. */
+export function AssessmentForm({
   projectId,
   cycleId,
   dbRevision,
@@ -469,8 +470,8 @@ function AssessmentForm({
 }
 
 export function BuildTestReview({
-  projectId,
-  cycleId,
+  projectId: _projectId,
+  cycleId: _cycleId,
   stage,
   stageStatus,
   view,
@@ -505,12 +506,13 @@ export function BuildTestReview({
     );
   }
   return (
-    <AssessmentForm
-      projectId={projectId}
-      cycleId={cycleId}
-      dbRevision={view.db_revision}
-      packKey={view.validity_pack.pack_key}
-      requiredChecks={view.validity_pack.required_checks}
-    />
+    <div className="border-border border-l-2 pl-4">
+      <p className="text-sm font-medium">Decision required in chat</p>
+      <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
+        Return to the originating conversation. The Test evidence card lets you
+        convene a review meeting or continue to the outcome decision; this
+        inspector does not record human input.
+      </p>
+    </div>
   );
 }

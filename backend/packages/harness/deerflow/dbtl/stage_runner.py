@@ -251,6 +251,22 @@ def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> st
         "",
         RESULT_CONTRACT,
     ]
+    if spec.stage == "test":
+        lines.extend(
+            [
+                "",
+                "Test outcome contract (required in addition to the shared result):",
+                "- Put one object at provenance.validity_assessment.",
+                "- metrics is a non-empty list of {name, value, threshold, criterion, plausible_max, unit}.",
+                "- checks contains exactly the names in test_validity_contract.required_checks from Project context.",
+                "- Each check is {check, status, detail, evidence_refs}; a passed check needs at least one evidence reference.",
+                "- status is passed, failed, missing, or not_applicable. Use real JSON numbers and null, never numeric strings.",
+                "- rationale explains the assessment; limitations lists non-gating caveats.",
+                "- Do not put a route or overall outcome in this object. The server computes both from the pinned validity pack.",
+                "",
+                'provenance.validity_assessment shape: {"metrics": [], "checks": [], "limitations": [], "rationale": ""}',
+            ]
+        )
     return "\n".join(lines)
 
 

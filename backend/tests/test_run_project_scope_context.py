@@ -33,7 +33,16 @@ class _RootRepo:
         root = self._roots.get(project_id)
         if root is None:
             return None
-        return {"id": project_id, "name": project_id, "root_path": root}
+        return {
+            "id": project_id,
+            "name": project_id,
+            "root_path": root,
+            "current_user_role": "owner",
+        }
+
+    async def get_project(self, project_id: str, *, user_id: str):
+        project = await self.get_project_record(project_id)
+        return project if user_id == "user-1" else None
 
     async def update_project_root(self, project_id: str, root_path: str) -> None:
         self._roots[project_id] = root_path
@@ -59,9 +68,11 @@ class TestProjectScopeContext:
             "thread-1",
             _Store({"project_id": "project-abc"}),
             workspace_repo=_RootRepo({"project-abc": str(root)}),
+            owner_user_id="user-1",
         )
         assert config["context"]["project_id"] == "project-abc"
         assert config["context"]["project_name"] == "project-abc"
+        assert config["context"]["project_role"] == "owner"
         assert config["context"]["project_root"] == str(root)
         # ensure_project_root materializes the human folder
         assert root.is_dir()
@@ -110,11 +121,13 @@ class TestProjectScopeContext:
                 "project_id": "project-victim",
                 "project_name": "Victim",
                 "project_root": "/etc",
+                "project_role": "owner",
             },
             "configurable": {
                 "project_id": "project-victim",
                 "project_name": "Victim",
                 "project_root": "/etc",
+                "project_role": "owner",
             },
         }
         await apply_project_scope_context(
@@ -126,9 +139,11 @@ class TestProjectScopeContext:
         assert config["context"]["project_id"] == "project-abc"
         assert config["context"]["project_name"] == "project-abc"
         assert config["context"]["project_root"] == str(tmp_path / "G2F")
+        assert config["context"]["project_role"] == "owner"
         assert "project_id" not in config["configurable"]
         assert "project_name" not in config["configurable"]
         assert "project_root" not in config["configurable"]
+        assert "project_role" not in config["configurable"]
 
     async def test_client_supplied_project_is_dropped_for_unfiled_conversations(self):
         config: dict = {
@@ -136,18 +151,22 @@ class TestProjectScopeContext:
                 "project_id": "project-victim",
                 "project_name": "Victim",
                 "project_root": "/etc",
+                "project_role": "owner",
             },
             "configurable": {
                 "project_id": "project-victim",
                 "project_name": "Victim",
+                "project_role": "owner",
             },
         }
         await apply_project_scope_context(config, "thread-1", _Store({"project_id": None}))
         assert "project_id" not in config["context"]
         assert "project_name" not in config["context"]
         assert "project_root" not in config["context"]
+        assert "project_role" not in config["context"]
         assert "project_id" not in config["configurable"]
         assert "project_name" not in config["configurable"]
+        assert "project_role" not in config["configurable"]
 
     async def test_missing_repo_still_stamps_the_id_but_no_root(self):
         config: dict = {"context": {}, "configurable": {}}
