@@ -252,7 +252,13 @@ export function CycleStageSheet({
 
   const cycle = detail.data ?? null;
   const record = stage ? stageOf(cycle, stage) : null;
-  const block = stage ? stageBlockReason(cycle, stage) : null;
+  const block = stage
+    ? stageBlockReason(
+        cycle,
+        stage,
+        dbtl.feature?.reconciliation_required ?? true,
+      )
+    : null;
   const artifacts = useMemo(
     () => (stage ? latestArtifactsForStage(cycle, stage) : []),
     [cycle, stage],

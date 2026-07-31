@@ -513,6 +513,21 @@ Breeding-workspace note:
   immutable — `dataset_fingerprint([])` is a valid hash of nothing, so an
   undeclared build would otherwise bind silently and be unable to say what
   produced it. What is given up is the human-settled judgement matrix.
+  The rule is published through `/api/features` because the UI cannot infer
+  it: a stage locked because it was skipped and one locked because it has
+  not been reached are the same status, so `stageBlockReason` takes it as an
+  argument rather than naming Reconciliation unconditionally.
+- **A cycle awaiting changes does not argue with every message.** The hold
+  rule used to skip `changes_requested` entirely, on the grounds that the
+  verdict *is* the request to argue again — true of the verdict, false of
+  every message after it, so a cycle in that status convened a meeting for
+  the word "hello". `_unreviewed_design_package` now holds for that status
+  too, and the review endpoint's own refinement kickoff is recognised
+  deterministically (`_is_refinement_kickoff`) so an unavailable interpreter
+  cannot cost a reviewer the round their verdict asked for. Recording a
+  verdict through the deck also invalidates the `dbtl-cycles` queries: the
+  rail refreshed for its own controls but not for a decision taken on the
+  deck, so an approved Design left Build reading "Locked".
 - **Progressive-gate Phases 0-1** record every gate decision as an append-only
   edge on a Design/Build/Test/Learn stage graph (`dbtl_stage_transitions`);
   reconciliation is a Build-edge precondition, not a path node, so data work

@@ -575,6 +575,18 @@ export function ArtifactFilePreview({
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
     };
 
+    /**
+     * A verdict recorded here changes the cycle, and the rail is the surface
+     * that shows it. The rail's own controls invalidate these keys; a decision
+     * taken on the deck did not, so approving a Design left the rail showing
+     * the stage list from before the approval — Build still "Locked" while the
+     * server had already opened it. Broad on purpose: one verdict can move the
+     * cycle state, the stage statuses, and the activity feed at once.
+     */
+    const refreshCycles = () => {
+      void queryClient.invalidateQueries({ queryKey: ["dbtl-cycles"] });
+    };
+
     const waitForChairOutcome = async (surfaceId: string, channel: string) => {
       if (deckChairPollingSurfaceRef.current === surfaceId) {
         return;
@@ -776,6 +788,9 @@ export function ArtifactFilePreview({
           clientSubmissionId: submissionId,
         });
         if (cancelled) return;
+        // Every recorded intent can move the cycle, so this fires before the
+        // per-intent branches rather than inside one of them.
+        refreshCycles();
         if (
           intent.action.kind === "submit_for_review" ||
           intent.action.kind === "park"

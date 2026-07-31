@@ -950,16 +950,35 @@ def _wants_new_debate(request_text: str) -> bool:
     return bool(_NEW_DEBATE_PATTERN.search((request_text or "").strip()))
 
 
+#: The refinement round the review endpoint dispatches for the reviewer, sent
+#: as a hidden kickoff message. Recognised deterministically so "request
+#: changes" still convenes without a model: an interpreter that happens to be
+#: unavailable must not cost a reviewer the round their verdict asked for.
+_REFINEMENT_KICKOFF_PREFIX = "refine the approved design candidate for"
+
+
+def _is_refinement_kickoff(request_text: str) -> bool:
+    """Whether this request is the server's own post-verdict refinement."""
+    return (request_text or "").strip().lower().startswith(_REFINEMENT_KICKOFF_PREFIX)
+
+
 def _unreviewed_design_package(cycle: dict[str, Any]) -> dict[str, Any] | None:
     """A Design package this cycle already has and nobody has contested.
 
-    ``changes_requested`` deliberately yields ``None``: a reviewer asking for
-    changes *is* the request to argue again, and it already carries what to
-    argue about. Everything else — a package sitting there waiting to be
-    submitted — is work that is done until a person says otherwise.
+    Both ``in_progress`` and ``changes_requested`` count as "there is a package
+    on the table". ``changes_requested`` used to yield ``None`` on the grounds
+    that the verdict *is* the request to argue again — true of the verdict, but
+    not of every message that arrives afterwards. Because the hold was skipped
+    entirely for that status, a cycle sitting in changes-requested convened a
+    round for *anything* sent to it, including "hello". The reviewer's round is
+    dispatched once, by the review endpoint's own kickoff
+    (:func:`_is_refinement_kickoff`); a person typing later has to ask.
     """
     attempt = _stage_attempt(cycle, "design")
-    if not isinstance(attempt, dict) or str(attempt.get("status") or "") != StageStatus.IN_PROGRESS.value:
+    if not isinstance(attempt, dict) or str(attempt.get("status") or "") not in {
+        StageStatus.IN_PROGRESS.value,
+        StageStatus.CHANGES_REQUESTED.value,
+    }:
         return None
     attempt_id = str(attempt.get("id") or "")
     if not attempt_id:
@@ -2724,7 +2743,7 @@ class LiveStageAdapter:
         # cycle convened the whole meeting over again. The deterministic
         # phrases decide first and free; the interpreter reads only what they
         # did not match, so a typo or paraphrase still means what it meant.
-        if stage == "design" and not resumed_answer and authored_design is None:
+        if stage == "design" and not resumed_answer and authored_design is None and not _is_refinement_kickoff(request_text):
             settled = _unreviewed_design_package(cycle)
             if settled is not None and not _wants_new_debate(request_text) and not await self._interpreted_wants_new_debate(request_text):
                 return LiveStageResult(

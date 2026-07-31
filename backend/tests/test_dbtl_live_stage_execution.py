@@ -1465,10 +1465,18 @@ async def test_a_deterministic_match_never_consults_the_interpreter(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_a_change_request_still_reopens_the_debate_without_being_asked(
+async def test_a_change_request_reopens_the_debate_through_the_servers_own_kickoff(
     tmp_path: Path,
 ) -> None:
-    """``changes_requested`` *is* the request to argue again."""
+    """The verdict dispatches the round; a later message does not.
+
+    ``changes_requested`` used to skip the hold entirely, on the grounds that a
+    reviewer asking for changes *is* the request to argue again. That is true of
+    the verdict and false of every message that arrives after it — a cycle in
+    changes-requested convened a meeting for the word "hello". The review
+    endpoint's kickoff is recognised deterministically instead, so an
+    unavailable interpreter cannot cost a reviewer the round they asked for.
+    """
     cycle = _with_design_package(_cycle(status="changes_requested"))
     repo = FakeRepo(cycle)
     dispatcher = FakeDispatcher(text=_structured_result())
@@ -1476,13 +1484,32 @@ async def test_a_change_request_still_reopens_the_debate_without_being_asked(
     result = await _design_adapter(repo, dispatcher).execute(
         project_id="project-1",
         cycle_id="cycle-1",
-        request_text="Here is the design.",
+        request_text="Refine the approved Design candidate for the reviewer's written objection.\n\nUse 4,000 individuals.",
         state={},
         config=_runtime_config(tmp_path),
     )
 
     assert dispatcher.calls
     assert result.worker_count == 3
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_message_to_a_changes_requested_cycle_convenes_nobody(
+    tmp_path: Path,
+) -> None:
+    cycle = _with_design_package(_cycle(status="changes_requested"))
+    dispatcher = FakeDispatcher(text=_structured_result())
+
+    result = await _design_adapter(FakeRepo(cycle), dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Here is the design.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert dispatcher.calls == []
+    assert result.worker_count == 0
 
 
 def _paused_meeting_runs() -> list[dict]:

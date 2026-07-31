@@ -318,6 +318,8 @@ export interface StageBlockReason {
 export function stageBlockReason(
   cycle: CycleRecord | null | undefined,
   stage: DbtlStage,
+  /** Whether this deployment gates Build on a settled reconciliation matrix. */
+  reconciliationRequired = true,
 ): StageBlockReason {
   const record = stageOf(cycle, stage);
   if (!cycle || !record) {
@@ -327,12 +329,17 @@ export function stageBlockReason(
     return { blocked: false, reason: "" };
   }
   if (stage === "build") {
-    const outstanding = (["design", "reconciliation"] as const)
-      .filter((prior) => stageOf(cycle, prior)?.status !== "approved")
-      .map((prior) => STAGE_LABELS[prior]);
+    // Which stages Build waits for is a deployment rule, not a constant. A
+    // project that does not gate Build on Data reconciliation leaves that
+    // stage locked forever, and naming it here told people to go and approve
+    // a stage nothing was waiting for. The rule has to be passed in: stage
+    // statuses alone cannot tell "locked because skipped" from "locked
+    // because not reached yet", since both look identical here.
+    const priors = reconciliationRequired ? (["design", "reconciliation"] as const) : (["design"] as const);
+    const outstanding = priors.filter((prior) => stageOf(cycle, prior)?.status !== "approved").map((prior) => STAGE_LABELS[prior]);
     return {
       blocked: true,
-      reason: `Build opens once ${outstanding.join(" and ")} ${outstanding.length === 1 ? "is" : "are"} approved.`,
+      reason: outstanding.length ? `Build opens once ${outstanding.join(" and ")} ${outstanding.length === 1 ? "is" : "are"} approved.` : "Build is not open yet.",
     };
   }
   const index = DBTL_STAGES.indexOf(stage);

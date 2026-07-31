@@ -391,3 +391,20 @@ describe("cycle disclosure", () => {
     expect(toggleCycleDisclosure("cycle-1", "cycle-2")).toBe("cycle-2");
   });
 });
+
+describe("why a stage is locked when reconciliation is not required", () => {
+  test("build names only Design", () => {
+    const reason = stageBlockReason(cycle(), "build", false);
+
+    expect(reason.reason).toContain("Design");
+    expect(reason.reason).not.toContain("Data reconciliation");
+    expect(reason.reason).toContain("is approved");
+  });
+
+  test("a locked build with Design approved says nothing about reconciliation", () => {
+    const reason = stageBlockReason(cycle({ design: "approved" }), "build", false);
+
+    expect(reason.reason).not.toContain("Data reconciliation");
+    expect(reason.reason).toBe("Build is not open yet.");
+  });
+});
