@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -74,6 +74,89 @@ def meeting_gate(
         transition_routes_locked=requirement is MeetingRequirement.REQUIRED,
         can_convene=requirement in {MeetingRequirement.OPTIONAL, MeetingRequirement.REQUIRED},
     )
+
+
+#: Intents that move the cycle along a path edge or end the attempt. These are
+#: the ones a *required* meeting withholds until it has happened; the chair
+#: intents and ``convene_review_meeting`` are deliberately not here, because a
+#: locked gate must still let a person answer a question and convene the
+#: meeting that unlocks it.
+TRANSITION_INTENTS = frozenset(
+    {
+        "advance",
+        "approve",
+        "choose_route",
+        "close_without_candidate",
+        "recommend_promotion",
+        "reject",
+        "submit_for_review",
+    }
+)
+
+
+def surface_meeting_gate(
+    *,
+    stage: str,
+    assessed_difficulty: str | None,
+    enabled: bool,
+    meeting_completed: bool = False,
+    human_override: str | None = None,
+) -> MeetingGate | None:
+    """The gate for a surface's stage, or ``None`` when it has no meeting.
+
+    Design has no review meeting, so a Design surface gets ``None`` rather than
+    an exception: this runs on the read path for every surface, and a stage
+    without a meeting is an ordinary answer there, not an error.
+
+    An absent or unreadable assessment falls back to ``standard``, the same
+    fail-safe the transition assessor uses. Guessing ``routine`` would skip a
+    meeting on missing information, and guessing ``high_stakes`` would lock the
+    gate on it; ``standard`` offers the meeting and decides nothing.
+    """
+    normalized_stage = (stage or "").strip().lower()
+    if normalized_stage not in REVIEW_MEETING_STAGES:
+        return None
+    difficulty = (assessed_difficulty or "").strip().lower()
+    try:
+        TransitionDifficulty(difficulty)
+    except ValueError:
+        difficulty = TransitionDifficulty.STANDARD.value
+    override = (human_override or "").strip().lower() or None
+    if override is not None:
+        try:
+            TransitionDifficulty(override)
+        except ValueError:
+            override = None
+    return meeting_gate(
+        stage=normalized_stage,
+        assessed_difficulty=difficulty,
+        enabled=enabled,
+        meeting_completed=meeting_completed,
+        human_override=override,
+    )
+
+
+def apply_meeting_gate(gate: MeetingGate | None, intents: Sequence[str]) -> list[str]:
+    """Fold the convening decision into what a surface may be asked to do.
+
+    Three rules, in the order they matter. A stage with no gate is returned
+    untouched, so Design behaves exactly as it did. A gate that *can* convene
+    adds ``convene_review_meeting`` — the read model's other branches compute
+    verdicts and routes and have no reason to know meetings exist. And a
+    **required** meeting withholds the transition intents until it has
+    happened, which is the only thing on this path that changes what a person
+    can record rather than merely what they are offered.
+
+    Withholding is deliberately not the same as refusing: the server-side
+    intent matrix still decides what each stage may ever do, and this narrows
+    that set for one surface at one moment.
+    """
+    if gate is None:
+        return list(intents)
+    allowed = [intent for intent in intents if not (gate.transition_routes_locked and intent in TRANSITION_INTENTS)]
+    if gate.can_convene and "convene_review_meeting" not in allowed:
+        allowed.append("convene_review_meeting")
+    return allowed
 
 
 def sanitize_meeting_attachment(stage: str, payload: Mapping[str, Any]) -> dict[str, Any]:

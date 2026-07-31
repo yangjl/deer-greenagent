@@ -46,6 +46,7 @@ from deerflow.dbtl import (
     validate_candidate_grade,
 )
 from deerflow.dbtl.stage_feedback import filter_stage_feedback_intents
+from deerflow.dbtl.stage_meetings import apply_meeting_gate, surface_meeting_gate
 from deerflow.persistence.dbtl import (
     DbtlRevisionConflict,
     DbtlWorkflowRefused,
@@ -83,6 +84,31 @@ def _surface_transition_gate(surface: dict[str, Any]) -> dict[str, Any] | None:
         },
         "routes": [dict(item) for item in routes if isinstance(item, dict)],
     }
+
+
+def _surface_meeting_gate(surface: dict[str, Any], dbtl_config: Any, *, stage: dict[str, Any] | None):
+    """The review-meeting gate for this surface's stage, or ``None``.
+
+    The assessment is read off the surface's own server-owned transition gate,
+    the same place the progressive Design gate reads it from, so a deck reports
+    the difficulty it was rendered against rather than one recomputed now. A
+    surface carrying no assessment falls back to ``standard`` inside
+    ``surface_meeting_gate`` rather than being treated as routine.
+    """
+    surface_stage = str(surface.get("stage") or "design")
+    transition_gate = _surface_transition_gate(surface) or {}
+    assessment = transition_gate.get("assessment") if isinstance(transition_gate.get("assessment"), dict) else {}
+    meetings = getattr(dbtl_config, "stage_meetings", None)
+    enabled = bool(meetings.enabled_for(surface_stage)) if meetings is not None and hasattr(meetings, "enabled_for") else False
+    return surface_meeting_gate(
+        stage=surface_stage,
+        assessed_difficulty=str((assessment or {}).get("difficulty") or ""),
+        enabled=enabled,
+        # A stage attempt already carrying its review-meeting artifact has had
+        # its meeting; offering another would let the gate demand meetings
+        # recursively, which the policy layer explicitly forbids.
+        meeting_completed=bool((stage or {}).get("review_meeting_recorded", False)),
+    )
 
 
 def _route_available(gate: dict[str, Any], slug: str) -> bool:
@@ -614,6 +640,11 @@ async def _design_feedback_read_model(
                     allowed_actions = ["approve", "request_changes", "reject"]
                     if gate is not None and "stage_park" not in groups:
                         allowed_actions.append("park")
+        # The convening decision is folded in before the stage's own intent
+        # matrix has the last word: the gate may add ``convene_review_meeting``
+        # or withhold the transition intents, but it can never grant a stage an
+        # intent that stage may not ever record.
+        allowed_actions = apply_meeting_gate(_surface_meeting_gate(surface, dbtl_config, stage=stage), allowed_actions)
         allowed_actions = filter_stage_feedback_intents(surface_stage, allowed_actions)
         interactive = bool(allowed_actions)
 
@@ -666,6 +697,16 @@ async def _design_feedback_read_model(
         "receipt": latest_action,
         "note": note,
         "transition_gate": (_surface_transition_gate(surface) if dbtl_config.progressive_gate else None),
+        # Served in every mode, like the transition gate: a client that cannot
+        # see why its deck offers no meeting cannot explain it either. Null for
+        # Design, which has no review meeting.
+        "meeting_gate": (lambda gate: gate.as_dict() if gate is not None else None)(
+            _surface_meeting_gate(
+                surface,
+                dbtl_config,
+                stage=next((item for item in cycle["stages"] if item["stage"] == surface_stage), None) if cycle else None,
+            )
+        ),
         "parked": bool((cycle or {}).get("parked", False)),
     }
 

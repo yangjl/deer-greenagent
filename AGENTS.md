@@ -616,7 +616,14 @@ generalized repository methods; captured Design decks continue through the
 legacy aliases. The artifact parent renders the stage, lifecycle, and revision.
 Phase 3 review-meeting contracts are pinned as
 `generic:{build,test,learn}-review:v1`; rollout flags live under
-`dbtl.stage_meetings` and default off independently.
+`dbtl.stage_meetings` and default off independently. The convening decision now
+reaches the read model: `surface_meeting_gate` derives a stage's gate from the
+assessment its own deck was rendered against (falling back to `standard`, never
+`routine`, when that is missing), and `apply_meeting_gate` adds
+`convene_review_meeting` when one may be convened and withholds the transition
+intents while one is required — never the chair or park intents, or convening
+the meeting that unlocks the gate would be unreachable. Design surfaces get a
+null gate and are untouched. Nothing dispatches a review meeting yet.
 
 ## Cross-Cutting Conventions
 
