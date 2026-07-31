@@ -38,6 +38,7 @@ from deerflow.dbtl.stage_spec import (
     RECONCILIATION_SPEC_V1,
     TEST_SPEC_V1,
     TEST_SPEC_V2,
+    TEST_SPEC_V3,
     CycleWeight,
     MemoryWritePolicy,
     StageSpec,
@@ -117,7 +118,7 @@ class TestStageSpecRegistry:
             "generic:design:v2",
             "generic:reconciliation:v1",
             "generic:build:v3",
-            "generic:test:v2",
+            "generic:test:v3",
             "generic:learn:v1",
         )
 
@@ -169,6 +170,8 @@ class TestStageSpecRegistry:
     def test_test_uses_a_versioned_validity_pack(self) -> None:
         assert "generic-predictive:v1" in TEST_SPEC_V1.validity_gates
         assert TEST_SPEC_V2.budget.max_turns == 143
+        assert TEST_SPEC_V3.validity_gates == ("generic-predictive:v2",)
+        assert TEST_SPEC_V3.budget == TEST_SPEC_V2.budget
 
     def test_a_spec_without_required_capabilities_is_refused(self) -> None:
         with pytest.raises(ValueError, match="no required capabilities"):

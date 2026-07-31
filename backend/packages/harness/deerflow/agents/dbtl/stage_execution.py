@@ -97,6 +97,7 @@ from deerflow.dbtl.transition_assessment import (
     parse_transition_assessment,
     standard_assessment,
 )
+from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK, ValidityCheckName
 from deerflow.dbtl.worker_result import (
     QualityCheck,
     StageWorkerResult,
@@ -3310,6 +3311,28 @@ class LiveStageAdapter:
                     )
                 ),
             },
+            "test_validity_contract": (
+                {
+                    "pack_key": DEFAULT_VALIDITY_PACK.pack_key,
+                    "required_checks": [check.value for check in DEFAULT_VALIDITY_PACK.required_checks],
+                    "authoritative_rules": [
+                        "Only required_checks may determine the overall Test outcome. Do not invent or require an additional gate.",
+                        (
+                            "The server-bound Build lineage satisfies reconciled_inputs when present. Data Reconciliation is intentionally skipped; do not require a declaration, matrix, or reconciliation artifact."
+                            if not requires_reconciliation
+                            else "Judge reconciled_inputs from the approved reconciliation and Build lineage."
+                        ),
+                        (
+                            "duplicates_relatedness is not in this validity pack. Missing pedigree, genotype, kinship, or relatedness columns may be noted as a limitation, but cannot fail, block, or make this Test inconclusive."
+                            if ValidityCheckName.DUPLICATES_RELATEDNESS not in DEFAULT_VALIDITY_PACK.required_checks
+                            else "Evaluate duplicates_relatedness as a required check."
+                        ),
+                        "The approved Design and this server-owned contract outrank commentary in an older Build package.",
+                    ],
+                }
+                if stage == "test"
+                else None
+            ),
             # Named explicitly beside the listing, because a worker that
             # *constructs* a path (rather than copying one from the
             # manifest) has no other way to learn the prefix its tools

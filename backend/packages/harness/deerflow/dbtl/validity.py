@@ -67,13 +67,38 @@ class ValidityPack:
         return f"{self.profile}:v{self.version}"
 
 
-DEFAULT_VALIDITY_PACK = ValidityPack(
+GENERIC_PREDICTIVE_V1_PACK = ValidityPack(
     profile="generic-predictive",
     version=1,
     title="Generic predictive validity",
     required_checks=tuple(ValidityCheckName),
     # Phase 7 implements the reviewable first pack.  Domain evidence grades and
     # thresholds remain a later human decision rather than being invented here.
+    provisional=True,
+)
+
+
+# Version 1 treated every check in the broad cross-domain vocabulary as a gate.
+# That made a simple, approved family holdout fail because no pedigree existed,
+# even though relatedness was never part of its Design. Version 2 keeps the
+# checks that are meaningful for every predictive holdout and leaves
+# population-structure, within-group, and relatedness checks to a future
+# explicitly selected domain/design pack. A worker may discuss those concerns
+# as limitations; it may not silently promote them into required gates.
+DEFAULT_VALIDITY_PACK = ValidityPack(
+    profile="generic-predictive",
+    version=2,
+    title="Generic predictive validity",
+    required_checks=tuple(
+        check
+        for check in ValidityCheckName
+        if check
+        not in {
+            ValidityCheckName.STRUCTURE_NULL,
+            ValidityCheckName.WITHIN_GROUP,
+            ValidityCheckName.DUPLICATES_RELATEDNESS,
+        }
+    ),
     provisional=True,
 )
 

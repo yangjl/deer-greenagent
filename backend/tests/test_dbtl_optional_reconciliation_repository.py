@@ -14,6 +14,7 @@ import pytest
 import pytest_asyncio
 
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK, ValidityCheckName
 from deerflow.persistence.dbtl import DbtlCycleRepository
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
@@ -204,3 +205,57 @@ class TestBuildOwnsInputBinding:
         statuses = {item["stage"]: item["status"] for item in reviewed["stages"]}
         assert statuses["build"] == "approved"
         assert statuses["test"] == "in_progress"
+
+        view = await repo.build_test_view("cycle-1", project_id="project-1")
+        assert view["validity_pack"]["pack_key"] == "generic-predictive:v2"
+        assert ValidityCheckName.DUPLICATES_RELATEDNESS.value not in view["validity_pack"]["required_checks"]
+
+        await repo.attach_artifact(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            stage="test",
+            artifact_type="validity_report",
+            uri="/mnt/user-data/outputs/test-report.json",
+            content_hash=HASH_A,
+            created_by="agent:user-1",
+            expected_db_revision=await _revision(repo),
+            idempotency_key="test-package",
+        )
+        await repo.submit_stage_for_review(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            stage="test",
+            expected_db_revision=await _revision(repo),
+            actor_user_id="user-1",
+            idempotency_key="submit-test",
+        )
+        checks = [
+            {
+                "check": check.value,
+                # A client cannot override the server's durable provenance
+                # fact with stale Build prose.
+                "status": "failed" if check is ValidityCheckName.RECONCILED_INPUTS else "passed",
+                "detail": "Stale worker claim." if check is ValidityCheckName.RECONCILED_INPUTS else f"{check.value} passed.",
+                "evidence_refs": [] if check is ValidityCheckName.RECONCILED_INPUTS else [f"artifact://{check.value}"],
+            }
+            for check in DEFAULT_VALIDITY_PACK.required_checks
+        ]
+        assessed = await repo.record_validity_assessment(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            metrics=[{"name": "holdout_r2", "value": 1.0, "threshold": 0.95, "criterion": "gte"}],
+            checks=checks,
+            recommendation="advance_to_learn",
+            limitations=[],
+            rationale="The approved holdout criterion and its required validity checks passed.",
+            reviewer_user_id="user-2",
+            reviewer_project_role="owner",
+            expected_db_revision=await _revision(repo),
+            idempotency_key="assess-test",
+        )
+
+        assert assessed["cycle"]["state"] == "learn"
+        assert assessed["validity_assessment"]["outcome"] == "supported"
+        recorded_checks = {item["check"]: item for item in assessed["validity_assessment"]["checks"]}
+        assert recorded_checks[ValidityCheckName.RECONCILED_INPUTS.value]["status"] == "passed"
+        assert recorded_checks[ValidityCheckName.RECONCILED_INPUTS.value]["evidence_refs"] == ["server://dbtl/build-lineage"]

@@ -163,6 +163,7 @@ export function metricMeetsThreshold(metric: HeadlineMetric): boolean {
 export function projectedValidity(
   metrics: HeadlineMetric[],
   checks: ValidityCheck[],
+  requiredChecks: readonly string[] = Object.keys(VALIDITY_CHECK_LABELS),
 ): ProjectedValidity {
   const headlineSuccess =
     metrics.length > 0 && metrics.every(metricMeetsThreshold);
@@ -171,7 +172,7 @@ export function projectedValidity(
       metric.plausible_max !== null && metric.value > metric.plausible_max,
   );
   const failed = checks.filter((check) => check.status === "failed");
-  const missing = Object.keys(VALIDITY_CHECK_LABELS).filter((name) => {
+  const missing = requiredChecks.filter((name) => {
     const check = checks.find((item) => item.check === name);
     return (
       !check || check.status === "missing" || check.status === "not_applicable"

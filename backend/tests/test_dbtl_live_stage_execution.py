@@ -1165,6 +1165,11 @@ async def test_optional_reconciliation_tells_test_to_judge_bound_build_lineage(
     assert '"status": "skipped"' in prompt
     assert "Missing dataset declarations or reconciliation matrix rows are not a blocker" in prompt
     assert "a validity check named reconciled_inputs means bound input provenance" in prompt
+    assert '"pack_key": "generic-predictive:v2"' in prompt
+    assert "Only required_checks may determine the overall Test outcome" in prompt
+    assert "Missing pedigree, genotype, kinship, or relatedness columns" in prompt
+    assert '"duplicates_relatedness"' not in prompt.split('"required_checks":', 1)[1].split("]", 1)[0]
+    assert repo.recorded[0]["stage_spec_key"] == "generic:test:v3"
 
 
 def test_build_discovers_and_hashes_the_workspace_input_reported_by_a_worker(tmp_path: Path) -> None:

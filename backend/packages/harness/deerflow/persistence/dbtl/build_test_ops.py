@@ -21,8 +21,10 @@ from deerflow.dbtl.stage_routes import (
 from deerflow.dbtl.stage_spec import resolve_stage_spec
 from deerflow.dbtl.validity import (
     DEFAULT_VALIDITY_PACK,
+    CheckStatus,
     HeadlineMetric,
     ValidityCheck,
+    ValidityCheckName,
     ValidityOutcome,
     ValidityRefused,
     WorkflowRecommendation,
@@ -59,6 +61,37 @@ def _build_input_fingerprint(input_artifacts: list[str]) -> str:
     if unbound:
         raise ValueError("Every Build input must include a server-computed SHA-256 content hash.")
     return _sha256(sorted(dict.fromkeys(str(item) for item in input_artifacts)))
+
+
+def _server_owned_optional_provenance(checks: list[ValidityCheck]) -> list[ValidityCheck]:
+    """Replace the optional-mode input check with the server's own verdict.
+
+    A human may assess scientific evidence, but cannot truthfully declare that
+    the server did not bind inputs when the durable Build-lineage writer did.
+    The assessment path separately refuses a cycle with no lineage, so a pass
+    here is conditional on an exact lineage row being bound later in the same
+    transaction.
+    """
+    authoritative = ValidityCheck(
+        check=ValidityCheckName.RECONCILED_INPUTS,
+        status=CheckStatus.PASSED,
+        detail=(
+            "The Build lineage binds every examined input to a server-computed content hash; "
+            "Data Reconciliation is intentionally not required in this deployment."
+        ),
+        evidence_refs=("server://dbtl/build-lineage",),
+    )
+    replaced = False
+    normalized: list[ValidityCheck] = []
+    for check in checks:
+        if check.check is ValidityCheckName.RECONCILED_INPUTS:
+            normalized.append(authoritative)
+            replaced = True
+        else:
+            normalized.append(check)
+    if not replaced:
+        normalized.append(authoritative)
+    return normalized
 
 
 class BuildTestOpsMixin:
@@ -336,6 +369,8 @@ class BuildTestOpsMixin:
             )
             for item in checks
         ]
+        if not reconciliation_required():
+            parsed_checks = _server_owned_optional_provenance(parsed_checks)
         evaluation = evaluate_validity(
             metrics=parsed_metrics,
             checks=parsed_checks,

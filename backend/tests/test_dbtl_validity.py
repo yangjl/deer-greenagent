@@ -14,6 +14,7 @@ from deerflow.dbtl.validity import (
     CheckStatus,
     HeadlineMetric,
     ValidityCheck,
+    ValidityCheckName,
     ValidityOutcome,
     ValidityRefused,
     WorkflowRecommendation,
@@ -46,11 +47,7 @@ def test_high_accuracy_with_leakage_is_invalidated() -> None:
                 criterion="gte",
             )
         ],
-        checks=_passing_checks(
-            leakage=CheckStatus.FAILED,
-            structure_null=CheckStatus.FAILED,
-            within_group=CheckStatus.FAILED,
-        ),
+        checks=_passing_checks(leakage=CheckStatus.FAILED),
     )
 
     assert result.outcome is ValidityOutcome.INVALIDATED
@@ -112,6 +109,22 @@ def test_duplicate_checks_are_refused_instead_of_last_write_wins() -> None:
         evaluate_validity(
             metrics=[HeadlineMetric(name="accuracy", value=0.8, threshold=0.7)],
             checks=[*checks, checks[0]],
+        )
+
+
+def test_relatedness_cannot_be_invented_as_a_generic_v2_gate() -> None:
+    assert ValidityCheckName.DUPLICATES_RELATEDNESS not in DEFAULT_VALIDITY_PACK.required_checks
+    with pytest.raises(ValidityRefused, match="not part of this pack"):
+        evaluate_validity(
+            metrics=[HeadlineMetric(name="holdout_r2", value=1.0, threshold=0.95)],
+            checks=[
+                *_passing_checks(),
+                ValidityCheck(
+                    check=ValidityCheckName.DUPLICATES_RELATEDNESS,
+                    status=CheckStatus.FAILED,
+                    detail="No pedigree columns were present.",
+                ),
+            ],
         )
 
 

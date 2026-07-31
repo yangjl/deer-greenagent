@@ -73,7 +73,7 @@ function BuildLineagePanel({ view }: { view: BuildTestView }) {
         <p className="text-sm font-medium">Reproducibility record required</p>
         <p className="text-muted-foreground mt-1 text-xs leading-relaxed">
           Run Build in this cycle context. Submission stays blocked until the
-          system records reconciled inputs, code and config revisions,
+          system records server-bound inputs, code and config revisions,
           environment, outputs, deviations, and logs.
         </p>
       </div>
@@ -162,6 +162,7 @@ function RecordedAssessment({ view }: { view: BuildTestView }) {
   const projected = projectedValidity(
     assessment.headline_metrics,
     assessment.checks,
+    assessment.checks.map((check) => check.check),
   );
   return (
     <div className="space-y-4">
@@ -218,11 +219,13 @@ function AssessmentForm({
   cycleId,
   dbRevision,
   packKey,
+  requiredChecks,
 }: {
   projectId: string;
   cycleId: string;
   dbRevision: number;
   packKey: string;
+  requiredChecks: string[];
 }) {
   const mutation = useRecordValidityAssessment(projectId, cycleId);
   const [metricName, setMetricName] = useState("accuracy");
@@ -231,7 +234,7 @@ function AssessmentForm({
   const [plausibleMax, setPlausibleMax] = useState("");
   const [checks, setChecks] = useState<Record<string, ValidityCheck>>(() =>
     Object.fromEntries(
-      Object.keys(VALIDITY_CHECK_LABELS).map((check) => [
+      requiredChecks.map((check) => [
         check,
         { check, status: "missing", detail: "", evidence_refs: [] },
       ]),
@@ -264,7 +267,11 @@ function AssessmentForm({
     };
   }, [metricName, metricValue, metricThreshold, plausibleMax]);
   const checkList = Object.values(checks);
-  const projected = projectedValidity(metric ? [metric] : [], checkList);
+  const projected = projectedValidity(
+    metric ? [metric] : [],
+    checkList,
+    requiredChecks,
+  );
   const routes = recommendationOptions(projected);
   const effectiveRoute = routes.some((item) => item.id === route)
     ? route
@@ -503,6 +510,7 @@ export function BuildTestReview({
       cycleId={cycleId}
       dbRevision={view.db_revision}
       packKey={view.validity_pack.pack_key}
+      requiredChecks={view.validity_pack.required_checks}
     />
   );
 }

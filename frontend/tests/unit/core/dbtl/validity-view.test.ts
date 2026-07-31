@@ -83,4 +83,20 @@ describe("metric and validity separation", () => {
       "advance_to_learn",
     );
   });
+
+  test("checks outside the server-owned pack do not become invented gates", () => {
+    const required = Object.keys(VALIDITY_CHECK_LABELS).filter(
+      (check) => check !== "duplicates_relatedness",
+    );
+    const result = projectedValidity(
+      [highMetric],
+      checks().filter((check) => required.includes(check.check)),
+      required,
+    );
+
+    expect(result.outcome).toBe("supported");
+    expect(result.reason_codes).not.toContain(
+      "missing_duplicates_relatedness",
+    );
+  });
 });

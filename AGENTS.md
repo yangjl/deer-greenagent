@@ -527,11 +527,18 @@ Breeding-workspace note:
   active stage row over a stale cycle checkpoint, allowing captures written by
   older code (`state=build`, Build approved, Test in progress) to recover at
   Test instead of rerunning Build.
+  `generic-predictive:v2` is the current generic Test pack. It retains the
+  cross-cutting predictive checks but does not make population structure,
+  within-group analysis, or duplicates/relatedness mandatory unless a later
+  explicitly selected pack says so; a worker may report those as limitations
+  but cannot invent them as gates. In optional mode the backend replaces any
+  client/worker `reconciled_inputs` verdict with the server-owned Build-lineage
+  pass, and still refuses assessment when no lineage exists.
   `generic:build:v3` gives executable Build work twelve bounded model calls
   (143 LangGraph super-steps) rather than the four-call effective default that
   could only read the Design and one input before finalizing.
-  `generic:test:v2` uses the same bounded allowance so it can execute validity
-  checks rather than stop after inspecting Build artifacts. Ordinary
+  `generic:test:v3` keeps the v2 bounded allowance and pins the authoritative
+  `generic-predictive:v2` check list into the worker contract. Ordinary
   Build/Test/Learn worker events do not carry `council_seat`; only actual
   meetings do, and meeting seat identity carries its DBTL stage so the frontend
   cannot label Build work as a Design meeting.

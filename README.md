@@ -39,11 +39,13 @@ Design–Build–Test–Learn (DBTL) governance.
   and receives enough bounded execution turns to produce and run the approved
   implementation in one stage request. Test treats that server-bound Build
   lineage as the input-provenance check; an intentionally skipped
-  Reconciliation form is not a validity failure. One-click Build approval opens
-  Test atomically, and older checkpoints whose summary lags their active stage
-  recover from the active row instead of rerunning Build. Live worker cards use
-  the actual DBTL stage instead of presenting Build work as another Design
-  meeting.
+  Reconciliation form is not a validity failure. Test uses a server-owned list
+  of required checks, so missing pedigree or relatedness data can remain a
+  limitation without becoming a gate the approved Design never selected.
+  One-click Build approval opens Test atomically, and older checkpoints whose
+  summary lags their active stage recover from the active row instead of
+  rerunning Build. Live worker cards use the actual DBTL stage instead of
+  presenting Build work as another Design meeting.
 - **Human-controlled automation** — AI may recommend or route DBTL work, but it
   cannot satisfy scientific gates or create authoritative results by itself.
   Starting a cycle launches a project-grounded Design council: independent

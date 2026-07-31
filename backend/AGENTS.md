@@ -2226,8 +2226,13 @@ no readable matrix rows, so the Phase 3 manual-path tests now declare a dataset
 and settle one matrix row first.
 
 DBTL Phase 7 extends the same execution seam through Build and Test.
-`deerflow/dbtl/validity.py` is the pure authority for the provisional
-`generic-predictive:v1` pack. It keeps `HeadlineMetric` separate from
+`deerflow/dbtl/validity.py` is the pure authority for versioned validity packs.
+The legacy `generic-predictive:v1` vocabulary required every cross-domain
+check; current `generic-predictive:v2` keeps the universally applicable
+predictive checks and leaves population structure, within-group analysis, and
+duplicates/relatedness out unless a later explicitly selected pack requires
+them. A worker can retain such concerns as limitations but cannot invent them
+as gates. The pack keeps `HeadlineMetric` separate from
 `ValidityCheck` and computes `supported`, `not_supported`, `inconclusive`, or
 `invalidated` fail-closed; high performance cannot override a failed validity
 check or an explicit plausible ceiling. Only supported and valid-negative
@@ -2248,6 +2253,11 @@ server-bound Build lineage as the data authority, and defines the retained
 `reconciled_inputs` validity key as bound input provenance. Missing dataset
 declarations or matrix rows are therefore neither a limitation nor a failed
 Test check. Historical Build prose cannot override the active server policy.
+The assessment writer enforces the same boundary: optional mode replaces the
+submitted `reconciled_inputs` status with a server-owned pass bound to Build
+lineage, while the existing no-lineage refusal prevents that normalization from
+manufacturing provenance. The frontend constructs the review form from the
+server's `required_checks` list instead of the larger display vocabulary.
 `dbtl_validity_assessments` binds a human reviewer and
 typed recommendation to the exact Test attempt and latest Build lineage.
 Migration `0016_dbtl_build_test_validity` owns both tables. A Build submission
@@ -2265,8 +2275,10 @@ generated outputs and refuses a source changed during the run. V3 raises the
 bounded allowance from the four model calls effectively available under the
 old 40-super-step default to twelve calls (143 super-steps), so a worker can
 inspect, write, execute, diagnose, and still return its structured result in
-the same request. `generic:test:v2` carries the same correction for executable
-validity checks. Ordinary stage workers omit `council_seat` from lifecycle
+the same request. `generic:test:v3` retains that allowance and pins
+`generic-predictive:v2`, its exact required-check list, optional-Reconciliation
+semantics, and the no-invented-gates rule into the worker context. Ordinary
+stage workers omit `council_seat` from lifecycle
 events; actual review meetings carry their stage in that identity so the
 frontend uses Design, Build, Test, or Learn meeting copy correctly. It records
 the explicit Build checkpoint inside a one-click approval before advancing to

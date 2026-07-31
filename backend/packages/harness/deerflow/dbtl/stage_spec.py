@@ -428,6 +428,28 @@ TEST_SPEC_V2 = StageSpec(
     ),
 )
 
+
+TEST_SPEC_V3 = StageSpec(
+    stage="test",
+    domain_profile=GENERIC_PROFILE,
+    version=3,
+    title="Test",
+    purpose=(
+        "Assess the approved Build against the server-owned generic-predictive:v2 validity contract. "
+        "Only that pack's named checks can determine the outcome; other scientific concerns remain limitations unless a person approved them in another pack."
+    ),
+    cycle_classes=_ALL_CLASSES,
+    cycle_weights=_ALL_WEIGHTS,
+    required_inputs=TEST_SPEC_V2.required_inputs,
+    required_artifact_types=TEST_SPEC_V2.required_artifact_types,
+    output_schema="validity_report.v2",
+    required_capabilities=TEST_SPEC_V2.required_capabilities,
+    optional_capabilities=TEST_SPEC_V2.optional_capabilities,
+    validity_gates=("generic-predictive:v2",),
+    memory_write_policy=MemoryWritePolicy.NONE,
+    budget=TEST_SPEC_V2.budget,
+)
+
 LEARN_SPEC_V1 = StageSpec(
     stage="learn",
     domain_profile=GENERIC_PROFILE,
@@ -512,6 +534,7 @@ _REGISTRY: dict[str, StageSpec] = {
         BUILD_SPEC_V3,
         TEST_SPEC_V1,
         TEST_SPEC_V2,
+        TEST_SPEC_V3,
         LEARN_SPEC_V1,
         TEST_REVIEW_SPEC_V1,
         BUILD_REVIEW_SPEC_V1,
@@ -527,7 +550,7 @@ _CURRENT: MappingProxyType[tuple[str, str], int] = MappingProxyType(
         (GENERIC_PROFILE, "design"): DESIGN_SPEC_V2.version,
         (GENERIC_PROFILE, "reconciliation"): RECONCILIATION_SPEC_V1.version,
         (GENERIC_PROFILE, "build"): BUILD_SPEC_V3.version,
-        (GENERIC_PROFILE, "test"): TEST_SPEC_V2.version,
+        (GENERIC_PROFILE, "test"): TEST_SPEC_V3.version,
         (GENERIC_PROFILE, "learn"): LEARN_SPEC_V1.version,
     }
 )
