@@ -623,7 +623,18 @@ assessment its own deck was rendered against (falling back to `standard`, never
 `convene_review_meeting` when one may be convened and withholds the transition
 intents while one is required — never the chair or park intents, or convening
 the meeting that unlocks the gate would be unreachable. Design surfaces get a
-null gate and are untouched. Nothing dispatches a review meeting yet.
+null gate and are untouched.
+
+Phase 3A's first visible piece: the **Test stage now registers a review page of
+its own**, rendered from that stage's evidence rather than from a chair result,
+because no meeting has happened when it is written. It carries the transition
+assessment (so the meeting gate has a difficulty to read) and **deliberately no
+route menu** — a Test outcome is computed at review time from the validity
+pack, and a menu rendered before that would pre-empt the computation. The page
+is registered whether or not `progressive_gate` is on; only the gate rides on
+that flag. Still missing before a person can use it: a handler for
+`convene_review_meeting`, and dispatch of the review meeting itself. Tests:
+`tests/test_dbtl_test_review_surface.py`, `tests/test_dbtl_meeting_gate_surface.py`.
 
 ## Cross-Cutting Conventions
 

@@ -2483,11 +2483,12 @@ class LiveStageAdapter:
         then be an owner who cannot respond at all.
         """
         try:
-            register = getattr(
-                self._repo,
-                "register_stage_feedback_surface",
-                self._repo.register_design_feedback_surface,
-            )
+            # Resolved without touching the legacy attribute: ``getattr`` with a
+            # default evaluates that default eagerly, so a repository exposing
+            # only the stage-generic method raised AttributeError before the
+            # lookup it would have succeeded at.
+            stage_register = getattr(self._repo, "register_stage_feedback_surface", None)
+            register = stage_register if stage_register is not None else self._repo.register_design_feedback_surface
             kwargs = dict(
                 surface_id=plan.surface_id,
                 project_id=project_id,
@@ -2504,7 +2505,7 @@ class LiveStageAdapter:
                 evidence_artifact_revision=int(plan.evidence["revision"]) if plan.evidence is not None else None,
                 evidence_content_hash=plan.evidence_content_hash or None,
             )
-            if hasattr(self._repo, "register_stage_feedback_surface"):
+            if stage_register is not None:
                 kwargs["stage"] = plan.stage
             await register(**kwargs)
         except Exception:  # noqa: BLE001 - a descriptor must not break the record
@@ -3182,9 +3183,32 @@ class LiveStageAdapter:
         deck_uri = None
         deck = None
         surface_plan = None
-        if stage == "design" and chair_has_presentable_outcome:
+        # Test's deck is the *pre-meeting* decision surface, so it is rendered
+        # from the stage's own evidence rather than from a chair result — there
+        # is no meeting yet, and its outcome is computed at review time from the
+        # validity pack, never here. It carries no routes for the same reason:
+        # a route menu that pre-empted the outcome computation would be the one
+        # thing Phase 7 forbids.
+        test_has_reviewable_evidence = stage == "test" and produced_usable_evidence and bool(artifact_uri and artifact_hash)
+        if (stage == "design" and chair_has_presentable_outcome) or test_has_reviewable_evidence:
             transition_gate = None
-            if artifact_uri and artifact_hash and bool(getattr(getattr(self._app_config, "dbtl", None), "progressive_gate", False)):
+            if test_has_reviewable_evidence:
+                if bool(getattr(getattr(self._app_config, "dbtl", None), "progressive_gate", False)):
+                    assessment = await self._assess_transition(
+                        stage="test",
+                        cycle=cycle,
+                        evidence_summary=artifact_digest or f"Test evidence: {artifact_uri} ({artifact_hash})",
+                    )
+                    # Assessment only. The difficulty is what decides whether a
+                    # validity meeting is skipped, offered, or required; the
+                    # legal routes are not knowable until a person's review
+                    # computes the outcome.
+                    transition_gate = {
+                        "stage": "test",
+                        "assessment": assessment.as_dict(),
+                        "routes": [],
+                    }
+            elif artifact_uri and artifact_hash and bool(getattr(getattr(self._app_config, "dbtl", None), "progressive_gate", False)):
                 assessment = await self._assess_transition(
                     stage="design",
                     cycle=cycle,
@@ -3221,9 +3245,9 @@ class LiveStageAdapter:
                 paused=bool(clarification_question),
                 artifact_uri=artifact_uri or "",
                 artifact_hash=artifact_hash or "",
-                decision_request=chair_result.decision_request,
+                decision_request=(chair_result.decision_request if chair_result is not None else None),
                 chair_worker_run_id=chair_worker_run_id,
-                review_issue_ids=tuple(f"issue-{index + 1}" for index, _item in enumerate(chair_result.consensus.disagreements if chair_result.consensus is not None else ())),
+                review_issue_ids=(tuple(f"issue-{index + 1}" for index, _item in enumerate(chair_result.consensus.disagreements)) if chair_result is not None and chair_result.consensus is not None else ()),
                 transition_gate=transition_gate,
             )
             theme_css = await asyncio.to_thread(_deck_theme_css, str(user_id or ""))
@@ -3236,7 +3260,7 @@ class LiveStageAdapter:
                 stage=stage,
                 package_path=artifact_uri or "",
                 clarification_question=clarification_question or "",
-                decision_request=chair_result.decision_request,
+                decision_request=(chair_result.decision_request if chair_result is not None else None),
                 surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
                 surface_mode=(surface_plan.mode if surface_plan is not None else ""),
                 transition_gate=transition_gate,
