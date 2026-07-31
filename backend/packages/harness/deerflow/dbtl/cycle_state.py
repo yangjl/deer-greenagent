@@ -122,6 +122,61 @@ _FORWARD_TRANSITIONS: Mapping[str, tuple[str, tuple[str, ...]]] = MappingProxyTy
     }
 )
 
+# The same three tables with Data Reconciliation lifted out of the path, used
+# when a deployment sets ``dbtl.reconciliation_required = false``. Design
+# approval then opens Build directly.
+#
+# Reconciliation is *skipped*, not deleted: the stage row still exists, its
+# endpoints still work, and a project may still declare datasets and settle
+# rows. What changes is only whether Build waits for it. Expressing that as a
+# second set of tables rather than as branches inside the functions keeps the
+# legal moves readable as data — the property this module exists to make
+# checkable.
+_STAGE_PREREQUISITES_WITHOUT_RECONCILIATION: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "design": (),
+        "reconciliation": ("design",),
+        "build": ("design",),
+        "test": ("build",),
+        "learn": ("test",),
+    }
+)
+
+_ENTRY_STATES_WITHOUT_RECONCILIATION: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        "design": frozenset({"design"}),
+        "reconciliation": frozenset({"design", "reconciliation"}),
+        "build": frozenset({"ready_for_build", "build"}),
+        "test": frozenset({"build", "test"}),
+        "learn": frozenset({"test", "learn"}),
+    }
+)
+
+_FORWARD_TRANSITIONS_WITHOUT_RECONCILIATION: Mapping[str, tuple[str, tuple[str, ...]]] = MappingProxyType(
+    {
+        "design": ("ready_for_build", ("design",)),
+        # Retained so a cycle that *did* work reconciliation before the flag
+        # changed still has a legal move forward. A cycle mid-flight must not
+        # become unadvanceable because an operator flipped a switch.
+        "reconciliation": ("ready_for_build", ("design",)),
+        "ready_for_build": ("build", ("design",)),
+        "build": ("test", ("build",)),
+        "test": ("learn", ("test",)),
+        "learn": ("completed", ("learn",)),
+    }
+)
+
+
+def _tables(reconciliation_required: bool):
+    """The three legal-move tables for this deployment's reconciliation rule."""
+    if reconciliation_required:
+        return _STAGE_PREREQUISITES, _ENTRY_STATES, _FORWARD_TRANSITIONS
+    return (
+        _STAGE_PREREQUISITES_WITHOUT_RECONCILIATION,
+        _ENTRY_STATES_WITHOUT_RECONCILIATION,
+        _FORWARD_TRANSITIONS_WITHOUT_RECONCILIATION,
+    )
+
 
 def validate_cycle_class(value: str) -> CycleClass:
     """Return the :class:`CycleClass` for *value*, or raise ``ValueError``."""
@@ -153,24 +208,37 @@ def _approved(statuses: Mapping[str, StageStatus], stages: tuple[str, ...]) -> b
     return all(statuses.get(stage) is StageStatus.APPROVED for stage in stages)
 
 
-def can_enter_stage(stage: str, current_state: str, statuses: Mapping[str, StageStatus]) -> bool:
+def can_enter_stage(
+    stage: str,
+    current_state: str,
+    statuses: Mapping[str, StageStatus],
+    *,
+    reconciliation_required: bool = True,
+) -> bool:
     """Whether *stage* may be worked, given the cycle state and approvals.
 
     Both conditions must hold: every prerequisite stage is approved, and the
     cycle is in a state from which this stage is reachable. Checking only the
     approvals would let a completed cycle re-open a stage.
     """
-    prerequisites = _STAGE_PREREQUISITES.get(stage)
-    if prerequisites is None or is_terminal(current_state):
+    prerequisites, entry_states, _forward = _tables(reconciliation_required)
+    stage_prerequisites = prerequisites.get(stage)
+    if stage_prerequisites is None or is_terminal(current_state):
         return False
-    if not _approved(statuses, prerequisites):
+    if not _approved(statuses, stage_prerequisites):
         return False
-    return current_state in _ENTRY_STATES[stage]
+    return current_state in entry_states[stage]
 
 
-def next_cycle_state(current_state: str, statuses: Mapping[str, StageStatus]) -> str:
+def next_cycle_state(
+    current_state: str,
+    statuses: Mapping[str, StageStatus],
+    *,
+    reconciliation_required: bool = True,
+) -> str:
     """The single legal forward state, or raise :class:`TransitionRefused`."""
-    move = _FORWARD_TRANSITIONS.get(current_state)
+    _prerequisites, _entry_states, forward = _tables(reconciliation_required)
+    move = forward.get(current_state)
     if move is None:
         raise TransitionRefused(f"No forward transition exists from state {current_state!r}.")
     target, required = move
@@ -184,11 +252,16 @@ def apply_review(
     statuses: Mapping[str, StageStatus],
     stage: str,
     decision: ReviewDecision,
+    *,
+    reconciliation_required: bool = True,
 ) -> dict[str, StageStatus]:
     """Return a **new** status map with *decision* applied to *stage*.
 
     An approval also opens the next stage, but only that one — approving
     Design must not make Build workable while Reconciliation is outstanding.
+    When reconciliation is not required, the successor of Design is Build, and
+    reconciliation is stepped over rather than opened: opening a stage nothing
+    waits for would leave every cycle showing permanent outstanding work.
     """
     if stage not in STAGE_ORDER:
         raise TransitionRefused(f"Unknown stage {stage!r}.")
@@ -196,13 +269,22 @@ def apply_review(
     if current not in _REVIEWABLE_STATUSES:
         raise TransitionRefused(f"Stage {stage!r} is {current} and is not awaiting review.")
 
+    prerequisites, _entry_states, _forward = _tables(reconciliation_required)
     updated = dict(statuses)
     updated[stage] = _REVIEW_RESULT[decision]
 
     if decision is ReviewDecision.APPROVE:
-        index = STAGE_ORDER.index(stage)
-        if index + 1 < len(STAGE_ORDER):
-            successor = STAGE_ORDER[index + 1]
-            if _approved(updated, _STAGE_PREREQUISITES[successor]) and updated[successor] is StageStatus.LOCKED:
-                updated[successor] = StageStatus.IN_PROGRESS
+        successor = _successor_stage(stage, reconciliation_required=reconciliation_required)
+        if successor is not None and _approved(updated, prerequisites[successor]) and updated[successor] is StageStatus.LOCKED:
+            updated[successor] = StageStatus.IN_PROGRESS
     return updated
+
+
+def _successor_stage(stage: str, *, reconciliation_required: bool) -> str | None:
+    """The stage an approval of *stage* opens, if any."""
+    index = STAGE_ORDER.index(stage)
+    for candidate in STAGE_ORDER[index + 1 :]:
+        if candidate == "reconciliation" and not reconciliation_required:
+            continue
+        return candidate
+    return None

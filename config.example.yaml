@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 35
+config_version: 36
 
 # ============================================================================
 # Logging
@@ -1230,6 +1230,21 @@ dbtl:
   # the registered feedback deck. Set false for the one-release rollback path;
   # durable deck responses and reviews are retained.
   design_deck_feedback: true
+  # Gate Build on a settled Data Reconciliation matrix. Default true: an
+  # approved Design opens Reconciliation, and Build waits until every required
+  # matrix row is settled by a person. Set false and an approved Design opens
+  # Build directly, while the Reconciliation stage, its endpoints, and its
+  # matrix stay available for projects that use them.
+  #
+  # The data guarantees are not dropped with the gate. Build still binds the
+  # content hashes of the datasets it ran on, and still refuses to record
+  # lineage when none are declared or a raw source is not declared immutable —
+  # `dataset_fingerprint([])` is a valid hash of nothing, so an undeclared
+  # build would otherwise bind silently and be unable to say what produced it.
+  # What is given up is the human-settled judgement matrix: contradictory
+  # sources, trait direction, exclusions, leakage, and train/test separation
+  # are no longer required to be adjudicated before Build.
+  reconciliation_required: true
   # Progressive Design gate (Phases 0-1): show the durable path strip and put
   # the assessment plus the Approve / Revise / Park choice on registered Design
   # decks. Off restores the uniform two-step gate. Transition records accumulate

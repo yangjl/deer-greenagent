@@ -10,7 +10,8 @@ from uuid import uuid4
 from sqlalchemy import func, select
 
 from deerflow.dbtl.cycle_state import StageStatus
-from deerflow.dbtl.reconciliation import dataset_fingerprint
+from deerflow.dbtl.reconciliation import dataset_fingerprint, dataset_readiness_reasons
+from deerflow.dbtl.reconciliation_policy import reconciliation_required
 from deerflow.dbtl.stage_routes import (
     UNRECONCILED_REASON,
     RouteContext,
@@ -211,9 +212,22 @@ class BuildTestOpsMixin:
             }:
                 raise DbtlWorkflowRefused(f"Build lineage cannot be recorded while Build is {build.status!r}.")
             dataset_rows = list((await session.execute(select(DbtlDatasetRow).where(DbtlDatasetRow.cycle_id == cycle_id))).scalars())
-            fingerprint = dataset_fingerprint([self._binding_from_row(item) for item in dataset_rows])
-            if reconciliation.status != StageStatus.APPROVED.value or not reconciliation.approved_dataset_fingerprint or reconciliation.approved_dataset_fingerprint != fingerprint:
-                raise DbtlWorkflowRefused("Build lineage is not bound to the currently approved reconciled inputs.")
+            bindings = [self._binding_from_row(item) for item in dataset_rows]
+            fingerprint = dataset_fingerprint(bindings)
+            if reconciliation_required():
+                if reconciliation.status != StageStatus.APPROVED.value or not reconciliation.approved_dataset_fingerprint or reconciliation.approved_dataset_fingerprint != fingerprint:
+                    raise DbtlWorkflowRefused("Build lineage is not bound to the currently approved reconciled inputs.")
+            else:
+                # Reconciliation is not gating Build here, so the two data
+                # guarantees it used to carry move onto this write instead of
+                # disappearing with it: a result must still name the data it
+                # ran on, and raw inputs must still be declared immutable.
+                # `dataset_fingerprint([])` is a valid hash of nothing, so an
+                # empty set would otherwise bind silently and a build would be
+                # unable to say which data produced it.
+                reasons = dataset_readiness_reasons(bindings)
+                if reasons:
+                    raise DbtlWorkflowRefused(f"Build lineage cannot be recorded: {' '.join(reasons)}")
 
             highest = await session.scalar(select(func.max(DbtlBuildLineageRow.lineage_revision)).where(DbtlBuildLineageRow.stage_attempt_id == build.id))
             revision = int(highest or 0) + 1
@@ -497,23 +511,10 @@ class BuildTestOpsMixin:
     ) -> bool:
         """Whether the current dataset still has an approved Build bridge."""
         reconciliation = attempts["reconciliation"]
-        if (
-            reconciliation.status != StageStatus.APPROVED.value
-            or not reconciliation.approved_dataset_fingerprint
-        ):
+        if reconciliation.status != StageStatus.APPROVED.value or not reconciliation.approved_dataset_fingerprint:
             return False
-        dataset_rows = list(
-            (
-                await session.execute(
-                    select(DbtlDatasetRow).where(
-                        DbtlDatasetRow.cycle_id == cycle_id
-                    )
-                )
-            ).scalars()
-        )
-        current = dataset_fingerprint(
-            [self._binding_from_row(item) for item in dataset_rows]
-        )
+        dataset_rows = list((await session.execute(select(DbtlDatasetRow).where(DbtlDatasetRow.cycle_id == cycle_id))).scalars())
+        current = dataset_fingerprint([self._binding_from_row(item) for item in dataset_rows])
         return reconciliation.approved_dataset_fingerprint == current
 
     @staticmethod
@@ -539,23 +540,15 @@ class BuildTestOpsMixin:
             WorkflowRecommendation.CLOSE_CYCLE: RouteSlug.CLOSE_CYCLE,
         }.get(route)
         if route is WorkflowRecommendation.RETURN_TO_RECONCILIATION:
-            raise ValidityRefused(
-                "Reconciliation is not a cycle-stage destination. "
-                f"{UNRECONCILED_REASON}"
-            )
+            raise ValidityRefused(f"Reconciliation is not a cycle-stage destination. {UNRECONCILED_REASON}")
         selected = next(
             (candidate for candidate in routes if candidate.slug == route_slug),
             None,
         )
         if selected is None:
-            raise ValidityRefused(
-                f"Recommendation {route.value!r} is not a legal route from "
-                f"{outcome.value!r} Test evidence."
-            )
+            raise ValidityRefused(f"Recommendation {route.value!r} is not a legal route from {outcome.value!r} Test evidence.")
         if selected.blocked:
-            raise ValidityRefused(
-                selected.blocked_reason or f"Route {route.value!r} is blocked."
-            )
+            raise ValidityRefused(selected.blocked_reason or f"Route {route.value!r} is blocked.")
 
     @staticmethod
     def _review_decision_for_route(

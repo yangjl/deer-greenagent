@@ -50,6 +50,18 @@ class DbtlConfig(BaseModel):
         description=("Use authenticated Design feedback decks for chair answers and Design review. Set false to restore the visible Design Human Input card and Design stage sheet without deleting surfaces, actions, reviews, or artifacts."),
     )
 
+    reconciliation_required: bool = Field(
+        default=True,
+        description=(
+            "Gate Build on a settled Data Reconciliation matrix. Default true. Set false and an approved Design opens "
+            "Build directly, while the reconciliation stage, its endpoints, and its matrix remain available for projects "
+            "that use them. The data guarantees are not dropped: Build still binds the content hashes of the datasets it "
+            "ran on and still refuses to record lineage when none are declared or a raw source is not declared immutable. "
+            "What is given up is the human-settled judgement matrix — contradictory sources, trait direction, exclusions, "
+            "leakage, and train/test separation are no longer required to be adjudicated before Build."
+        ),
+    )
+
     progressive_gate: bool = Field(
         default=False,
         description=(

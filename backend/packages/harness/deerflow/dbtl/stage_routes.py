@@ -87,13 +87,23 @@ class RouteContext:
     stage: str
     outcome: str | None
     reconciliation_settled: bool = False
+    #: Whether this deployment gates Build on a settled reconciliation matrix.
+    #: Defaults to ``True`` so a caller that has not been taught about the flag
+    #: keeps the stricter behaviour; a route menu is a safety surface, and the
+    #: forgiving default belongs on the other side.
+    reconciliation_required: bool = True
+
+    @property
+    def build_edge_open(self) -> bool:
+        """Whether the data work behind the Build edge is out of the way."""
+        return self.reconciliation_settled or not self.reconciliation_required
 
 
-def _advance(stage: str, *, reconciliation_settled: bool) -> StageRoute:
+def _advance(stage: str, *, build_edge_open: bool) -> StageRoute:
     target = _NEXT_STAGE.get(stage, COMPLETED)
     if stage == "learn":
         return StageRoute(RouteSlug.ADVANCE, COMPLETED, "Conclude the cycle", "Record Learn's outcome and close the cycle as completed.")
-    blocked = target == "build" and not reconciliation_settled
+    blocked = target == "build" and not build_edge_open
     return StageRoute(
         RouteSlug.ADVANCE,
         target,
@@ -121,8 +131,8 @@ def _park(stage: str) -> StageRoute:
     )
 
 
-def _return_to_build(*, reconciliation_settled: bool) -> StageRoute:
-    blocked = not reconciliation_settled
+def _return_to_build(*, build_edge_open: bool) -> StageRoute:
+    blocked = not build_edge_open
     return StageRoute(
         RouteSlug.RETURN_TO_BUILD,
         "build",
@@ -157,13 +167,13 @@ def compute_stage_routes(context: RouteContext) -> tuple[StageRoute, ...]:
             raise StageRoutesRefused(f"Unknown Test outcome {outcome!r}.")
         if outcome in {"supported", "not_supported"}:
             return (
-                _advance("test", reconciliation_settled=context.reconciliation_settled),
+                _advance("test", build_edge_open=context.build_edge_open),
                 _revise("test"),
                 _close(),
             )
         return (
             _revise("test"),
-            _return_to_build(reconciliation_settled=context.reconciliation_settled),
+            _return_to_build(build_edge_open=context.build_edge_open),
             _return_to_design(),
             _close(),
         )
@@ -172,7 +182,7 @@ def compute_stage_routes(context: RouteContext) -> tuple[StageRoute, ...]:
         raise StageRoutesRefused(f"Unknown review outcome {outcome!r} for stage {stage!r}.")
     if outcome in {"approve", "approved"}:
         return (
-            _advance(stage, reconciliation_settled=context.reconciliation_settled),
+            _advance(stage, build_edge_open=context.build_edge_open),
             *(() if stage == "learn" else (_revise(stage),)),
             *(() if stage == "learn" else (_park(stage),)),
             *(() if stage == "learn" else (_close(),)),

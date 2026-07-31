@@ -497,6 +497,22 @@ Breeding-workspace note:
   run request carries `context` at the top level, but LangGraph relocates it to
   `configurable["context"]` before a node sees it, so code running on both sides
   must look in both places or silently read nothing on one of them.
+- **Data Reconciliation can be a required gate or an optional stage.**
+  `dbtl.reconciliation_required` (default **true**) keeps today's rule: an
+  approved Design opens Reconciliation, and Build waits for a settled matrix.
+  Set it false and an approved Design opens Build directly, while the stage,
+  its endpoints, and its matrix stay available — it is *skipped*, never
+  deleted, and a cycle already working the matrix stays advanceable in either
+  direction so flipping the switch cannot strand one. The rule lives in
+  `deerflow.dbtl.reconciliation_policy`, read by the state machine, the route
+  menu, and the Build lineage writer so they cannot disagree; an unreadable
+  config keeps the gate, because a deployment that cannot state its rule has
+  not asked for the looser one. **The data guarantees do not leave with the
+  gate**: Build still binds the content hashes of the datasets it ran on and
+  refuses lineage when none are declared or a raw source is not declared
+  immutable — `dataset_fingerprint([])` is a valid hash of nothing, so an
+  undeclared build would otherwise bind silently and be unable to say what
+  produced it. What is given up is the human-settled judgement matrix.
 - **Progressive-gate Phases 0-1** record every gate decision as an append-only
   edge on a Design/Build/Test/Learn stage graph (`dbtl_stage_transitions`);
   reconciliation is a Build-edge precondition, not a path node, so data work
