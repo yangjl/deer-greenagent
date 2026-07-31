@@ -4,7 +4,28 @@
 feature flag; focused automated checks pass and the owner approved the manual
 walkthrough on 2026-07-31 (park → approve recorded against cycle `b9e8cade`
 in the isolated manual profile). Phase 2 is code complete behind the same
-flags; its named manual checkpoints are the open acceptance work.
+flags.
+
+Owner-approved on 2026-07-31 against cycle `0bbcd8b9` (scenarios
+`after-meeting`, `meeting-approve`, `post-meeting-revise`, `revise-park`):
+the one-question gate records **Approve**, **Revise**, and **Park** correctly,
+each as its own append-only edge; approval opens Reconciliation rather than the
+blocked Build edge; and the revision round takes the chair-only route with its
+reason recorded. A pre-0025 scenario also migrated forward cleanly on restore.
+
+Still unverified by a person:
+
+- the **reconvene** branch of the revision reading (an objection that needs an
+  argument nobody made);
+- the **Reject** verdict;
+- the parent surface's lifecycle strip (`Design · open` / `· superseded` /
+  `· consumed`, `Surface revision N`, `Open latest surface`), which has **no
+  automated coverage at all**; and
+- one uncached end-to-end smoke test through every changed stage, per the
+  manual-pipeline runbook, before merge.
+
+Known gap, not yet fixed: a revision round that dies mid-flight still says
+nothing in chat, because the explanation rides on the round's own reply.
 **Date:** 2026-07-29
 **Scope:** Replace the uniform post-meeting human gate with a progressive gate
 driven by a per-transition difficulty assessment; model a cycle as a recorded
