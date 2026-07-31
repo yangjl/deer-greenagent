@@ -609,6 +609,14 @@ Phase 3 review-meeting contracts are pinned as
 
 These apply repo-wide; module guides own the module-specific detail.
 
+- **Answer short, in plain words** — chat replies are for a busy person, not a log
+  file. Lead with what happened or what you found, keep it to a few sentences, and
+  use ordinary language instead of internal identifiers, code names, or jargon
+  when a plain phrase says the same thing. Spell a term out the first time it is
+  needed. Skip the reasoning, the options you did not take, and the caveats unless
+  they change what the reader would do next — or unless they ask. This governs
+  replies only; commit messages, code comments, and these guides stay as detailed
+  as they are.
 - **Documentation update policy** — keep docs in sync with code: update `README.md` for
   user-facing changes and the relevant `AGENTS.md` for development/architecture changes in
   the same change set.
