@@ -13,14 +13,17 @@ each as its own append-only edge; approval opens Reconciliation rather than the
 blocked Build edge; and the revision round takes the chair-only route with its
 reason recorded. A pre-0025 scenario also migrated forward cleanly on restore.
 
+The parent surface's lifecycle strip was owner-confirmed on 2026-07-31 against
+`meeting-approve` (`Design · consumed`, `Surface revision 1`, verdict controls
+inert with a receipt) and the superseded conversation (`Design · superseded`,
+amber, `Open latest surface`). That closes Phase 2's only manual-only check —
+nothing automated covers those strings.
+
 Still unverified by a person:
 
 - the **reconvene** branch of the revision reading (an objection that needs an
   argument nobody made);
-- the **Reject** verdict;
-- the parent surface's lifecycle strip (`Design · open` / `· superseded` /
-  `· consumed`, `Surface revision N`, `Open latest surface`), which has **no
-  automated coverage at all**; and
+- the **Reject** verdict; and
 - one uncached end-to-end smoke test through every changed stage, per the
   manual-pipeline runbook, before merge.
 
