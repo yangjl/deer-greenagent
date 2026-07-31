@@ -93,6 +93,12 @@ logger = logging.getLogger(__name__)
 # outlive the request and silently apply to later turns.
 SELECTED_CYCLE_CONTEXT_KEY = "dbtl_selected_cycle_id"
 EXPLICIT_CHOICE_CONTEXT_KEY = "dbtl_explicit_choice"
+#: Set only by the authenticated ``convene_review_meeting`` route, from the
+#: stage the *server* registered the deck against. A meeting reads a stage's
+#: recorded evidence rather than re-running it, so this is the one signal that
+#: makes an ``awaiting_review`` stage dispatchable — it must never come from a
+#: client, or a deck could convene a meeting over evidence it never saw.
+REVIEW_MEETING_STAGE_CONTEXT_KEY = "dbtl_review_meeting_stage"
 
 # Request-id prefixes, one per clarification the supervisor can raise. They are
 # what a resuming turn matches on, so the two must stay distinguishable: a
@@ -1356,6 +1362,12 @@ def build_supervisor_graph(
                 ]
             }
         raw_context = request_context(config)
+        # Server-owned, set only by the authenticated convening route. Read here
+        # so the Design preflight below is skipped entirely: a review meeting
+        # seats its own roster over recorded evidence, and raising the Design
+        # council's participant card for it would ask about the wrong meeting.
+        requested_meeting = raw_context.get(REVIEW_MEETING_STAGE_CONTEXT_KEY)
+        review_meeting_stage = requested_meeting.strip().lower() if isinstance(requested_meeting, str) and requested_meeting.strip() else None
         # Recovered before the preflight check, and it re-supplies the depth the
         # client cannot: without it this answer would look like an ordinary
         # cycle request with no depth set, and the council the person declined
@@ -1384,7 +1396,7 @@ def build_supervisor_graph(
         # bypass the once-only guard: the whole point is to show the roster
         # again, changed.
         answered_adjustment = _card_answer(state, COUNCIL_ADJUST_PREFIX) is not None
-        if authored_design is None and council_depth_from_config(config) is None and (answered_adjustment or not _has_emitted_card(state, COUNCIL_PREFLIGHT_PREFIX)):
+        if review_meeting_stage is None and authored_design is None and council_depth_from_config(config) is None and (answered_adjustment or not _has_emitted_card(state, COUNCIL_PREFLIGHT_PREFIX)):
             preview = getattr(stage_adapter, "preview_council", None)
             plan = None
             if callable(preview):
@@ -1416,6 +1428,31 @@ def build_supervisor_graph(
             "state": state,
             "config": config,
         }
+        if review_meeting_stage:
+            # Convening is its own kind of request: the adapter reads the named
+            # stage's recorded evidence rather than deriving a stage from cycle
+            # state, so none of the Design council setup below applies to it.
+            execute_kwargs["review_meeting_stage"] = review_meeting_stage
+            result = stage_adapter.execute(**execute_kwargs)
+            if isawaitable(result):
+                result = await result
+            deck_uri = getattr(result, "deck_uri", None)
+            deck_uri = deck_uri if isinstance(deck_uri, str) and deck_uri else None
+            artifact_uri = getattr(result, "artifact_uri", None)
+            if isinstance(artifact_uri, str) and artifact_uri:
+                return {
+                    "messages": list(
+                        _present_artifact_messages(
+                            decision,
+                            note=result.note,
+                            artifact_uri=artifact_uri,
+                            request_nonce=str(request_context(config).get("run_id") or ""),
+                            deck_uri=deck_uri,
+                        )
+                    ),
+                    "artifacts": [path for path in (artifact_uri, deck_uri) if path],
+                }
+            return {"messages": [AIMessage(content=_render_continuation(decision, result.note))]}
         if authored_design is not None:
             execute_kwargs["authored_design"] = authored_design
         if adjustment is not None:

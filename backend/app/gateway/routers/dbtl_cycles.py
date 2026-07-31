@@ -46,7 +46,7 @@ from deerflow.dbtl import (
     validate_candidate_grade,
 )
 from deerflow.dbtl.stage_feedback import filter_stage_feedback_intents
-from deerflow.dbtl.stage_meetings import apply_meeting_gate, surface_meeting_gate
+from deerflow.dbtl.stage_meetings import apply_meeting_gate, review_meeting_recorded, surface_meeting_gate
 from deerflow.persistence.dbtl import (
     DbtlRevisionConflict,
     DbtlWorkflowRefused,
@@ -86,7 +86,13 @@ def _surface_transition_gate(surface: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _surface_meeting_gate(surface: dict[str, Any], dbtl_config: Any, *, stage: dict[str, Any] | None):
+def _surface_meeting_gate(
+    surface: dict[str, Any],
+    dbtl_config: Any,
+    *,
+    stage: dict[str, Any] | None,
+    cycle: dict[str, Any] | None = None,
+):
     """The review-meeting gate for this surface's stage, or ``None``.
 
     The assessment is read off the surface's own server-owned transition gate,
@@ -106,8 +112,14 @@ def _surface_meeting_gate(surface: dict[str, Any], dbtl_config: Any, *, stage: d
         enabled=enabled,
         # A stage attempt already carrying its review-meeting artifact has had
         # its meeting; offering another would let the gate demand meetings
-        # recursively, which the policy layer explicitly forbids.
-        meeting_completed=bool((stage or {}).get("review_meeting_recorded", False)),
+        # recursively, which the policy layer explicitly forbids. Read off the
+        # artifact rather than a stored flag, so the gate and the evidence a
+        # reviewer opens cannot disagree.
+        meeting_completed=review_meeting_recorded(
+            stage=surface_stage,
+            stage_attempt_id=str((stage or {}).get("id") or ""),
+            artifacts=[item for item in (cycle or {}).get("artifacts", []) if isinstance(item, dict)],
+        ),
     )
 
 
@@ -644,7 +656,7 @@ async def _design_feedback_read_model(
         # matrix has the last word: the gate may add ``convene_review_meeting``
         # or withhold the transition intents, but it can never grant a stage an
         # intent that stage may not ever record.
-        allowed_actions = apply_meeting_gate(_surface_meeting_gate(surface, dbtl_config, stage=stage), allowed_actions)
+        allowed_actions = apply_meeting_gate(_surface_meeting_gate(surface, dbtl_config, stage=stage, cycle=cycle), allowed_actions)
         allowed_actions = filter_stage_feedback_intents(surface_stage, allowed_actions)
         interactive = bool(allowed_actions)
 
@@ -705,6 +717,7 @@ async def _design_feedback_read_model(
                 surface,
                 dbtl_config,
                 stage=next((item for item in cycle["stages"] if item["stage"] == surface_stage), None) if cycle else None,
+                cycle=cycle,
             )
         ),
         "parked": bool((cycle or {}).get("parked", False)),
@@ -967,6 +980,73 @@ async def apply_design_feedback_action(
             )
             _feedback_event(
                 "design_feedback.resume_started",
+                surface_id=surface_id,
+                project_id=project_id,
+                cycle_id=cycle_id,
+                thread_id=body.originating_thread_id,
+                action_kind=body.action.kind,
+                revision=body.expected_db_revision,
+            )
+            return {**updated, "replayed": replayed}
+
+        if body.action.kind == "convene_review_meeting":
+            surface_stage = str(surface.get("stage") or "design")
+            cycle_now = await repo.get_cycle(cycle_id, project_id=project_id)
+            stage_row = next(
+                (item for item in (cycle_now or {}).get("stages", []) if item.get("stage") == surface_stage),
+                None,
+            )
+            gate = _surface_meeting_gate(surface, dbtl_config, stage=stage_row, cycle=cycle_now)
+            # The read model already withheld this intent, but a client holds a
+            # deck for as long as it likes: the meeting may have been convened,
+            # completed, or turned off since the page was rendered.
+            if gate is None or not gate.can_convene:
+                raise DesignFeedbackConflict(f"A {surface_stage.title()} review meeting cannot be convened from this deck.")
+            record = await start_run(
+                RunCreateRequest(
+                    input={
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": (f"Convene the {surface_stage.title()} review meeting for the recorded evidence." + (f"\n\n{body.comment.strip()}" if body.comment.strip() else "")),
+                                "additional_kwargs": {
+                                    "hide_from_ui": True,
+                                    "dbtl_design_kickoff": True,
+                                    "design_feedback_surface_id": surface_id,
+                                },
+                            }
+                        ]
+                    },
+                    context={
+                        "dbtl_supervisor_enabled": True,
+                        "dbtl_explicit_choice": "continue_cycle",
+                        "dbtl_selected_cycle_id": cycle_id,
+                        # The stage is server-owned, taken from the surface the
+                        # server registered rather than from the request: a deck
+                        # that could name its own stage could convene a meeting
+                        # over evidence it was never rendered from.
+                        "dbtl_review_meeting_stage": surface_stage,
+                    },
+                    on_disconnect="continue",
+                ),
+                body.originating_thread_id,
+                request,
+            )
+            receipt = {
+                "kind": "convene_review_meeting",
+                "run_id": record.run_id,
+                "originating_thread_id": body.originating_thread_id,
+                "message": f"The {surface_stage.title()} review meeting is starting in the originating conversation.",
+            }
+            updated = await repo.update_stage_feedback_action(
+                action_id,
+                project_id=project_id,
+                status="resume_started",
+                run_id=record.run_id,
+                receipt=receipt,
+            )
+            _feedback_event(
+                "design_feedback.review_meeting_convened",
                 surface_id=surface_id,
                 project_id=project_id,
                 cycle_id=cycle_id,

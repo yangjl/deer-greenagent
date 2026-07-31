@@ -2,14 +2,41 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any
 
 from deerflow.dbtl.transition_assessment import TransitionDifficulty
 
 REVIEW_MEETING_STAGES = ("build", "test", "learn")
+
+#: What a completed review meeting leaves behind, per stage. These mirror the
+#: ``required_artifact_types`` on the pinned ``generic:<stage>-review:v1`` specs,
+#: because the artifact a meeting writes is the only durable proof it happened.
+REVIEW_MEETING_ARTIFACT_TYPES: Mapping[str, str] = MappingProxyType({stage: f"{stage}_review_meeting" for stage in REVIEW_MEETING_STAGES})
+
+
+def review_meeting_recorded(
+    *,
+    stage: str,
+    stage_attempt_id: str,
+    artifacts: Iterable[Mapping[str, Any]],
+) -> bool:
+    """Whether *this* stage attempt already carries its review-meeting artifact.
+
+    Derived rather than stored, for the same reason ``is_current`` is derived on
+    a feedback surface: a separate boolean could disagree with the evidence, and
+    the evidence is what a reviewer actually reads. Scoping to the attempt is
+    load-bearing — a revised attempt receives a new assessment, so the previous
+    attempt's meeting must not satisfy this one's gate.
+    """
+    expected = REVIEW_MEETING_ARTIFACT_TYPES.get((stage or "").strip().lower())
+    attempt = (stage_attempt_id or "").strip()
+    if expected is None or not attempt:
+        return False
+    return any(str(item.get("artifact_type") or "") == expected and str(item.get("stage_attempt_id") or "") == attempt for item in artifacts)
 
 
 class MeetingRequirement(StrEnum):

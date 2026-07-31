@@ -30,7 +30,7 @@ from deerflow.agents.middlewares.finalization_deadline_middleware import (
     model_call_budget,
 )
 from deerflow.authz.principal import normalize_authz_attributes
-from deerflow.dbtl.agent_selector import AgentCandidate, Assignment, SelectionResult, build_candidates
+from deerflow.dbtl.agent_selector import AgentCandidate, Assignment, SelectionResult, build_candidates, select_agents
 from deerflow.dbtl.consensus import CONSENSUS_CONTRACT
 from deerflow.dbtl.council import (
     ROLE_BRIEFS,
@@ -66,6 +66,10 @@ from deerflow.dbtl.revision_intent import (
     RevisionVerdict,
     interpret_revision,
 )
+from deerflow.dbtl.stage_meetings import (
+    REVIEW_MEETING_STAGES,
+    sanitize_meeting_attachment,
+)
 from deerflow.dbtl.stage_routes import RouteContext, compute_stage_routes
 from deerflow.dbtl.stage_runner import (
     RESULT_CONTRACT,
@@ -79,7 +83,13 @@ from deerflow.dbtl.stage_runner import (
     collect_results,
     plan_stage,
 )
-from deerflow.dbtl.stage_spec import StageSpec, WorkerBudget, resolve_stage_spec
+from deerflow.dbtl.stage_spec import (
+    StageSpec,
+    StageSpecNotFound,
+    WorkerBudget,
+    resolve_review_stage_spec,
+    resolve_stage_spec,
+)
 from deerflow.dbtl.transition_assessment import (
     TransitionAssessment,
     build_transition_assessment_prompt,
@@ -1472,6 +1482,102 @@ def _design_red_team_unit(
     )
 
 
+#: What each review meeting argues about. The stage's own result is settled by
+#: the time this runs, so the question is never "what should we do" — it is
+#: whether the recorded evidence supports what it claims.
+_REVIEW_MEETING_BRIEFS: Mapping[str, str] = {
+    "build": (
+        "Review the recorded Build execution: environment, code and config revisions, "
+        "plan-vs-actual deviations, versioned outputs, and whether another person could "
+        "reproduce it from this record alone. Attack execution risk, not the scientific "
+        "design — a design objection belongs in a new Design round, not here."
+    ),
+    "test": (
+        "Review the recorded validity pack: leakage between train and test, fold "
+        "construction, holdout handling, plausible performance ceilings, direction of "
+        "effect, and reproducibility. The outcome itself is computed from the pack at "
+        "review time and is not yours to state or change — argue about whether the pack "
+        "supports what it reports."
+    ),
+    "learn": (
+        "Review the provisional candidates against the human-owned Test outcome: is every "
+        "candidate traceable to evidence, is any claim broader than what was tested, and "
+        "does anything here belong in a later cycle instead. You recommend only — "
+        "promotion and publication are separate human decisions you cannot make."
+    ),
+}
+
+_REVIEW_MEETING_ROLES: tuple[tuple[str, str, str], ...] = (
+    (
+        "position",
+        "reviewer",
+        "States independently whether the recorded evidence supports what it claims, naming the specific parts that do and do not.",
+    ),
+    (
+        "red_team",
+        "red-team",
+        ("Argues the opposite case. Look for the reading of this evidence under which the recorded result does not hold, and state it plainly rather than agreeing by default."),
+    ),
+    (
+        "chair",
+        "chair",
+        ("Synthesizes the positions. Keep both sides of any disagreement and say how each was settled; do not average incompatible readings into a middle one."),
+    ),
+)
+
+
+def _review_meeting_units(
+    *,
+    stage: str,
+    attempt_id: str,
+    assignment: Assignment,
+    model: str,
+    evidence_uri: str,
+    evidence_hash: str,
+    context: Mapping[str, Any],
+) -> tuple[WorkUnit, ...]:
+    """One seat per role, all reading the same recorded evidence.
+
+    Deliberately the same disagreement-before-synthesis shape as the Design
+    council rather than a single reviewer: one opinion about a validity pack is
+    not a review meeting, and a deck rendered from it would have nothing to show
+    a person but that opinion.
+    """
+    brief = _REVIEW_MEETING_BRIEFS[stage]
+    header = [
+        f"You are one seat in the {stage.title()} review meeting for cycle {context.get('cycle_title') or context.get('cycle_id')}.",
+        "",
+        f"Research question: {context.get('research_question') or '(not recorded)'}",
+        f"Objective: {context.get('objective') or '(not recorded)'}",
+        f"Success criteria: {context.get('success_criteria') or '(not recorded)'}",
+        "",
+        "The evidence under review is already recorded and must not be changed:",
+        f"  {evidence_uri}",
+        f"  content hash {evidence_hash}",
+        WORKSPACE_PATH_NOTE,
+        "",
+        brief,
+        "",
+        CONSENSUS_CONTRACT if stage else "",
+    ]
+    units: list[WorkUnit] = []
+    for role, slug, instruction in _REVIEW_MEETING_ROLES:
+        units.append(
+            WorkUnit(
+                unit_id=f"{attempt_id}-review-{slug}",
+                capability=f"{stage}_review_{slug.replace('-', '_')}",
+                agent_name=assignment.agent_name,
+                prompt="\n".join([*header, "", "Your seat:", instruction]),
+                via_generalist=assignment.via_generalist,
+                model=model,
+                role=role,
+                focus=instruction.split(".")[0].lower(),
+                round=1,
+            )
+        )
+    return tuple(units)
+
+
 def _write_stage_package(
     *,
     project_root: str,
@@ -2558,6 +2664,192 @@ class LiveStageAdapter:
             answer=answer,
         )
 
+    async def _execute_review_meeting(
+        self,
+        *,
+        stage: str,
+        project_id: str,
+        cycle_id: str,
+        cycle: dict[str, Any],
+        runtime: Mapping[str, Any],
+        project_root: str,
+        user_id: str,
+        execution_key: str,
+        config: RunnableConfig,
+        state: dict[str, Any],
+    ) -> LiveStageResult:
+        """Argue about a stage's recorded evidence without re-running the stage.
+
+        This is a *reader*, which is what makes it legal at ``awaiting_review``
+        — the status ordinary execution refuses, because re-running the stage
+        there would replace the evidence a person is in the middle of reading.
+        The meeting never touches that evidence; it attaches its own beside it.
+        """
+        normalized = (stage or "").strip().lower()
+        if normalized not in REVIEW_MEETING_STAGES:
+            return LiveStageResult(
+                stage=normalized or "unknown",
+                cycle_id=cycle_id,
+                note=f"The {normalized or 'requested'} stage has no review meeting, so nothing was convened.",
+            )
+        attempt = _stage_attempt(cycle, normalized)
+        attempt_id = str((attempt or {}).get("id") or "")
+        evidence = max(
+            [item for item in cycle.get("artifacts", []) if isinstance(item, Mapping) and item.get("stage_attempt_id") == attempt_id and str(item.get("artifact_type") or "") != f"{normalized}_review_meeting"],
+            key=lambda item: int(item.get("revision") or 0),
+            default=None,
+        )
+        if not attempt_id or evidence is None:
+            return LiveStageResult(
+                stage=normalized,
+                cycle_id=cycle_id,
+                note=(f"The {normalized} stage has recorded no evidence yet, so there is nothing for a review meeting to argue about. No participants were run."),
+            )
+        try:
+            spec = resolve_review_stage_spec(normalized)
+        except StageSpecNotFound:
+            return LiveStageResult(
+                stage=normalized,
+                cycle_id=cycle_id,
+                note=f"No review meeting contract is registered for the {normalized} stage.",
+            )
+
+        selection = select_agents(spec, self._candidates())
+        assignment = next(iter(selection.assignments), None)
+        if assignment is None:
+            return LiveStageResult(
+                stage=normalized,
+                cycle_id=cycle_id,
+                note=(f"No available agent covers the {normalized} review meeting's required capabilities, so nobody was dispatched. " + ("; ".join(selection.notes) if selection.notes else "")).strip(),
+            )
+        units = _review_meeting_units(
+            stage=normalized,
+            attempt_id=attempt_id,
+            assignment=assignment,
+            model=self._council_model(),
+            evidence_uri=str(evidence.get("uri") or ""),
+            evidence_hash=str(evidence.get("content_hash") or ""),
+            context={
+                "cycle_id": cycle_id,
+                "cycle_title": cycle.get("title"),
+                "research_question": cycle.get("research_question"),
+                "objective": cycle.get("objective"),
+                "success_criteria": cycle.get("success_criteria"),
+            },
+        )
+        plan = StageExecutionPlan(spec=spec, selection=selection, units=units)
+        dispatcher = self._dispatcher or self._production_dispatcher(
+            config=config,
+            state=state,
+            project_id=project_id,
+            project_root=project_root,
+        )
+        outcome = collect_results(plan, await dispatcher(units, budget=spec.budget))
+        results = [
+            {
+                # A meeting annotates; it cannot restate what the stage's own
+                # result computes. Applied to what is *recorded*, not merely
+                # offered as a helper, or the rule is advisory.
+                **sanitize_meeting_attachment(normalized, result.as_dict()),
+                "unit_id": unit.unit_id,
+                "via_generalist": unit.via_generalist,
+                "execution": {
+                    "model": unit.model,
+                    "max_tokens": unit.max_tokens,
+                    "token_limit_enforced": spec.budget.token_limit_enforced,
+                    "reasoning": unit.reasoning,
+                },
+                "counts_toward_stage_output": unit.role == "chair",
+            }
+            for unit, result in zip(plan.units, outcome.results, strict=True)
+        ]
+        chair_result = next(
+            (result for unit, result in zip(plan.units, outcome.results, strict=True) if unit.role == "chair"),
+            None,
+        )
+        debate_complete = any(unit.role == "position" and result.is_trustworthy for unit, result in zip(plan.units, outcome.results, strict=True)) and any(
+            unit.role == "red_team" and result.is_trustworthy for unit, result in zip(plan.units, outcome.results, strict=True)
+        )
+        usable = bool(debate_complete and chair_result is not None and chair_result.is_trustworthy)
+
+        artifact_uri = artifact_hash = None
+        artifact_digest = ""
+        if usable:
+            artifact_uri, artifact_hash, artifact_digest = await asyncio.to_thread(
+                _write_stage_package,
+                project_root=project_root,
+                cycle=cycle,
+                outcome=outcome,
+                idempotency_key=execution_key,
+                council=None,
+            )
+        await self._repo.record_worker_runs(
+            cycle_id=cycle_id,
+            project_id=project_id,
+            stage=normalized,
+            stage_spec_key=spec.spec_key,
+            results=results,
+            actor_user_id=str(user_id),
+            expected_db_revision=int(cycle["db_revision"]),
+            idempotency_key=execution_key,
+            artifact_type=(spec.required_artifact_types[0] if usable else None),
+            artifact_uri=artifact_uri,
+            artifact_content_hash=artifact_hash,
+        )
+
+        deck_uri = None
+        deck = None
+        surface_plan = None
+        if usable and artifact_uri and artifact_hash:
+            surface_plan = await self._plan_feedback_surface(
+                stage=normalized,
+                cycle_id=cycle_id,
+                project_id=project_id,
+                execution_key=execution_key,
+                round_number=1,
+                originating_thread_id=str(runtime.get("thread_id") or ""),
+                paused=False,
+                artifact_uri=artifact_uri,
+                artifact_hash=artifact_hash,
+                review_issue_ids=(tuple(f"issue-{index + 1}" for index, _item in enumerate(chair_result.consensus.disagreements)) if chair_result is not None and chair_result.consensus is not None else ()),
+            )
+            theme_css = await asyncio.to_thread(_deck_theme_css, str(user_id or ""))
+            deck = await asyncio.to_thread(
+                _write_council_deck,
+                project_root=project_root,
+                cycle=cycle,
+                results=results,
+                round_number=1,
+                stage=normalized,
+                package_path=artifact_uri,
+                clarification_question="",
+                decision_request=None,
+                surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
+                surface_mode=(surface_plan.mode if surface_plan is not None else ""),
+                transition_gate=None,
+                theme_css=theme_css,
+            )
+            if deck is not None:
+                deck_uri = deck.uri
+                if surface_plan is not None:
+                    await self._register_feedback_surface(
+                        surface_plan,
+                        deck,
+                        cycle_id=cycle_id,
+                        project_id=project_id,
+                    )
+        note = artifact_digest or (f"The {normalized.title()} review meeting ran but produced no usable synthesis, so no review evidence was attached.\n" + "\n".join(_failure_reasons(results)))
+        return LiveStageResult(
+            stage=normalized,
+            cycle_id=cycle_id,
+            note=note,
+            worker_count=len(results),
+            produced_usable_evidence=usable,
+            artifact_uri=artifact_uri,
+            deck_uri=deck_uri,
+            feedback_surface_id=(surface_plan.surface_id if surface_plan is not None and deck is not None else None),
+        )
+
     async def execute(
         self,
         *,
@@ -2571,6 +2863,7 @@ class LiveStageAdapter:
         participant_settings: Mapping[str, ParticipantSettings] | None = None,
         approved_council_proposal: CouncilProposal | None = None,
         clarification_answer: str | None = None,
+        review_meeting_stage: str | None = None,
     ) -> LiveStageResult:
         if not project_id or not cycle_id:
             return LiveStageResult(
@@ -2659,6 +2952,23 @@ class LiveStageAdapter:
                 produced_usable_evidence=trustworthy_count > 0,
                 artifact_uri=str(artifact_uri) if artifact_uri else None,
                 clarification_question=clarification_question,
+            )
+
+        if review_meeting_stage:
+            # A convened meeting reads the stage's recorded evidence instead of
+            # deriving a stage from cycle state, so it deliberately skips the
+            # status checks below — ``awaiting_review`` is exactly when it runs.
+            return await self._execute_review_meeting(
+                stage=review_meeting_stage,
+                project_id=project_id,
+                cycle_id=cycle_id,
+                cycle=cycle,
+                runtime=runtime,
+                project_root=project_root,
+                user_id=str(user_id),
+                execution_key=execution_key,
+                config=config,
+                state=state,
             )
 
         cycle_state = str(cycle.get("state") or "")

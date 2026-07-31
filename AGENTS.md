@@ -663,9 +663,39 @@ assessment (so the meeting gate has a difficulty to read) and **deliberately no
 route menu** — a Test outcome is computed at review time from the validity
 pack, and a menu rendered before that would pre-empt the computation. The page
 is registered whether or not `progressive_gate` is on; only the gate rides on
-that flag. Still missing before a person can use it: a handler for
-`convene_review_meeting`, and dispatch of the review meeting itself. Tests:
-`tests/test_dbtl_test_review_surface.py`, `tests/test_dbtl_meeting_gate_surface.py`.
+that flag.
+
+**Convening now runs a real meeting, and a meeting is a reader.** The
+`convene_review_meeting` intent starts a run in the originating conversation
+carrying a **server-owned** `dbtl_review_meeting_stage` — taken from the stage
+the server registered the deck against, never from the request, or a deck could
+convene a meeting over evidence it was never rendered from. The supervisor
+routes that request straight to `LiveStageAdapter._execute_review_meeting` and
+skips the Design preflight entirely: a review meeting seats its own roster over
+recorded evidence, so raising the Design participant card would ask about the
+wrong meeting. The adapter runs the pinned `generic:<stage>-review:v1` contract
+with the same position/red-team/chair shape the Design council uses — one
+reviewer is an opinion, not a meeting — and deliberately **skips the
+`awaiting_review` refusal** that ordinary execution applies, because that status
+is precisely when a meeting is legal: it reads the stage's evidence and never
+re-runs it, so the pack a person is reading cannot move underneath them. What it
+records goes through `sanitize_meeting_attachment` on the way into the row, not
+merely as an available helper, so a chair cannot restate a computed Test outcome.
+It writes a `<stage>_review_meeting` artifact beside the core result and
+registers its own `stage_review` deck.
+
+`review_meeting_recorded` closes the gate, derived from that artifact on that
+stage attempt rather than a stored flag — the same reason `is_current` is
+derived on a surface: a boolean column could disagree with the evidence a
+reviewer opens. Scoping to the attempt is load-bearing, since a revised attempt
+receives a new assessment and must not inherit the previous attempt's meeting.
+Before this, `meeting_completed` was a parameter nothing passed as true, so a
+*required* meeting could never be satisfied.
+
+Still to come in Phase 3: the Build (3B) and Learn (3C) meetings, each behind its
+own `dbtl.stage_meetings.*` flag. Tests:
+`tests/test_dbtl_test_review_surface.py`, `tests/test_dbtl_meeting_gate_surface.py`,
+`tests/test_dbtl_review_meeting.py`, `tests/test_dbtl_review_meeting_dispatch.py`.
 
 ## Cross-Cutting Conventions
 
