@@ -109,6 +109,7 @@ from deerflow.dbtl.stage_runner import (
 )
 from deerflow.dbtl.stage_spec import (
     BUILD_SPEC_V1,
+    BUILD_SPEC_V2,
     DESIGN_SPEC_V1,
     DESIGN_SPEC_V2,
     EXECUTABLE_STAGES,
@@ -161,6 +162,7 @@ from deerflow.dbtl.worker_result import (
 __all__ = [
     "CAPABILITIES",
     "BUILD_SPEC_V1",
+    "BUILD_SPEC_V2",
     "CAPPED_STOP_REASONS",
     "CHECK_LABELS",
     "CONFIRMATION_REQUIRED_NOTICE",

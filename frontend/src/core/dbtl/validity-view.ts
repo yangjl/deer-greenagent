@@ -34,7 +34,7 @@ export const VALIDITY_CHECK_LABELS: Record<string, string> = {
   within_group: "Within-population / environment",
   duplicates_relatedness: "Duplicates and relatedness",
   reproducibility: "Reproducible execution",
-  reconciled_inputs: "Reconciled inputs",
+  reconciled_inputs: "Bound input provenance",
 };
 
 export const CHECK_STATUS_LABELS: Record<CheckStatus, string> = {

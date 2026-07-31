@@ -58,6 +58,7 @@ from deerflow.dbtl.council_settings import (
 )
 from deerflow.dbtl.cycle_state import StageStatus, stage_for_state
 from deerflow.dbtl.decision_request import DECISION_REQUEST_CONTRACT, DecisionRequest
+from deerflow.dbtl.reconciliation_policy import reconciliation_required
 from deerflow.dbtl.review_markdown import render_review_markdown, render_stage_digest
 from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
 from deerflow.dbtl.revision_intent import (
@@ -1174,6 +1175,112 @@ def _project_manifest(project_root: str, *, limit: int = 120) -> list[dict[str, 
             }
         )
     return entries
+
+
+def _project_file_snapshot(project_root: str, *, limit: int = 5_000) -> dict[str, tuple[int, int]]:
+    """Remember which project files existed before Build touched the workspace.
+
+    Build owns input discovery when Reconciliation is optional.  The worker
+    reports the files it actually examined and the server binds their bytes,
+    but only files present in this pre-run snapshot qualify as inputs.  That
+    keeps a newly generated model or report from being mistaken for source
+    data and lets us refuse a source that changed during the run.
+    """
+    root = Path(project_root).expanduser().resolve()
+    ignored = {".git", ".greenagent", "node_modules", "__pycache__"}
+    snapshot: dict[str, tuple[int, int]] = {}
+    try:
+        paths = sorted(root.rglob("*"), key=lambda item: item.as_posix())
+    except OSError:
+        return snapshot
+    for path in paths:
+        if len(snapshot) >= limit:
+            break
+        try:
+            relative = path.relative_to(root)
+            if any(part in ignored for part in relative.parts) or not path.is_file():
+                continue
+            stat = path.stat()
+        except (OSError, ValueError):
+            continue
+        snapshot[relative.as_posix()] = (stat.st_size, stat.st_mtime_ns)
+    return snapshot
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _workspace_relative_path(reference: str, *, project_root: str) -> tuple[str, Path] | None:
+    """Resolve one worker-authored workspace reference without escaping scope."""
+    value = reference.strip()
+    if not value:
+        return None
+    virtual_prefix = f"{WORKSPACE_VIRTUAL_ROOT}/"
+    if value.startswith(virtual_prefix):
+        relative = value[len(virtual_prefix) :]
+    elif value.startswith("/") or "://" in value:
+        return None
+    else:
+        relative = value
+    root = Path(project_root).expanduser().resolve()
+    candidate = (root / relative).resolve()
+    try:
+        normalized = candidate.relative_to(root).as_posix()
+    except ValueError:
+        return None
+    return normalized, candidate
+
+
+def _build_input_artifacts(
+    *,
+    datasets: Sequence[Mapping[str, Any]],
+    results: Sequence[StageWorkerResult],
+    project_root: str,
+    pre_run_files: Mapping[str, tuple[int, int]],
+) -> list[str]:
+    """Bind Build's actual inputs without a separate declaration ceremony.
+
+    Required-Reconciliation deployments continue to contribute their durable
+    dataset bindings.  In optional mode, exact workspace paths come from the
+    validated worker contract and hashes are computed by the server, never
+    requested from the person running the cycle.
+    """
+    artifacts: list[str] = []
+    for item in datasets:
+        source_key = str(item.get("source_key") or "").strip()
+        content_hash = str(item.get("content_hash") or "").strip().lower()
+        if source_key and re.fullmatch(r"[0-9a-f]{64}", content_hash):
+            artifacts.append(f"dataset:{source_key}:{content_hash}")
+
+    references: list[str] = []
+    for result in results:
+        inputs_examined = result.provenance.get("inputs_examined", ())
+        if isinstance(inputs_examined, Sequence) and not isinstance(inputs_examined, (str, bytes)):
+            references.extend(str(item) for item in inputs_examined if isinstance(item, str))
+        references.extend(ref.reference for ref in result.evidence_refs if ref.kind in {"workspace_file", "dataset"})
+
+    for reference in references:
+        resolved = _workspace_relative_path(reference, project_root=project_root)
+        if resolved is None:
+            continue
+        relative, path = resolved
+        before = pre_run_files.get(relative)
+        if before is None:
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if (stat.st_size, stat.st_mtime_ns) != before:
+            raise ValueError(f"Build input {relative!r} changed during execution; rerun Build from an unchanged source file.")
+        artifacts.append(f"workspace_file:{relative}:sha256:{_sha256_file(path)}")
+
+    return list(dict.fromkeys(artifacts))
 
 
 def _design_chair_unit(
@@ -3110,6 +3217,8 @@ class LiveStageAdapter:
                     ),
                 )
 
+        project_manifest = await asyncio.to_thread(_project_manifest, project_root)
+        pre_run_files = await asyncio.to_thread(_project_file_snapshot, project_root) if stage == "build" else {}
         stage_context_payload = {
             "request": request_text,
             "cycle": {
@@ -3132,9 +3241,17 @@ class LiveStageAdapter:
             # manifest) has no other way to learn the prefix its tools
             # require, and a path outside it is refused outright.
             "workspace_root": WORKSPACE_VIRTUAL_ROOT,
-            "project_workspace_manifest": await asyncio.to_thread(
-                _project_manifest,
-                project_root,
+            "project_workspace_manifest": project_manifest,
+            "build_input_policy": (
+                {
+                    "reconciliation_required": reconciliation_required(),
+                    "instruction": (
+                        "Read the data files needed to implement the approved design and list every exact workspace path in "
+                        "provenance.inputs_examined. The server will compute and record their hashes automatically."
+                    ),
+                }
+                if stage == "build"
+                else None
             ),
             "prior_design_council_runs": _compact_design_history(prior_design_runs),
             # Only present once a person has approved a Design package.
@@ -3511,6 +3628,13 @@ class LiveStageAdapter:
             deviations = []
             if not supplied_code_revision:
                 deviations.append("Runtime did not provide a source-control revision; recorded workspace:unversioned.")
+            input_artifacts = await asyncio.to_thread(
+                _build_input_artifacts,
+                datasets=datasets,
+                results=outcome.trustworthy_results,
+                project_root=project_root,
+                pre_run_files=pre_run_files,
+            )
             await self._repo.record_build_lineage(
                 cycle_id=cycle_id,
                 project_id=project_id,
@@ -3523,7 +3647,7 @@ class LiveStageAdapter:
                     "executable": sys.executable,
                     "stage_runner": "LiveStageAdapter",
                 },
-                input_artifacts=[f"dataset:{item['source_key']}:{item['content_hash']}" for item in datasets],
+                input_artifacts=input_artifacts,
                 output_artifacts=[
                     {
                         "uri": artifact_uri,

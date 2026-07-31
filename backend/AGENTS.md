@@ -2235,9 +2235,14 @@ results may recommend `advance_to_learn`.
 
 `persistence/dbtl/build_test_ops.py` is mixed into `DbtlCycleRepository` because
 Build lineage and Test decisions share the cycle revision and activity ledger.
-`dbtl_build_lineage` binds a Build revision to the reconciled dataset
-fingerprint, stage spec, code/config, environment, inputs, versioned outputs,
-deviations, and logs. `dbtl_validity_assessments` binds a human reviewer and
+`dbtl_build_lineage` binds a Build revision to its input fingerprint, stage
+spec, code/config, environment, versioned outputs, deviations, and logs. When
+Reconciliation is required that fingerprint remains the approved dataset set;
+when it is optional, Build workers report the workspace files they examined and
+the server computes their hashes automatically from files that existed before
+the run. No separate dataset declaration or human-supplied digest is required.
+Test then owns leakage, split, and validity checks against that lineage.
+`dbtl_validity_assessments` binds a human reviewer and
 typed recommendation to the exact Test attempt and latest Build lineage.
 Migration `0016_dbtl_build_test_validity` owns both tables. A Build submission
 without lineage is refused. The generic Test review path is also refused:
@@ -2248,7 +2253,10 @@ membership rather than request data.
 
 `LiveStageAdapter` maps `ready_for_build` to Build, runs Build/Test through the
 same bounded fan-out, and creates Build lineage after the content-addressed
-Build package is committed. It records `workspace:unversioned` plus a deviation
+Build package is committed. `generic:build:v2` makes the approved Design plus
+the files examined during Build its inputs; the server snapshot excludes newly
+generated outputs and refuses a source changed during the run. It records
+`workspace:unversioned` plus a deviation
 when the runtime provides no source-control revision rather than manufacturing
 one. Tests: `test_dbtl_validity.py`, `test_dbtl_build_test_repository.py`,
 `test_dbtl_stage_contracts.py`, and the existing live/router/bootstrap suites.

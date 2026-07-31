@@ -15,7 +15,6 @@ import pytest_asyncio
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.dbtl import DbtlCycleRepository
-from deerflow.persistence.dbtl.cycles import DbtlWorkflowRefused
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
 
@@ -132,15 +131,15 @@ class TestDesignApprovalOpensBuild:
         assert statuses["build"] == "locked"
 
 
-class TestTheDataGuaranteesMovedIntoBuild:
-    async def _record_lineage(self, repo: DbtlCycleRepository):
+class TestBuildOwnsInputBinding:
+    async def _record_lineage(self, repo: DbtlCycleRepository, *, input_artifacts: list[str] | None = None):
         return await repo.record_build_lineage(
             cycle_id="cycle-1",
             project_id="project-1",
             code_revision="git:abc123",
             config_revision="config:sha256:" + "c" * 64,
             environment={"python": "3.12.13"},
-            input_artifacts=["dataset:yield_trial:" + HASH_A],
+            input_artifacts=input_artifacts if input_artifacts is not None else ["workspace_file:uploads/yield.csv:sha256:" + HASH_A],
             output_artifacts=[{"uri": "/mnt/user-data/outputs/model.pkl", "content_hash": "d" * 64, "revision": 1}],
             deviations=[],
             logs_uri="/mnt/user-data/outputs/build.log",
@@ -149,48 +148,25 @@ class TestTheDataGuaranteesMovedIntoBuild:
             idempotency_key="lineage-1",
         )
 
-    async def _declare(self, repo: DbtlCycleRepository, *, declared_immutable: bool):
-        return await repo.declare_dataset(
-            cycle_id="cycle-1",
-            project_id="project-1",
-            source_key="yield_trial",
-            uri="/mnt/user-data/workspace/yield.csv",
-            content_hash=HASH_A,
-            role="raw",
-            declared_immutable=declared_immutable,
-            recorded_by="user-1",
-            expected_db_revision=await _revision(repo),
-            idempotency_key="dataset-1",
-        )
-
     @pytest.mark.asyncio
-    async def test_build_refuses_to_record_a_result_that_names_no_data(self, tmp_path: Path, no_reconciliation):
-        """``dataset_fingerprint([])`` is a valid hash of nothing, so without
-        this an empty set binds silently and the build cannot say what
-        produced it."""
+    async def test_build_accepts_a_server_bound_input_without_a_dataset_declaration(self, tmp_path: Path, no_reconciliation):
         repo = await _approved_design(tmp_path)
-
-        with pytest.raises(DbtlWorkflowRefused) as excinfo:
-            await self._record_lineage(repo)
-
-        assert "No data sources have been declared" in str(excinfo.value)
-
-    @pytest.mark.asyncio
-    async def test_build_refuses_a_raw_source_that_is_not_declared_immutable(self, tmp_path: Path, no_reconciliation):
-        repo = await _approved_design(tmp_path)
-        await self._declare(repo, declared_immutable=False)
-
-        with pytest.raises(DbtlWorkflowRefused) as excinfo:
-            await self._record_lineage(repo)
-
-        assert "not declared immutable" in str(excinfo.value)
-
-    @pytest.mark.asyncio
-    async def test_a_declared_immutable_source_binds_and_the_build_records(self, tmp_path: Path, no_reconciliation):
-        repo = await _approved_design(tmp_path)
-        await self._declare(repo, declared_immutable=True)
 
         lineage = await self._record_lineage(repo)
 
-        # The result still names the data it ran on, by content hash.
         assert len(lineage["dataset_fingerprint"]) == 64
+        assert lineage["input_artifacts"] == ["workspace_file:uploads/yield.csv:sha256:" + HASH_A]
+
+    @pytest.mark.asyncio
+    async def test_build_refuses_an_input_without_a_server_content_hash(self, tmp_path: Path, no_reconciliation):
+        repo = await _approved_design(tmp_path)
+
+        with pytest.raises(ValueError, match="server-computed SHA-256"):
+            await self._record_lineage(repo, input_artifacts=["workspace_file:uploads/yield.csv"])
+
+    @pytest.mark.asyncio
+    async def test_build_refuses_to_record_a_result_that_names_no_data(self, tmp_path: Path, no_reconciliation):
+        repo = await _approved_design(tmp_path)
+
+        with pytest.raises(ValueError, match="at least one input file"):
+            await self._record_lineage(repo, input_artifacts=[])

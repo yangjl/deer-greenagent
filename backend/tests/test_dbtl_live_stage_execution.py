@@ -13,7 +13,9 @@ import pytest
 from deerflow.agents.dbtl.stage_execution import (
     LiveStageAdapter,
     _bound_evidence,
+    _build_input_artifacts,
     _compact_design_history,
+    _project_file_snapshot,
     _report_subagent_token_usage,
     _stage_worker_config,
     _summarize_token_usage,
@@ -1096,12 +1098,33 @@ async def test_ready_for_build_runs_build_and_records_reproducibility_lineage(
     )
 
     assert result.stage == "build"
-    assert repo.recorded[0]["stage_spec_key"] == "generic:build:v1"
+    assert repo.recorded[0]["stage_spec_key"] == "generic:build:v2"
     assert len(repo.lineage) == 1
     assert repo.lineage[0]["expected_db_revision"] == 4
     assert repo.lineage[0]["output_artifacts"][0]["content_hash"]
     assert repo.lineage[0]["code_revision"] == "workspace:unversioned"
     assert repo.lineage[0]["deviations"]
+
+
+def test_build_discovers_and_hashes_the_workspace_input_reported_by_a_worker(tmp_path: Path) -> None:
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    source = uploads / "tiny.csv"
+    source.write_text("height_cm,yield_g\n10,2\n", encoding="utf-8")
+    snapshot = _project_file_snapshot(str(tmp_path))
+    worker = SimpleNamespace(
+        provenance={"inputs_examined": ["/mnt/user-data/uploads/tiny.csv"]},
+        evidence_refs=(),
+    )
+
+    artifacts = _build_input_artifacts(
+        datasets=(),
+        results=(worker,),
+        project_root=str(tmp_path),
+        pre_run_files=snapshot,
+    )
+
+    assert artifacts == [f"workspace_file:uploads/tiny.csv:sha256:{hashlib.sha256(source.read_bytes()).hexdigest()}"]
 
 
 @pytest.mark.asyncio

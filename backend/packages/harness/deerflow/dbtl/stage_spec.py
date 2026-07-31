@@ -316,6 +316,38 @@ BUILD_SPEC_V1 = StageSpec(
 )
 
 
+BUILD_SPEC_V2 = StageSpec(
+    stage="build",
+    domain_profile=GENERIC_PROFILE,
+    version=2,
+    title="Build",
+    purpose=(
+        "Produce a rerunnable implementation from the approved design, discover the data actually used, "
+        "and bind those inputs to server-computed content hashes."
+    ),
+    cycle_classes=_ALL_CLASSES,
+    cycle_weights=_ALL_WEIGHTS,
+    required_inputs=(
+        "approved_design_brief",
+        "workspace_inputs_examined_during_build",
+    ),
+    required_artifact_types=("build_package",),
+    output_schema="build_package.v2",
+    required_capabilities=(Capability.SOFTWARE_ENGINEERING,),
+    optional_capabilities=(
+        Capability.STATISTICAL_ANALYSIS,
+        Capability.QUANTITATIVE_GENETICS,
+        Capability.FIELD_TRIAL_QC,
+    ),
+    validity_gates=(
+        "server_bound_input_lineage",
+        "versioned_derived_outputs",
+        "reproducible_execution",
+    ),
+    memory_write_policy=MemoryWritePolicy.NONE,
+)
+
+
 TEST_SPEC_V1 = StageSpec(
     stage="test",
     domain_profile=GENERIC_PROFILE,
@@ -417,6 +449,7 @@ _REGISTRY: dict[str, StageSpec] = {
         DESIGN_SPEC_V2,
         RECONCILIATION_SPEC_V1,
         BUILD_SPEC_V1,
+        BUILD_SPEC_V2,
         TEST_SPEC_V1,
         LEARN_SPEC_V1,
         TEST_REVIEW_SPEC_V1,
@@ -432,7 +465,7 @@ _CURRENT: MappingProxyType[tuple[str, str], int] = MappingProxyType(
     {
         (GENERIC_PROFILE, "design"): DESIGN_SPEC_V2.version,
         (GENERIC_PROFILE, "reconciliation"): RECONCILIATION_SPEC_V1.version,
-        (GENERIC_PROFILE, "build"): BUILD_SPEC_V1.version,
+        (GENERIC_PROFILE, "build"): BUILD_SPEC_V2.version,
         (GENERIC_PROFILE, "test"): TEST_SPEC_V1.version,
         (GENERIC_PROFILE, "learn"): LEARN_SPEC_V1.version,
     }

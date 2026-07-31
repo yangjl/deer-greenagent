@@ -510,12 +510,14 @@ Breeding-workspace note:
   `deerflow.dbtl.reconciliation_policy`, read by the state machine, the route
   menu, and the Build lineage writer so they cannot disagree; an unreadable
   config keeps the gate, because a deployment that cannot state its rule has
-  not asked for the looser one. **The data guarantees do not leave with the
-  gate**: Build still binds the content hashes of the datasets it ran on and
-  refuses lineage when none are declared or a raw source is not declared
-  immutable — `dataset_fingerprint([])` is a valid hash of nothing, so an
-  undeclared build would otherwise bind silently and be unable to say what
-  produced it. What is given up is the human-settled judgement matrix.
+  not asked for the looser one. **The data guarantees move into Build/Test
+  without becoming a pre-Build form**: Build workers name the exact workspace
+  files they actually examined, the server computes and records their SHA-256
+  bindings automatically, and Build refuses only when no real input was used or
+  an input changed during execution. Test owns leakage, split, and validity
+  checks against that lineage. People do not declare a dataset or paste a
+  digest before Build can start; what optional mode gives up is the
+  human-settled judgement matrix.
   The rule is published through `/api/features` because the UI cannot infer
   it: a stage locked because it was skipped and one locked because it has
   not been reached are the same status, so `stageBlockReason` takes it as an

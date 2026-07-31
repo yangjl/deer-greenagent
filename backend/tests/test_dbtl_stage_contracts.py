@@ -29,6 +29,7 @@ from deerflow.dbtl.stage_runner import (
 )
 from deerflow.dbtl.stage_spec import (
     BUILD_SPEC_V1,
+    BUILD_SPEC_V2,
     DESIGN_SPEC_V1,
     DESIGN_SPEC_V2,
     EXECUTABLE_STAGES,
@@ -113,7 +114,7 @@ class TestStageSpecRegistry:
         assert current_spec_keys() == (
             "generic:design:v2",
             "generic:reconciliation:v1",
-            "generic:build:v1",
+            "generic:build:v2",
             "generic:test:v1",
             "generic:learn:v1",
         )
@@ -144,6 +145,14 @@ class TestStageSpecRegistry:
             "bound_dataset_fingerprint",
         )
         assert "reproducible_execution" in BUILD_SPEC_V1.validity_gates
+
+    def test_current_build_discovers_and_server_binds_its_inputs(self) -> None:
+        assert BUILD_SPEC_V2.required_inputs == (
+            "approved_design_brief",
+            "workspace_inputs_examined_during_build",
+        )
+        assert "server_bound_input_lineage" in BUILD_SPEC_V2.validity_gates
+        assert BUILD_SPEC_V2.output_schema == "build_package.v2"
 
     def test_learn_can_only_create_candidates(self) -> None:
         assert LEARN_SPEC_V1.output_schema == "learn_summary.v1"

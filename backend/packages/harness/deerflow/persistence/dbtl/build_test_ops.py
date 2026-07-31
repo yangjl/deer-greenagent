@@ -10,7 +10,7 @@ from uuid import uuid4
 from sqlalchemy import func, select
 
 from deerflow.dbtl.cycle_state import StageStatus
-from deerflow.dbtl.reconciliation import dataset_fingerprint, dataset_readiness_reasons
+from deerflow.dbtl.reconciliation import dataset_fingerprint
 from deerflow.dbtl.reconciliation_policy import reconciliation_required
 from deerflow.dbtl.stage_routes import (
     UNRECONCILED_REASON,
@@ -51,6 +51,14 @@ def _sha256(value: object) -> str:
 
 def _is_sha256(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
+def _build_input_fingerprint(input_artifacts: list[str]) -> str:
+    """Fingerprint server-bound Build inputs when Reconciliation is skipped."""
+    unbound = [item for item in input_artifacts if not any(_is_sha256(part) for part in str(item).lower().split(":"))]
+    if unbound:
+        raise ValueError("Every Build input must include a server-computed SHA-256 content hash.")
+    return _sha256(sorted(dict.fromkeys(str(item) for item in input_artifacts)))
 
 
 class BuildTestOpsMixin:
@@ -155,7 +163,7 @@ class BuildTestOpsMixin:
         if not isinstance(environment, dict) or not environment:
             raise ValueError("Build lineage requires a non-empty environment capture.")
         if not input_artifacts:
-            raise ValueError("Build lineage requires at least one approved input artifact.")
+            raise ValueError("Build lineage requires at least one input file examined during Build.")
         if not output_artifacts:
             raise ValueError("Build lineage requires at least one versioned output artifact.")
         for item in output_artifacts:
@@ -218,16 +226,12 @@ class BuildTestOpsMixin:
                 if reconciliation.status != StageStatus.APPROVED.value or not reconciliation.approved_dataset_fingerprint or reconciliation.approved_dataset_fingerprint != fingerprint:
                     raise DbtlWorkflowRefused("Build lineage is not bound to the currently approved reconciled inputs.")
             else:
-                # Reconciliation is not gating Build here, so the two data
-                # guarantees it used to carry move onto this write instead of
-                # disappearing with it: a result must still name the data it
-                # ran on, and raw inputs must still be declared immutable.
-                # `dataset_fingerprint([])` is a valid hash of nothing, so an
-                # empty set would otherwise bind silently and a build would be
-                # unable to say which data produced it.
-                reasons = dataset_readiness_reasons(bindings)
-                if reasons:
-                    raise DbtlWorkflowRefused(f"Build lineage cannot be recorded: {' '.join(reasons)}")
+                # With no Reconciliation gate, Build owns discovery. Workers
+                # name what they read and the server computes those files'
+                # hashes; no person has to declare a dataset or paste a digest
+                # before useful work can start. Test later checks leakage,
+                # splits, and whether execution stayed bound to this lineage.
+                fingerprint = _build_input_fingerprint(input_artifacts)
 
             highest = await session.scalar(select(func.max(DbtlBuildLineageRow.lineage_revision)).where(DbtlBuildLineageRow.stage_attempt_id == build.id))
             revision = int(highest or 0) + 1

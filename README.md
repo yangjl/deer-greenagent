@@ -94,7 +94,8 @@ Design–Build–Test–Learn (DBTL) governance.
   data/packages become review limitations rather than Design blockers. If the
   strict chair contract still fails, DeerFlow creates a clearly labeled pilot
   draft from cycle metadata and recoverable meeting output so a person can
-  approve it into Data reconciliation; Medium and Heavy retain strict evidence
+  approve it into the configured next stage (Build directly when Data
+  Reconciliation is optional); Medium and Heavy retain strict evidence
   contracts and also meter tokens without enforcing a token cap;
   if the chair pauses for a decision, the resumed synthesis keeps that same
   chair model and participant settings rather than inheriting the current chat
