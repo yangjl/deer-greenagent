@@ -170,3 +170,37 @@ class TestBuildOwnsInputBinding:
 
         with pytest.raises(ValueError, match="at least one input file"):
             await self._record_lineage(repo, input_artifacts=[])
+
+    @pytest.mark.asyncio
+    async def test_one_click_build_approval_opens_test_from_ready_for_build(self, tmp_path: Path, no_reconciliation):
+        repo = await _approved_design(tmp_path)
+        await self._record_lineage(repo)
+        await repo.attach_artifact(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            stage="build",
+            artifact_type="build_package",
+            uri="/mnt/user-data/outputs/build-package.json",
+            content_hash=HASH_B,
+            created_by="agent:user-1",
+            expected_db_revision=await _revision(repo),
+            idempotency_key="build-package",
+        )
+
+        reviewed = await repo.review_stage(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            stage="build",
+            decision="approve",
+            rationale="The execution package is reproducible.",
+            expected_db_revision=await _revision(repo),
+            reviewer_user_id="user-2",
+            reviewer_project_role="owner",
+            idempotency_key="approve-build",
+            auto_submit=True,
+        )
+
+        assert reviewed["state"] == "test"
+        statuses = {item["stage"]: item["status"] for item in reviewed["stages"]}
+        assert statuses["build"] == "approved"
+        assert statuses["test"] == "in_progress"

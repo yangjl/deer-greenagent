@@ -15,6 +15,7 @@ from deerflow.agents.dbtl.stage_execution import (
     _bound_evidence,
     _build_input_artifacts,
     _compact_design_history,
+    _executable_stage,
     _project_file_snapshot,
     _report_subagent_token_usage,
     _stage_worker_config,
@@ -55,6 +56,24 @@ def _cycle(*, state: str = "design", status: str = "in_progress", revision: int 
             for stage, stage_status in stage_statuses.items()
         ],
     }
+
+
+def test_executable_stage_prefers_the_single_active_stage_row() -> None:
+    cycle = _cycle(state="test")
+    cycle["state"] = "build"
+
+    assert _executable_stage(cycle) == "test"
+
+
+def test_executable_stage_maps_the_ready_for_build_checkpoint_to_build() -> None:
+    assert _executable_stage(_cycle(state="ready_for_build")) == "build"
+
+
+def test_executable_stage_does_not_reopen_a_terminal_cycle_from_a_stale_row() -> None:
+    cycle = _cycle()
+    cycle["state"] = "abandoned"
+
+    assert _executable_stage(cycle) is None
 
 
 class FakeRepo:
@@ -1104,6 +1123,48 @@ async def test_ready_for_build_runs_build_and_records_reproducibility_lineage(
     assert repo.lineage[0]["output_artifacts"][0]["content_hash"]
     assert repo.lineage[0]["code_revision"] == "workspace:unversioned"
     assert repo.lineage[0]["deviations"]
+
+
+@pytest.mark.asyncio
+async def test_optional_reconciliation_tells_test_to_judge_bound_build_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("deerflow.agents.dbtl.stage_execution.reconciliation_required", lambda: False)
+    repo = FakeRepo(_cycle(state="test"))
+    repo.lineage.append(
+        {
+            "dataset_fingerprint": "a" * 64,
+            "input_artifacts": ["workspace_file:uploads/tiny.csv:sha256:" + "b" * 64],
+        }
+    )
+    dispatcher = FakeDispatcher(text=_structured_result())
+    adapter = LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="reviewer",
+                capabilities=frozenset({Capability.VALIDITY_ASSESSMENT}),
+            ),
+        ),
+        dispatcher=dispatcher,
+    )
+
+    result = await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Test the approved Build.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert result.stage == "test"
+    prompt = dispatcher.calls[0][0][0].prompt
+    assert '"authority": "server_bound_build_lineage"' in prompt
+    assert '"status": "skipped"' in prompt
+    assert "Missing dataset declarations or reconciliation matrix rows are not a blocker" in prompt
+    assert "a validity check named reconciled_inputs means bound input provenance" in prompt
 
 
 def test_build_discovers_and_hashes_the_workspace_input_reported_by_a_worker(tmp_path: Path) -> None:

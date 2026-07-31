@@ -2242,6 +2242,12 @@ when it is optional, Build workers report the workspace files they examined and
 the server computes their hashes automatically from files that existed before
 the run. No separate dataset declaration or human-supplied digest is required.
 Test then owns leakage, split, and validity checks against that lineage.
+The live stage context makes that policy explicit: when Reconciliation is
+optional it projects the stage as intentionally skipped, identifies
+server-bound Build lineage as the data authority, and defines the retained
+`reconciled_inputs` validity key as bound input provenance. Missing dataset
+declarations or matrix rows are therefore neither a limitation nor a failed
+Test check. Historical Build prose cannot override the active server policy.
 `dbtl_validity_assessments` binds a human reviewer and
 typed recommendation to the exact Test attempt and latest Build lineage.
 Migration `0016_dbtl_build_test_validity` owns both tables. A Build submission
@@ -2263,6 +2269,12 @@ the same request. `generic:test:v2` carries the same correction for executable
 validity checks. Ordinary stage workers omit `council_seat` from lifecycle
 events; actual review meetings carry their stage in that identity so the
 frontend uses Design, Build, Test, or Learn meeting copy correctly. It records
+the explicit Build checkpoint inside a one-click approval before advancing to
+Test. For checkpoints created before that repair, the adapter treats a single
+`in_progress` or `changes_requested` stage row as more specific than the cycle
+summary, so a Build-approved/Test-active record resumes Test rather than
+dispatching Build twice; terminal and unknown cycle states are never reopened
+from a stale row. Build records
 `workspace:unversioned` plus a deviation
 when the runtime provides no source-control revision rather than manufacturing
 one. Tests: `test_dbtl_validity.py`, `test_dbtl_build_test_repository.py`,

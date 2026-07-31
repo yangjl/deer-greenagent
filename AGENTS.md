@@ -518,6 +518,15 @@ Breeding-workspace note:
   checks against that lineage. People do not declare a dataset or paste a
   digest before Build can start; what optional mode gives up is the
   human-settled judgement matrix.
+  In optional mode, later workers receive a server-owned provenance policy
+  instead of the skipped gate's unsettled projection: the compatibility
+  validity key `reconciled_inputs` means "bound input provenance" and is judged
+  from Build lineage, so absent declarations or matrix rows cannot invalidate
+  Test. One-click Build approval also normalizes `ready_for_build` to the Build
+  checkpoint before advancing to Test. `LiveStageAdapter` prefers the single
+  active stage row over a stale cycle checkpoint, allowing captures written by
+  older code (`state=build`, Build approved, Test in progress) to recover at
+  Test instead of rerunning Build.
   `generic:build:v3` gives executable Build work twelve bounded model calls
   (143 LangGraph super-steps) rather than the four-call effective default that
   could only read the Design and one input before finalizing.

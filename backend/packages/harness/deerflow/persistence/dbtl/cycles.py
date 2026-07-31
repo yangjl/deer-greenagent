@@ -887,6 +887,14 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                 for row in stages:
                     row.db_revision = cycle.db_revision
                 review_bound_revision = cycle.db_revision
+                # The explicit submit path materializes the Build checkpoint
+                # before review. The one-click path must do the same inside its
+                # transaction; otherwise approving Build from
+                # ``ready_for_build`` advances only to ``build`` while already
+                # opening Test, leaving durable state one stage behind its own
+                # stage rows and causing the Supervisor to dispatch Build again.
+                if stage == "build" and cycle.state == "ready_for_build":
+                    cycle.state = "build"
             bound_projection_hash = cycle.projection_hash
             try:
                 updated = apply_review(statuses, stage, verdict, reconciliation_required=reconciliation_required())

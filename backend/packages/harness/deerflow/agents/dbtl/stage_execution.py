@@ -1131,6 +1131,36 @@ def _stage_attempt(cycle: dict[str, Any], stage: str) -> dict[str, Any] | None:
     return None
 
 
+def _executable_stage(cycle: Mapping[str, Any]) -> str | None:
+    """Select the stage rows say is active, with cycle state as fallback.
+
+    Older one-click Build approvals could leave ``cycle.state='build'`` while
+    atomically marking Build approved and Test in progress. Trusting only the
+    checkpoint in that recoverable shape reruns Build. A single active stage
+    row is the more specific durable fact; ambiguous or legacy projections
+    still fall back to the state machine's checkpoint.
+    """
+    state = str(cycle.get("state") or "")
+    fallback = "build" if state == "ready_for_build" else stage_for_state(state)
+    # A stale stage row must never reopen a terminal/unknown cycle. Recovery is
+    # only a tie-breaker between executable checkpoints.
+    if fallback is None:
+        return None
+    stages = cycle.get("stages")
+    if not isinstance(stages, Sequence) or isinstance(stages, (str, bytes)):
+        return fallback
+    active = [
+        str(item.get("stage") or "")
+        for item in stages
+        if isinstance(item, Mapping)
+        and str(item.get("stage") or "") in {"design", "reconciliation", "build", "test", "learn"}
+        and str(item.get("status") or "") in {StageStatus.IN_PROGRESS.value, StageStatus.CHANGES_REQUESTED.value}
+    ]
+    if len(active) == 1:
+        return active[0]
+    return fallback
+
+
 def _safe_token(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:20]
 
@@ -2263,8 +2293,7 @@ class LiveStageAdapter:
         cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
         if cycle is None:
             return None
-        cycle_state = str(cycle.get("state") or "")
-        stage = "build" if cycle_state == "ready_for_build" else stage_for_state(cycle_state)
+        stage = _executable_stage(cycle)
         if stage != "design":
             return None
         attempt = _stage_attempt(cycle, stage)
@@ -3133,8 +3162,7 @@ class LiveStageAdapter:
                 state=state,
             )
 
-        cycle_state = str(cycle.get("state") or "")
-        stage = "build" if cycle_state == "ready_for_build" else stage_for_state(cycle_state)
+        stage = _executable_stage(cycle)
         if stage not in {"design", "reconciliation", "build", "test", "learn"}:
             return LiveStageResult(
                 stage=stage or "checkpoint",
@@ -3160,6 +3188,7 @@ class LiveStageAdapter:
             )
 
         datasets = await self._repo.list_datasets(cycle_id, project_id=project_id)
+        requires_reconciliation = reconciliation_required()
         reconciliation = await self._repo.reconciliation_view(cycle_id, project_id=project_id) if stage in {"design", "reconciliation", "build", "test", "learn"} else None
         build_test = await self._repo.build_test_view(cycle_id, project_id=project_id) if stage in {"build", "test", "learn"} else None
         prior_design_runs = (
@@ -3249,8 +3278,38 @@ class LiveStageAdapter:
                 )
             },
             "declared_datasets": datasets,
-            "reconciliation": reconciliation,
+            # Optional mode deliberately moves data authority into Build/Test.
+            # Do not hand later workers the old gate's unsettled matrix as if
+            # it were still an active prerequisite: that caused a correct
+            # Build to report ``reconciled_inputs`` as failed and made Test
+            # invalidate a cycle solely because the skipped stage was skipped.
+            "reconciliation": (
+                reconciliation
+                if requires_reconciliation
+                else {
+                    "required": False,
+                    "status": "skipped",
+                    "instruction": (
+                        "Data Reconciliation is intentionally skipped for this deployment. "
+                        "Missing dataset declarations or reconciliation matrix rows are not a blocker, limitation, or failed validity check."
+                    ),
+                }
+            ),
             "build_test": build_test,
+            "input_provenance_policy": {
+                "reconciliation_required": requires_reconciliation,
+                "authority": "approved_reconciliation" if requires_reconciliation else "server_bound_build_lineage",
+                "instruction": (
+                    "Use the approved reconciliation record as the input prerequisite."
+                    if requires_reconciliation
+                    else (
+                        "Build binds the exact files it reads with server-computed content hashes, and Test verifies that durable Build lineage. "
+                        "For compatibility, a validity check named reconciled_inputs means bound input provenance in this mode; judge the Build lineage, "
+                        "not the existence of reconciliation rows. An older Build package may describe absent reconciliation as a limitation; that is "
+                        "historical worker commentary, not the active deployment policy."
+                    )
+                ),
+            },
             # Named explicitly beside the listing, because a worker that
             # *constructs* a path (rather than copying one from the
             # manifest) has no other way to learn the prefix its tools
@@ -3259,10 +3318,15 @@ class LiveStageAdapter:
             "project_workspace_manifest": project_manifest,
             "build_input_policy": (
                 {
-                    "reconciliation_required": reconciliation_required(),
+                    "reconciliation_required": requires_reconciliation,
                     "instruction": (
                         "Read the data files needed to implement the approved design and list every exact workspace path in "
-                        "provenance.inputs_examined. The server will compute and record their hashes automatically."
+                        "provenance.inputs_examined. The server will compute and record their hashes automatically. "
+                        + (
+                            "An approved reconciliation remains a prerequisite."
+                            if requires_reconciliation
+                            else "No dataset declaration or reconciliation matrix is required, and their absence must not be reported as a failure or limitation."
+                        )
                     ),
                 }
                 if stage == "build"
