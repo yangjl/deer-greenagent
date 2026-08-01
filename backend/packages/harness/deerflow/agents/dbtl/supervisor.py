@@ -188,13 +188,28 @@ _REVIEW_INTENT_RE = re.compile(
         (?:
             it
             |this
-            |the\s+(?:design|artifact|package|review)
+            |the\s+(?:design|artifact|package|review|build|test|learn)
             |revision(?:\s+\d+)?
         )
     )?
-    \s*[.!]*\s*$
+    \s*(?=$|[.!?])
     """,
     re.IGNORECASE | re.VERBOSE,
+)
+
+_STAGE_CONTROL_PATTERNS = (
+    re.compile(
+        r"\b(?P<action>start|run|retry|rerun|re-run)\s+(?:the\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?P<action>move|go|proceed|advance|continue)\s+(?:ahead\s+)?(?:to|into|with)\s+(?:the\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?P<action>let['’]?s|let\s+us|shall\s+we)\s+(?:(?:start|run|retry|rerun|re-run)\s+|(?:move|go|proceed|advance|continue)\s+(?:to|into|with)\s+)?(?:the\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
+        re.IGNORECASE,
+    ),
 )
 
 
@@ -288,10 +303,76 @@ def _bullets(items: tuple[str, ...] | list[str]) -> str:
 
 def _review_intent(text: str) -> str | None:
     """Return a narrow, explicit review intent without treating prose as authority."""
-    match = _REVIEW_INTENT_RE.fullmatch(text)
+    match = _REVIEW_INTENT_RE.match(text)
     if match is None:
         return None
     return " ".join(match.group("decision").lower().split())
+
+
+def _stage_control_intent(text: str) -> tuple[str, str] | None:
+    """Read an explicit request to run or advance a named governed stage."""
+    for pattern in _STAGE_CONTROL_PATTERNS:
+        match = pattern.search(text or "")
+        if match is not None:
+            action = " ".join(match.group("action").lower().replace("’", "'").split())
+            stage = match.group("stage").lower()
+            return action, stage
+    return None
+
+
+async def _active_cycles(stage_adapter: Any, *, project_id: str | None) -> list[dict[str, Any]]:
+    if not project_id:
+        return []
+    reader = getattr(stage_adapter, "active_cycle_status", None)
+    if not callable(reader):
+        return []
+    try:
+        read = reader(project_id=project_id)
+        if isawaitable(read):
+            read = await read
+    except Exception:  # noqa: BLE001 - control guidance must fail closed
+        logger.warning("Could not read active DBTL cycles for project %s.", project_id, exc_info=True)
+        return []
+    return [item for item in read if isinstance(item, dict)] if isinstance(read, list) else []
+
+
+def _render_stage_control_guidance(
+    decision: BranchDecision,
+    *,
+    intent: tuple[str, str],
+    cycles: Sequence[Mapping[str, Any]],
+) -> str:
+    """Keep an unscoped stage command out of ordinary tools and model prose."""
+    action, target_stage = intent
+    selected = next((item for item in cycles if str(item.get("cycle_id") or "") == decision.cycle_id), None)
+    if selected is None and len(cycles) == 1:
+        selected = cycles[0]
+    if selected is None:
+        return "\n".join(
+            [
+                f"Your message asks to {action} {target_stage.title()}, but no single active DBTL cycle is selected.",
+                "Select the intended cycle in the composer and use its server-authored stage handoff or review control.",
+                "No stage worker ran and no gate or stage state changed.",
+            ]
+        )
+
+    title = str(selected.get("title") or selected.get("cycle_id") or "the active cycle")
+    stages = selected.get("stages") if isinstance(selected.get("stages"), Mapping) else {}
+    status_lines = [
+        f"{stage.title()} is {str(stages[stage]).replace('_', ' ')}."
+        for stage in ("design", "reconciliation", "build", "test", "learn")
+        if stage in stages
+    ]
+    return "\n".join(
+        [
+            f"Your message asks to {action} {target_stage.title()} for {title}, but free text cannot start or advance a governed stage.",
+            "",
+            *status_lines,
+            "",
+            "Use the cycle's current server-authored handoff or review control. A locked later stage cannot be opened by Lead Agent prose.",
+            "No stage worker ran and no gate or stage state changed.",
+        ]
+    )
 
 
 def _render_review_intent_guidance(
@@ -1084,6 +1165,13 @@ def build_supervisor_graph(
             return SupervisorBranch.CLARIFICATION.value
 
         decision = decide(state)
+        if (
+            decision.branch is SupervisorBranch.ORDINARY
+            and context.project_id
+            and context.selected_cycle_id is None
+            and _stage_control_intent(_latest_user_text(state)) is not None
+        ):
+            return SupervisorBranch.CYCLE_CONTINUATION.value
         if decision.branch is SupervisorBranch.CYCLE_CONTINUATION:
             reader = getattr(stage_adapter, "parked_design_context", None)
             if callable(reader):
@@ -1166,6 +1254,21 @@ def build_supervisor_graph(
         config: RunnableConfig,
     ) -> dict:
         decision = decide(state)
+        latest_text = _latest_user_text(state)
+        unscoped_stage_intent = (
+            _stage_control_intent(latest_text)
+            if decision.branch is SupervisorBranch.ORDINARY and context.selected_cycle_id is None
+            else None
+        )
+        active_cycles: list[dict[str, Any]] = []
+        if decision.cycle_id is None and (_review_intent(latest_text) is not None or unscoped_stage_intent is not None):
+            active_cycles = [item for item in await _active_cycles(stage_adapter, project_id=context.project_id) if not item.get("parked")]
+            if len(active_cycles) == 1:
+                decision = replace(
+                    decision,
+                    branch=SupervisorBranch.CYCLE_CONTINUATION,
+                    cycle_id=str(active_cycles[0].get("cycle_id") or "") or None,
+                )
         raw_context = request_context(config)
         request_nonce = str(raw_context.get("run_id") or "")
 
@@ -1210,6 +1313,23 @@ def build_supervisor_graph(
                 ]
             }
 
+        # An unscoped command cannot use an arbitrary old handoff to resolve
+        # ambiguity between several live cycles.  The card belongs to one
+        # cycle, but the person's words did not select it; re-presenting it here
+        # would turn thread history into a hidden cycle selector.
+        if unscoped_stage_intent is not None and len(active_cycles) > 1:
+            return {
+                "messages": [
+                    receipt_message(
+                        _render_stage_control_guidance(
+                            decision,
+                            intent=unscoped_stage_intent,
+                            cycles=active_cycles,
+                        )
+                    )
+                ]
+            }
+
         # Nothing above claimed this request, and a Start/Hold control is still
         # waiting. Re-present it rather than dispatching stage work or falling
         # through: the person is answering a question the server already asked,
@@ -1226,6 +1346,20 @@ def build_supervisor_graph(
             )
             if represented is not None:
                 return represented
+        if unscoped_stage_intent is not None:
+            if not active_cycles:
+                active_cycles = [item for item in await _active_cycles(stage_adapter, project_id=context.project_id) if not item.get("parked")]
+            return {
+                "messages": [
+                    receipt_message(
+                        _render_stage_control_guidance(
+                            decision,
+                            intent=unscoped_stage_intent,
+                            cycles=active_cycles,
+                        )
+                    )
+                ]
+            }
         raw_context = request_context(config)
         # Server-owned, set only by the authenticated convening route. Read here
         # so the Design preflight below is skipped entirely: a review meeting

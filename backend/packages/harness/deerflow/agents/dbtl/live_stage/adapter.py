@@ -20,7 +20,7 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from inspect import isawaitable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -112,11 +112,13 @@ from deerflow.dbtl.validity import (
     ValidityCheckName,
 )
 from deerflow.dbtl.worker_result import (
+    EvidenceRef,
     QualityCheck,
     StageWorkerResult,
     WorkerResultRejected,
     WorkerStatus,
     extract_result_payload,
+    failed_result,
     parse_worker_result,
 )
 from deerflow.projects.storage import ensure_project_dirs, project_outputs_dir
@@ -1165,6 +1167,50 @@ def _safe_token(value: str) -> str:
 #: folder, but a worker can only *read* through the virtual path, so the two must
 #: be joined before the listing is shown to anyone who will act on it.
 WORKSPACE_VIRTUAL_ROOT = "/mnt/user-data"
+STAGE_WORK_ROOT = ".dbtl-stage-work"
+STAGE_UNIT_WORKSPACE_PLACEHOLDER = "__DBTL_UNIT_WORKSPACE__"
+
+
+def _prepare_stage_workspace(
+    project_root: str,
+    *,
+    attempt_id: str,
+    stage: str,
+) -> tuple[str, Path]:
+    """Create the worker's writable area outside repository-owned DBTL output.
+
+    Workers author implementation files and derived outputs here. The adapter
+    alone publishes validated review packages under ``outputs/dbtl``. Keeping
+    those two paths separate preserves the ordinary-agent write fence while
+    giving a real Build/Test worker somewhere it can execute its contract.
+    """
+    root = Path(project_root).expanduser().resolve()
+    host = project_outputs_dir(root) / STAGE_WORK_ROOT / attempt_id / stage
+    host.mkdir(parents=True, exist_ok=True)
+    return f"{WORKSPACE_VIRTUAL_ROOT}/outputs/{STAGE_WORK_ROOT}/{attempt_id}/{stage}", host
+
+
+def _unit_stage_workspace(stage_workspace: str, unit_id: str) -> str:
+    """Return the isolated writable directory for one concurrent worker."""
+    return f"{stage_workspace.rstrip('/')}/{_safe_token(unit_id)}"
+
+
+def _bind_stage_unit_workspaces(
+    units: Sequence[WorkUnit],
+    stage_workspace: str | None,
+) -> tuple[WorkUnit, ...]:
+    if not stage_workspace:
+        return tuple(units)
+    return tuple(
+        replace(
+            unit,
+            prompt=unit.prompt.replace(
+                STAGE_UNIT_WORKSPACE_PLACEHOLDER,
+                _unit_stage_workspace(stage_workspace, unit.unit_id),
+            ),
+        )
+        for unit in units
+    )
 
 
 def _project_manifest(project_root: str, *, limit: int = 120) -> list[dict[str, Any]]:
@@ -1180,7 +1226,7 @@ def _project_manifest(project_root: str, *, limit: int = 120) -> list[dict[str, 
     it has to name the path in the form they can use.
     """
     root = Path(project_root).expanduser().resolve()
-    ignored = {".git", ".greenagent", "node_modules", "__pycache__"}
+    ignored = {".git", ".greenagent", STAGE_WORK_ROOT, "node_modules", "__pycache__"}
     entries: list[dict[str, Any]] = []
     try:
         paths = sorted(root.rglob("*"), key=lambda item: item.as_posix())
@@ -1216,7 +1262,7 @@ def _project_file_snapshot(project_root: str, *, limit: int = 5_000) -> dict[str
     data and lets us refuse a source that changed during the run.
     """
     root = Path(project_root).expanduser().resolve()
-    ignored = {".git", ".greenagent", "node_modules", "__pycache__"}
+    ignored = {".git", ".greenagent", STAGE_WORK_ROOT, "node_modules", "__pycache__"}
     snapshot: dict[str, tuple[int, int]] = {}
     try:
         paths = sorted(root.rglob("*"), key=lambda item: item.as_posix())
@@ -1244,8 +1290,8 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _workspace_relative_path(reference: str, *, project_root: str) -> tuple[str, Path] | None:
-    """Resolve one worker-authored workspace reference without escaping scope."""
+def _workspace_lexical_path(reference: str, *, project_root: str) -> tuple[str, Path] | None:
+    """Map one virtual reference without following worker-authored symlinks."""
     value = reference.strip()
     if not value:
         return None
@@ -1256,8 +1302,22 @@ def _workspace_relative_path(reference: str, *, project_root: str) -> tuple[str,
         return None
     else:
         relative = value
+    relative_path = PurePosixPath(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        return None
+    normalized = relative_path.as_posix()
     root = Path(project_root).expanduser().resolve()
-    candidate = (root / relative).resolve()
+    return normalized, root.joinpath(*relative_path.parts)
+
+
+def _workspace_relative_path(reference: str, *, project_root: str) -> tuple[str, Path] | None:
+    """Resolve one worker-authored workspace reference without escaping scope."""
+    lexical = _workspace_lexical_path(reference, project_root=project_root)
+    if lexical is None:
+        return None
+    _relative, candidate = lexical
+    root = Path(project_root).expanduser().resolve()
+    candidate = candidate.resolve()
     try:
         normalized = candidate.relative_to(root).as_posix()
     except ValueError:
@@ -1975,6 +2035,173 @@ def _atomic_write(destination: Path, content: bytes) -> None:
             Path(temp_path).unlink(missing_ok=True)
 
 
+def _atomic_copy(source: Path, destination: Path, *, expected_hash: str) -> None:
+    """Copy one validated worker file without exposing a partial artifact."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: str | None = None
+    try:
+        with source.open("rb") as reader, tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            delete=False,
+        ) as writer:
+            temp_path = writer.name
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: reader.read(1024 * 1024), b""):
+                digest.update(chunk)
+                writer.write(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+        if digest.hexdigest() != expected_hash:
+            raise ValueError("Worker artifact changed while it was being published.")
+        os.replace(temp_path, destination)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            Path(temp_path).unlink(missing_ok=True)
+
+
+def _publish_build_worker_artifacts(
+    *,
+    project_root: str,
+    cycle: Mapping[str, Any],
+    outcome: StageExecutionOutcome,
+    stage_workspace: str,
+    attempt_id: str,
+) -> tuple[StageExecutionOutcome, list[dict[str, Any]]]:
+    """Validate and publish Build outputs before they can count as evidence.
+
+    Worker-authored references are untrusted strings.  Each completed Build
+    result must point to at least one regular file inside that unit's isolated
+    directory.  The adapter hashes and copies those bytes into the governed,
+    content-addressed output tree, then rewrites the durable result to the
+    published URI.  A bad reference converts only that worker to a failed
+    result; it can never become Build lineage.
+    """
+    published: list[dict[str, Any]] = []
+    validated_results: list[StageWorkerResult] = []
+    rejected = list(outcome.rejected)
+    stage_dir = stage_output_dir(
+        cycle_id=str(cycle["id"]),
+        cycle_title=str(cycle.get("title") or ""),
+        stage="build",
+    )
+    outputs_root = project_outputs_dir(Path(project_root).expanduser().resolve())
+
+    for unit, result in zip(outcome.plan.units, outcome.results, strict=True):
+        if not result.is_trustworthy:
+            validated_results.append(result)
+            continue
+        unit_workspace = _unit_stage_workspace(stage_workspace, unit.unit_id)
+        lexical_root = _workspace_lexical_path(unit_workspace, project_root=project_root)
+        failure = ""
+        remapped: dict[str, str] = {}
+        unit_outputs: list[dict[str, Any]] = []
+        if lexical_root is None:
+            failure = "The adapter could not resolve the worker's isolated Build workspace."
+        elif not result.artifact_refs:
+            failure = "A completed Build worker must return at least one artifact created in its isolated workspace."
+        else:
+            workspace_lexical = lexical_root[1]
+            workspace_host = workspace_lexical.resolve()
+            try:
+                workspace_host.relative_to(Path(project_root).expanduser().resolve())
+            except ValueError:
+                failure = "The worker's Build workspace resolves outside the project."
+            for reference in result.artifact_refs:
+                if failure:
+                    break
+                lexical = _workspace_lexical_path(reference, project_root=project_root)
+                if lexical is None:
+                    failure = f"Build artifact {reference!r} is outside the project workspace."
+                    break
+                try:
+                    _relative, candidate = lexical
+                    candidate.relative_to(workspace_lexical)
+                    path_from_workspace = candidate.relative_to(workspace_lexical)
+                    cursor = workspace_lexical
+                    if workspace_lexical.is_symlink():
+                        raise ValueError("workspace is a symlink")
+                    for part in path_from_workspace.parts:
+                        cursor = cursor / part
+                        if cursor.is_symlink():
+                            raise ValueError("artifact path contains a symlink")
+                    source = candidate.resolve(strict=True)
+                    source.relative_to(workspace_host)
+                except (OSError, ValueError):
+                    failure = f"Build artifact {reference!r} is outside this worker's isolated workspace."
+                    break
+                if not source.is_file() or source.is_symlink():
+                    failure = f"Build artifact {reference!r} is not a regular file."
+                    break
+                content_hash = _sha256_file(source)
+                safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", source.name).strip("-.") or "artifact"
+                destination_relative = (
+                    stage_dir
+                    / "artifacts"
+                    / attempt_id
+                    / _safe_token(unit.unit_id)
+                    / f"{content_hash[:16]}-{safe_name[:96]}"
+                )
+                destination = outputs_root / destination_relative
+                try:
+                    _atomic_copy(source, destination, expected_hash=content_hash)
+                except (OSError, ValueError):
+                    failure = f"Build artifact {reference!r} changed or became unreadable while it was being published."
+                    break
+                uri = f"{WORKSPACE_VIRTUAL_ROOT}/outputs/{destination_relative.as_posix()}"
+                remapped[reference] = uri
+                unit_outputs.append(
+                    {
+                        "uri": uri,
+                        "content_hash": content_hash,
+                        "revision": 1,
+                        "unit_id": unit.unit_id,
+                    }
+                )
+
+        if failure:
+            rejected.append(f"{unit.unit_id}: {failure}")
+            validated_results.append(
+                replace(
+                    failed_result(
+                        capability=result.capability,
+                        agent_name=result.agent_name,
+                        reason=failure,
+                    ),
+                    token_usage=result.token_usage,
+                )
+            )
+            continue
+
+        evidence_refs = tuple(
+            EvidenceRef(
+                kind=("artifact" if ref.reference in remapped else ref.kind),
+                reference=remapped.get(ref.reference, ref.reference),
+                description=ref.description,
+            )
+            for ref in result.evidence_refs
+        )
+        validated_results.append(
+            replace(
+                result,
+                artifact_refs=tuple(remapped[reference] for reference in result.artifact_refs),
+                evidence_refs=evidence_refs,
+            )
+        )
+        published.extend(unit_outputs)
+
+    return (
+        replace(
+            outcome,
+            results=tuple(validated_results),
+            rejected=tuple(rejected),
+        ),
+        published,
+    )
+
+
 class LiveStageAdapter:
     """Verify scope, fan out workers, and persist their structured evidence."""
 
@@ -2368,6 +2595,7 @@ class LiveStageAdapter:
         project_root: str,
         stage: str = "design",
         meeting: bool = True,
+        stage_workspace: str | None = None,
     ) -> AsyncWorkerDispatcher:
         runtime = self._runtime(config)
         metadata = dict(config.get("metadata", {}) or {})
@@ -2388,6 +2616,7 @@ class LiveStageAdapter:
                 project_root=project_root,
                 stage=stage,
                 meeting=meeting,
+                stage_workspace=stage_workspace,
             )
 
         return dispatch
@@ -2405,6 +2634,7 @@ class LiveStageAdapter:
         project_root: str,
         stage: str,
         meeting: bool,
+        stage_workspace: str | None,
     ) -> Sequence[DispatchOutcome]:
         from langgraph.config import get_stream_writer
 
@@ -2424,6 +2654,16 @@ class LiveStageAdapter:
                 await aemit_custom_event(payload, writer=writer)
 
         async def run_one(unit: WorkUnit) -> DispatchOutcome:
+            unit_workspace = _unit_stage_workspace(stage_workspace, unit.unit_id) if stage_workspace else None
+            if unit_workspace:
+                resolved_workspace = _workspace_relative_path(unit_workspace, project_root=project_root)
+                if resolved_workspace is None:
+                    return DispatchOutcome(
+                        unit_id=unit.unit_id,
+                        text=None,
+                        error="The stage adapter could not resolve this worker's isolated workspace.",
+                    )
+                await asyncio.to_thread(resolved_workspace[1].mkdir, parents=True, exist_ok=True)
             base_config = get_subagent_config(
                 unit.agent_name,
                 app_config=self._app_config,
@@ -2495,6 +2735,7 @@ class LiveStageAdapter:
                 # depth disables enforcement, even a stale participant edit
                 # must not quietly turn the kill switch back on.
                 token_budget_max_tokens=_token_limit_for_worker(unit, budget),
+                dbtl_writable_paths=((unit_workspace,) if unit_workspace else ()),
                 thinking_enabled=unit.reasoning == REASONING_EXTENDED,
                 extra_middlewares=[deadline],
             )
@@ -3235,6 +3476,15 @@ class LiveStageAdapter:
                     ),
                 )
 
+        attempt_id = f"dbtl-{_safe_token(execution_key)}"
+        stage_workspace = None
+        if stage != "design":
+            stage_workspace, _ = await asyncio.to_thread(
+                _prepare_stage_workspace,
+                project_root,
+                attempt_id=attempt_id,
+                stage=stage,
+            )
         project_manifest = await asyncio.to_thread(_project_manifest, project_root)
         pre_run_files = await asyncio.to_thread(_project_file_snapshot, project_root) if stage == "build" else {}
         stage_context_payload = {
@@ -3308,6 +3558,20 @@ class LiveStageAdapter:
             # manifest) has no other way to learn the prefix its tools
             # require, and a path outside it is refused outright.
             "workspace_root": WORKSPACE_VIRTUAL_ROOT,
+            "stage_workspace": (
+                {
+                    # Replaced with a distinct attempt/stage/unit path inside
+                    # the production dispatcher immediately before the unit
+                    # runs. No two concurrent workers receive the same grant.
+                    "path": STAGE_UNIT_WORKSPACE_PLACEHOLDER,
+                    "instruction": (
+                        "Write every new implementation, derived output, and execution log under this exact directory. "
+                        "Do not write under outputs/dbtl; the stage adapter publishes validated review evidence there after your result passes its contract."
+                    ),
+                }
+                if stage_workspace
+                else None
+            ),
             "project_workspace_manifest": project_manifest,
             "build_input_policy": (
                 {
@@ -3348,7 +3612,6 @@ class LiveStageAdapter:
             ensure_ascii=False,
         )
         spec = resolve_stage_spec(stage)
-        attempt_id = f"dbtl-{_safe_token(execution_key)}"
         council_plan: CouncilPlan | None = None
         approved_proposal: CouncilProposal | None = None
         if stage == "design":
@@ -3400,14 +3663,26 @@ class LiveStageAdapter:
                     user_id=str(user_id),
                     execution_key=execution_key,
                 )
-        dispatcher = self._dispatcher or self._production_dispatcher(
+        base_dispatcher = self._dispatcher or self._production_dispatcher(
             config=config,
             state=state,
             project_id=project_id,
             project_root=project_root,
             stage=stage,
             meeting=stage == "design",
+            stage_workspace=stage_workspace,
         )
+
+        async def dispatcher(
+            units: Sequence[WorkUnit],
+            *,
+            budget: WorkerBudget,
+        ) -> Sequence[DispatchOutcome]:
+            return await base_dispatcher(
+                _bind_stage_unit_workspaces(units, stage_workspace),
+                budget=budget,
+            )
+
         proposal: CouncilProposal | None = None
         resumed_chair: WorkUnit | None = None
         #: The positions the single-chair round re-weighs, whichever round it is.
@@ -3591,6 +3866,18 @@ class LiveStageAdapter:
                     rejected=outcome.rejected + chair_outcome.rejected,
                 )
 
+        published_build_artifacts: list[dict[str, Any]] = []
+        if stage == "build" and stage_workspace:
+            outcome, published_build_artifacts = await asyncio.to_thread(
+                _publish_build_worker_artifacts,
+                project_root=project_root,
+                cycle=cycle,
+                outcome=outcome,
+                stage_workspace=stage_workspace,
+                attempt_id=attempt_id,
+            )
+            unit_result_pairs = list(zip(outcome.plan.units, outcome.results, strict=True))
+
         results = [
             {
                 **result.as_dict(),
@@ -3723,13 +4010,7 @@ class LiveStageAdapter:
                     "stage_runner": "LiveStageAdapter",
                 },
                 input_artifacts=input_artifacts,
-                output_artifacts=[
-                    {
-                        "uri": artifact_uri,
-                        "content_hash": artifact_hash,
-                        "revision": 1,
-                    }
-                ],
+                output_artifacts=published_build_artifacts,
                 deviations=deviations,
                 logs_uri=artifact_uri,
                 recorded_by=str(user_id),

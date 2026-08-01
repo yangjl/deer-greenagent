@@ -347,6 +347,26 @@ def test_build_lead_runtime_middlewares_chain_order_matches_agents_md():
         assert idx_a < idx_b, f"{name_a} (idx {idx_a}) must come before {name_b} (idx {idx_b}); full chain: {actual}"
 
 
+def test_dbtl_stage_grant_selects_a_process_isolation_policy() -> None:
+    from deerflow.agents.middlewares.dbtl_output_policy_middleware import DbtlOutputPolicyMiddleware
+
+    app_config = _make_app_config()
+    app_config.sandbox.use = "deerflow.sandbox.local:LocalSandboxProvider"
+    middlewares = build_subagent_runtime_middlewares(
+        app_config=app_config,
+        dbtl_writable_paths=(
+            "/mnt/user-data/outputs/.dbtl-stage-work/attempt-1/build/unit-1",
+        ),
+    )
+    policy = next(
+        middleware
+        for middleware in middlewares
+        if isinstance(middleware, DbtlOutputPolicyMiddleware)
+    )
+
+    assert policy._shell_isolation == ("sandbox-exec" if sys.platform == "darwin" else "deny")
+
+
 def test_wrap_tool_call_passthrough_on_success():
     middleware = ToolErrorHandlingMiddleware()
     req = _request()

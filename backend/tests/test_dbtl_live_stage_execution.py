@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ import pytest
 
 from deerflow.agents.dbtl.live_stage.adapter import (
     LiveStageAdapter,
+    _bind_stage_unit_workspaces,
     _bound_evidence,
     _build_input_artifacts,
     _compact_design_history,
@@ -1124,7 +1126,32 @@ async def test_ready_for_build_runs_build_and_records_reproducibility_lineage(
     tmp_path: Path,
 ) -> None:
     repo = FakeRepo(_cycle(state="ready_for_build"))
-    dispatcher = FakeDispatcher(text=_structured_result())
+
+    class BuildDispatcher(FakeDispatcher):
+        async def __call__(self, units, *, budget):
+            self.calls.append((units, budget))
+            outcomes = []
+            for unit in units:
+                match = re.search(r"/mnt/user-data/outputs/\.dbtl-stage-work/[^\s\"']+", unit.prompt)
+                assert match is not None
+                workspace = match.group(0)
+                artifact = f"{workspace}/pipeline.py"
+                host = tmp_path / artifact.removeprefix("/mnt/user-data/")
+                host.parent.mkdir(parents=True, exist_ok=True)
+                host.write_text("print('reproducible build')\n", encoding="utf-8")
+                payload = json.loads(_structured_result())
+                payload["artifact_refs"] = [artifact]
+                payload["evidence_refs"] = [
+                    {
+                        "kind": "workspace_file",
+                        "reference": artifact,
+                        "description": "Executable Build implementation.",
+                    }
+                ]
+                outcomes.append(DispatchOutcome(unit_id=unit.unit_id, text=json.dumps(payload)))
+            return outcomes
+
+    dispatcher = BuildDispatcher()
     adapter = LiveStageAdapter(
         repo=repo,
         app_config=SimpleNamespace(),
@@ -1150,8 +1177,73 @@ async def test_ready_for_build_runs_build_and_records_reproducibility_lineage(
     assert len(repo.lineage) == 1
     assert repo.lineage[0]["expected_db_revision"] == 4
     assert repo.lineage[0]["output_artifacts"][0]["content_hash"]
+    assert "/outputs/dbtl/" in repo.lineage[0]["output_artifacts"][0]["uri"]
+    assert ".dbtl-stage-work" not in repo.lineage[0]["output_artifacts"][0]["uri"]
     assert repo.lineage[0]["code_revision"] == "workspace:unversioned"
     assert repo.lineage[0]["deviations"]
+
+
+@pytest.mark.asyncio
+async def test_build_worker_receives_an_attempt_scoped_writable_workspace(
+    tmp_path: Path,
+) -> None:
+    repo = FakeRepo(_cycle(state="ready_for_build"))
+    dispatcher = FakeDispatcher(text=_structured_result())
+    adapter = LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="builder",
+                capabilities=frozenset({Capability.SOFTWARE_ENGINEERING}),
+            ),
+        ),
+        dispatcher=dispatcher,
+    )
+
+    result = await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Build the approved design.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert result.stage == "build"
+    prompt = dispatcher.calls[0][0][0].prompt
+    attempt_id = "dbtl-" + hashlib.sha256(b"dbtl-stage:run-1:cycle-1").hexdigest()[:20]
+    expected = f"/mnt/user-data/outputs/.dbtl-stage-work/{attempt_id}/build"
+    assert expected in prompt
+    assert "Write every new implementation, derived output, and execution log under this exact directory" in prompt
+    assert (tmp_path / "outputs" / ".dbtl-stage-work" / attempt_id / "build").is_dir()
+    assert repo.lineage == []
+    assert "none produced usable evidence" in result.note.lower()
+
+
+def test_concurrent_stage_units_receive_distinct_workspace_paths() -> None:
+    units = (
+        WorkUnit(
+            unit_id="build-worker-one",
+            capability="software_engineering",
+            agent_name="builder",
+            prompt="workspace=__DBTL_UNIT_WORKSPACE__",
+        ),
+        WorkUnit(
+            unit_id="build-worker-two",
+            capability="statistical_analysis",
+            agent_name="analyst",
+            prompt="workspace=__DBTL_UNIT_WORKSPACE__",
+        ),
+    )
+
+    bound = _bind_stage_unit_workspaces(
+        units,
+        "/mnt/user-data/outputs/.dbtl-stage-work/attempt-1/build",
+    )
+
+    assert bound[0].prompt != bound[1].prompt
+    assert "__DBTL_UNIT_WORKSPACE__" not in bound[0].prompt
+    assert "__DBTL_UNIT_WORKSPACE__" not in bound[1].prompt
 
 
 @pytest.mark.asyncio

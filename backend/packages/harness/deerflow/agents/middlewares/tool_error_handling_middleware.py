@@ -2,6 +2,7 @@
 
 import logging
 import secrets
+import sys
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, override
 
@@ -160,6 +161,7 @@ def _build_runtime_middlewares(
     lazy_init: bool = True,
     authorization_provider=None,
     authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
+    dbtl_writable_paths: tuple[str, ...] = (),
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
@@ -254,7 +256,22 @@ def _build_runtime_middlewares(
     from deerflow.agents.middlewares.dbtl_output_policy_middleware import DbtlOutputPolicyMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
 
-    tail.append(DbtlOutputPolicyMiddleware())
+    sandbox_use = str(getattr(getattr(app_config, "sandbox", None), "use", "") or "")
+    if sandbox_use.endswith("LocalSandboxProvider") and sys.platform == "darwin":
+        dbtl_shell_isolation = "sandbox-exec"
+    elif dbtl_writable_paths:
+        # A stage grant is authority. If this provider cannot confine a whole
+        # process tree, generic shell execution must fail closed; file tools
+        # remain available under the exact middleware grant.
+        dbtl_shell_isolation = "deny"
+    else:
+        dbtl_shell_isolation = "literal"
+    tail.append(
+        DbtlOutputPolicyMiddleware(
+            writable_paths=dbtl_writable_paths,
+            shell_isolation=dbtl_shell_isolation,
+        )
+    )
     tail.append(SandboxAuditMiddleware())
 
     # ReadBeforeWriteMiddleware is the outermost write gate: it blocks writes to files
@@ -325,6 +342,7 @@ def build_subagent_runtime_middlewares(
     user_id: str | None = None,
     authorization_provider=None,
     token_budget_max_tokens: int | None = None,
+    dbtl_writable_paths: tuple[str, ...] = (),
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     if app_config is None:
@@ -339,6 +357,7 @@ def build_subagent_runtime_middlewares(
         lazy_init=lazy_init,
         authorization_provider=authorization_provider,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
+        dbtl_writable_paths=dbtl_writable_paths,
     )
 
     # Enabled/configured skills are discoverable metadata, not automatically

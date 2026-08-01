@@ -12,10 +12,15 @@ from deerflow.agents.middlewares.dbtl_output_policy_middleware import (
 
 
 def _request(name: str, args: dict):
-    return SimpleNamespace(
+    request = SimpleNamespace(
         tool_call={"name": name, "id": "call-1", "args": args},
         runtime=SimpleNamespace(context={}),
     )
+    request.override = lambda **updates: SimpleNamespace(
+        tool_call=updates.get("tool_call", request.tool_call),
+        runtime=request.runtime,
+    )
+    return request
 
 
 @pytest.mark.parametrize(
@@ -70,3 +75,120 @@ def test_ordinary_output_paths_remain_writable() -> None:
         lambda _request: ToolMessage(content="wrote", tool_call_id="call-1"),
     )
     assert result.content == "wrote"
+
+
+def test_ordinary_agents_cannot_write_the_stage_workspace() -> None:
+    path = "/mnt/user-data/outputs/.dbtl-stage-work/attempt-1/build/result.json"
+
+    result = DbtlOutputPolicyMiddleware().wrap_tool_call(
+        _request("write_file", {"path": path}),
+        lambda _request: ToolMessage(content="wrote", tool_call_id="call-1"),
+    )
+
+    assert "blocked" in str(result.content)
+
+
+def test_stage_worker_can_write_only_its_exact_workspace() -> None:
+    workspace = "/mnt/user-data/outputs/.dbtl-stage-work/attempt-1/build"
+    middleware = DbtlOutputPolicyMiddleware(writable_paths=(workspace,))
+
+    allowed = middleware.wrap_tool_call(
+        _request("write_file", {"path": f"{workspace}/result.json"}),
+        lambda _request: ToolMessage(content="wrote", tool_call_id="call-1"),
+    )
+    sibling = middleware.wrap_tool_call(
+        _request("write_file", {"path": "/mnt/user-data/outputs/.dbtl-stage-work/attempt-2/build/result.json"}),
+        lambda _request: ToolMessage(content="wrote", tool_call_id="call-1"),
+    )
+    escaped = middleware.wrap_tool_call(
+        _request("write_file", {"path": f"{workspace}/../../attempt-2/build/result.json"}),
+        lambda _request: ToolMessage(content="wrote", tool_call_id="call-1"),
+    )
+    governed = middleware.wrap_tool_call(
+        _request("write_file", {"path": "/mnt/user-data/outputs/dbtl/cycle/build/result.json"}),
+        lambda _request: ToolMessage(content="wrote", tool_call_id="call-1"),
+    )
+
+    assert allowed.content == "wrote"
+    assert "blocked" in str(sibling.content)
+    assert "blocked" in str(escaped.content)
+    assert "blocked" in str(governed.content)
+
+
+def test_stage_worker_shell_is_limited_to_its_exact_workspace() -> None:
+    workspace = "/mnt/user-data/outputs/.dbtl-stage-work/attempt-1/build"
+    middleware = DbtlOutputPolicyMiddleware(writable_paths=(workspace,))
+
+    allowed = middleware.wrap_tool_call(
+        _request("bash", {"command": f"cd {workspace} && python simulate.py"}),
+        lambda _request: ToolMessage(content="ran", tool_call_id="call-1"),
+    )
+    escaped = middleware.wrap_tool_call(
+        _request("bash", {"command": f"cd {workspace}/../.. && touch attempt-2/result.json"}),
+        lambda _request: ToolMessage(content="ran", tool_call_id="call-1"),
+    )
+
+    assert allowed.content == "ran"
+    assert "blocked" in str(escaped.content)
+
+
+def test_local_shell_uses_process_level_isolation_for_relative_path_bypasses() -> None:
+    workspace = "/mnt/user-data/outputs/.dbtl-stage-work/attempt-1/build/unit-1"
+    middleware = DbtlOutputPolicyMiddleware(
+        writable_paths=(workspace,),
+        shell_isolation="sandbox-exec",
+    )
+    seen: list[str] = []
+
+    result = middleware.wrap_tool_call(
+        _request(
+            "bash",
+            {
+                "command": (
+                    "cd /mnt/user-data/outputs && "
+                    "touch .dbtl-stage-work/attempt-2/build/forged.json"
+                )
+            },
+        ),
+        lambda request: (
+            seen.append(request.tool_call["args"]["command"])
+            or ToolMessage(content="ran", tool_call_id="call-1")
+        ),
+    )
+
+    assert result.content == "ran"
+    assert seen and seen[0].startswith("sandbox-exec -p ")
+    assert "(deny file-write*)" in seen[0]
+    assert workspace in seen[0]
+
+
+def test_ordinary_local_shell_cannot_bypass_governed_paths_with_cd() -> None:
+    seen: list[str] = []
+    result = DbtlOutputPolicyMiddleware(shell_isolation="sandbox-exec").wrap_tool_call(
+        _request(
+            "bash",
+            {"command": "cd /mnt/user-data/outputs && touch dbtl/forged.json"},
+        ),
+        lambda request: (
+            seen.append(request.tool_call["args"]["command"])
+            or ToolMessage(content="ran", tool_call_id="call-1")
+        ),
+    )
+
+    assert result.content == "ran"
+    assert "sandbox-exec -p" in seen[0]
+    assert '(deny file-write* (subpath "/mnt/user-data/outputs/dbtl"))' in seen[0]
+    assert '(deny file-write* (subpath "/mnt/user-data/outputs/.dbtl-stage-work"))' in seen[0]
+
+
+def test_stage_shell_fails_closed_without_a_process_isolation_backend() -> None:
+    workspace = "/mnt/user-data/outputs/.dbtl-stage-work/attempt-1/build/unit-1"
+    result = DbtlOutputPolicyMiddleware(
+        writable_paths=(workspace,),
+        shell_isolation="deny",
+    ).wrap_tool_call(
+        _request("bash", {"command": f"python {workspace}/pipeline.py"}),
+        lambda _request: ToolMessage(content="ran", tool_call_id="call-1"),
+    )
+
+    assert "cannot enforce" in str(result.content)

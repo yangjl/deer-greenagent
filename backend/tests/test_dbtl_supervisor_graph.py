@@ -1281,9 +1281,9 @@ class TestPostApprovalStageHandoff:
             marker=lead_marker,
         )
 
-        assert lead_marker == ["lead_agent"]
+        assert lead_marker == []
         assert executed == []
-        assert final["messages"][-1].content == "the workspace has 2 files"
+        assert "no stage worker ran" in final["messages"][-1].content.lower()
 
     @pytest.mark.asyncio
     async def test_the_lead_agent_is_told_what_it_may_not_do(self):
@@ -1800,6 +1800,7 @@ class TestLiveStageBranch:
         "text",
         [
             "Okay, I approve it.",
+            "Okay, I approve this. can we go to Test stage",
             "approve it!",
             "I approve revision 3",
             "request changes",
@@ -1842,6 +1843,140 @@ class TestLiveStageBranch:
         assert "chat text cannot record a DBTL review gate" in answer
         assert "No meeting participants ran" in answer
         assert final["artifacts"] == FULL_STATE["artifacts"]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "okay, let's Test",
+            "can we go to Test stage?",
+            "Retry Build using the approved design",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_unscoped_stage_control_uses_the_unique_live_cycle_without_the_lead_or_workers(
+        self,
+        text,
+    ):
+        lead_calls = []
+        worker_calls = []
+
+        class Adapter:
+            async def active_cycle_status(self, *, project_id):
+                assert project_id == "proj-1"
+                return [
+                    {
+                        "cycle_id": "cyc-1",
+                        "title": "Maize simulation",
+                        "state": "ready_for_build",
+                        "parked": False,
+                        "stages": {
+                            "design": "approved",
+                            "build": "in_progress",
+                            "test": "locked",
+                        },
+                    }
+                ]
+
+            async def execute(self, **kwargs):
+                worker_calls.append(kwargs)
+                raise AssertionError("unscoped stage control must not dispatch workers")
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent(lead_calls),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id=None,
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [HumanMessage(content=text, id="unscoped-stage-control")],
+            },
+            config={"configurable": {"thread_id": f"unscoped-stage-control-{text}"}},
+        )
+
+        assert lead_calls == []
+        assert worker_calls == []
+        receipt = final["messages"][-1].content.lower()
+        assert "maize simulation" in receipt
+        assert "build is in progress" in receipt
+        assert "test is locked" in receipt
+        assert "no stage worker ran" in receipt
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Let's discuss the Test results",
+            "Let's inspect the Build package",
+            "continue chatting about the Design",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_stage_words_in_ordinary_conversation_do_not_become_stage_controls(self, text):
+        lead_calls = []
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent(lead_calls),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id=None,
+            ),
+            stage_adapter=TestPostApprovalStageHandoff()._adapter([]),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [HumanMessage(content=text, id="ordinary-stage-words")],
+            },
+            config={"configurable": {"thread_id": f"ordinary-stage-words-{text}"}},
+        )
+
+        assert lead_calls
+        assert final["messages"][-1].content == "the workspace has 2 files"
+
+    @pytest.mark.asyncio
+    async def test_unscoped_stage_control_does_not_resurrect_a_card_when_multiple_cycles_are_live(self):
+        lead_calls = []
+        executed = []
+        handoffs = TestPostApprovalStageHandoff()
+        adapter = handoffs._adapter(executed)
+        asked = await handoffs._ask(adapter, thread_id="multi-cycle-stage-control-ask")
+
+        async def active_cycle_status(*, project_id):
+            assert project_id == "proj-1"
+            return [
+                {"cycle_id": "cyc-1", "title": "Cycle one", "parked": False, "stages": {"build": "open"}},
+                {"cycle_id": "cyc-2", "title": "Cycle two", "parked": False, "stages": {"test": "open"}},
+            ]
+
+        adapter.active_cycle_status = active_cycle_status
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent(lead_calls),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F"),
+            stage_adapter=adapter,
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [*asked["messages"], HumanMessage(content="let's Test", id="ambiguous-stage-control")],
+            },
+            config={"configurable": {"thread_id": "multi-cycle-stage-control"}},
+        )
+
+        assert lead_calls == []
+        assert executed == []
+        assert not isinstance(final["messages"][-1], ToolMessage)
+        assert "no single active dbtl cycle is selected" in final["messages"][-1].content.lower()
 
     @pytest.mark.asyncio
     async def test_continuation_awaits_the_live_adapter_with_project_scope(self):

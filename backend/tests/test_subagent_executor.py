@@ -332,6 +332,7 @@ class TestAgentConstruction:
             app_config=app_config,
             parent_model="parent-model",
             token_budget_max_tokens=123_456,
+            dbtl_writable_paths=("/mnt/user-data/outputs/.dbtl-stage-work/attempt-1/build",),
         )
         provider = object()
         executor._authz_provider = provider
@@ -361,6 +362,7 @@ class TestAgentConstruction:
             "available_skills": set(),
             "user_id": "default",
             "authorization_provider": provider,
+            "dbtl_writable_paths": ("/mnt/user-data/outputs/.dbtl-stage-work/attempt-1/build",),
         }
         assert captured["agent"]["model"] is model
         assert captured["agent"]["middleware"] is middlewares

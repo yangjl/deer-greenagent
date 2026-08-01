@@ -20,9 +20,8 @@ from langchain.tools import BaseTool
 from langchain_core.callbacks.base import BaseCallbackManager
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.constants import TAG_NOSTREAM
-
 from langchain_core.runnables.config import var_child_runnable_config
+from langgraph.constants import TAG_NOSTREAM
 from langgraph.errors import GraphRecursionError
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
@@ -457,6 +456,7 @@ class SubagentExecutor:
         project_id: str | None = None,
         project_root: str | None = None,
         token_budget_max_tokens: int | None = None,
+        dbtl_writable_paths: Sequence[str] | None = None,
         extra_middlewares: Sequence[Any] | None = None,
         thinking_enabled: bool = False,
     ):
@@ -518,6 +518,10 @@ class SubagentExecutor:
         self.project_id = project_id
         self.project_root = project_root
         self.token_budget_max_tokens = token_budget_max_tokens
+        # Empty for every ordinary subagent. Only the DBTL stage adapter passes
+        # an attempt-scoped path, which the shared output policy treats as the
+        # worker's sole writable DBTL staging area.
+        self.dbtl_writable_paths = tuple(dbtl_writable_paths or ())
         # Off by default so ordinary delegation is unchanged; DBTL meeting
         # participants may opt in per seat via the preflight card's
         # "reasoning" dial, which the stage dispatcher maps to this flag.
@@ -584,6 +588,8 @@ class SubagentExecutor:
         }
         if self.token_budget_max_tokens is not None:
             middleware_kwargs["token_budget_max_tokens"] = self.token_budget_max_tokens
+        if self.dbtl_writable_paths:
+            middleware_kwargs["dbtl_writable_paths"] = self.dbtl_writable_paths
         authz_provider = getattr(self, "_authz_provider", None)
         if authz_provider is not None:
             middleware_kwargs["authorization_provider"] = authz_provider
