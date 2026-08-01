@@ -251,8 +251,10 @@ def _build_runtime_middlewares(
         provider = provider_cls(**provider_kwargs)
         tail.append(GuardrailMiddleware(provider, fail_closed=guardrails_config.fail_closed, passport=guardrails_config.passport))
 
+    from deerflow.agents.middlewares.dbtl_output_policy_middleware import DbtlOutputPolicyMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
 
+    tail.append(DbtlOutputPolicyMiddleware())
     tail.append(SandboxAuditMiddleware())
 
     # ReadBeforeWriteMiddleware is the outermost write gate: it blocks writes to files

@@ -23,20 +23,33 @@ def review_meeting_recorded(
     stage: str,
     stage_attempt_id: str,
     artifacts: Iterable[Mapping[str, Any]],
+    evidence_artifact_id: str,
+    evidence_artifact_revision: int,
+    evidence_content_hash: str,
 ) -> bool:
-    """Whether *this* stage attempt already carries its review-meeting artifact.
+    """Whether this attempt has a meeting for the exact current evidence.
 
     Derived rather than stored, for the same reason ``is_current`` is derived on
     a feedback surface: a separate boolean could disagree with the evidence, and
     the evidence is what a reviewer actually reads. Scoping to the attempt is
-    load-bearing — a revised attempt receives a new assessment, so the previous
-    attempt's meeting must not satisfy this one's gate.
+    load-bearing. Stage attempts are long-lived and may accumulate evidence
+    revisions after request-changes, so attempt identity alone cannot prove the
+    current evidence was ever reviewed.
     """
     expected = REVIEW_MEETING_ARTIFACT_TYPES.get((stage or "").strip().lower())
     attempt = (stage_attempt_id or "").strip()
-    if expected is None or not attempt:
+    evidence_id = (evidence_artifact_id or "").strip()
+    evidence_hash = (evidence_content_hash or "").strip()
+    if expected is None or not attempt or not evidence_id or evidence_artifact_revision < 1 or not evidence_hash:
         return False
-    return any(str(item.get("artifact_type") or "") == expected and str(item.get("stage_attempt_id") or "") == attempt for item in artifacts)
+    return any(
+        str(item.get("artifact_type") or "") == expected
+        and str(item.get("stage_attempt_id") or "") == attempt
+        and str(item.get("reviewed_artifact_id") or "") == evidence_id
+        and int(item.get("reviewed_artifact_revision") or 0) == evidence_artifact_revision
+        and str(item.get("reviewed_artifact_content_hash") or "") == evidence_hash
+        for item in artifacts
+    )
 
 
 class MeetingRequirement(StrEnum):

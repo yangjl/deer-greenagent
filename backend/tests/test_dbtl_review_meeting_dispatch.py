@@ -103,6 +103,9 @@ class _Repo:
                     "revision": 1,
                     "uri": kwargs["artifact_uri"],
                     "content_hash": kwargs["artifact_content_hash"],
+                    "reviewed_artifact_id": kwargs.get("reviewed_artifact_id"),
+                    "reviewed_artifact_revision": kwargs.get("reviewed_artifact_revision"),
+                    "reviewed_artifact_content_hash": kwargs.get("reviewed_artifact_content_hash"),
                 },
             ]
         return kwargs["results"]
@@ -253,6 +256,16 @@ class TestTheMeetingRecordsItsOwnEvidence:
 
         assert repo.recorded[0]["artifact_type"] == "test_review_meeting"
         assert repo.recorded[0]["artifact_uri"]
+
+    @pytest.mark.asyncio
+    async def test_it_binds_the_meeting_to_the_exact_core_evidence(self, tmp_path: Path):
+        repo = _Repo()
+
+        await _convene(repo, tmp_path)
+
+        assert repo.recorded[0]["reviewed_artifact_id"] == "artifact-test-1"
+        assert repo.recorded[0]["reviewed_artifact_revision"] == 1
+        assert repo.recorded[0]["reviewed_artifact_content_hash"] == PACKAGE_HASH
 
     @pytest.mark.asyncio
     async def test_a_chair_cannot_restate_the_computed_outcome(self, tmp_path: Path):

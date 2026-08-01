@@ -301,6 +301,15 @@ class LocalSandboxProvider(SandboxProvider):
                 local_path=str(outputs_dir),
                 read_only=False,
             ),
+            # DBTL review packages are published by repository code on the
+            # host, never by a model-facing file tool.  The nested mapping wins
+            # over both writable parent mappings and makes that authority a
+            # filesystem rule for LocalSandbox file operations.
+            PathMapping(
+                container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/outputs/dbtl",
+                local_path=str(outputs_dir / "dbtl"),
+                read_only=True,
+            ),
             PathMapping(
                 container_path=_ACP_WORKSPACE_VIRTUAL_PREFIX,
                 local_path=str(paths.acp_workspace_dir(thread_id, user_id=effective_user_id)),

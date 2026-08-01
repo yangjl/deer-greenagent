@@ -579,6 +579,9 @@ class ReconciliationOpsMixin:
         artifact_type: str | None = None,
         artifact_uri: str | None = None,
         artifact_content_hash: str | None = None,
+        reviewed_artifact_id: str | None = None,
+        reviewed_artifact_revision: int | None = None,
+        reviewed_artifact_content_hash: str | None = None,
     ) -> list[dict[str, Any]]:
         """Persist one stage fan-out's structured results.
 
@@ -595,6 +598,21 @@ class ReconciliationOpsMixin:
             raise ValueError("A stage execution artifact requires type, URI, and content hash together.")
         if artifact_content_hash is not None and not _is_sha256(artifact_content_hash):
             raise ValueError("A stage execution artifact requires a lowercase SHA-256 hash.")
+        reviewed_values = (
+            reviewed_artifact_id,
+            reviewed_artifact_revision,
+            reviewed_artifact_content_hash,
+        )
+        if any(value is not None for value in reviewed_values) and not all(
+            value is not None for value in reviewed_values
+        ):
+            raise ValueError("A review meeting must bind the reviewed artifact id, revision, and content hash together.")
+        if reviewed_artifact_content_hash is not None and not _is_sha256(
+            reviewed_artifact_content_hash
+        ):
+            raise ValueError("Reviewed evidence requires a lowercase SHA-256 hash.")
+        if reviewed_artifact_id is not None and artifact_type != f"{stage}_review_meeting":
+            raise ValueError("Only a stage review-meeting artifact may carry a reviewed-evidence binding.")
         results_digest = hashlib.sha256(
             json.dumps(
                 results,
@@ -627,6 +645,9 @@ class ReconciliationOpsMixin:
                     "artifact_type": artifact_type,
                     "artifact_uri": artifact_uri,
                     "artifact_content_hash": artifact_content_hash,
+                    "reviewed_artifact_id": reviewed_artifact_id,
+                    "reviewed_artifact_revision": reviewed_artifact_revision,
+                    "reviewed_artifact_content_hash": reviewed_artifact_content_hash,
                     "expected_db_revision": expected_db_revision,
                 },
             )
@@ -642,6 +663,24 @@ class ReconciliationOpsMixin:
                 StageStatus.CHANGES_REQUESTED.value,
             }:
                 raise DbtlWorkflowRefused(f"Worker evidence cannot be recorded while {stage!r} is {attempt.status!r}.")
+
+            if reviewed_artifact_id is not None:
+                reviewed = await session.scalar(
+                    select(DbtlArtifactRow).where(
+                        DbtlArtifactRow.id == reviewed_artifact_id,
+                        DbtlArtifactRow.project_id == project_id,
+                        DbtlArtifactRow.cycle_id == cycle_id,
+                        DbtlArtifactRow.stage_attempt_id == attempt.id,
+                    )
+                )
+                if (
+                    reviewed is None
+                    or reviewed.revision != reviewed_artifact_revision
+                    or reviewed.content_hash != reviewed_artifact_content_hash
+                ):
+                    raise DbtlWorkflowRefused(
+                        "The review meeting's evidence binding no longer matches this stage attempt."
+                    )
 
             attempt.stage_spec_key = stage_spec_key
             for index, result in enumerate(results):
@@ -714,6 +753,9 @@ class ReconciliationOpsMixin:
                     "artifact_revision": artifact_revision,
                     "artifact_uri": artifact_uri,
                     "artifact_content_hash": artifact_content_hash,
+                    "reviewed_artifact_id": reviewed_artifact_id,
+                    "reviewed_artifact_revision": reviewed_artifact_revision,
+                    "reviewed_artifact_content_hash": reviewed_artifact_content_hash,
                     "expected_db_revision": expected_db_revision,
                 },
             )

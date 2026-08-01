@@ -22,7 +22,10 @@ def _tables() -> set[str]:
 def upgrade() -> None:
     tables = _tables()
     if "knowledge_claims" not in tables:
-        return
+        raise RuntimeError(
+            "Migration 0017 requires the knowledge_claims table from the DBTL governance foundation; "
+            "refusing to stamp an incomplete knowledge schema."
+        )
     if "knowledge_publications" not in tables:
         op.create_table(
             "knowledge_publications",

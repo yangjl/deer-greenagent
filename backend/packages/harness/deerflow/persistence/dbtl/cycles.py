@@ -132,6 +132,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
         stages: list[DbtlStageAttemptRow],
         *,
         artifacts: list[DbtlArtifactRow] | None = None,
+        artifact_bindings: dict[str, dict[str, Any]] | None = None,
         work_items: list[WorkItemRow] | None = None,
     ) -> dict[str, Any]:
         detail = dict(cycle.projection_json or {})
@@ -177,6 +178,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                     "uri": row.uri,
                     "created_by": row.created_by,
                     "created_at": _iso(row.created_at),
+                    **dict((artifact_bindings or {}).get(row.id) or {}),
                 }
                 for row in artifacts
             ]
@@ -551,8 +553,36 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOp
                 return None
             cycle, stages = loaded
             artifacts = list((await session.execute(select(DbtlArtifactRow).where(DbtlArtifactRow.cycle_id == cycle_id).order_by(DbtlArtifactRow.created_at.asc(), DbtlArtifactRow.id.asc()))).scalars())
+            artifact_events = list(
+                (
+                    await session.execute(
+                        select(DbtlEventRow).where(
+                            DbtlEventRow.cycle_id == cycle_id,
+                            DbtlEventRow.project_id == project_id,
+                            DbtlEventRow.event_type == "stage.workers_recorded",
+                        )
+                    )
+                ).scalars()
+            )
+            artifact_bindings: dict[str, dict[str, Any]] = {}
+            for event in artifact_events:
+                event_payload = dict(event.payload or {})
+                artifact_id = event_payload.get("artifact_id")
+                reviewed_id = event_payload.get("reviewed_artifact_id")
+                if isinstance(artifact_id, str) and isinstance(reviewed_id, str):
+                    artifact_bindings[artifact_id] = {
+                        "reviewed_artifact_id": reviewed_id,
+                        "reviewed_artifact_revision": event_payload.get("reviewed_artifact_revision"),
+                        "reviewed_artifact_content_hash": event_payload.get("reviewed_artifact_content_hash"),
+                    }
             work_items = list((await session.execute(select(WorkItemRow).where(WorkItemRow.cycle_id == cycle_id).order_by(WorkItemRow.created_at.asc(), WorkItemRow.id.asc()))).scalars())
-            return self._cycle_payload(cycle, stages, artifacts=artifacts, work_items=work_items)
+            return self._cycle_payload(
+                cycle,
+                stages,
+                artifacts=artifacts,
+                artifact_bindings=artifact_bindings,
+                work_items=work_items,
+            )
 
     async def list_activity(self, cycle_id: str, *, project_id: str) -> list[dict[str, Any]]:
         async with self._sf() as session:

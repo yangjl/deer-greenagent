@@ -184,6 +184,22 @@ async def test_candidate_promotion_publication_and_retraction_are_distinct(
     assert candidate["status"] == "proposed"
     assert learn["claims"] == []
 
+    with pytest.raises(KnowledgeLifecycleRefused, match="owner or administrator"):
+        await repo.promote_candidate(
+            candidate_id=candidate["id"],
+            project_id="project-1",
+            statement=candidate["statement"],
+            grade="valid_negative",
+            limitations=candidate["limitations"],
+            reviewer_user_id="member-1",
+            reviewer_project_role="member",
+            rationale="A member must not own the knowledge gate.",
+            authorization_reference="manual-promotion:project-1:member-1",
+            idempotency_key="member-promote",
+            rendered_uri="/mnt/user-data/knowledge/member.md",
+            claim_id="member-claim",
+        )
+
     promoted = await repo.promote_candidate(
         candidate_id=candidate["id"],
         project_id="project-1",
@@ -216,6 +232,21 @@ async def test_candidate_promotion_publication_and_retraction_are_distinct(
         claim_id="different-retry-id",
     )
     assert replayed_promotion["claim"]["id"] == "claim-1"
+    with pytest.raises(KnowledgeLifecycleRefused, match="idempotency key"):
+        await repo.promote_candidate(
+            candidate_id=candidate["id"],
+            project_id="project-1",
+            statement="A materially different statement.",
+            grade="valid_negative",
+            limitations=candidate["limitations"],
+            reviewer_user_id="reviewer-1",
+            reviewer_project_role="owner",
+            rationale="The evidence supports a bounded negative claim.",
+            authorization_reference="manual-promotion:project-1:reviewer-1",
+            idempotency_key="promote-1",
+            rendered_uri="/mnt/user-data/knowledge/another-id.md",
+            claim_id="another-id",
+        )
 
     published = await repo.publish_claim(
         claim_id=claim["id"],
@@ -232,6 +263,17 @@ async def test_candidate_promotion_publication_and_retraction_are_distinct(
         "project-3",
     }
     assert all(item["status"] == "active" for item in published["publications"])
+    with pytest.raises(KnowledgeLifecycleRefused, match="idempotency key"):
+        await repo.publish_claim(
+            claim_id=claim["id"],
+            source_project_id="project-1",
+            target_project_ids=["project-2"],
+            publisher_user_id="reviewer-1",
+            publisher_project_role="owner",
+            rationale="Both projects use the same protocol.",
+            authorization_reference="manual-publication:project-1:reviewer-1",
+            idempotency_key="publish-1",
+        )
 
     retracted = await repo.retract_claim(
         claim_id=claim["id"],

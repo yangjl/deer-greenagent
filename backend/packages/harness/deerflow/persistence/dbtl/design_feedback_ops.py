@@ -80,6 +80,18 @@ def _is_sha256(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
 
 
+def _locked_cycle_for_feedback_surface(cycle_id: str, project_id: str):
+    """Serialize revision allocation and supersession for one cycle."""
+    return (
+        select(DbtlCycleRow)
+        .where(
+            DbtlCycleRow.id == cycle_id,
+            DbtlCycleRow.project_id == project_id,
+        )
+        .with_for_update()
+    )
+
+
 class DesignFeedbackOpsMixin:
     """Register and resolve the decks a person may be shown."""
 
@@ -203,11 +215,11 @@ class DesignFeedbackOpsMixin:
             raise DbtlWorkflowRefused("Bound evidence needs its lowercase SHA-256 content hash.")
 
         async with self._sf() as session:  # type: ignore[attr-defined]
+            # This lock covers MAX(revision), insert, and supersession below.
+            # Without it, two different deck hashes can both allocate the same
+            # revision and both remain live under PostgreSQL READ COMMITTED.
             cycle = await session.scalar(
-                select(DbtlCycleRow).where(
-                    DbtlCycleRow.id == cycle_id,
-                    DbtlCycleRow.project_id == project_id,
-                )
+                _locked_cycle_for_feedback_surface(cycle_id, project_id)
             )
             if cycle is None:
                 raise DbtlWorkflowRefused("That cycle does not belong to this project.")

@@ -10,6 +10,42 @@ from app.gateway.dbtl_readiness import scan_dbtl_readiness
 from deerflow.config.dbtl_config import DbtlConfig
 from deerflow.persistence.dbtl import DbtlGovernanceRepository
 
+#: Provider identifiers proven to enforce nested read-only output mounts, so an
+#: ordinary shell command cannot write outside the DBTL-owned output policy.
+#: Unknown or unverified providers fail readiness rather than being assumed
+#: safe. Add a provider only after its enforced nested mount has been verified.
+_ENFORCED_OUTPUT_ISOLATION_PROVIDERS: frozenset[str] = frozenset()
+
+
+def _provider_enforces_output_isolation(sandbox_provider: str) -> bool:
+    return any(token and token in sandbox_provider for token in _ENFORCED_OUTPUT_ISOLATION_PROVIDERS)
+
+
+def stage_output_isolation(sandbox_provider: str, *, allow_host_bash: bool) -> tuple[bool, str]:
+    """Return the strict output-ownership readiness result for one provider."""
+    local_provider = "LocalSandboxProvider" in sandbox_provider or "sandbox.local" in sandbox_provider
+    if local_provider:
+        isolated = not allow_host_bash
+    else:
+        isolated = _provider_enforces_output_isolation(sandbox_provider)
+    if isolated:
+        detail = (
+            "Agent file tools enforce a read-only DBTL output mapping and local host bash is disabled."
+            if local_provider
+            else "The configured provider proves enforced nested read-only DBTL output mounts."
+        )
+    elif local_provider:
+        detail = (
+            "LocalSandboxProvider has sandbox.allow_host_bash=true. Host bash can bypass DBTL output ownership; "
+            "disable it before cutover."
+        )
+    else:
+        detail = (
+            "This sandbox provider does not prove enforced nested read-only DBTL output mounts; "
+            "strict stage-output ownership cannot be claimed."
+        )
+    return isolated, detail
+
 
 def _check(check_id: str, title: str, passed: bool, detail: str) -> dict[str, Any]:
     return {
@@ -26,6 +62,8 @@ async def build_governance_report(
     database_backend: str,
     root: Path,
     config: DbtlConfig,
+    sandbox_provider: str = "",
+    allow_host_bash: bool = False,
 ) -> dict[str, Any]:
     """Build evidence without repairing or migrating any record."""
     schema = await repository.schema_snapshot()
@@ -34,6 +72,10 @@ async def build_governance_report(
     postgres = database_backend == "postgres"
     schema_ready = not schema["tables_missing"] and schema["identity_binding"]
     legacy_ready = not (legacy.counts["repairable"] or legacy.counts["invalid_or_ambiguous"])
+    stage_output_isolated, stage_output_detail = stage_output_isolation(
+        sandbox_provider,
+        allow_host_bash=allow_host_bash,
+    )
     checks = [
         _check(
             "postgres-authority",
@@ -82,6 +124,12 @@ async def build_governance_report(
             "Legacy records have an explicit disposition",
             legacy_ready,
             ("No ambiguous legacy records detected." if legacy_ready else "Repairable or invalid legacy records remain; no automatic repair was attempted."),
+        ),
+        _check(
+            "stage-output-isolation",
+            "Ordinary runs cannot bypass DBTL stage output ownership",
+            stage_output_isolated,
+            stage_output_detail,
         ),
     ]
     technical_ready = all(check["status"] == "passed" for check in checks)

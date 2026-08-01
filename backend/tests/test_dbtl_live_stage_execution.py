@@ -85,8 +85,8 @@ class FakeRepo:
         self.replay: dict | None = None
         self.worker_runs: list[dict] = []
         self.surfaces: list[dict] = []
-        #: Set to raise from surface registration, to prove a descriptor
-        #: failure cannot cost the meeting whose results are already committed.
+        #: Set to raise from surface registration, proving the review surface
+        #: failure is visible even though meeting evidence is already durable.
         self.surface_error: Exception | None = None
 
     async def get_cycle(self, cycle_id: str, *, project_id: str):
@@ -2084,30 +2084,26 @@ async def test_a_paused_meeting_registers_a_chair_feedback_surface(
 
 
 @pytest.mark.asyncio
-async def test_a_failed_registration_does_not_cost_the_meeting(
+async def test_a_failed_registration_is_visible_and_keeps_the_meeting_record(
     tmp_path: Path,
 ) -> None:
-    """The results are already committed; a descriptor must not undo that.
-
-    This inverts at cutover: once the deck is the only way to respond, an
-    unregistered deck is an owner who cannot answer, and the failure has to
-    become visible instead of silent.
-    """
+    """An unregistered authoritative deck must never look successful."""
     repo = FakeRepo(_cycle())
     repo.surface_error = RuntimeError("descriptor store unavailable")
     dispatcher = FakeDispatcher(text=_structured_result())
 
-    result = await _design_adapter(repo, dispatcher).execute(
-        project_id="project-1",
-        cycle_id="cycle-1",
-        request_text="Draft the Design package.",
-        state={},
-        config=_runtime_config(tmp_path),
-    )
+    with pytest.raises(RuntimeError, match="descriptor store unavailable"):
+        await _design_adapter(repo, dispatcher).execute(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            request_text="Draft the Design package.",
+            state={},
+            config=_runtime_config(tmp_path),
+        )
 
     assert repo.surfaces == []
-    assert result.deck_uri is not None
-    assert result.artifact_uri is not None
+    assert repo.recorded
+    assert repo.recorded[-1]["artifact_type"] == "design_brief"
 
 
 def test_evidence_matching_uses_the_keys_the_repository_actually_returns() -> None:

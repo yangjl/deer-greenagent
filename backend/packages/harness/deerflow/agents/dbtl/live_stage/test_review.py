@@ -10,7 +10,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.dbtl.cycle_state import StageStatus
 from deerflow.dbtl.reconciliation_policy import reconciliation_required
-from deerflow.dbtl.stage_meetings import surface_meeting_gate
+from deerflow.dbtl.stage_meetings import review_meeting_recorded, surface_meeting_gate
 from deerflow.dbtl.validity import (
     DEFAULT_VALIDITY_PACK,
     CheckStatus,
@@ -122,10 +122,26 @@ class TestReviewService:
         if assessment is None:
             return None
         artifacts = list(cycle.get("artifacts") or [])
-        meeting_completed = any(
-            item.get("stage_attempt_id") == test.get("id") and item.get("artifact_type") == "test_review_meeting"
-            for item in artifacts
-            if isinstance(item, Mapping)
+        evidence = max(
+            (
+                item
+                for item in artifacts
+                if isinstance(item, Mapping)
+                and item.get("stage_attempt_id") == test.get("id")
+                and item.get("artifact_type") in {"validity_report", "test_report"}
+            ),
+            key=lambda item: int(item.get("revision") or 0),
+            default=None,
+        )
+        if evidence is None:
+            return None
+        meeting_completed = review_meeting_recorded(
+            stage="test",
+            stage_attempt_id=str(test.get("id") or ""),
+            artifacts=[item for item in artifacts if isinstance(item, Mapping)],
+            evidence_artifact_id=str(evidence.get("id") or ""),
+            evidence_artifact_revision=int(evidence.get("revision") or 0),
+            evidence_content_hash=str(evidence.get("content_hash") or ""),
         )
         difficulty = "standard"
         latest_surface = getattr(self.repo, "latest_stage_feedback_surface", None)
@@ -147,17 +163,6 @@ class TestReviewService:
             assessed_difficulty=difficulty,
             enabled=bool(getattr(meetings, "test", False)),
             meeting_completed=meeting_completed,
-        )
-        evidence = max(
-            (
-                item
-                for item in artifacts
-                if isinstance(item, Mapping)
-                and item.get("stage_attempt_id") == test.get("id")
-                and item.get("artifact_type") in {"validity_report", "test_report"}
-            ),
-            key=lambda item: int(item.get("revision") or 0),
-            default=None,
         )
         return {
             **assessment,

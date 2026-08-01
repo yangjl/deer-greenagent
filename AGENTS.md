@@ -351,9 +351,9 @@ Breeding-workspace note:
   paused meeting's deck must not, because there is no package yet. An
   authenticated, project-scoped read endpoint reports those bindings and, in
   this phase, always reports that nothing is actionable. Registration is
-  fail-soft today (the meeting's results are already committed when it runs) and
-  must become fail-visible at cutover, when an unregistered deck would mean an
-  owner who cannot answer.
+  fail-visible: evidence already committed remains retryable, but an
+  unregistered deck cannot be presented as an answerable review surface. Cycle
+  row locking serializes surface revision allocation and supersession.
 - The preflight card is also the meeting's setup form.
   `deerflow.dbtl.council_settings` renders one **editable participant card per
   seat** (`council_participants` on the artifact), prefilled with the roster

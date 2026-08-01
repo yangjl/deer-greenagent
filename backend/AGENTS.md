@@ -450,7 +450,7 @@ Lead-agent middlewares are assembled in strict order across three functions: the
 7. **DanglingToolCallMiddleware** - Injects placeholder ToolMessages for AIMessage tool_calls that lack responses (e.g., user interruption), preserving raw provider tool-call payloads in `additional_kwargs["tool_calls"]`; malformed tool-call names and arguments are sanitized in the model-bound request so strict OpenAI-compatible providers do not reject the next request. It also drops **unusable reasoning blocks** from replayed assistant turns. Anthropic streams extended thinking as a `content_block_start` announcing `{"type": "thinking"}` with the text arriving afterwards as deltas, so a stream that ends between the two — a cancelled run, a provider error, even a 400 caused by something else in the same request — checkpoints a thinking block with no `thinking` field. Every later turn in that thread is then rejected with `thinking.thinking: Field required`, on a request unrelated to the one that caused it, and nothing in the thread can recover because the damage is durable: one interrupted stream permanently ends a conversation. The repair is deliberately surgical — a *complete* thinking block must survive byte-identical because Anthropic verifies its signature, so this is not a blanket strip — and it rewrites the **request only**, never the checkpoint, because rewriting recorded history is a much larger claim than "this provider will not accept it". A turn left with no content gains a placeholder, since an empty assistant message is also a 400 and trading one rejection for another would fix nothing
 8. **LLMErrorHandlingMiddleware** - Normalizes provider/model invocation failures into recoverable assistant-facing errors before later stages run
 9. **Authorization / GuardrailMiddleware** - Up to two independent pre-tool-call gates run here. When `authorization.enabled`, the `AuthorizationProvider` instance already used for Layer 1 capability filtering is wrapped by `GuardrailAuthorizationAdapter` and reused for Layer 2 execution checks. A generated `tool_search` bypasses the adapter's second provider call only when the current build has a concrete deferred setup; its catalog was already filtered by Layer 1, and an ordinary same-named tool without that deferred setup receives no exemption. When `guardrails.enabled`, the explicitly configured `GuardrailProvider` is appended after authorization and still evaluates every call, including `tool_search`. Authorization therefore runs outermost and can deny before an external guardrail call; both use the existing middleware's fail-closed, audit, sync/async, and error-`ToolMessage` behavior. See the authorization RFC and [docs/GUARDRAILS.md](docs/GUARDRAILS.md).
-10. **SandboxAuditMiddleware** - Audits sandboxed shell/file operations for security logging before tool execution
+10. **DbtlOutputPolicyMiddleware**, then **SandboxAuditMiddleware** - The DBTL policy blocks model-facing `write_file`, `str_replace`, and direct shell paths into `outputs/dbtl`; repository-owned stage publication remains the only writer. LocalSandbox also overlays that subtree read-only, and governance readiness fails if host bash is enabled or a non-local provider cannot prove equivalent nested-mount isolation. The audit middleware then records sandboxed shell/file operations before tool execution.
 11. **ReadBeforeWriteMiddleware** - _(optional, if `read_before_write.enabled`, default on)_ Outermost write gate (issue #3857): `read_file` stamps a content hash onto its ToolMessage; `write_file` (append/overwrite-existing) and `str_replace` are blocked unless the newest mark for that path matches the file's current hash. Sits outside ToolProgressMiddleware and ToolErrorHandlingMiddleware so a blocked write returns immediately without consuming a ToolProgress slot. Blocked results call `normalize_tool_result` directly to stamp `deerflow_tool_meta` (`recoverable_by_model=True`) before returning, keeping the result well-formed for any outer consumer. Marks live on messages, so summarization dropping the read result invalidates the gate automatically; writes never refresh marks, forcing a re-read between consecutive edits. Gate check + tool execution are serialized per (thread, path) so same-turn parallel writes cannot reuse one stale mark; on sandboxes whose `read_file` reports failures as `"Error: ..."` strings instead of raising (AIO/E2B), uninspectable targets fail open (creation proceeds, no mark stamped)
 12. **ToolProgressMiddleware** - _(optional, if `tool_progress.enabled`)_ State-machine-based stagnation guard (RFC #3177). Outer wrapper around ToolErrorHandlingMiddleware so its `wrap_tool_call` receives results already stamped with `deerflow_tool_meta`. Tracks per-(thread, tool) consecutive "no-new-info" calls across three error categories: (a) `recoverable_by_model=True` (no_results, not_found, permission, Jaccard-duplicate success): ACTIVE → WARNED (terminal — hint re-injected on each subsequent problem); (b) `recoverable_by_model=False, action≠stop` (rate_limited, transient): ACTIVE → WARNED → BLOCKED after `warn_escalation_count` more problems; (c) `recoverable_by_model=False, action=stop` (auth, config, internal): immediately BLOCKED on first occurrence. **Division of labor with LoopDetectionMiddleware:** ToolProgressMiddleware is a result-quality guard — fires after tool execution and blocks specific tools that stop producing new information; LoopDetectionMiddleware is a call-pattern guard — fires after the model responds and hard-stops the whole turn when the model repeatedly issues identical tool_calls. Both can inject HumanMessage hints in the same model call without conflict; neither reads the other's internal state.
 13. **ToolErrorHandlingMiddleware** - Receives `AppConfig`, converts tool exceptions into error `ToolMessage`s so the run can continue instead of aborting, stamps every result with `deerflow_tool_meta` (status / error_type / recoverable_by_model / recommended_next_action / source) via `tool_result_meta.normalize_tool_result`, stamps structured metadata for task exception wrappers, and stamps skill-read metadata for downstream durable-context capture. Task tool result text is generated from the same status/result/error inputs as the structured metadata so callers do not hand-write a second protocol string.
@@ -2312,9 +2312,12 @@ Build-approved/Test-active rollout shape as Test, and the Test decision commits
 that cursor repair with its normal audited revision. Ordinary stage workers
 omit `council_seat` from lifecycle
 events; actual review meetings carry their stage in that identity so the
-frontend uses Design, Build, Test, or Learn meeting copy correctly. It records
-the explicit Build checkpoint inside a one-click approval before advancing to
-Test. For checkpoints created before that repair, the adapter treats a single
+frontend uses Design, Build, Test, or Learn meeting copy correctly. A meeting
+artifact also binds the exact core evidence artifact id, revision, and content
+hash it reviewed; a newer evidence revision on the same attempt reopens the
+meeting gate instead of inheriting a stale completion. It records the explicit
+Build checkpoint inside a one-click approval before advancing to Test. For
+checkpoints created before that repair, the adapter treats a single
 `in_progress` or `changes_requested` stage row as more specific than the cycle
 summary, so a Build-approved/Test-active record resumes Test rather than
 dispatching Build twice; terminal and unknown cycle states are never reopened
@@ -2335,13 +2338,17 @@ become `memory_candidates`.
 
 `persistence/dbtl/knowledge_ops.py` separates four durable acts: candidate
 keep/discard, human project-scope promotion, selected-project publication, and
-human supersession/retraction. Promotion never publishes. Publication validates
-that every target is an active project in the same workspace. Supersession and
-retraction retain claims, links, publication rows, and immutable
-`knowledge_events`, but close every old active publication. Migration
-`0017_dbtl_learn_knowledge` adds the publication and event tables; existing
-candidate, claim, promotion, and link tables remain the authority for the rest
-of the lifecycle.
+human supersession/retraction. Owner or admin project authority is enforced at
+both the HTTP and repository boundaries for promotion, publication,
+supersession, and retraction. Promotion never publishes. Publication validates
+that every target is an active project in the same workspace. Every knowledge
+event binds its idempotency key to a canonical request digest, so a changed
+payload is a conflict rather than a silent replay. Supersession and retraction
+retain claims, links, publication rows, and immutable `knowledge_events`, but
+close every old active publication. Migration `0017_dbtl_learn_knowledge` adds
+the publication and event tables and refuses to stamp itself if its governance
+foundation tables are absent; existing candidate, claim, promotion, and link
+tables remain the authority for the rest of the lifecycle.
 
 Gateway Phase 8 endpoints live under
 `/api/projects/{id}/dbtl/{knowledge,candidates,claims}`. Reviewer identity and
@@ -2378,20 +2385,10 @@ knowledge`) is collapsed into `DbtlMode = disabled|audit_only|manual|graph_enabl
   `graph_enabled`). Enabling Phase 3's manual workflow therefore also enables
   knowledge promotion and cross-project publication, so "a mode may be raised
   only after its phase exit review" is currently unenforceable.
-- The plan's P8 decision "which human project roles may promote, publish,
-  retract, or supersede claims" is unimplemented: `reviewer_project_role` is
-  _recorded_ but never _checked_, so any `member` may do all four.
-- Knowledge idempotency keys are not payload-bound (contrast Phase 7's
-  `request_digest` in `build_test_ops.py`), so a reused key with different
-  `target_project_ids` replays the prior result and silently drops the new
-  targets.
 - The four knowledge mutations take no `expected_db_revision`, unlike every
   other DBTL mutation.
 - `MemoryWritePolicy` and Learn's `validity_gates` are declared on the
   `StageSpec` but read by nothing — they document intent, they do not enforce it.
-- Migration `0017` early-returns when `knowledge_claims` is absent while Alembic
-  still stamps it applied, so a database missing that precondition can never
-  acquire the publication/event tables.
 - `knowledge_view` is source-project scoped, so a project that a claim was
   published _into_ returns no claims/publications and cannot see or manage it.
 
@@ -2611,7 +2608,10 @@ actually shown and a review may already refer to it; `is_current` is derived
 from the absence of a successor rather than stored, so a second column cannot
 disagree with it. Re-registering identical bytes for the same attempt and mode
 returns the existing descriptor — a retried turn re-renders the same file, and a
-second id for it would leave two live surfaces answering one question.
+second id for it would leave two live surfaces answering one question. Surface
+revision allocation, insert, and supersession run while holding the cycle row
+lock, so concurrent registrations cannot allocate the same revision or both
+remain live.
 
 Refusals are at the write boundary: an unknown `mode`, a `deck_content_hash`
 that is not a lowercase SHA-256 (refused rather than normalized, so two
@@ -2632,10 +2632,10 @@ chair paused, `stage_review` when the review package can be matched by
 `_bound_evidence` — **by content hash, never by attachment order**, since a deck
 must bind to the document it was rendered from or to nothing — and `read_only`
 otherwise, including when there is no originating thread. Registration is
-fail-soft for the same reason writing the deck is: the meeting's results are
-already committed by the time it runs. **That inverts at cutover** — once the
-deck is the only way to answer, an unregistered deck is an owner who cannot
-respond, and the failure has to become visible instead of silent.
+fail-visible: meeting evidence is already durable by the time it runs, but an
+unregistered deck is an owner who cannot answer the gate. The run therefore
+fails and may safely retry registration instead of returning a surface id that
+does not exist.
 
 `GET /api/projects/{id}/dbtl/cycles/{cycle_id}/design-feedback/{surface_id}`
 serves the read model in **every** mode including `audit_only`: a read model

@@ -587,6 +587,60 @@ class TestApprovalBinding:
 
 
 class TestWorkerRuns:
+    async def test_a_review_meeting_projects_its_exact_evidence_binding(self, tmp_path: Path) -> None:
+        repo, project_id = await _repos(tmp_path)
+        await _cycle(repo, project_id)
+        evidence = await _attach(repo, project_id, "design", key="design-evidence")
+
+        await repo.record_worker_runs(
+            cycle_id="cycle-1",
+            project_id=project_id,
+            stage="design",
+            stage_spec_key="generic:design:v1",
+            results=[],
+            actor_user_id="user-1",
+            expected_db_revision=await _revision(repo, project_id),
+            idempotency_key="design-meeting-1",
+            artifact_type="design_review_meeting",
+            artifact_uri="/mnt/user-data/outputs/dbtl/design-meeting.json",
+            artifact_content_hash=HASH_A,
+            reviewed_artifact_id=evidence["id"],
+            reviewed_artifact_revision=evidence["revision"],
+            reviewed_artifact_content_hash=evidence["content_hash"],
+        )
+
+        cycle = await repo.get_cycle("cycle-1", project_id=project_id)
+        assert cycle is not None
+        meeting = next(
+            item for item in cycle["artifacts"] if item["artifact_type"] == "design_review_meeting"
+        )
+        assert meeting["reviewed_artifact_id"] == evidence["id"]
+        assert meeting["reviewed_artifact_revision"] == evidence["revision"]
+        assert meeting["reviewed_artifact_content_hash"] == evidence["content_hash"]
+
+    async def test_a_review_meeting_refuses_a_stale_evidence_hash(self, tmp_path: Path) -> None:
+        repo, project_id = await _repos(tmp_path)
+        await _cycle(repo, project_id)
+        evidence = await _attach(repo, project_id, "design", key="design-evidence")
+
+        with pytest.raises(DbtlWorkflowRefused, match="evidence binding no longer matches"):
+            await repo.record_worker_runs(
+                cycle_id="cycle-1",
+                project_id=project_id,
+                stage="design",
+                stage_spec_key="generic:design:v1",
+                results=[],
+                actor_user_id="user-1",
+                expected_db_revision=await _revision(repo, project_id),
+                idempotency_key="design-meeting-stale",
+                artifact_type="design_review_meeting",
+                artifact_uri="/mnt/user-data/outputs/dbtl/design-meeting.json",
+                artifact_content_hash=HASH_A,
+                reviewed_artifact_id=evidence["id"],
+                reviewed_artifact_revision=evidence["revision"],
+                reviewed_artifact_content_hash="f" * 64,
+            )
+
     async def test_a_live_fanout_records_its_review_artifact_atomically(self, tmp_path: Path) -> None:
         repo, project_id = await _repos(tmp_path)
         await _cycle(repo, project_id)

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.dialects import postgresql
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.dbtl import (
@@ -21,6 +22,7 @@ from deerflow.persistence.dbtl import (
     DbtlWorkflowRefused,
     DesignFeedbackConflict,
 )
+from deerflow.persistence.dbtl.design_feedback_ops import _locked_cycle_for_feedback_surface
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
 
@@ -30,6 +32,13 @@ DECK_HASH = "a" * 64
 OTHER_DECK_HASH = "b" * 64
 EVIDENCE_HASH = "c" * 64
 DECK_URI = "/mnt/user-data/outputs/dbtl/cycle/design/design-slides-rev1-aaaaaa.html"
+
+
+async def test_surface_registration_locks_the_cycle_before_allocating_a_revision() -> None:
+    statement = _locked_cycle_for_feedback_surface("cycle-1", "project-1")
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert "FOR UPDATE" in compiled
 
 
 @pytest_asyncio.fixture(autouse=True)

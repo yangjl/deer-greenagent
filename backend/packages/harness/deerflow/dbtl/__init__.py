@@ -51,12 +51,14 @@ from deerflow.dbtl.cycle_state import (
     validate_cycle_class,
 )
 from deerflow.dbtl.knowledge import (
+    KNOWLEDGE_AUTHORITY_ROLES,
     CandidateEligibility,
     ClaimGrade,
     KnowledgeLifecycleRefused,
     candidate_eligibility,
     publication_pointer,
     render_claim_markdown,
+    require_knowledge_authority,
     validate_candidate_grade,
 )
 from deerflow.dbtl.proposal import (
@@ -178,6 +180,7 @@ __all__ = [
     "GENERALIST_AGENT",
     "GENERIC_PROFILE",
     "HUMAN_RESOLVED_CHECKS",
+    "KNOWLEDGE_AUTHORITY_ROLES",
     "NO_RECORD_NOTICE",
     "LEARN_SPEC_V1",
     "RECONCILIATION_SPEC_V1",
@@ -275,6 +278,7 @@ __all__ = [
     "parse_capability",
     "parse_cycle_weight",
     "publication_pointer",
+    "require_knowledge_authority",
     "parse_worker_result",
     "plan_stage",
     "registered_spec_keys",

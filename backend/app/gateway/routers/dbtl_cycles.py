@@ -42,6 +42,7 @@ from app.gateway.services import start_run
 from deerflow.agents.memory.scopes import bind_scope, publication_scope
 from deerflow.config.app_config import AppConfig
 from deerflow.dbtl import (
+    KNOWLEDGE_AUTHORITY_ROLES,
     STAGE_ORDER,
     ClaimGrade,
     KnowledgeLifecycleRefused,
@@ -137,6 +138,9 @@ def _surface_meeting_gate(
             stage=surface_stage,
             stage_attempt_id=str((stage or {}).get("id") or ""),
             artifacts=[item for item in (cycle or {}).get("artifacts", []) if isinstance(item, dict)],
+            evidence_artifact_id=str(surface.get("evidence_artifact_id") or ""),
+            evidence_artifact_revision=int(surface.get("evidence_artifact_revision") or 0),
+            evidence_content_hash=str(surface.get("evidence_content_hash") or ""),
         ),
     )
 
@@ -541,6 +545,14 @@ def _require_human_reviewer(request: Request) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="DBTL reviews require an authenticated human project member.",
+        )
+
+
+def _require_knowledge_authority(project: dict[str, Any]) -> None:
+    if str(project.get("current_user_role") or "").strip().lower() not in KNOWLEDGE_AUTHORITY_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only a project owner or administrator may alter governed knowledge.",
         )
 
 
@@ -2630,6 +2642,7 @@ async def promote_knowledge_candidate(
     project, user_id = await _require_project(project_id, request)
     _require_mutations_enabled(request, config)
     _require_human_reviewer(request)
+    _require_knowledge_authority(project)
     view = await repo.knowledge_view(project_id)
     candidate = next(
         (item for item in view["candidates"] if item["id"] == candidate_id),
@@ -2723,6 +2736,7 @@ async def publish_knowledge_claim(
     project, user_id = await _require_project(project_id, request)
     _require_mutations_enabled(request, config)
     _require_human_reviewer(request)
+    _require_knowledge_authority(project)
     try:
         result = await repo.publish_claim(
             claim_id=claim_id,
@@ -2773,6 +2787,7 @@ async def retract_knowledge_claim(
     project, user_id = await _require_project(project_id, request)
     _require_mutations_enabled(request, config)
     _require_human_reviewer(request)
+    _require_knowledge_authority(project)
     try:
         result = await repo.retract_claim(
             claim_id=claim_id,

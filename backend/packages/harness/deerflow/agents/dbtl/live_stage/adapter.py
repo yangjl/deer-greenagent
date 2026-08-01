@@ -2712,41 +2712,36 @@ class LiveStageAdapter:
     ) -> None:
         """Record that this workflow produced this deck, for this conversation.
 
-        Fail-soft, for the same reason writing the deck is: the meeting's
-        results are already committed by the time this runs, and a descriptor
-        that could fail the turn would trade a durable record for a projection
-        of it. That inverts once the deck is the only way to answer — at
-        cutover this has to block instead, because an unregistered deck will
-        then be an owner who cannot respond at all.
+        Registration is fail-visible. The registered deck is the authenticated
+        review surface, so returning success after this write fails would leave
+        an owner with a deck that can never answer its gate. Stage evidence is
+        already durable at this point and remains available for a safe retry.
         """
-        try:
-            # Resolved without touching the legacy attribute: ``getattr`` with a
-            # default evaluates that default eagerly, so a repository exposing
-            # only the stage-generic method raised AttributeError before the
-            # lookup it would have succeeded at.
-            stage_register = getattr(self._repo, "register_stage_feedback_surface", None)
-            register = stage_register if stage_register is not None else self._repo.register_design_feedback_surface
-            kwargs = dict(
-                surface_id=plan.surface_id,
-                project_id=project_id,
-                cycle_id=cycle_id,
-                stage_attempt_id=plan.stage_attempt_id,
-                design_round=plan.round_number,
-                originating_thread_id=plan.originating_thread_id,
-                mode=plan.mode,
-                chair_worker_run_id=plan.chair_worker_run_id,
-                decision_request=dict(plan.decision_request) if plan.decision_request is not None else None,
-                deck_uri=deck.uri,
-                deck_content_hash=deck.content_hash,
-                evidence_artifact_id=str(plan.evidence["id"]) if plan.evidence is not None else None,
-                evidence_artifact_revision=int(plan.evidence["revision"]) if plan.evidence is not None else None,
-                evidence_content_hash=plan.evidence_content_hash or None,
-            )
-            if stage_register is not None:
-                kwargs["stage"] = plan.stage
-            await register(**kwargs)
-        except Exception:  # noqa: BLE001 - a descriptor must not break the record
-            logger.warning("Could not register the %s feedback surface for cycle %s.", plan.stage, cycle_id, exc_info=True)
+        # Resolved without touching the legacy attribute: ``getattr`` with a
+        # default evaluates that default eagerly, so a repository exposing
+        # only the stage-generic method raised AttributeError before the lookup
+        # it would have succeeded at.
+        stage_register = getattr(self._repo, "register_stage_feedback_surface", None)
+        register = stage_register if stage_register is not None else self._repo.register_design_feedback_surface
+        kwargs = dict(
+            surface_id=plan.surface_id,
+            project_id=project_id,
+            cycle_id=cycle_id,
+            stage_attempt_id=plan.stage_attempt_id,
+            design_round=plan.round_number,
+            originating_thread_id=plan.originating_thread_id,
+            mode=plan.mode,
+            chair_worker_run_id=plan.chair_worker_run_id,
+            decision_request=dict(plan.decision_request) if plan.decision_request is not None else None,
+            deck_uri=deck.uri,
+            deck_content_hash=deck.content_hash,
+            evidence_artifact_id=str(plan.evidence["id"]) if plan.evidence is not None else None,
+            evidence_artifact_revision=int(plan.evidence["revision"]) if plan.evidence is not None else None,
+            evidence_content_hash=plan.evidence_content_hash or None,
+        )
+        if stage_register is not None:
+            kwargs["stage"] = plan.stage
+        await register(**kwargs)
 
     async def bind_feedback_request(
         self,
@@ -2936,6 +2931,9 @@ class LiveStageAdapter:
             artifact_type=(spec.required_artifact_types[0] if usable else None),
             artifact_uri=artifact_uri,
             artifact_content_hash=artifact_hash,
+            reviewed_artifact_id=(str(evidence.get("id") or "") if usable else None),
+            reviewed_artifact_revision=(int(evidence.get("revision") or 0) if usable else None),
+            reviewed_artifact_content_hash=(str(evidence.get("content_hash") or "") if usable else None),
         )
 
         deck_uri = None

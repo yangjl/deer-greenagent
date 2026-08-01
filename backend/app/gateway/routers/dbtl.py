@@ -169,6 +169,8 @@ async def _operator_report(
         database_backend=database_backend,
         root=root,
         config=dbtl_config,
+        sandbox_provider=str(getattr(config.sandbox, "use", "") or ""),
+        allow_host_bash=bool(getattr(config.sandbox, "allow_host_bash", False)),
     )
     latest_validation = await repository.latest_validation()
     latest_cutover = await repository.latest_cutover()

@@ -45,6 +45,28 @@ class TestProjectScopedWorkspace:
         assert _mapping(sandbox, "/mnt/user-data/uploads") == str(project_root / "uploads")
         assert _mapping(sandbox, "/mnt/user-data/outputs") == str(project_root / "outputs")
 
+    def test_dbtl_outputs_are_read_only_to_agent_file_tools(self, project_root: Path):
+        provider = LocalSandboxProvider()
+        sandbox = provider.get(
+            provider.acquire(
+                "thread-1",
+                user_id="alice",
+                project_id="project-abc",
+                project_root=str(project_root),
+            )
+        )
+        assert sandbox is not None
+        mapping = next(
+            item
+            for item in sandbox.path_mappings
+            if item.container_path == "/mnt/user-data/outputs/dbtl"
+        )
+        assert mapping.local_path == str(project_root / "outputs" / "dbtl")
+        assert mapping.read_only is True
+
+        with pytest.raises(OSError, match="Read-only file system"):
+            sandbox.write_file("/mnt/user-data/outputs/dbtl/cycle-1/result.json", "{}")
+
     def test_the_human_folder_is_created_on_acquire(self, project_root: Path):
         provider = LocalSandboxProvider()
         provider.acquire("thread-1", user_id="alice", project_id="project-abc", project_root=str(project_root))

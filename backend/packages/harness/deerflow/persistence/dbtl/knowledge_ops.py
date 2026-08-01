@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -12,6 +14,7 @@ from deerflow.dbtl.knowledge import (
     KnowledgeLifecycleRefused,
     candidate_eligibility,
     publication_pointer,
+    require_knowledge_authority,
     validate_candidate_grade,
 )
 from deerflow.persistence.dbtl.model import (
@@ -28,6 +31,17 @@ from deerflow.persistence.workspaces.model import ProjectRow
 
 def _iso(value: Any) -> Any:
     return value.isoformat() if isinstance(value, datetime) else value
+
+
+def _request_digest(payload: dict[str, Any]) -> str:
+    """Return a stable digest for the human/server intent behind one write."""
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class KnowledgeOpsMixin:
@@ -106,6 +120,7 @@ class KnowledgeOpsMixin:
         key: str,
         *,
         event_type: str,
+        request_digest: str,
         cycle_id: str | None = None,
         candidate_id: str | None = None,
         claim_id: str | None = None,
@@ -118,7 +133,13 @@ class KnowledgeOpsMixin:
         )
         if existing is None:
             return None
-        if existing.event_type != event_type or (cycle_id is not None and existing.cycle_id != cycle_id) or (candidate_id is not None and existing.candidate_id != candidate_id) or (claim_id is not None and existing.claim_id != claim_id):
+        if (
+            existing.event_type != event_type
+            or (cycle_id is not None and existing.cycle_id != cycle_id)
+            or (candidate_id is not None and existing.candidate_id != candidate_id)
+            or (claim_id is not None and existing.claim_id != claim_id)
+            or dict(existing.payload or {}).get("request_digest") != request_digest
+        ):
             raise KnowledgeLifecycleRefused("This idempotency key was already used for a different knowledge action.")
         return existing
 
@@ -191,6 +212,14 @@ class KnowledgeOpsMixin:
     ) -> dict[str, Any]:
         if not summary.strip():
             raise ValueError("Learn synthesis requires a summary.")
+        request_digest = _request_digest(
+            {
+                "summary": summary.strip(),
+                "candidates": candidates,
+                "actor_user_id": actor_user_id,
+                "expected_db_revision": expected_db_revision,
+            }
+        )
         async with self._sf() as session:
             loaded = await self._load(session, cycle_id, project_id, for_update=True)
             if loaded is None:
@@ -201,6 +230,7 @@ class KnowledgeOpsMixin:
                 project_id,
                 idempotency_key,
                 event_type="learn.synthesized",
+                request_digest=request_digest,
                 cycle_id=cycle_id,
             ):
                 await session.rollback()
@@ -265,6 +295,7 @@ class KnowledgeOpsMixin:
                 actor_user_id=actor_user_id,
                 idempotency_key=idempotency_key,
                 payload={
+                    "request_digest": request_digest,
                     "summary": summary.strip(),
                     "candidate_ids": [row.id for row in created],
                     "test_outcome": assessment.outcome,
@@ -300,6 +331,13 @@ class KnowledgeOpsMixin:
             raise ValueError("Candidate decision must be 'keep' or 'discard'.")
         if not rationale.strip():
             raise ValueError("A candidate decision requires a rationale.")
+        request_digest = _request_digest(
+            {
+                "decision": decision,
+                "actor_user_id": actor_user_id,
+                "rationale": rationale.strip(),
+            }
+        )
         async with self._sf() as session:
             row = await session.scalar(
                 select(MemoryCandidateRow)
@@ -316,6 +354,7 @@ class KnowledgeOpsMixin:
                 project_id,
                 idempotency_key,
                 event_type=f"candidate.{target}",
+                request_digest=request_digest,
                 candidate_id=row.id,
             ):
                 replay_cycle_id = row.cycle_id
@@ -332,7 +371,7 @@ class KnowledgeOpsMixin:
                 event_type=f"candidate.{target}",
                 actor_user_id=actor_user_id,
                 idempotency_key=idempotency_key,
-                payload={"rationale": rationale.strip()},
+                payload={"request_digest": request_digest, "rationale": rationale.strip()},
             )
             await session.commit()
             cycle_id = row.cycle_id
@@ -357,6 +396,18 @@ class KnowledgeOpsMixin:
     ) -> dict[str, Any]:
         if not statement.strip() or not rationale.strip():
             raise ValueError("Promotion requires a statement and rationale.")
+        require_knowledge_authority(reviewer_project_role)
+        request_digest = _request_digest(
+            {
+                "statement": statement.strip(),
+                "grade": grade,
+                "limitations": [item.strip() for item in limitations if item.strip()][:50],
+                "reviewer_user_id": reviewer_user_id,
+                "reviewer_project_role": reviewer_project_role,
+                "rationale": rationale.strip(),
+                "supersedes_claim_id": supersedes_claim_id,
+            }
+        )
         async with self._sf() as session:
             candidate = await session.scalar(
                 select(MemoryCandidateRow)
@@ -373,6 +424,7 @@ class KnowledgeOpsMixin:
                 project_id,
                 idempotency_key,
                 event_type="claim.promoted",
+                request_digest=request_digest,
                 candidate_id=candidate.id,
             ):
                 promoted_claim = await session.scalar(
@@ -489,6 +541,7 @@ class KnowledgeOpsMixin:
                 actor_user_id=reviewer_user_id,
                 idempotency_key=idempotency_key,
                 payload={
+                    "request_digest": request_digest,
                     "grade": parsed_grade.value,
                     "rationale": rationale.strip(),
                     "rendered_uri": rendered_uri,
@@ -522,6 +575,15 @@ class KnowledgeOpsMixin:
             raise ValueError("The source project is already in claim scope.")
         if not rationale.strip():
             raise ValueError("Publication requires a rationale.")
+        require_knowledge_authority(publisher_project_role)
+        request_digest = _request_digest(
+            {
+                "target_project_ids": sorted(targets),
+                "publisher_user_id": publisher_user_id,
+                "publisher_project_role": publisher_project_role,
+                "rationale": rationale.strip(),
+            }
+        )
         async with self._sf() as session:
             claim = await session.scalar(
                 select(KnowledgeClaimRow)
@@ -538,6 +600,7 @@ class KnowledgeOpsMixin:
                 source_project_id,
                 idempotency_key,
                 event_type="claim.published",
+                request_digest=request_digest,
                 claim_id=claim.id,
             ):
                 await session.rollback()
@@ -601,6 +664,7 @@ class KnowledgeOpsMixin:
                 actor_user_id=publisher_user_id,
                 idempotency_key=idempotency_key,
                 payload={
+                    "request_digest": request_digest,
                     "target_project_ids": targets,
                     "publication_ids": [row.id for row in publications],
                     "rationale": rationale.strip(),
@@ -622,6 +686,14 @@ class KnowledgeOpsMixin:
     ) -> dict[str, Any]:
         if not rationale.strip():
             raise ValueError("Retraction requires a rationale.")
+        require_knowledge_authority(reviewer_project_role)
+        request_digest = _request_digest(
+            {
+                "reviewer_user_id": reviewer_user_id,
+                "reviewer_project_role": reviewer_project_role,
+                "rationale": rationale.strip(),
+            }
+        )
         async with self._sf() as session:
             claim = await session.scalar(
                 select(KnowledgeClaimRow)
@@ -638,6 +710,7 @@ class KnowledgeOpsMixin:
                 project_id,
                 idempotency_key,
                 event_type="claim.retracted",
+                request_digest=request_digest,
                 claim_id=claim.id,
             ):
                 await session.rollback()
@@ -682,7 +755,7 @@ class KnowledgeOpsMixin:
                 event_type="claim.retracted",
                 actor_user_id=reviewer_user_id,
                 idempotency_key=idempotency_key,
-                payload=evidence["retraction"],
+                payload={"request_digest": request_digest, **evidence["retraction"]},
             )
             await session.commit()
         view = await self.knowledge_view(project_id)

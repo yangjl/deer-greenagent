@@ -8,6 +8,7 @@ from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
+from app.gateway.dbtl_governance import stage_output_isolation
 from app.gateway.routers import dbtl
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.dbtl_config import DbtlConfig
@@ -35,6 +36,27 @@ def _other_user():
         password_hash="x",
         system_role="user",
     )
+
+
+def test_stage_output_readiness_requires_enforced_isolation() -> None:
+    local_safe, _ = stage_output_isolation(
+        "deerflow.sandbox.local:LocalSandboxProvider",
+        allow_host_bash=False,
+    )
+    local_host_bash, host_detail = stage_output_isolation(
+        "deerflow.sandbox.local:LocalSandboxProvider",
+        allow_host_bash=True,
+    )
+    unknown_provider, unknown_detail = stage_output_isolation(
+        "example.sandbox:UnverifiedProvider",
+        allow_host_bash=False,
+    )
+
+    assert local_safe is True
+    assert local_host_bash is False
+    assert "allow_host_bash=true" in host_detail
+    assert unknown_provider is False
+    assert "does not prove" in unknown_detail
 
 
 async def _seed(tmp_path):
@@ -222,6 +244,6 @@ def test_governance_validation_requires_operator_and_blocks_sqlite_cutover(tmp_p
     assert validation.status_code == 200
     assert validation.json()["database_backend"] == "sqlite"
     assert validation.json()["technical_ready"] is False
-    assert validation.json()["total_checks"] == 9
+    assert validation.json()["total_checks"] == 10
     assert validation.json()["checks"][-1]["status"] == "waiting"
     assert cutover.status_code == 409
