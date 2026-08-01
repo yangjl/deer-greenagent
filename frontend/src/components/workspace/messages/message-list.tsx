@@ -30,6 +30,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import {
   deriveHumanInputThreadState,
   extractHumanInputRequest,
+  isDeckOwnedHumanInputRequest,
   shouldClearPendingHumanInputOnThreadError,
   type HumanInputRequest,
   type HumanInputResponse,
@@ -1217,7 +1218,7 @@ export function MessageList({
 
               const humanInputRequest = extractHumanInputRequest(message);
               if (humanInputRequest) {
-                if (humanInputRequest.design_feedback_surface_id) {
+                if (isDeckOwnedHumanInputRequest(humanInputRequest)) {
                   return null;
                 }
                 const answeredResponse =

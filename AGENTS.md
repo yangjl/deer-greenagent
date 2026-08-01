@@ -259,23 +259,60 @@ Breeding-workspace note:
   used to complete successfully, hold its Start/Hold card in its final graph
   state, and persist no message at all — the card was absent live and after
   refresh, and the owner's next words, "go ahead with build", reached ordinary
-  chat. Three fixes, at the three layers that each failed independently.
+  chat. Four layers each failed independently.
+  **Rendering**: the card carries `design_feedback_surface_id`, and the web UI
+  returned `null` for *any* request carrying that field — a rule written for the
+  Design decision card, where the deck genuinely is the input surface. On a
+  handoff the surface id is only an audit binding (which approval opened this
+  stage) and the deck holds no control that could answer it, so the card
+  rendered as nothing even once it reached history.
+  `isDeckOwnedHumanInputRequest` keys the suppression on the clarification type
+  instead, as an allowlist: an unrecognized surface-bound card stays suppressed,
+  because being invisible is recoverable and being wrongly interactive is not.
   **Delivery**: the journal recognizes a run's own output by finding the run's
   input message, which requires an id nothing mints, so graph-authored cards
   were silently never reconciled; the worker now hands the journal the
-  thread's pre-run messages as the boundary, deck-started runs stamp an
-  explicit input id as well, and a deterministic supervisor reply marked
-  `deerflow_graph_receipt` (server-owned, stripped from client input) is
-  reconciled too — otherwise "Holding here" is spoken into a void.
+  thread's pre-run messages as the boundary (an empty set for a thread's first
+  run, which is a *known* boundary — only a failed snapshot stays unknown),
+  deck-started runs stamp an explicit input id as well, and a deterministic
+  supervisor reply marked `deerflow_graph_receipt` (server-owned, stripped from
+  client input) is reconciled too — otherwise "Holding here" is spoken into a
+  void.
   **Verification**: run success is not delivery, so the handoff watcher asks
   the thread's own message projection whether the card arrived and treats a
   successful-but-empty run exactly like a dead one, reopening the deck action.
+  A read error propagates rather than being swallowed, so the watcher's own
+  retry loop covers it; swallowing it ended the watch and reported delivered
+  exactly when a struggling store was the likely reason the card was missing.
   **Routing**: while a Start/Hold card the server emitted is still unanswered,
   a request that would otherwise become ordinary work is answering *that card*
   — the supervisor re-presents it and dispatches nothing. Every earlier guard
   missed this because each fires only on a card *answer* or an explicitly
-  scoped request. Answering with **Hold** ends it: hold is a decision, and
-  re-presenting it would argue with the person who made it.
+  scoped request.
+  `pending_stage_handoff_control` is the single predicate the route fence and
+  the handler share, because a fence that intercepts a request the handler then
+  declines would fall through to stage execution. Three things make a card *not*
+  pending: it was answered (**Hold** is a decision, and re-presenting it would
+  argue with the person who made it); its refusal was already recorded, so a
+  stale card states its reason once and hands the conversation back rather than
+  answering every later message with the same refusal; or the request names a
+  different cycle, since a project runs several at once and the card now names
+  the cycle it would start. **Start** validates against the rebuilt marker, not
+  the raw card — the card names its cycle `dbtl_cycle_id` while the validator
+  reads `cycle_id`, so passing the request through sent an empty cycle id and
+  every Start was refused as "no project-owned cycle".
+- **A card in checkpoint state must be one the graph emitted.** `ToolMessage.
+artifact` is server-owned in full and is now stripped from external run input:
+  `convert_to_messages` will build a `ToolMessage` with any caller-supplied
+  artifact, and the supervisor resolves replies against the card it finds
+  there — so an unstripped artifact let a client place a fabricated control in
+  a thread, hijack its routing, and (by forging an *answered* card) suppress
+  the fence while a real one waited. No legitimate client sends one; the
+  composer and every IM channel send human messages only. `cycle_revision` is
+  validated where the card is read rather than coerced where the marker is
+  rebuilt, because the fence forces every later request through that rebuild
+  and a non-integer value would take the whole conversation down instead of one
+  card.
 - **The lead agent is told what governed work surrounds it, and that knowing
   is not permission.** An ordinary project run receives a read-only
   `dbtl_status_snapshot` in request-only context — the live cycles, their stage

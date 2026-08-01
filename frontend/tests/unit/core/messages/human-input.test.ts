@@ -12,6 +12,7 @@ import {
   extractHumanInputRequest,
   extractHumanInputResponse,
   hasOpenHumanInputRequest,
+  isDeckOwnedHumanInputRequest,
   readHumanInputFormValue,
   shouldClearPendingHumanInputOnThreadError,
 } from "@/core/messages/human-input";
@@ -264,6 +265,40 @@ test("a deck-backed Design request does not lock the ordinary composer", () => {
     design_feedback_surface_id: "dfs-0123456789abcdef",
   });
   expect(hasOpenHumanInputRequest([requestMessage])).toBe(false);
+});
+
+test("a stage handoff card is answered in chat even though it names a surface", () => {
+  // The surface id on this card is an audit binding — which approval opened
+  // the stage — not an input surface. The deck has no Start/Hold control, so
+  // suppressing it rendered the card as nothing at all: the control existed in
+  // durable history and nobody could see or answer it.
+  const requestMessage = {
+    type: "tool",
+    name: "ask_clarification",
+    content: "fallback",
+    artifact: {
+      human_input: {
+        ...requestPayload,
+        clarification_type: "dbtl_stage_handoff",
+        design_feedback_surface_id: "dfs-0123456789abcdef",
+      },
+    },
+  } as unknown as Message;
+
+  expect(isDeckOwnedHumanInputRequest(extractHumanInputRequest(requestMessage))).toBe(false);
+  expect(hasOpenHumanInputRequest([requestMessage])).toBe(true);
+});
+
+test("an unknown surface-bound card stays deck-owned", () => {
+  // The allowlist is deliberately narrow: a future surface-bound card should
+  // stay suppressed until someone decides it is answered in chat.
+  const request = {
+    ...requestPayload,
+    clarification_type: "some_future_deck_card",
+    design_feedback_surface_id: "dfs-0123456789abcdef",
+  } as unknown as Parameters<typeof isDeckOwnedHumanInputRequest>[0];
+
+  expect(isDeckOwnedHumanInputRequest(request)).toBe(true);
 });
 
 test("detects new thread errors that should unlock pending human input cards", () => {

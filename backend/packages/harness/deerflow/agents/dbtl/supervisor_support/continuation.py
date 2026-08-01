@@ -16,10 +16,9 @@ from deerflow.dbtl.branches import BranchDecision, SupervisorContext
 from .card_history import (
     answered_stage_handoff,
     answered_test_card,
-    answers_a_server_card,
     pending_stage_handoff,
+    pending_stage_handoff_control,
     stage_handoff_marker,
-    unanswered_stage_handoff_card,
 )
 from .human_input_protocol import TEST_OUTCOME_PREFIX, TEST_REVIEW_PREFIX, receipt_message
 from .ports import StageExecutionPort
@@ -66,7 +65,14 @@ async def handle_stage_handoff(
         next_stage = str(answer[1].get("next_stage") or "the next stage").replace("_", " ").title()
         return HandlerResult(update={"messages": [receipt_message(f"Holding here. {next_stage} remains open, and no stage work was started.")]})
     if answer is not None and answer[0] == "start_next_stage":
-        refusal = await validate(stage_adapter, context, answer[1])
+        # Validate against the marker shape, not the raw card request. The card
+        # names its cycle `dbtl_cycle_id` (the key the frontend reads) while the
+        # validator reads `cycle_id`, so passing the request straight through
+        # sent an empty cycle id and every Start was refused as "no
+        # project-owned cycle" — the button has never worked in production, and
+        # the existing test missed it because its fake adapter ignores its
+        # arguments.
+        refusal = await validate(stage_adapter, context, stage_handoff_marker(answer[1]))
         if refusal is not None:
             return HandlerResult(update={"messages": [receipt_message(refusal)]})
     return HandlerResult(handoff_answer=answer)
@@ -91,22 +97,33 @@ async def represent_pending_stage_handoff(
     is the authority here; a request that reaches this point is answered by
     re-presenting it, never by handing the intent to the lead agent.
 
-    Returns ``None`` when there is nothing pending, when the newest message
-    answers some other server card (that answer is the more specific intent), or
-    when the durable cycle has moved on — a stale card must not be re-offered as
-    though it were still actionable.
+    Returns ``None`` when :func:`pending_stage_handoff_control` says no control
+    is waiting for *this* request — nothing outstanding, an answer to another
+    server card, a card belonging to a different cycle, or one whose refusal has
+    already been stated.
+
+    A stale card is refused **once**. The receipt records which card it closes,
+    which releases the fence: repeating the refusal on every later message would
+    make ordinary work unreachable for the life of the thread, which is worse
+    than the escape this exists to prevent.
     """
-    if answers_a_server_card(state):
-        return None
-    request = unanswered_stage_handoff_card(state)
+    request = pending_stage_handoff_control(
+        state,
+        selected_cycle_id=context.selected_cycle_id or decision.cycle_id,
+    )
     if request is None:
         return None
     marker = stage_handoff_marker(request)
-    if decision.cycle_id and str(marker["cycle_id"]) != str(decision.cycle_id):
-        return None
     refusal = await validate(stage_adapter, context, marker)
     if refusal is not None:
-        return {"messages": [receipt_message(refusal)]}
+        return {
+            "messages": [
+                receipt_message(
+                    f"{refusal} You can continue working in this conversation.",
+                    stage_handoff_refused=str(request.get("request_id") or ""),
+                )
+            ]
+        }
     return {"messages": list(build_card(decision, marker, request_nonce=request_nonce))}
 
 

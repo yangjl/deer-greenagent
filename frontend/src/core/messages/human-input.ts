@@ -837,6 +837,34 @@ export function deriveHumanInputThreadState(
   return { answeredResponses, latestOpenRequestId };
 }
 
+/**
+ * Clarification types that are answered in chat even though they name a
+ * feedback surface.
+ *
+ * A surface id on a request means two different things depending on the card.
+ * On a Design decision it means the deck *is* the input surface, so the card
+ * must not also appear in chat. On a stage handoff it is only an audit binding
+ * — which surface's approval opened this stage — and the deck has no control
+ * that could answer it. Suppressing both made the Start/Hold card render as
+ * nothing at all: the control existed in durable history and no one could see
+ * or answer it.
+ *
+ * The check is an allowlist so a future surface-bound card stays suppressed by
+ * default; being invisible is recoverable, being wrongly interactive is not.
+ */
+const CHAT_ANSWERED_SURFACE_CLARIFICATION_TYPES = new Set([
+  "dbtl_stage_handoff",
+]);
+
+export function isDeckOwnedHumanInputRequest(
+  request: HumanInputRequest | null | undefined,
+): boolean {
+  if (!request?.design_feedback_surface_id) return false;
+  return !CHAT_ANSWERED_SURFACE_CLARIFICATION_TYPES.has(
+    request.clarification_type ?? "",
+  );
+}
+
 export function hasOpenHumanInputRequest(
   messages: Message[],
   isVisibleMessage?: (message: Message) => boolean,
@@ -853,7 +881,7 @@ export function hasOpenHumanInputRequest(
   // A verified deck-backed Design request remains in durable thread state for
   // the supervisor, but the deck is now its input surface. It must not lock the
   // ordinary composer or render a duplicate card.
-  return !request?.design_feedback_surface_id;
+  return !isDeckOwnedHumanInputRequest(request);
 }
 
 export function createHumanInputOptionResponse(

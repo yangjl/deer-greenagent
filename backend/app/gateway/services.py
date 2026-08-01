@@ -226,16 +226,29 @@ async def _orphan_recovery_observed_after_heartbeat(
 
 
 def _strip_external_message_metadata(message: Any) -> Any:
-    """Remove server-owned metadata from an untrusted input message."""
+    """Remove server-owned metadata from an untrusted input message.
+
+    ``ToolMessage.artifact`` is server-owned in full. It is the payload the
+    supervisor reads back to decide what a person is answering — a Human Input
+    card's request lives there — and ``convert_to_messages`` will happily build
+    a ``ToolMessage`` with a caller-supplied artifact from ordinary run input.
+    Without this, a client could place a fabricated card in checkpoint state and
+    the supervisor would resolve replies against it exactly as if the graph had
+    emitted it. No legitimate client sends one: the composer and every IM
+    channel send human messages only.
+    """
     if not isinstance(message, BaseMessage):
         return message
+    update: dict[str, Any] = {}
     additional_kwargs = dict(message.additional_kwargs)
     additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
     for key in _SERVER_OWNED_MESSAGE_METADATA_KEYS:
         additional_kwargs.pop(key, None)
-    if additional_kwargs == message.additional_kwargs:
-        return message
-    return message.model_copy(update={"additional_kwargs": additional_kwargs})
+    if additional_kwargs != message.additional_kwargs:
+        update["additional_kwargs"] = additional_kwargs
+    if getattr(message, "artifact", None) is not None:
+        update["artifact"] = None
+    return message.model_copy(update=update) if update else message
 
 
 def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool = False) -> dict[str, Any]:
@@ -432,6 +445,10 @@ async def apply_project_scope_context(
     context.pop("project_role", None)
     context.pop("dbtl_project_cycle_count", None)
     context.pop("dbtl_has_unfinished_cycles", None)
+    # Written per request by the supervisor's ordinary branch from durable
+    # cycle state. A caller-supplied one would let a client fabricate the
+    # governed-status block the lead agent is told to trust.
+    context.pop("dbtl_status_snapshot", None)
     configurable = config.get("configurable", {})
     configurable.pop("project_id", None)
     configurable.pop("project_root", None)
@@ -439,6 +456,7 @@ async def apply_project_scope_context(
     configurable.pop("project_role", None)
     configurable.pop("dbtl_project_cycle_count", None)
     configurable.pop("dbtl_has_unfinished_cycles", None)
+    configurable.pop("dbtl_status_snapshot", None)
 
     if thread_store is None:
         return

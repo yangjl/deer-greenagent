@@ -819,12 +819,21 @@ async def run_agent(
 
             # Tell the journal what this thread held before the run, so a
             # graph-authored message can be recognized as this run's own even
-            # when the run input carries no id. Only a successful snapshot is
-            # passed: a guessed boundary would re-persist retained history.
-            if journal is not None:
-                boundary_messages = resumed_messages if resumed_messages is not None else (rollback_point.messages if rollback_point is not None else None)
-                if boundary_messages is not None:
-                    journal.record_pre_run_message_identities(list(boundary_messages))
+            # when the run input carries no id.
+            #
+            # "No prior checkpoint" is a *known* boundary, not an unknown one:
+            # a thread's first run starts from nothing, so the empty set is the
+            # truth rather than a guess. Collapsing it into "unknown" left the
+            # first turn of every new conversation unreconciled — which is
+            # exactly where a cycle-setup confirmation card appears. Only a
+            # failed capture stays unknown, because there the thread does hold
+            # history we cannot see, and reconciling against a guessed boundary
+            # would re-persist it as this run's own work.
+            if journal is not None and not snapshot_capture_failed:
+                if resumed_messages is not None:
+                    journal.record_pre_run_message_identities(list(resumed_messages))
+                else:
+                    journal.record_pre_run_message_identities(list(rollback_point.messages) if rollback_point is not None else [])
 
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         _install_runtime_context(config, runtime_ctx)

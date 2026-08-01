@@ -461,6 +461,57 @@ extra click on **Hold**, against a takeover that cost 35 model calls and left
 chat and durable state disagreeing. Narrowing it to rung 4's free-text pattern
 belongs with the rest of `GovernedStageIntent`, not ahead of it.
 
+### 4.6 Review corrections (2026-08-01)
+
+An adversarial review of §4.5 found that the fence, as first written, made
+things worse. All findings are fixed; the ones that mattered:
+
+**The card could not render at all.** It carries `design_feedback_surface_id`,
+and the web UI returned `null` for every request carrying that field — a rule
+written for the Design decision card, where the deck genuinely is the input
+surface. On a handoff that id is only an audit binding and the deck holds no
+control that could answer it. So the card was invisible for *two* independent
+reasons and §4.5 fixed only one; the fence then re-presented an invisible card
+on every message, turning a governance escape into a silent thread. The
+suppression now keys on clarification type as an allowlist, so an unrecognized
+surface-bound card stays suppressed: invisible is recoverable, wrongly
+interactive is not. The characterization test asserted the card row was
+*present* in the endpoint and never that it was *renderable*, which is exactly
+why this was missed.
+
+**Start had never worked.** `handle_stage_handoff` passed the raw card request
+to a validator reading `cycle_id`, while the card names it `dbtl_cycle_id`, so
+every Start was refused as "no project-owned cycle". Pre-existing, and invisible
+because the test's fake adapter ignores its arguments. It also means that
+accidental fail-closed bug was the only thing keeping forged cards away from a
+real dispatch.
+
+**A stale card trapped the thread.** A refusal emitted no card, so the card
+stayed unanswered, the fence fired again, and ordinary work became unreachable
+for the life of the thread. The refusal now records which card it closes and
+releases the fence.
+
+**A card could be answered for the wrong cycle.** Every ORDINARY route carries
+`cycle_id=None`, so the mismatch guard never fired; a question asked with cycle
+B selected got cycle A's card, which never named its cycle. The guard now reads
+the request's selected cycle, and the card names the cycle it would start.
+
+**Forged cards.** `ToolMessage.artifact` survived `normalize_input`, so a client
+could place a fabricated card in checkpoint state — hijacking routing, and by
+forging an *answered* card, suppressing the fence while a real control waited.
+The artifact is now stripped from external input. `cycle_revision` is validated
+where the card is read, since the fence forces every later request through the
+marker rebuild and a non-integer value crashed the whole conversation.
+
+**Two smaller ones.** A thread's first run has no prior checkpoint, which is a
+known empty boundary rather than an unknown one; collapsing them left the first
+turn of every new conversation unreconciled. And the delivery check swallowed
+store errors, ending the watch and reporting "delivered" precisely when a
+struggling store was the likely reason the card was missing.
+
+One §4.5 test was mislabeled — it passed with the whole fix reverted — and is
+now stated as what it is: a deliberate pin on the conservative branch.
+
 **Awareness without authority.** An ordinary project run now receives
 `dbtl_status_snapshot` in request-only context (live cycles, stage statuses, any
 waiting control), rendered by `build_dbtl_status_reminder`. The block states

@@ -1102,6 +1102,157 @@ class TestPostApprovalStageHandoff:
         assert final["messages"][-1].content == "the workspace has 2 files"
 
     @pytest.mark.asyncio
+    async def test_a_stale_card_is_refused_once_and_then_releases_the_conversation(self):
+        """A dead control must not become a dead conversation.
+
+        The card is refused when the cycle moves on, and the fence re-presents
+        on every message — so without a release the refusal repeats forever and
+        ordinary work is unreachable for the life of the thread. That is worse
+        than the escape the fence exists to prevent.
+        """
+        executed: list[dict] = []
+        lead_marker: list[str] = []
+        asked = await self._ask(self._adapter(executed), thread_id="handoff-stale-release-ask")
+        stale = self._adapter(executed, refusal="The cycle changed after this prompt was rendered. Nothing was started.")
+
+        first = await self._follow_up(stale, asked, "go ahead with build", thread_id="handoff-stale-1", marker=lead_marker)
+        assert lead_marker == []
+        assert executed == []
+        assert "nothing was started" in first["messages"][-1].content.lower()
+
+        second = await self._follow_up(
+            stale,
+            {"messages": first["messages"]},
+            "what does the design say about the training population?",
+            thread_id="handoff-stale-2",
+            marker=lead_marker,
+        )
+
+        assert lead_marker == ["lead_agent"], "a refused card must not keep intercepting"
+        assert executed == []
+        assert second["messages"][-1].content == "the workspace has 2 files"
+
+    @pytest.mark.asyncio
+    async def test_a_card_for_another_cycle_is_not_presented_to_this_one(self):
+        """A card that never names its cycle must not be answered by mistake.
+
+        A project runs several cycles at once. Asking a read-only question with
+        cycle B selected classifies ordinary and carries no cycle id, so without
+        an explicit guard cycle A's Start card is presented — and clicking Start
+        would dispatch the wrong cycle's stage.
+        """
+        executed: list[dict] = []
+        lead_marker: list[str] = []
+        adapter = self._adapter(executed)
+        asked = await self._ask(adapter, thread_id="handoff-other-cycle-ask")
+
+        final = await self._follow_up(
+            adapter,
+            asked,
+            "what did the design meeting decide?",
+            thread_id="handoff-other-cycle",
+            marker=lead_marker,
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id="cyc-2",
+                explicit_choice=ExplicitChoice.ORDINARY,
+            ),
+        )
+
+        assert lead_marker == ["lead_agent"]
+        assert executed == []
+        assert final["messages"][-1].content == "the workspace has 2 files"
+
+    @pytest.mark.asyncio
+    async def test_the_card_names_the_cycle_it_would_start(self):
+        executed: list[dict] = []
+        asked = await self._ask(self._adapter(executed), thread_id="handoff-names-cycle")
+
+        request = asked["messages"][-1].artifact["human_input"]
+        assert "cyc-1" in request["context"]
+
+    @pytest.mark.asyncio
+    async def test_start_validates_against_the_cards_own_cycle(self):
+        """The validator reads `cycle_id`; the card names it `dbtl_cycle_id`.
+
+        Passing the raw card request through sent an empty cycle id, so every
+        Start was refused as "no project-owned cycle" — the button never worked.
+        The existing dispatch test missed it because its fake adapter ignores
+        its arguments, so this one records what it was asked.
+        """
+        executed: list[dict] = []
+        seen: list[dict] = []
+
+        class Adapter:
+            async def validate_stage_handoff(self, **kwargs):
+                seen.append(kwargs)
+                return None
+
+            async def execute(self, **kwargs):
+                executed.append(kwargs)
+                return SimpleNamespace(
+                    stage="build",
+                    cycle_id=kwargs["cycle_id"],
+                    note="Build dispatch was admitted.",
+                    artifact_uri=None,
+                    clarification_question=None,
+                    produced_usable_evidence=False,
+                )
+
+        adapter = Adapter()
+        asked = await self._ask(adapter, thread_id="handoff-start-validate-ask")
+        request_id = asked["messages"][-1].artifact["human_input"]["request_id"]
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F"),
+            stage_adapter=adapter,
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        await graph.ainvoke(
+            {**FULL_STATE, "messages": [*asked["messages"], self._reply(request_id, "start_next_stage")]},
+            config={"configurable": {"thread_id": "handoff-start-validate"}},
+        )
+
+        assert [call["cycle_id"] for call in seen] == ["cyc-1", "cyc-1"]
+        assert [call["expected_stage"] for call in seen] == ["build", "build"]
+        assert executed and executed[0]["cycle_id"] == "cyc-1"
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_card_revision_does_not_break_every_later_turn(self):
+        """A card is untrusted shape, and the fence runs it on every message.
+
+        Coercing the revision at rebuild time meant a non-integer value raised
+        from a code path every subsequent request is forced through, taking the
+        whole conversation down rather than one card.
+        """
+        executed: list[dict] = []
+        lead_marker: list[str] = []
+        adapter = self._adapter(executed)
+        asked = await self._ask(adapter, thread_id="handoff-bad-revision-ask")
+        card = asked["messages"][-1]
+        broken = ToolMessage(
+            id=card.id,
+            name=card.name,
+            tool_call_id=card.tool_call_id,
+            content=card.content,
+            artifact={"human_input": {**card.artifact["human_input"], "cycle_revision": "not-a-number"}},
+        )
+
+        final = await self._follow_up(
+            adapter,
+            {"messages": [*asked["messages"][:-1], broken]},
+            "go ahead with build",
+            thread_id="handoff-bad-revision",
+            marker=lead_marker,
+        )
+
+        assert lead_marker == ["lead_agent"]
+        assert executed == []
+        assert final["messages"][-1].content == "the workspace has 2 files"
+
+    @pytest.mark.asyncio
     async def test_the_lead_agent_is_told_what_it_may_not_do(self):
         """Ordinary work carries the governed state, and no authority with it.
 

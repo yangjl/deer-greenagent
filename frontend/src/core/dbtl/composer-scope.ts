@@ -299,6 +299,15 @@ export function humanInputRunContext(
         ? runContextPayload({ kind: "cycle", cycleId: selectedCycleId })
         : runContextPayload(ORDINARY_REQUEST_CONTEXT);
     }
+    // Start/Hold answers the question "does this cycle's next stage begin now",
+    // so it belongs to that cycle. The card carries its own cycle id and the
+    // backend recovers it, but sending the scope keeps the two agreeing and
+    // means a Start does not depend on recovery to route correctly.
+    if (request.clarification_type === "dbtl_stage_handoff") {
+      return selectedCycleId
+        ? runContextPayload({ kind: "cycle", cycleId: selectedCycleId })
+        : runContextPayload(AUTO_REQUEST_CONTEXT);
+    }
     // Setup is not yet a cycle, so there is nothing to continue — the answer
     // returns to the setup branch that asked for the missing fields.
     if (

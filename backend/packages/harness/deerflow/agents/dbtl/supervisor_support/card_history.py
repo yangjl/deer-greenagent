@@ -27,6 +27,7 @@ from .human_input_protocol import (
     SETUP_CLARIFICATION_PREFIX,
     SETUP_CONFIRMATION_PREFIX,
     STAGE_HANDOFF_PREFIX,
+    STAGE_HANDOFF_REFUSED_KEY,
 )
 
 
@@ -199,8 +200,52 @@ def unanswered_stage_handoff_card(state: dict) -> dict[str, Any] | None:
         required = ("dbtl_cycle_id", "approved_stage", "next_stage", "design_feedback_surface_id")
         if not all(isinstance(request.get(key), str) and request.get(key) for key in required):
             return None
+        # Validated here rather than coerced in ``stage_handoff_marker``: the
+        # fence forces every later request through that rebuild, so a card
+        # carrying a non-integer revision would raise on every turn and take the
+        # whole conversation down with it.
+        if not isinstance(request.get("cycle_revision"), int) or isinstance(request.get("cycle_revision"), bool) or int(request["cycle_revision"]) <= 0:
+            return None
         return request
     return None
+
+
+def stage_handoff_refusal_recorded(state: dict, request_id: str) -> bool:
+    """Whether this card's "no longer actionable" receipt was already given."""
+    if not request_id:
+        return False
+    for message in state.get("messages") or []:
+        extra = getattr(message, "additional_kwargs", None) or {}
+        if extra.get(STAGE_HANDOFF_REFUSED_KEY) == request_id:
+            return True
+    return False
+
+
+def pending_stage_handoff_control(state: dict, *, selected_cycle_id: str | None = None) -> dict[str, Any] | None:
+    """The one Start/Hold control this request should be answering, if any.
+
+    Shared by the routing fence and the handler that re-presents the card, so
+    the two cannot disagree about whether a control is pending — a fence that
+    intercepts a request the handler then declines to answer would fall through
+    to stage execution, which is the opposite of what the fence is for.
+
+    Three things make a card *not* pending. It was answered (including with
+    Hold, which is a decision). Its refusal was already recorded, so the reason
+    has been given and the conversation is released rather than trapped
+    repeating it. Or the request explicitly names a different cycle, so this
+    card belongs to other work — a card that never names its own cycle must not
+    be answered by someone who thinks they are looking at another one.
+    """
+    if answers_a_server_card(state):
+        return None
+    request = unanswered_stage_handoff_card(state)
+    if request is None:
+        return None
+    if stage_handoff_refusal_recorded(state, str(request.get("request_id") or "")):
+        return None
+    if selected_cycle_id and str(request.get("dbtl_cycle_id") or "") != str(selected_cycle_id):
+        return None
+    return request
 
 
 def latest_stage_handoff_state(state: dict) -> tuple[dict[str, Any], str | None] | None:

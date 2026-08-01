@@ -1047,18 +1047,19 @@ async def _handoff_card_is_visible(
     verified against the same projection the conversation reads
     (``GET /threads/{id}/messages/page``), not against run status.
 
-    An unreadable store returns ``True``: it proves nothing about the card, and
-    announcing a failure on a transient store error would be worse than silence.
+    An unconfigured store returns ``True``: with nothing to read there is no
+    delivery to verify, and announcing a failure on that basis would be noise.
+    A *read error* is deliberately allowed to propagate instead. The caller
+    polls this on a 5-second loop and already retries a raising callback, so
+    swallowing the first transient error ended the watch permanently and
+    reported "delivered" — precisely when a struggling store is also the most
+    likely reason the card is missing.
     """
     try:
         event_store = get_run_event_store(request)
     except HTTPException:
         return True
-    try:
-        rows = await event_store.list_messages_by_run(thread_id, run_id, limit=50)
-    except Exception:  # noqa: BLE001 - an unreadable projection is not a failed delivery
-        logger.warning("Could not verify handoff card delivery for run %s", run_id, exc_info=True)
-        return True
+    rows = await event_store.list_messages_by_run(thread_id, run_id, limit=50, user_id=user_id)
     for row in rows or []:
         content = row.get("content") if isinstance(row, dict) else None
         if not isinstance(content, dict):

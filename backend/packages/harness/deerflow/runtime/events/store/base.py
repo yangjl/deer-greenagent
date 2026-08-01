@@ -121,8 +121,15 @@ class RunEventStore(abc.ABC):
         limit: int = 50,
         before_seq: int | None = None,
         after_seq: int | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict]:
         """Return displayable messages (category=message) for a specific run, ordered by seq ascending.
+
+        ``user_id`` matches :meth:`list_messages`: the SQL store scopes rows by
+        owner, and the single-user memory/JSONL stores accept it and ignore it
+        because they hold no owner dimension. It is part of the contract so a
+        caller can state the scope it means without having to know which
+        backend is configured.
 
         Supports bidirectional cursor pagination:
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)

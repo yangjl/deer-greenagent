@@ -50,9 +50,6 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from deerflow.agents.dbtl.supervisor_support.card_history import (
-    answers_a_server_card as _answers_a_server_card,
-)
-from deerflow.agents.dbtl.supervisor_support.card_history import (
     authored_design as _authored_design,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
@@ -92,13 +89,13 @@ from deerflow.agents.dbtl.supervisor_support.card_history import (
     latest_user_text as _latest_user_text,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
+    pending_stage_handoff_control as _pending_stage_handoff_control,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
     resumed_council_setup as _resumed_council_setup,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
     routing_input as _routing_input,
-)
-from deerflow.agents.dbtl.supervisor_support.card_history import (
-    unanswered_stage_handoff_card as _unanswered_stage_handoff_card,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
     wants_roster_adjustment as _wants_roster_adjustment,
@@ -413,7 +410,10 @@ def _stage_handoff_message(
     approved_label = approved_stage.replace("_", " ").title()
     next_label = next_stage.replace("_", " ").title()
     question = f"{approved_label} is approved. What should happen next?"
-    context = f"{next_label} is open for this cycle, but it will not start until you choose. Holding here leaves the approved record unchanged."
+    # The cycle is named, not implied. A project can run several cycles at once
+    # and this card can be re-presented long after the approval that raised it,
+    # so "this cycle" leaves a reader to guess which one they are starting.
+    context = f"{next_label} is open for cycle {cycle_id}, but it will not start until you choose. Holding here leaves the approved record unchanged."
     options = [
         {
             "id": "start_next_stage",
@@ -1101,7 +1101,19 @@ def build_supervisor_graph(
         # with build" is answering it, not opening a new conversation. Every
         # earlier guard fires only on a card answer or an explicitly scoped
         # request, which is exactly why this path escaped to the lead agent.
-        if decision.branch is SupervisorBranch.ORDINARY and context.project_id and _unanswered_stage_handoff_card(state) is not None and not _answers_a_server_card(state):
+        #
+        # This must use the same predicate the handler uses. A fence that
+        # intercepted a request the handler then declined to answer would fall
+        # through to stage execution — the opposite of what the fence is for.
+        if (
+            decision.branch is SupervisorBranch.ORDINARY
+            and context.project_id
+            and _pending_stage_handoff_control(
+                state,
+                selected_cycle_id=context.selected_cycle_id or decision.cycle_id,
+            )
+            is not None
+        ):
             return SupervisorBranch.CYCLE_CONTINUATION.value
         logger.debug(
             "dbtl supervisor route: branch=%s source=%s project=%s cycle=%s",

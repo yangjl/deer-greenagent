@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from hashlib import sha256
 from typing import Any
+from uuid import uuid4
 
 from langchain_core.messages import AIMessage, ToolMessage
 
@@ -48,7 +49,14 @@ def card_request_id(prefix: str, cycle: str, *parts: str) -> str:
     return request_id
 
 
-def receipt_message(content: str) -> AIMessage:
+#: Marks a receipt that explains why an outstanding Start/Hold card can no
+#: longer be acted on. Its presence releases the routing fence for that card:
+#: the reason is stated once, and the conversation is handed back rather than
+#: answering every later message with the same refusal.
+STAGE_HANDOFF_REFUSED_KEY = "dbtl_stage_handoff_refused"
+
+
+def receipt_message(content: str, *, stage_handoff_refused: str | None = None) -> AIMessage:
     """A deterministic supervisor reply that must survive a page reload.
 
     These are authored by the graph with no model call behind them, so no LLM
@@ -57,8 +65,19 @@ def receipt_message(content: str) -> AIMessage:
     ``RunJournal``'s root reconciliation pass to write it to the thread's
     durable event feed. It is server-owned: the Gateway strips it from any
     client-supplied message.
+
+    ``stage_handoff_refused`` records which card this receipt closes, so the
+    refusal is said once instead of on every subsequent turn.
     """
-    return AIMessage(content=content, additional_kwargs={GRAPH_RECEIPT_KEY: True})
+    extra: dict[str, Any] = {GRAPH_RECEIPT_KEY: True}
+    if stage_handoff_refused:
+        extra[STAGE_HANDOFF_REFUSED_KEY] = stage_handoff_refused
+    # The id is minted here rather than left to ``add_messages``. Reconciliation
+    # identifies a message by id and skips one that has none, so leaving it to
+    # the reducer would make durable delivery of this receipt depend on a
+    # framework detail — and the whole reason it carries a marker is that
+    # nothing else will persist it.
+    return AIMessage(id=f"dbtl-receipt__{uuid4().hex}", content=content, additional_kwargs=extra)
 
 
 def build_human_input_messages(

@@ -781,6 +781,21 @@ continue; a later gate decision clears the parked state. A deck-backed Human
 Input request stays in
 thread state for supervisor recovery but `MessageList` suppresses the duplicate
 card and `hasOpenHumanInputRequest` leaves the ordinary composer unlocked.
+
+**A surface id does not by itself mean the deck owns the card.**
+`isDeckOwnedHumanInputRequest` is the single predicate for that suppression, and
+it keys on `clarification_type`, not on the mere presence of
+`design_feedback_surface_id`. On a Design decision the deck *is* the input
+surface. On a `dbtl_stage_handoff` the surface id is only an audit binding —
+which approval opened this stage — and the deck holds no Start/Hold control that
+could answer it, so suppressing it rendered the card as nothing at all: the
+control sat in durable thread history and nobody could see or answer it, while
+the backend's routing fence re-presented that same invisible card on every
+later message. The check is an **allowlist** of chat-answered types, so any
+future surface-bound card stays suppressed until someone decides otherwise —
+invisible is recoverable, wrongly interactive is not. `humanInputRunContext`
+routes the handoff reply back to its cycle for the same reason every other card
+has a case there.
 With `design_deck_feedback` enabled, the project rail says **Open feedback
 deck** and the Design stage sheet points at it; Reconciliation, Build,
 Test, and Learn sheets are unchanged.
