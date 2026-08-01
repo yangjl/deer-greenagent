@@ -32,6 +32,8 @@ class StageExecutionPort(Protocol):
 
     async def parked_design_context(self, *, project_id: str | None, cycle_id: str | None) -> Any: ...
 
+    async def active_cycle_status(self, *, project_id: str) -> Sequence[Mapping[str, Any]]: ...
+
     async def preview_council(
         self,
         *,
@@ -125,6 +127,9 @@ class CompatibleStagePort:
 
     async def parked_design_context(self, **kwargs: Any) -> Any:
         return await self._optional("parked_design_context", **kwargs)
+
+    async def active_cycle_status(self, **kwargs: Any) -> Any:
+        return await self._optional("active_cycle_status", **kwargs)
 
     async def preview_council(self, **kwargs: Any) -> CouncilPlan | None:
         return await self._optional("preview_council", **kwargs)

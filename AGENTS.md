@@ -254,6 +254,39 @@ Breeding-workspace note:
   legacy Design card/sheet during the rollback window; non-Design review sheets
   are unchanged. Legacy, downloaded, wrong-thread, stale, superseded, or
   hash-mismatched decks remain read-only.
+- **A control nobody can see is a control that does not exist, and an
+  unanswered one is not an invitation to the lead agent.** A hidden handoff run
+  used to complete successfully, hold its Start/Hold card in its final graph
+  state, and persist no message at all — the card was absent live and after
+  refresh, and the owner's next words, "go ahead with build", reached ordinary
+  chat. Three fixes, at the three layers that each failed independently.
+  **Delivery**: the journal recognizes a run's own output by finding the run's
+  input message, which requires an id nothing mints, so graph-authored cards
+  were silently never reconciled; the worker now hands the journal the
+  thread's pre-run messages as the boundary, deck-started runs stamp an
+  explicit input id as well, and a deterministic supervisor reply marked
+  `deerflow_graph_receipt` (server-owned, stripped from client input) is
+  reconciled too — otherwise "Holding here" is spoken into a void.
+  **Verification**: run success is not delivery, so the handoff watcher asks
+  the thread's own message projection whether the card arrived and treats a
+  successful-but-empty run exactly like a dead one, reopening the deck action.
+  **Routing**: while a Start/Hold card the server emitted is still unanswered,
+  a request that would otherwise become ordinary work is answering *that card*
+  — the supervisor re-presents it and dispatches nothing. Every earlier guard
+  missed this because each fires only on a card *answer* or an explicitly
+  scoped request. Answering with **Hold** ends it: hold is a decision, and
+  re-presenting it would argue with the person who made it.
+- **The lead agent is told what governed work surrounds it, and that knowing
+  is not permission.** An ordinary project run receives a read-only
+  `dbtl_status_snapshot` in request-only context — the live cycles, their stage
+  statuses, and any waiting control — rendered by
+  `build_dbtl_status_reminder` as a `<dbtl_status>` block that states plainly
+  that the lead agent may discuss, read, and prepare but may never start, run,
+  advance, approve, reject, or record a stage, nor describe its own work as a
+  stage result. The takeover began with the lead agent not knowing a cycle
+  existed; this is why it now explains the boundary instead of building past
+  it. The block is orientation, not enforcement — the routing fence and the
+  stage-owned output paths are what actually stop it.
 - The Design council surfaces in the product as a **design meeting** — every
   user-facing string (card titles, debate panel, decision map, review
   Markdown) says "meeting"/"participants", while internal identifiers

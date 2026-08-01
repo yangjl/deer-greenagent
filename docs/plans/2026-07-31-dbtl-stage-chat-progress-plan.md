@@ -2,19 +2,26 @@
 
 **Status:** Revised enhancement plan. Implemented on the current branch: the
 deterministic post-approval Start/Hold handoff prototype (see §4.4 for the
-remaining authority, idempotency, and delivery gaps), the chat-first Test-gate
+remaining authority and idempotency gaps), the chat-first Test-gate
 correction (§14), the background round-failure watcher
 (`backend/app/gateway/dbtl_round_watch.py`), and the
 transition-backed audit timeline (`frontend/src/core/dbtl/timeline.ts`).
-Still proposed: the routing fence (Phase 2), the execution fence (§3.2), the
-durable stage progress envelope (Phase 3), the guaranteed terminal receipt
-(Phase 4), and any Lead-engine reuse (Phase 5). This document does not
-authorize further implementation.
+
+**Also implemented (2026-08-01), closing §4.4 gap 6 and the §3.1 free-text
+escape:** handoff-card delivery is now verified rather than assumed, and an
+unanswered control is intercepted before ordinary routing. See §4.5.
+
+Still proposed: the durable `dbtl_stage_handoffs` outbox (§4.2, §4.4 gaps 1-5),
+the full `GovernedStageIntent` step with its six outcomes (Phase 2), the
+execution fence (§3.2), the durable stage progress envelope (Phase 3), the
+guaranteed terminal receipt (Phase 4), and any Lead-engine reuse (Phase 5).
+This document does not authorize further implementation.
 
 **Date:** 2026-07-31
 
-**Revised from observed thread:**
-`28c9301b-353e-425f-8f3d-7d86c902e295` in project `test3`.
+**Revised from observed threads:**
+`28c9301b-353e-425f-8f3d-7d86c902e295` in project `test3`, plus the
+2026-08-01 isolated `design-approved` manual scenario described in §2.3.
 
 **Scope:** Make human gate transitions and long-running Build/Test/Learn work
 visible, durable, and understandable in project chat while making it
@@ -108,6 +115,40 @@ human stage intent
 
 Any plan that adds better-looking progress without closing that escape would
 make the false workflow more convincing.
+
+### 2.3 Generated-but-undelivered handoff regression (2026-08-01)
+
+The isolated `design-approved` scenario exposed a narrower delivery drift after
+the execution fence had already prevented the worst filesystem escape:
+
+- Design approval committed successfully and advanced the cycle to
+  `ready_for_build`, with Build `in_progress`;
+- the approval action recorded `review_recorded`, `handoff_status=started`, and
+  the hidden handoff run id;
+- the hidden run completed successfully without an LLM call and its final graph
+  output contained the expected `dbtl-stage-handoff__...` card, including
+  **Start Build** and **Hold here**;
+- that run emitted only lifecycle/delivery journal events, not the assistant and
+  tool-message events consumed by `GET /api/threads/{id}/messages/page`, so the
+  card was absent both live and after refresh; and
+- the owner's subsequent free text, “go ahead with build,” reached the ordinary
+  Lead Agent. It spent eight model calls attempting the work before the
+  stage-owned-path fence blocked it. No governed Build evidence was recorded.
+
+This is not a card-construction failure: the deterministic Supervisor output
+existed. It is a **projection/delivery failure** between successful hidden-run
+state and the durable thread event feed, followed by the already-known routing
+escape for unscoped free text.
+
+Further polishing must address both layers. A successful handoff is not
+`presented` until its card messages are durably visible through the canonical
+thread-history endpoint. Independently, before invoking the Lead Agent, routing
+must load authoritative thread-bound DBTL state. When one pending handoff makes
+the intent unambiguous, it re-presents that control instead of starting ordinary
+work. If ordinary work is still appropriate, the Lead Agent receives the active
+cycle, stage, pending control, and allowed actions in its initial context so it
+can explain the boundary before attempting tools. That awareness never grants
+the Lead Agent authority to start, approve, or record a governed stage.
 
 ## 3. Authority model
 
@@ -356,6 +397,86 @@ described by this plan:
    can have different run ids and therefore different adapter idempotency keys.
    The compare-and-set lifecycle and stable handoff execution key in §4.2 close
    duplicate dispatch and make Hold/reopen behavior explicit.
+6. **A successful hidden run can still be invisible to thread history.** The
+   2026-08-01 `design-approved` replay completed successfully and contained the
+   handoff card in its final graph output, but persisted no assistant/tool
+   message events for `/api/threads/{id}/messages/page`. Treating run success as
+   delivery success therefore loses the control on refresh. The handoff watcher
+   must verify the canonical message projection (or explicitly persist it) before
+   marking the handoff `presented`; otherwise it retries or emits a visible
+   recovery receipt. Add a characterization test that starts the hidden handoff,
+   reloads history from the endpoint, and proves exactly one actionable card is
+   present before any free-text follow-up is admitted to ordinary routing.
+
+### 4.5 Delivered 2026-08-01 — visible card, verified delivery, no free-text escape
+
+Three layers failed independently in the `design-approved` replay, and each is
+now closed at the layer that failed. None of this creates the durable
+`dbtl_stage_handoffs` row; §4.2 and gaps 1-5 remain open.
+
+**Delivery — the card is written to thread history.** `RunJournal` recognizes a
+run's own output by locating the run's *input* message in the final graph state,
+which requires that input to carry an `id`. Nothing mints one — not the
+composer, not the LangGraph SDK, not `convert_to_messages` — so the entire
+reconciliation path switched itself off for exactly the runs that have no model
+call to persist their output. Three changes:
+
+- `RunJournal.record_pre_run_message_identities` accepts the thread's pre-run
+  messages as a fallback current-run boundary, supplied by the worker from the
+  rollback snapshot it already captures. An *unknown* boundary keeps the old
+  conservative behaviour, because reconciling from a guessed one would
+  re-persist retained history as this run's work.
+- The three deck-started run inputs (`_start_post_approval_handoff`, the chair
+  resume, the review-meeting convener) stamp an explicit id, so delivery does
+  not depend on the boundary fallback either.
+- A deterministic supervisor reply built by `receipt_message` carries
+  `deerflow_graph_receipt` and is reconciled as an assistant turn. Without it a
+  Hold, a stale-card refusal, or the review-boundary guidance is spoken into a
+  void. The key is server-owned and stripped from external input.
+
+**Verification — success is not delivery.** `_watch_post_approval_handoff`
+passes `success_has_follow_up=card_delivered`, which reads the run's rows back
+through the canonical projection (`list_messages_by_run`) and looks for a
+`dbtl_stage_handoff` request. A run that succeeded and delivered nothing is
+handled exactly like a dead one: the ledger action reopens for retry and the
+conversation says what happened. An unreadable store reports delivered, because
+it proves nothing and a false alarm is worse than silence.
+
+**Routing — an unanswered control is not an opening for the lead agent.** While
+a server-emitted Start/Hold card is unanswered, a request that would otherwise
+route ordinary is answering *that card*. `route` intercepts it and
+`represent_pending_stage_handoff` re-presents the control, dispatching nothing.
+The reader is `unanswered_stage_handoff_card`, which reads the emitted card
+rather than the hidden marker: the marker scan stops at the first visible user
+message, and the escape *is* a visible user message. Precedence is preserved —
+an answer to any server card wins, a review sentence still gets the review
+boundary, and a stale card is refused rather than re-offered. Answering with
+**Hold** releases ordinary conversation, because hold is a decision.
+
+*Known trade-off, deliberate.* This implements §5's precedence rung 2 ("a live
+handoff bound to the originating thread"), which carries no phrase condition, so
+an unrelated question asked while a control is waiting also gets the control
+back rather than an answer. That is the conservative direction — the cost is one
+extra click on **Hold**, against a takeover that cost 35 model calls and left
+chat and durable state disagreeing. Narrowing it to rung 4's free-text pattern
+belongs with the rest of `GovernedStageIntent`, not ahead of it.
+
+**Awareness without authority.** An ordinary project run now receives
+`dbtl_status_snapshot` in request-only context (live cycles, stage statuses, any
+waiting control), rendered by `build_dbtl_status_reminder`. The block states
+that the lead agent may discuss, read, and prepare, and may never start,
+advance, approve, reject, or record a stage, nor call its own work a stage
+result. It is orientation only; the routing fence and the stage-owned output
+paths remain the enforcement.
+
+**Coverage.** `tests/test_dbtl_stage_handoff_delivery.py` (the regression at the
+journal seam, the boundary fix, the retained-history guard, and one actionable
+card through `GET /threads/{id}/messages/page`),
+`tests/test_dbtl_supervisor_graph.py::TestPostApprovalStageHandoff` (the four
+observed `test3` phrases re-presenting instead of running ordinary work, Hold
+releasing ordinary chat, and the injected status block's no-authority wording),
+and `tests/test_dbtl_round_watch.py` (successful-but-undelivered treated as
+failure; delivered stays quiet).
 
 ## 5. Phase 2 — stage-control interception and takeover prevention
 

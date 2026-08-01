@@ -13,8 +13,15 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.dbtl.branches import BranchDecision, SupervisorContext
 
-from .card_history import answered_stage_handoff, answered_test_card, pending_stage_handoff
-from .human_input_protocol import TEST_OUTCOME_PREFIX, TEST_REVIEW_PREFIX
+from .card_history import (
+    answered_stage_handoff,
+    answered_test_card,
+    answers_a_server_card,
+    pending_stage_handoff,
+    stage_handoff_marker,
+    unanswered_stage_handoff_card,
+)
+from .human_input_protocol import TEST_OUTCOME_PREFIX, TEST_REVIEW_PREFIX, receipt_message
 from .ports import StageExecutionPort
 
 logger = logging.getLogger(__name__)
@@ -48,27 +55,59 @@ async def handle_stage_handoff(
     pending = pending_stage_handoff(state)
     if pending is not None:
         if str(pending.get("cycle_id") or "") != str(decision.cycle_id or ""):
-            return HandlerResult(
-                update={"messages": [AIMessage(content="The post-approval handoff no longer matches the selected cycle; no stage was started.")]}
-            )
+            return HandlerResult(update={"messages": [receipt_message("The post-approval handoff no longer matches the selected cycle; no stage was started.")]})
         refusal = await validate(stage_adapter, context, pending)
         if refusal is not None:
-            return HandlerResult(update={"messages": [AIMessage(content=refusal)]})
-        return HandlerResult(
-            update={"messages": list(build_card(decision, pending, request_nonce=request_nonce))}
-        )
+            return HandlerResult(update={"messages": [receipt_message(refusal)]})
+        return HandlerResult(update={"messages": list(build_card(decision, pending, request_nonce=request_nonce))})
 
     answer = answered_stage_handoff(state)
     if answer is not None and answer[0] == "hold_here":
         next_stage = str(answer[1].get("next_stage") or "the next stage").replace("_", " ").title()
-        return HandlerResult(
-            update={"messages": [AIMessage(content=f"Holding here. {next_stage} remains open, and no stage work was started.")]}
-        )
+        return HandlerResult(update={"messages": [receipt_message(f"Holding here. {next_stage} remains open, and no stage work was started.")]})
     if answer is not None and answer[0] == "start_next_stage":
         refusal = await validate(stage_adapter, context, answer[1])
         if refusal is not None:
-            return HandlerResult(update={"messages": [AIMessage(content=refusal)]})
+            return HandlerResult(update={"messages": [receipt_message(refusal)]})
     return HandlerResult(handoff_answer=answer)
+
+
+async def represent_pending_stage_handoff(
+    *,
+    state: dict,
+    decision: BranchDecision,
+    context: SupervisorContext,
+    stage_adapter: StageExecutionPort,
+    request_nonce: str,
+    validate: Callable[[StageExecutionPort, SupervisorContext, Mapping[str, Any]], Awaitable[str | None]],
+    build_card: Callable[..., tuple[BaseMessage, BaseMessage]],
+) -> StateUpdate | None:
+    """Show the outstanding Start/Hold control instead of starting other work.
+
+    The observed escape is a free-text follow-up — "go ahead with build" — that
+    arrives with no cycle scope while a Start/Hold card is still unanswered.
+    Every existing guard misses it: they fire on a card *answer* or on an
+    explicitly scoped request, and this is neither. The card the server emitted
+    is the authority here; a request that reaches this point is answered by
+    re-presenting it, never by handing the intent to the lead agent.
+
+    Returns ``None`` when there is nothing pending, when the newest message
+    answers some other server card (that answer is the more specific intent), or
+    when the durable cycle has moved on — a stale card must not be re-offered as
+    though it were still actionable.
+    """
+    if answers_a_server_card(state):
+        return None
+    request = unanswered_stage_handoff_card(state)
+    if request is None:
+        return None
+    marker = stage_handoff_marker(request)
+    if decision.cycle_id and str(marker["cycle_id"]) != str(decision.cycle_id):
+        return None
+    refusal = await validate(stage_adapter, context, marker)
+    if refusal is not None:
+        return {"messages": [receipt_message(refusal)]}
+    return {"messages": list(build_card(decision, marker, request_nonce=request_nonce))}
 
 
 async def handle_test_cards(
@@ -99,9 +138,7 @@ async def handle_test_cards(
             if isawaitable(recorded):
                 recorded = await recorded
         except AttributeError:
-            return HandlerResult(
-                update={"messages": [AIMessage(content="This runtime cannot record a Test outcome from chat yet; no decision was written.")]}
-            )
+            return HandlerResult(update={"messages": [AIMessage(content="This runtime cannot record a Test outcome from chat yet; no decision was written.")]})
         except Exception as exc:  # noqa: BLE001 - a write refusal must be visible
             logger.warning("Could not record the Test outcome from chat.", exc_info=True)
             return HandlerResult(update={"messages": [AIMessage(content=f"The Test decision was not recorded: {exc}")]})
@@ -161,11 +198,7 @@ async def handle_test_cards(
             snapshot = refreshed
     except AttributeError:
         pass
-    artifacts = (
-        [path for path in (result.artifact_uri, getattr(result, "deck_uri", None)) if path]
-        if choice == "convene_review_meeting" and getattr(result, "artifact_uri", None)
-        else []
-    )
+    artifacts = [path for path in (result.artifact_uri, getattr(result, "deck_uri", None)) if path] if choice == "convene_review_meeting" and getattr(result, "artifact_uri", None) else []
     return HandlerResult(
         update={
             "messages": [*presented, *build_test_card(decision, snapshot, request_nonce=request_nonce, outcome=True)],

@@ -103,6 +103,80 @@ def build_parked_design_reminder(value: object) -> str | None:
     )
 
 
+_MAX_STATUS_CYCLE_LINES = 5
+
+
+def _status_cycle_line(cycle: object) -> str | None:
+    if not isinstance(cycle, dict):
+        return None
+    cycle_id = str(cycle.get("cycle_id") or "").strip()
+    if not cycle_id:
+        return None
+    title = escape(str(cycle.get("title") or cycle_id), quote=False)
+    state = escape(str(cycle.get("state") or "unknown").replace("_", " "), quote=False)
+    stages = cycle.get("stages")
+    detail = ""
+    if isinstance(stages, dict) and stages:
+        detail = "; stages: " + ", ".join(f"{escape(str(stage), quote=False)}={escape(str(status).replace('_', ' '), quote=False)}" for stage, status in stages.items())
+    parked = " (parked for ordinary work)" if cycle.get("parked") else ""
+    return f"- {title} [{escape(cycle_id, quote=False)}] is at {state}{parked}{detail}."
+
+
+def build_dbtl_status_reminder(value: object) -> str | None:
+    """State the governed work around this conversation, and its hard limit.
+
+    The failure this exists for was not a missing rule but missing knowledge:
+    the lead agent answered "start to build following the approved design" with
+    a plausible, ungoverned Build because nothing had told it a governed cycle
+    owned that work. Naming the cycles and any waiting control lets it say where
+    the boundary is.
+
+    The closing paragraph is deliberately blunt and non-negotiable. Awareness of
+    a stage is not permission to enter it, and the model must not read a status
+    line as an invitation. This is a prompt, so it is not the enforcement — the
+    routing fence and the stage-owned output paths are — but a model that knows
+    the boundary explains it instead of walking into a refusal.
+    """
+    if not isinstance(value, dict):
+        return None
+    cycles = value.get("cycles")
+    lines = [line for cycle in (cycles if isinstance(cycles, list) else []) if (line := _status_cycle_line(cycle))][:_MAX_STATUS_CYCLE_LINES]
+    control = value.get("pending_control")
+    control_lines: list[str] = []
+    if isinstance(control, dict) and str(control.get("next_stage") or ""):
+        next_stage = escape(str(control["next_stage"]).replace("_", " "), quote=False)
+        approved = escape(str(control.get("approved_stage") or "").replace("_", " "), quote=False)
+        answered = str(control.get("answered_with") or "")
+        if answered == "hold_here":
+            control_lines.append(f"The project owner approved {approved} and explicitly chose to hold: {next_stage} is open but deliberately not started.")
+        elif answered:
+            control_lines.append(f"The project owner has already answered the {next_stage} start prompt.")
+        else:
+            control_lines.append(f"A start-or-hold decision for {next_stage} is still waiting on the project owner.")
+    if not lines and not control_lines:
+        return None
+    body = ""
+    if lines:
+        body += "Governed DBTL cycles in this project:\n" + "\n".join(lines) + "\n"
+    if control_lines:
+        body += "\n".join(control_lines) + "\n"
+    return (
+        "<dbtl_status>\n"
+        "This conversation belongs to a project with governed Design/Build/Test/Learn work. "
+        "The following is a read-only status snapshot, current as of this request.\n"
+        f"{body}"
+        "You are NOT the workflow owner and this snapshot grants you no authority over it. "
+        "You may discuss this work, read its files, explain what a stage contains, and help "
+        "prepare for it. You must NOT start, run, advance, approve, reject, or record any "
+        "stage, and you must NOT describe ordinary work you do as a stage result, a gate "
+        "passage, or an approval — even if the person asks you to.\n"
+        "If the request is to start or approve a stage, say plainly that the governed "
+        "workflow owns that action and point at the waiting control or the project review "
+        "sheet. Do not produce a substitute for it.\n"
+        "</dbtl_status>"
+    )
+
+
 def _insert_before_latest_visible_user(messages: list, message: HumanMessage) -> list:
     for index in range(len(messages) - 1, -1, -1):
         candidate = messages[index]
@@ -178,6 +252,7 @@ class ProjectContextMiddleware(AgentMiddleware[AgentState]):
                 build_project_reminder(context.get("project_root")),
                 build_mounts_reminder(self._mounts_provider(), context.get("project_root")),
                 build_parked_design_reminder(context.get("dbtl_parked_design_brief")),
+                build_dbtl_status_reminder(context.get("dbtl_status_snapshot")),
             )
             if block is not None
         ]

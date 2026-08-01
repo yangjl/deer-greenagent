@@ -61,6 +61,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.goal import goal_thread_lock
+from deerflow.runtime.journal import GRAPH_RECEIPT_KEY
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
@@ -106,6 +107,9 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = frozenset(
         _DYNAMIC_CONTEXT_REMINDER_KEY,
         _REMINDER_DATE_KEY,
         _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
+        # Marks an assistant turn the graph authored itself; the journal treats
+        # it as reconcile-worthy, so a client must not be able to supply one.
+        GRAPH_RECEIPT_KEY,
     }
 )
 

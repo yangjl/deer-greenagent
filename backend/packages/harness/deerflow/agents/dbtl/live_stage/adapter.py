@@ -64,7 +64,7 @@ from deerflow.dbtl.council_settings import (
     apply_participant_settings,
     owner_instruction_lines,
 )
-from deerflow.dbtl.cycle_state import StageStatus, stage_for_state
+from deerflow.dbtl.cycle_state import TERMINAL_CYCLE_STATES, StageStatus, stage_for_state
 from deerflow.dbtl.decision_request import DECISION_REQUEST_CONTRACT, DecisionRequest
 from deerflow.dbtl.reconciliation_policy import reconciliation_required
 from deerflow.dbtl.review_markdown import render_review_markdown, render_stage_digest
@@ -1150,16 +1150,10 @@ def _stage_handoff_refusal(
     """Refuse a card whose recorded approval no longer names current state."""
     current_revision = int(cycle.get("db_revision") or 0)
     if current_revision != expected_db_revision:
-        return (
-            f"This next-stage prompt was created at cycle revision {expected_db_revision}, "
-            f"but the cycle is now at revision {current_revision}. Nothing was started; open the current cycle state and try again."
-        )
+        return f"This next-stage prompt was created at cycle revision {expected_db_revision}, but the cycle is now at revision {current_revision}. Nothing was started; open the current cycle state and try again."
     current_stage = _executable_stage(cycle)
     if current_stage != expected_stage:
-        return (
-            f"This prompt offered {expected_stage.title()}, but the cycle's current executable stage is "
-            f"{current_stage.title() if current_stage else 'none'}. Nothing was started."
-        )
+        return f"This prompt offered {expected_stage.title()}, but the cycle's current executable stage is {current_stage.title() if current_stage else 'none'}. Nothing was started."
     return None
 
 
@@ -2067,6 +2061,33 @@ class LiveStageAdapter:
             expected_db_revision=expected_db_revision,
             expected_stage=expected_stage,
         )
+
+    async def active_cycle_status(self, *, project_id: str) -> list[dict[str, Any]]:
+        """The project's live cycles, as read-only orientation for ordinary work.
+
+        Terminal cycles are omitted: a completed or abandoned record is history,
+        and the question this answers is "what governed work is in flight around
+        this conversation right now". Nothing here is authority — it is the same
+        durable state the project rail shows, handed to the lead agent so it can
+        name the boundary rather than discover it by crossing it.
+        """
+        if not project_id:
+            return []
+        cycles = await self._repo.list_cycles(project_id)
+        live: list[dict[str, Any]] = []
+        for cycle in cycles or []:
+            if not isinstance(cycle, dict) or str(cycle.get("state") or "") in TERMINAL_CYCLE_STATES:
+                continue
+            live.append(
+                {
+                    "cycle_id": str(cycle.get("id") or ""),
+                    "title": str(cycle.get("title") or ""),
+                    "state": str(cycle.get("state") or ""),
+                    "parked": bool(cycle.get("parked")),
+                    "stages": {str(item.get("stage") or ""): str(item.get("status") or "") for item in cycle.get("stages", []) if isinstance(item, dict)},
+                }
+            )
+        return live
 
     async def parked_design_context(
         self,

@@ -153,6 +153,95 @@ def answered_stage_handoff(state: dict) -> tuple[str, dict[str, Any]] | None:
     return (str(option.get("value") or ""), request) if option is not None else None
 
 
+def answers_a_server_card(state: dict) -> bool:
+    """Whether the newest message answers a card this server emitted."""
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if not response or response.get("source") != "ask_clarification":
+            return False
+        return emitted_card_request(state, str(response.get("request_id") or "")) is not None
+    return False
+
+
+def unanswered_stage_handoff_card(state: dict) -> dict[str, Any] | None:
+    """Return the newest emitted Start/Hold card that nobody has answered.
+
+    This is the thread-bound pending control the routing fence needs. It reads
+    only a card the *server* emitted, so it cannot be forged, and it survives
+    the two failures the hidden marker does not: the marker is scanned back only
+    as far as the first visible user message, and the observed escape is exactly
+    a visible user message ("go ahead with build") arriving after it.
+
+    An answered card — including one answered with **Hold** — is not pending.
+    Hold is a decision, and re-presenting it would argue with the person who
+    made it; the plan reopens a held handoff on an explicit later request
+    instead.
+    """
+    answered: set[str] = set()
+    for message in state.get("messages") or []:
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if response and response.get("source") == "ask_clarification":
+            answered.add(str(response.get("request_id") or ""))
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, ToolMessage):
+            continue
+        artifact = getattr(message, "artifact", None)
+        request = artifact.get("human_input") if isinstance(artifact, dict) else None
+        if not isinstance(request, dict) or request.get("clarification_type") != "dbtl_stage_handoff":
+            continue
+        request_id = str(request.get("request_id") or "")
+        if not request_id or request_id in answered:
+            return None
+        required = ("dbtl_cycle_id", "approved_stage", "next_stage", "design_feedback_surface_id")
+        if not all(isinstance(request.get(key), str) and request.get(key) for key in required):
+            return None
+        return request
+    return None
+
+
+def latest_stage_handoff_state(state: dict) -> tuple[dict[str, Any], str | None] | None:
+    """Return the newest emitted Start/Hold card and the option chosen, if any.
+
+    Unlike :func:`unanswered_stage_handoff_card` this keeps an answered card, so
+    an ordinary run can be told a stage is *open but deliberately not started*.
+    That is the state a person is in right after choosing Hold, and it is the
+    one the lead agent most needs stated: the stage exists, and nothing the lead
+    agent does may start it.
+    """
+    answers: dict[str, str] = {}
+    for message in state.get("messages") or []:
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if response and response.get("source") == "ask_clarification":
+            answers[str(response.get("request_id") or "")] = str(response.get("option_id") or response.get("value") or "")
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, ToolMessage):
+            continue
+        artifact = getattr(message, "artifact", None)
+        request = artifact.get("human_input") if isinstance(artifact, dict) else None
+        if not isinstance(request, dict) or request.get("clarification_type") != "dbtl_stage_handoff":
+            continue
+        return request, answers.get(str(request.get("request_id") or "")) or None
+    return None
+
+
+def stage_handoff_marker(request: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the handoff marker from the server-emitted card's own bindings."""
+    return {
+        "version": 1,
+        "cycle_id": str(request.get("dbtl_cycle_id") or ""),
+        "cycle_revision": int(request.get("cycle_revision") or 0),
+        "approved_stage": str(request.get("approved_stage") or ""),
+        "next_stage": str(request.get("next_stage") or ""),
+        "surface_id": str(request.get("design_feedback_surface_id") or ""),
+    }
+
+
 def routing_input(state: dict) -> tuple[str, ExplicitChoice | None, str | None]:
     """Return routing text and any scope recovered from an answered card."""
     confirmed = card_answer(state, SETUP_CONFIRMATION_PREFIX)

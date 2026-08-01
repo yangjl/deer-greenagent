@@ -50,6 +50,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
+#: Marks an assistant turn the graph authored itself, with no model call behind
+#: it. Nothing else can persist such a message — there is no LLM callback — so
+#: the root-run reconciliation pass treats the marker as reconcile-worthy. It is
+#: server-owned: producers set it, and no client or model can.
+GRAPH_RECEIPT_KEY = "deerflow_graph_receipt"
 _RECONCILED_TOOL_MESSAGE_NAMES = frozenset({"ask_clarification", "present_files"})
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"})
 
@@ -260,6 +265,11 @@ class RunJournal(BaseCallbackHandler):
         self._persisted_ai_message_identities: set[str] = set()
         self._persisted_tool_message_identities: set[str] = set()
         self._input_message_identities: set[str] = set()
+        # Identities checkpointed *before* this run started, when the worker was
+        # able to capture them. This is the fallback current-run boundary for a
+        # run whose input messages carry no id — see
+        # ``record_pre_run_message_identities``.
+        self._pre_run_message_identities: set[str] | None = None
 
         # Artifact-production tracking for the terminal run.delivery event
         # (#4272 slice 1). Deduped by (path, tool_name); insertion order kept.
@@ -323,6 +333,36 @@ class RunJournal(BaseCallbackHandler):
                 if identity:
                     self._input_message_identities.add(identity)
             self._record_first_human_input(messages)
+
+    def record_pre_run_message_identities(self, messages: Sequence[Any]) -> None:
+        """Record the thread's pre-run messages as a current-run boundary.
+
+        ``_reconcile_final_tool_messages`` recognizes this run's own output by
+        finding the run's input message in the final state, which requires that
+        input to carry an ``id``. Nothing mints one: neither the composer, nor
+        the LangGraph SDK, nor ``convert_to_messages``. For an ordinary run that
+        is harmless — its assistant turn is persisted by ``on_llm_end`` — but a
+        graph-authored message produced *without* a model call has no callback
+        to persist it, so the whole reconciliation path silently switched off
+        and the message existed only in the checkpoint. That is how a DBTL
+        handoff run could complete successfully, hold its Start/Hold card in its
+        final state, and leave the conversation with nothing to answer.
+
+        Callers pass the pre-run messages only when they actually know them (the
+        worker's rollback snapshot). An unknown boundary keeps the conservative
+        behaviour rather than guessing, because reconciling from a guessed
+        boundary would re-persist retained history as if this run had authored
+        it.
+        """
+        identities: set[str] = set()
+        for raw_message in messages or ():
+            message = _coerce_seed_message(raw_message)
+            if not isinstance(message, BaseMessage):
+                continue
+            identity = self._message_identity(message)
+            if identity:
+                identities.add(identity)
+        self._pre_run_message_identities = identities
 
     def on_chain_start(
         self,
@@ -694,6 +734,13 @@ class RunJournal(BaseCallbackHandler):
         identity = self._message_identity(message)
         if identity is None or identity in self._persisted_ai_message_identities:
             return False
+        # A server-owned receipt: authored by the graph with no model call, so
+        # no callback will ever persist it. The marker is set by the producing
+        # node, never by a model or a client, which is what makes reconciling a
+        # plain assistant turn here safe — an ordinary model answer is already
+        # persisted by ``on_llm_end`` and carries no marker.
+        if message.additional_kwargs.get(GRAPH_RECEIPT_KEY) is True:
+            return True
         for tool_call in message.tool_calls:
             name = self._tool_call_value(tool_call, "name")
             if name in _RECONCILED_TOOL_MESSAGE_NAMES:
@@ -711,8 +758,16 @@ class RunJournal(BaseCallbackHandler):
             if isinstance(filepaths, list):
                 self._record_produced_artifacts(filepaths, "present_files")
 
-    def _reconcile_final_tool_messages(self, outputs: Any) -> None:
-        messages = self._final_output_messages(outputs)
+    def _current_run_output_messages(self, messages: list[Any]) -> tuple[list[Any], bool]:
+        """Split this run's own output off the final state.
+
+        Returns the candidate messages plus whether the boundary is *known*.
+        The run's input message is the precise boundary when it carries an
+        identity; the pre-run checkpoint is the fallback for the common case
+        where it does not. With neither, the boundary is unknown and only the
+        legacy tool-message pass runs, because reconciling an AI turn from a
+        guessed boundary would re-persist retained history.
+        """
         current_input_index = -1
         for index, message in enumerate(messages):
             if not isinstance(message, BaseMessage):
@@ -720,9 +775,28 @@ class RunJournal(BaseCallbackHandler):
             identity = self._message_identity(message)
             if identity and identity in self._input_message_identities:
                 current_input_index = index
-
-        current_run_messages = messages[current_input_index + 1 :] if current_input_index >= 0 else messages
         if current_input_index >= 0:
+            return messages[current_input_index + 1 :], True
+
+        pre_run = self._pre_run_message_identities
+        if pre_run is None:
+            return messages, False
+        fresh = []
+        for message in messages:
+            if not isinstance(message, BaseMessage):
+                continue
+            identity = self._message_identity(message)
+            # An identity-less message cannot be reconciled anyway (both
+            # ``_should_reconcile_*`` checks require one), so excluding it here
+            # keeps the boundary honest rather than merely permissive.
+            if identity and identity not in pre_run:
+                fresh.append(message)
+        return fresh, True
+
+    def _reconcile_final_tool_messages(self, outputs: Any) -> None:
+        messages = self._final_output_messages(outputs)
+        current_run_messages, boundary_known = self._current_run_output_messages(messages)
+        if boundary_known:
             for message in current_run_messages:
                 if isinstance(message, AIMessage):
                     self._remember_current_run_tool_calls(
@@ -731,7 +805,7 @@ class RunJournal(BaseCallbackHandler):
                     )
 
         for message in current_run_messages:
-            if current_input_index >= 0 and isinstance(message, AIMessage) and self._should_reconcile_ai_message(message):
+            if boundary_known and isinstance(message, AIMessage) and self._should_reconcile_ai_message(message):
                 self._persist_ai_response_message(message, caller="lead_agent")
                 self._record_reconciled_present_files(message)
             elif isinstance(message, ToolMessage) and self._should_reconcile_tool_message(message):

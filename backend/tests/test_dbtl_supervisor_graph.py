@@ -254,11 +254,7 @@ class TestCompleteThreadStateOnEveryBranch:
 
         def model(_state, config):
             seen_context.update(request_context(config))
-            return {
-                "messages": [
-                    AIMessage(content="I can discuss the parked Design.", id="ai-parked")
-                ]
-            }
+            return {"messages": [AIMessage(content="I can discuss the parked Design.", id="ai-parked")]}
 
         lead = StateGraph(SCHEMA)
         lead.add_node("model", model)
@@ -1018,6 +1014,173 @@ class TestPostApprovalStageHandoff:
 
         assert executed == []
         assert "nothing was started" in final["messages"][-1].content.lower()
+
+    async def _follow_up(self, adapter, asked, text, *, thread_id, marker, context=None):
+        """Send unscoped free text into a thread that still holds the card."""
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent(marker),
+            context=context
+            or SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                explicit_choice=ExplicitChoice.ORDINARY,
+            ),
+            stage_adapter=adapter,
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+        return await graph.ainvoke(
+            {**FULL_STATE, "messages": [*asked["messages"], HumanMessage(content=text)]},
+            config={
+                "configurable": {"thread_id": thread_id},
+                "context": {"run_id": f"run-{thread_id}"},
+            },
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "follow_up",
+        [
+            "go ahead with build",
+            "now, start to build following the approved design",
+            "approve to build",
+            "now, shall we move to Test?",
+        ],
+    )
+    async def test_unscoped_free_text_re_presents_the_card_instead_of_running_the_lead_agent(self, follow_up):
+        """The observed escape, closed at the branch that let it through.
+
+        Each of these ran ordinary work in the `test3` thread while a governed
+        cycle owned the request: 35 model calls, ~684k tokens, and no durable
+        Build record. The card is still unanswered, so the request is answering
+        it — and only the card can carry that answer into a governed dispatch.
+        """
+        executed: list[dict] = []
+        lead_marker: list[str] = []
+        adapter = self._adapter(executed)
+        asked = await self._ask(adapter, thread_id=f"handoff-escape-ask-{abs(hash(follow_up))}")
+
+        final = await self._follow_up(
+            adapter,
+            asked,
+            follow_up,
+            thread_id=f"handoff-escape-{abs(hash(follow_up))}",
+            marker=lead_marker,
+        )
+
+        assert lead_marker == [], "ordinary lead agent must not receive a pending stage control"
+        assert executed == [], "re-presenting a control must dispatch no stage work"
+        card = final["messages"][-1]
+        assert isinstance(card, ToolMessage)
+        request = card.artifact["human_input"]
+        assert request["clarification_type"] == "dbtl_stage_handoff"
+        assert request["next_stage"] == "build"
+
+    @pytest.mark.asyncio
+    async def test_a_held_control_releases_ordinary_conversation(self):
+        """Hold is a decision, and re-presenting it would argue with the person.
+
+        The fence must intercept a *waiting* control, not become a trap that
+        answers every later message with the same card.
+        """
+        executed: list[dict] = []
+        lead_marker: list[str] = []
+        adapter = self._adapter(executed)
+        asked = await self._ask(adapter, thread_id="handoff-held-ask")
+        request_id = asked["messages"][-1].artifact["human_input"]["request_id"]
+        held = {**asked, "messages": [*asked["messages"], self._reply(request_id, "hold_here")]}
+
+        final = await self._follow_up(
+            adapter,
+            held,
+            "what does the design say about the training population?",
+            thread_id="handoff-held-follow-up",
+            marker=lead_marker,
+        )
+
+        assert lead_marker == ["lead_agent"]
+        assert executed == []
+        assert final["messages"][-1].content == "the workspace has 2 files"
+
+    @pytest.mark.asyncio
+    async def test_the_lead_agent_is_told_what_it_may_not_do(self):
+        """Ordinary work carries the governed state, and no authority with it.
+
+        The takeover started with the lead agent not knowing a cycle existed.
+        Telling it is worth doing; telling it in a way that reads as permission
+        is not, so the block that reaches the model states the limit explicitly.
+        """
+        from deerflow.agents.middlewares.project_context_middleware import build_dbtl_status_reminder
+
+        executed: list[dict] = []
+        seen: list[dict] = []
+        adapter = self._adapter(executed)
+
+        class Recording:
+            async def validate_stage_handoff(self, **kwargs):
+                return None
+
+            async def active_cycle_status(self, *, project_id):
+                seen.append({"project_id": project_id})
+                return [
+                    {
+                        "cycle_id": "cyc-1",
+                        "title": "Yield GS pilot",
+                        "state": "ready_for_build",
+                        "parked": False,
+                        "stages": {"design": "approved", "build": "in_progress"},
+                    }
+                ]
+
+            async def execute(self, **kwargs):
+                executed.append(kwargs)
+                raise AssertionError("ordinary work must not dispatch a stage")
+
+        asked = await self._ask(adapter, thread_id="handoff-status-ask")
+        request_id = asked["messages"][-1].artifact["human_input"]["request_id"]
+        held = {**asked, "messages": [*asked["messages"], self._reply(request_id, "hold_here")]}
+
+        captured: dict = {}
+
+        def capturing_lead_agent():
+            builder = StateGraph(SCHEMA)
+
+            def node(state, config):
+                captured.update(request_context(config))
+                return {"messages": [AIMessage(content="ok", id="ai-status")]}
+
+            builder.add_node("lead", node)
+            builder.add_edge(START, "lead")
+            builder.add_edge("lead", END)
+            return builder.compile(checkpointer=False)
+
+        graph = build_supervisor_graph(
+            lead_agent=capturing_lead_agent(),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                explicit_choice=ExplicitChoice.ORDINARY,
+            ),
+            stage_adapter=Recording(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+        await graph.ainvoke(
+            {**FULL_STATE, "messages": [*held["messages"], HumanMessage(content="summarise the workspace files")]},
+            config={
+                "configurable": {"thread_id": "handoff-status-run"},
+                "context": {"run_id": "run-status"},
+            },
+        )
+
+        assert seen == [{"project_id": "proj-1"}]
+        snapshot = captured["dbtl_status_snapshot"]
+        assert snapshot["cycles"][0]["cycle_id"] == "cyc-1"
+        assert snapshot["pending_control"]["answered_with"] == "hold_here"
+
+        block = build_dbtl_status_reminder(snapshot)
+        assert "Yield GS pilot" in block
+        assert "deliberately not started" in block
+        assert "grants you no authority" in block
+        assert "must NOT start, run, advance, approve, reject, or record any stage" in block.replace("\n", " ")
 
 
 class TestCouncilPreflight:

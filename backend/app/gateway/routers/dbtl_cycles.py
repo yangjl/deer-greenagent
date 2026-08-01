@@ -246,21 +246,13 @@ async def _post_design_meeting_progress(
 
 def _next_open_stage(cycle: dict[str, Any], approved_stage: str) -> str | None:
     """The newly opened stage after a deck approval, from durable stage rows."""
-    statuses = {
-        str(item.get("stage") or ""): str(item.get("status") or "")
-        for item in cycle.get("stages", [])
-        if isinstance(item, dict)
-    }
+    statuses = {str(item.get("stage") or ""): str(item.get("status") or "") for item in cycle.get("stages", []) if isinstance(item, dict)}
     try:
         approved_index = STAGE_ORDER.index(approved_stage)
     except ValueError:
         return None
     return next(
-        (
-            stage
-            for stage in STAGE_ORDER[approved_index + 1 :]
-            if statuses.get(stage) == "in_progress"
-        ),
+        (stage for stage in STAGE_ORDER[approved_index + 1 :] if statuses.get(stage) == "in_progress"),
         None,
     )
 
@@ -293,10 +285,18 @@ async def _start_post_approval_handoff(
                     "messages": [
                         {
                             "role": "user",
-                            "content": (
-                                f"{approved_stage.title()} approval is recorded. "
-                                f"Ask the project owner before starting {next_stage.title()}."
-                            ),
+                            # An explicit id is what makes this run's card
+                            # reach durable thread history. ``RunJournal``
+                            # reconciles a graph-authored ``ask_clarification``
+                            # pair only for messages appended *after* the run's
+                            # own input, and it recognizes that input by
+                            # identity. ``convert_to_messages`` mints no id, so
+                            # without this the handoff run completed, held the
+                            # card in its final state, and persisted no message
+                            # event at all — the control existed and nobody
+                            # could see it.
+                            "id": f"dbtl-handoff-input__{uuid4().hex}",
+                            "content": (f"{approved_stage.title()} approval is recorded. Ask the project owner before starting {next_stage.title()}."),
                             "additional_kwargs": {
                                 "hide_from_ui": True,
                                 "dbtl_post_approval_handoff": marker,
@@ -687,17 +687,7 @@ async def _design_feedback_read_model(
     # yield a chair outcome. Release the same payload-bound action for retry
     # instead of leaving the only deck permanently consumed.
     background_round = bool(
-        latest_action
-        and (
-            (
-                surface["mode"] == "chair_feedback"
-                and latest_action.get("action_group") == "chair_response"
-            )
-            or (
-                surface["mode"] == "stage_review"
-                and latest_action.get("action_group") == "review_meeting"
-            )
-        )
+        latest_action and ((surface["mode"] == "chair_feedback" and latest_action.get("action_group") == "chair_response") or (surface["mode"] == "stage_review" and latest_action.get("action_group") == "review_meeting"))
     )
     if background_round and surface["is_current"] and latest_action and latest_action.get("status") == "resume_started" and latest_action.get("run_id"):
         try:
@@ -710,11 +700,7 @@ async def _design_feedback_read_model(
         raw_status = (run or {}).get("status") if isinstance(run, dict) else None
         run_status = str(getattr(raw_status, "value", raw_status) or "")
         if run_status in {"success", "error", "timeout", "interrupted"}:
-            round_label = (
-                "Design chair"
-                if surface["mode"] == "chair_feedback"
-                else f"{surface_stage.title()} review meeting"
-            )
+            round_label = "Design chair" if surface["mode"] == "chair_feedback" else f"{surface_stage.title()} review meeting"
             message = f"The {round_label} could not produce a follow-up deck from that run. Your recorded choice is still here; try sending it again."
             latest_action = await repo.update_stage_feedback_action(
                 str(latest_action["client_submission_id"]),
@@ -729,13 +715,7 @@ async def _design_feedback_read_model(
                 failure_code="resume_no_feedback_surface",
             )
     handoff_receipt = dict((latest_action or {}).get("receipt") or {})
-    if (
-        latest_action
-        and latest_action.get("action_group") == "stage_review"
-        and latest_action.get("status") == "review_recorded"
-        and handoff_receipt.get("handoff_status") == "started"
-        and latest_action.get("run_id")
-    ):
+    if latest_action and latest_action.get("action_group") == "stage_review" and latest_action.get("status") == "review_recorded" and handoff_receipt.get("handoff_status") == "started" and latest_action.get("run_id"):
         try:
             run = await get_run_store(request).get(
                 str(latest_action["run_id"]),
@@ -750,10 +730,7 @@ async def _design_feedback_read_model(
                 {
                     "handoff_status": "failed",
                     "handoff_failure_code": f"run_{run_status}"[:64],
-                    "message": (
-                        f"{str(handoff_receipt.get('approved_stage') or surface_stage).title()} approval remains recorded, "
-                        "but the next-stage prompt stopped before it appeared. Retry the same decision from this deck."
-                    ),
+                    "message": (f"{str(handoff_receipt.get('approved_stage') or surface_stage).title()} approval remains recorded, but the next-stage prompt stopped before it appeared. Retry the same decision from this deck."),
                 }
             )
             latest_action = await repo.update_stage_feedback_action(
@@ -786,12 +763,7 @@ async def _design_feedback_read_model(
         # meeting reviewed, so a newly written meeting package must not make
         # that surface look stale merely because it has a higher revision.
         meeting_artifact_type = f"{surface_stage}_review_meeting"
-        attempt_artifacts = [
-            item
-            for item in (cycle or {}).get("artifacts", [])
-            if item.get("stage_attempt_id") == surface.get("stage_attempt_id")
-            and item.get("artifact_type") != meeting_artifact_type
-        ]
+        attempt_artifacts = [item for item in (cycle or {}).get("artifacts", []) if item.get("stage_attempt_id") == surface.get("stage_attempt_id") and item.get("artifact_type") != meeting_artifact_type]
         artifact = max(
             attempt_artifacts,
             key=lambda item: int(item.get("revision") or 0),
@@ -1048,20 +1020,54 @@ def _handoff_receipt(
         "handoff_run_id": handoff.run_id,
     }
     if handoff.status == "failed":
-        updated["message"] = (
-            f"{approved_stage.title()} approval is recorded, but the next-stage prompt could not start. "
-            "Reopen this deck and retry the same decision; the approval will not be recorded twice."
-        )
+        updated["message"] = f"{approved_stage.title()} approval is recorded, but the next-stage prompt could not start. Reopen this deck and retry the same decision; the approval will not be recorded twice."
         updated["handoff_failure_code"] = handoff.failure_code
     elif handoff.status == "started":
         updated["message"] = "Approval recorded. Choose the next governed action in the originating conversation."
         updated.pop("handoff_failure_code", None)
     else:
-        updated["message"] = (
-            f"{approved_stage.title()} approval is recorded. No later stage is currently waiting for a start decision."
-        )
+        updated["message"] = f"{approved_stage.title()} approval is recorded. No later stage is currently waiting for a start decision."
         updated.pop("handoff_failure_code", None)
     return updated
+
+
+async def _handoff_card_is_visible(
+    request: Request,
+    *,
+    thread_id: str,
+    run_id: str,
+    user_id: str,
+) -> bool:
+    """Whether the run's Start/Hold card reached durable thread history.
+
+    A successful run is not a delivered control. The 2026-08-01 replay completed
+    without error and held the card in its final graph state, yet persisted no
+    message event — so the card was absent live *and* after refresh, and the
+    owner's next message escaped to the lead agent. Delivery is therefore
+    verified against the same projection the conversation reads
+    (``GET /threads/{id}/messages/page``), not against run status.
+
+    An unreadable store returns ``True``: it proves nothing about the card, and
+    announcing a failure on a transient store error would be worse than silence.
+    """
+    try:
+        event_store = get_run_event_store(request)
+    except HTTPException:
+        return True
+    try:
+        rows = await event_store.list_messages_by_run(thread_id, run_id, limit=50)
+    except Exception:  # noqa: BLE001 - an unreadable projection is not a failed delivery
+        logger.warning("Could not verify handoff card delivery for run %s", run_id, exc_info=True)
+        return True
+    for row in rows or []:
+        content = row.get("content") if isinstance(row, dict) else None
+        if not isinstance(content, dict):
+            continue
+        artifact = content.get("artifact")
+        payload = artifact.get("human_input") if isinstance(artifact, dict) else None
+        if isinstance(payload, dict) and payload.get("clarification_type") == "dbtl_stage_handoff":
+            return True
+    return False
 
 
 def _watch_post_approval_handoff(
@@ -1077,9 +1083,17 @@ def _watch_post_approval_handoff(
     approved_stage: str,
     handoff: _PostApprovalHandoff,
 ) -> None:
-    """Make an admitted handoff recoverable if its background run later dies."""
+    """Make an admitted handoff recoverable if its run dies or delivers nothing."""
     if handoff.status != "started" or not handoff.run_id:
         return
+
+    async def card_delivered() -> bool:
+        return await _handoff_card_is_visible(
+            request,
+            thread_id=thread_id,
+            run_id=str(handoff.run_id),
+            user_id=user_id,
+        )
 
     async def mark_failed(run_status: str) -> None:
         actions = await repo.stage_feedback_actions(surface_id, project_id=project_id)
@@ -1087,21 +1101,14 @@ def _watch_post_approval_handoff(
             (item for item in actions if str(item.get("client_submission_id") or "") == action_id),
             None,
         )
-        if (
-            current is None
-            or current.get("status") != "review_recorded"
-            or str(current.get("run_id") or "") != handoff.run_id
-        ):
+        if current is None or current.get("status") != "review_recorded" or str(current.get("run_id") or "") != handoff.run_id:
             return
         receipt = dict(current.get("receipt") or {})
         receipt.update(
             {
                 "handoff_status": "failed",
                 "handoff_failure_code": f"run_{run_status}"[:64],
-                "message": (
-                    f"{approved_stage.title()} approval remains recorded, but the next-stage prompt stopped before it appeared. "
-                    "Reopen this deck and retry the same decision."
-                ),
+                "message": (f"{approved_stage.title()} approval remains recorded, but the next-stage prompt stopped before it appeared. Reopen this deck and retry the same decision."),
             }
         )
         await repo.update_stage_feedback_action(
@@ -1118,10 +1125,11 @@ def _watch_post_approval_handoff(
         thread_id=thread_id,
         run_id=handoff.run_id,
         surface_id=surface_id,
-        explanation=(
-            f"{approved_stage.title()} approval is recorded, but the prompt for the next stage stopped before it appeared. "
-            "Reopen the same feedback deck to retry the handoff."
-        ),
+        explanation=(f"{approved_stage.title()} approval is recorded, but the prompt for the next stage stopped before it appeared. Reopen the same feedback deck to retry the handoff."),
+        # A run that succeeds without leaving its card in thread history has
+        # delivered nothing, so it is treated exactly like one that died: the
+        # ledger action reopens for retry and the conversation says so.
+        success_has_follow_up=card_delivered,
         on_failure=mark_failed,
     )
 
@@ -1249,11 +1257,7 @@ async def apply_design_feedback_action(
         return updated, handoff
 
     receipt = dict(action.get("receipt") or {})
-    if (
-        replayed
-        and action.get("status") == "pending"
-        and receipt.get("handoff_status") == "retrying"
-    ):
+    if replayed and action.get("status") == "pending" and receipt.get("handoff_status") == "retrying":
         current_cycle = await repo.get_cycle(cycle_id, project_id=project_id)
         if current_cycle is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cycle not found")
@@ -1335,6 +1339,11 @@ async def apply_design_feedback_action(
                         "messages": [
                             {
                                 "role": "user",
+                                # See ``_start_post_approval_handoff``: without an
+                                # explicit identity the journal cannot tell this
+                                # run's own messages from retained history, so a
+                                # card this run authors never reaches the feed.
+                                "id": f"dbtl-chair-answer__{uuid4().hex}",
                                 "content": f'For your clarification "{question}", my answer is: {visible_answer}',
                                 "additional_kwargs": {
                                     "hide_from_ui": True,
@@ -1409,6 +1418,10 @@ async def apply_design_feedback_action(
                         "messages": [
                             {
                                 "role": "user",
+                                # See ``_start_post_approval_handoff``: an explicit
+                                # identity is what lets this run's own presented
+                                # artifacts and cards reach durable chat history.
+                                "id": f"dbtl-review-meeting__{uuid4().hex}",
                                 "content": (f"Convene the {surface_stage.title()} review meeting for the recorded evidence." + (f"\n\n{body.comment.strip()}" if body.comment.strip() else "")),
                                 "additional_kwargs": {
                                     "hide_from_ui": True,
@@ -1479,11 +1492,7 @@ async def apply_design_feedback_action(
         if surface_stage != "design" and body.action.kind in TRANSITION_INTENTS:
             current_cycle = await repo.get_cycle(cycle_id, project_id=project_id)
             current_stage = next(
-                (
-                    item
-                    for item in (current_cycle or {}).get("stages", [])
-                    if item.get("stage") == surface_stage
-                ),
+                (item for item in (current_cycle or {}).get("stages", []) if item.get("stage") == surface_stage),
                 None,
             )
             meeting_gate = _surface_meeting_gate(
@@ -1493,15 +1502,11 @@ async def apply_design_feedback_action(
                 cycle=current_cycle,
             )
             if meeting_gate is not None and meeting_gate.transition_routes_locked:
-                raise DesignFeedbackConflict(
-                    f"The {surface_stage.title()} gate requires its review meeting before this decision can be recorded."
-                )
+                raise DesignFeedbackConflict(f"The {surface_stage.title()} gate requires its review meeting before this decision can be recorded.")
         if body.action.kind in {"advance", "park"} and transition_gate is None:
             raise DesignFeedbackConflict("This deck does not carry a progressive transition gate.")
         if body.action.kind in {"advance", "park"} and surface_stage != "design":
-            raise DesignFeedbackConflict(
-                f"The {body.action.kind.replace('_', ' ')} intent is not implemented for the {surface_stage.title()} gate."
-            )
+            raise DesignFeedbackConflict(f"The {body.action.kind.replace('_', ' ')} intent is not implemented for the {surface_stage.title()} gate.")
         assessment = dict((transition_gate or {}).get("assessment") or {})
         assessed_difficulty = str(assessment.get("difficulty") or "")
         assessment_rationale = str(assessment.get("rationale") or "")
@@ -1642,27 +1647,15 @@ async def apply_design_feedback_action(
             "recommend_promotion",
             "close_without_candidate",
         }:
-            raise DesignFeedbackConflict(
-                f"The {body.action.kind.replace('_', ' ')} intent requires its stage-specific review record."
-            )
+            raise DesignFeedbackConflict(f"The {body.action.kind.replace('_', ' ')} intent requires its stage-specific review record.")
         if effective_difficulty == "high_stakes" and not body.comment.strip():
-            raise DesignFeedbackConflict(
-                f"A high-stakes {surface_stage.title()} verdict requires the reviewer's written rationale."
-            )
+            raise DesignFeedbackConflict(f"A high-stakes {surface_stage.title()} verdict requires the reviewer's written rationale.")
         if body.action.kind == "reject" and not body.comment.strip():
             raise DesignFeedbackConflict(f"{body.action.kind.replace('_', ' ').title()} requires a comment.")
-        rationale = body.comment.strip() or (
-            f"Approved from the registered {surface_stage.title()} feedback deck."
-            if body.action.kind == "approve"
-            else f"Selected contested {surface_stage.title()} issues require refinement."
-        )
+        rationale = body.comment.strip() or (f"Approved from the registered {surface_stage.title()} feedback deck." if body.action.kind == "approve" else f"Selected contested {surface_stage.title()} issues require refinement.")
         rationale_projection = rationale
         if body.action.kind == "request_changes":
-            target = (
-                f"the recorded issues {', '.join(body.action.option_ids)}"
-                if body.action.option_ids
-                else f"the {surface_stage.title()} evidence described in the reviewer's comment"
-            )
+            target = f"the recorded issues {', '.join(body.action.option_ids)}" if body.action.option_ids else f"the {surface_stage.title()} evidence described in the reviewer's comment"
             rationale_projection = f"Requested changes to {target}.\n\n{rationale}"
         provenance = {
             "input_source": "design_deck" if surface_stage == "design" else "stage_deck",
@@ -1685,11 +1678,7 @@ async def apply_design_feedback_action(
             # is what opens the data work that unblocks the edge.
             current = await repo.get_cycle(cycle_id, project_id=project_id)
             current_status = next(
-                (
-                    str(item.get("status") or "")
-                    for item in (current or {}).get("stages", [])
-                    if item.get("stage") == surface_stage
-                ),
+                (str(item.get("status") or "") for item in (current or {}).get("stages", []) if item.get("stage") == surface_stage),
                 "",
             )
             auto_submit = current_status in {"in_progress", "changes_requested"}

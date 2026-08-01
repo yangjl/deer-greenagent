@@ -13,6 +13,8 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
 
+from deerflow.runtime.journal import GRAPH_RECEIPT_KEY
+
 # Request-id prefixes are part of the durable Human Input wire protocol.  They
 # must remain collision-free under ``startswith`` and valid for every provider's
 # tool-call grammar.
@@ -44,6 +46,19 @@ def card_request_id(prefix: str, cycle: str, *parts: str) -> str:
     if len(request_id) > MAX_CARD_REQUEST_ID_CHARS:  # pragma: no cover - guarded by test
         request_id = f"{prefix}{digest}"
     return request_id
+
+
+def receipt_message(content: str) -> AIMessage:
+    """A deterministic supervisor reply that must survive a page reload.
+
+    These are authored by the graph with no model call behind them, so no LLM
+    callback exists to persist them and they would live only in the checkpoint —
+    visible while the run streams and gone on refresh. The marker tells
+    ``RunJournal``'s root reconciliation pass to write it to the thread's
+    durable event feed. It is server-owned: the Gateway strips it from any
+    client-supplied message.
+    """
+    return AIMessage(content=content, additional_kwargs={GRAPH_RECEIPT_KEY: True})
 
 
 def build_human_input_messages(

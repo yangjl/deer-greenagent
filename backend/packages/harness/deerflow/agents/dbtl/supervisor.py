@@ -50,6 +50,9 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
 from deerflow.agents.dbtl.supervisor_support.card_history import (
+    answers_a_server_card as _answers_a_server_card,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
     authored_design as _authored_design,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
@@ -83,6 +86,9 @@ from deerflow.agents.dbtl.supervisor_support.card_history import (
     latest_cycle_request_text as _latest_cycle_request_text,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
+    latest_stage_handoff_state as _latest_stage_handoff_state,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
     latest_user_text as _latest_user_text,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
@@ -92,11 +98,15 @@ from deerflow.agents.dbtl.supervisor_support.card_history import (
     routing_input as _routing_input,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
+    unanswered_stage_handoff_card as _unanswered_stage_handoff_card,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
     wants_roster_adjustment as _wants_roster_adjustment,
 )
 from deerflow.agents.dbtl.supervisor_support.continuation import (
     handle_stage_handoff,
     handle_test_cards,
+    represent_pending_stage_handoff,
 )
 from deerflow.agents.dbtl.supervisor_support.human_input_protocol import (
     COUNCIL_ADJUST_PREFIX,
@@ -111,6 +121,7 @@ from deerflow.agents.dbtl.supervisor_support.human_input_protocol import (
     TEST_REVIEW_PREFIX,
     build_human_input_messages,
     card_request_id,
+    receipt_message,
 )
 from deerflow.agents.dbtl.supervisor_support.human_input_protocol import (
     MAX_CARD_REQUEST_ID_CHARS as _MAX_CARD_REQUEST_ID_CHARS,
@@ -212,6 +223,66 @@ async def _validate_stage_handoff(
     if isawaitable(result):
         result = await result
     return str(result) if isinstance(result, str) and result.strip() else None
+
+
+#: Runtime-context key carrying the read-only DBTL status the ordinary branch
+#: hands to the lead agent. Written per request and never checkpointed, like the
+#: parked-design brief beside it.
+DBTL_STATUS_CONTEXT_KEY = "dbtl_status_snapshot"
+
+#: A status block is orientation, not a directory. More than this and it stops
+#: being read.
+_MAX_STATUS_CYCLES = 5
+
+
+async def _dbtl_status_snapshot(
+    stage_adapter: Any,
+    context: SupervisorContext,
+    state: dict,
+) -> dict[str, Any] | None:
+    """Assemble what the lead agent must know before it answers in a project.
+
+    The observed takeover began with the lead agent having no idea a governed
+    cycle existed: it read "start to build following the approved design" as an
+    ordinary request and produced a convincing, ungoverned Build. Handing it the
+    active cycles, their stage statuses, and any control still waiting lets it
+    explain the boundary instead of walking through it.
+
+    This is awareness only. It grants no authority, and the block the middleware
+    renders says so explicitly — the routing and execution fences, not the
+    prompt, are what actually stop an ordinary run from taking a stage.
+    """
+    if not context.project_id:
+        return None
+    cycles: list[dict[str, Any]] = []
+    reader = getattr(stage_adapter, "active_cycle_status", None)
+    if callable(reader):
+        try:
+            read = reader(project_id=context.project_id)
+            if isawaitable(read):
+                read = await read
+            if isinstance(read, list):
+                cycles = [item for item in read if isinstance(item, dict)][:_MAX_STATUS_CYCLES]
+        except Exception:  # noqa: BLE001 - orientation must never fail a reply
+            logger.warning("Could not read DBTL status for project %s.", context.project_id, exc_info=True)
+    handoff = _latest_stage_handoff_state(state)
+    pending_control = None
+    if handoff is not None:
+        request, answer = handoff
+        pending_control = {
+            "kind": "stage_handoff",
+            "cycle_id": str(request.get("dbtl_cycle_id") or ""),
+            "approved_stage": str(request.get("approved_stage") or ""),
+            "next_stage": str(request.get("next_stage") or ""),
+            "answered_with": answer,
+        }
+    if not cycles and pending_control is None:
+        return None
+    return {
+        "project_id": context.project_id,
+        "cycles": cycles,
+        "pending_control": pending_control,
+    }
 
 
 def _bullets(items: tuple[str, ...] | list[str]) -> str:
@@ -342,10 +413,7 @@ def _stage_handoff_message(
     approved_label = approved_stage.replace("_", " ").title()
     next_label = next_stage.replace("_", " ").title()
     question = f"{approved_label} is approved. What should happen next?"
-    context = (
-        f"{next_label} is open for this cycle, but it will not start until you choose. "
-        "Holding here leaves the approved record unchanged."
-    )
+    context = f"{next_label} is open for this cycle, but it will not start until you choose. Holding here leaves the approved record unchanged."
     options = [
         {
             "id": "start_next_stage",
@@ -1027,6 +1095,14 @@ def build_supervisor_graph(
                     parked = await parked
                 if parked is not None:
                     return SupervisorBranch.ORDINARY.value
+        # The routing fence. A request that would otherwise become ordinary work
+        # is intercepted when this thread still holds an unanswered Start/Hold
+        # card: that card *is* the pending intent, and free text like "go ahead
+        # with build" is answering it, not opening a new conversation. Every
+        # earlier guard fires only on a card answer or an explicitly scoped
+        # request, which is exactly why this path escaped to the lead agent.
+        if decision.branch is SupervisorBranch.ORDINARY and context.project_id and _unanswered_stage_handoff_card(state) is not None and not _answers_a_server_card(state):
+            return SupervisorBranch.CYCLE_CONTINUATION.value
         logger.debug(
             "dbtl supervisor route: branch=%s source=%s project=%s cycle=%s",
             decision.branch,
@@ -1108,23 +1184,36 @@ def build_supervisor_graph(
         if test_cards.handled:
             return test_cards.update or {}
 
-        request_text = (
-            f"Start the governed {str(handoff_answer[1].get('next_stage') or '').replace('_', ' ')} stage now."
-            if handoff_answer is not None and handoff_answer[0] == "start_next_stage"
-            else _latest_cycle_request_text(state)
-        )
+        request_text = f"Start the governed {str(handoff_answer[1].get('next_stage') or '').replace('_', ' ')} stage now." if handoff_answer is not None and handoff_answer[0] == "start_next_stage" else _latest_cycle_request_text(state)
         review_intent = _review_intent(request_text)
         if review_intent is not None:
             return {
                 "messages": [
-                    AIMessage(
-                        content=_render_review_intent_guidance(
+                    receipt_message(
+                        _render_review_intent_guidance(
                             decision,
                             review_intent=review_intent,
                         )
                     )
                 ]
             }
+
+        # Nothing above claimed this request, and a Start/Hold control is still
+        # waiting. Re-present it rather than dispatching stage work or falling
+        # through: the person is answering a question the server already asked,
+        # and only the card can carry that answer into a governed dispatch.
+        if handoff_answer is None:
+            represented = await represent_pending_stage_handoff(
+                state=state,
+                decision=decision,
+                context=context,
+                stage_adapter=stage_adapter,
+                request_nonce=request_nonce,
+                validate=_validate_stage_handoff,
+                build_card=_stage_handoff_message,
+            )
+            if represented is not None:
+                return represented
         raw_context = request_context(config)
         # Server-owned, set only by the authenticated convening route. Read here
         # so the Design preflight below is skipped entirely: a review meeting
@@ -1396,9 +1485,15 @@ def build_supervisor_graph(
         return {"messages": [AIMessage(content=_render_continuation(decision, result.note))]}
 
     async def ordinary(state: dict, config: RunnableConfig) -> dict:
-        """Delegate ordinary work, adding parked evidence only for this call."""
-        ordinary_config = config
+        """Delegate ordinary work, adding DBTL orientation only for this call.
+
+        Both additions are request-only context: the lead agent is told what
+        governed work exists around it *before* it reaches for a tool, so it can
+        say where the boundary is instead of building past it. Neither key
+        widens what it may do.
+        """
         decision = decide(state)
+        extra: dict[str, Any] = {}
         if decision.cycle_id:
             reader = getattr(stage_adapter, "parked_design_context", None)
             if callable(reader):
@@ -1409,13 +1504,18 @@ def build_supervisor_graph(
                 if isawaitable(parked):
                     parked = await parked
                 if parked is not None:
-                    active_context = dict(request_context(config))
-                    active_context["dbtl_parked_design_brief"] = parked
-                    ordinary_config = dict(config)
-                    ordinary_config["context"] = active_context
-                    configurable = dict(ordinary_config.get("configurable") or {})
-                    configurable["context"] = active_context
-                    ordinary_config["configurable"] = configurable
+                    extra["dbtl_parked_design_brief"] = parked
+        status = await _dbtl_status_snapshot(stage_adapter, context, state)
+        if status is not None:
+            extra[DBTL_STATUS_CONTEXT_KEY] = status
+        if not extra:
+            return await lead_agent.ainvoke(state, config=config)
+        active_context = {**request_context(config), **extra}
+        ordinary_config = dict(config)
+        ordinary_config["context"] = active_context
+        configurable = dict(ordinary_config.get("configurable") or {})
+        configurable["context"] = active_context
+        ordinary_config["configurable"] = configurable
         return await lead_agent.ainvoke(state, config=ordinary_config)
 
     builder = StateGraph(state_schema)
