@@ -35,6 +35,7 @@ from deerflow.uploads.manager import (
 )
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 from deerflow.utils.file_io import run_file_io
+from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
 
@@ -300,7 +301,7 @@ def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
 @router.post("", response_model=UploadResponse)
 @require_permission("threads", "write", owner_check=True, require_existing=False)
 async def upload_files(
-    thread_id: str,
+    thread_id: ThreadId,
     request: Request,
     files: list[UploadFile] = File(...),
     config: AppConfig = Depends(get_config),
@@ -447,7 +448,7 @@ async def upload_files(
 @router.get("/limits", response_model=UploadLimits)
 @require_permission("threads", "read", owner_check=True)
 async def get_upload_limits(
-    thread_id: str,
+    thread_id: ThreadId,
     request: Request,
     config: AppConfig = Depends(get_config),
 ) -> UploadLimits:
@@ -457,7 +458,7 @@ async def get_upload_limits(
 
 @router.get("/list", response_model=UploadListResponse)
 @require_permission("threads", "read", owner_check=True)
-async def list_uploaded_files(thread_id: str, request: Request) -> UploadListResponse:
+async def list_uploaded_files(thread_id: ThreadId, request: Request) -> UploadListResponse:
     """List all files in a thread's uploads directory."""
     try:
         _, project_root = await resolve_thread_project_scope(request, thread_id)
@@ -470,7 +471,7 @@ async def list_uploaded_files(thread_id: str, request: Request) -> UploadListRes
 
 @router.delete("/{filename}")
 @require_permission("threads", "delete", owner_check=True, require_existing=True)
-async def delete_uploaded_file(thread_id: str, filename: str, request: Request) -> dict:
+async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
     try:
         _, project_root = await resolve_thread_project_scope(request, thread_id)

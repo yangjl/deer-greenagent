@@ -72,6 +72,7 @@ from deerflow.runtime.secret_context import (
 from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -1333,6 +1334,11 @@ async def start_run(
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
     """
+    try:
+        validate_thread_id(thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     # Phase 0 fail-closed boundary: reject the experimental orchestrator before
     # creating a run row, thread metadata, checkpoints, or project artifacts.
     ensure_dbtl_execution_allowed(body.assistant_id, getattr(body, "command", None))
