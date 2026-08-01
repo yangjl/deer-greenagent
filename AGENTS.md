@@ -232,6 +232,17 @@ Breeding-workspace note:
   conflict, the authenticated parent restores the original selected
   option/comment from the failed action before re-enabling the deck, so the
   person is not trapped with a non-retryable draft.
+  An approval that opens another stage also starts a short hidden supervisor
+  run in the originating conversation. That run emits a deterministic,
+  checkpointed Human Input Card with **Start &lt;next stage&gt;** and **Hold here**;
+  it never dispatches stage work while rendering the card. The reply recovers
+  its cycle from the server-emitted card, and only the Start option reaches the
+  live stage adapter. Both the supervisor and adapter validate the card's bound
+  cycle revision and intended next stage; stale cards dispatch nothing. Review
+  success and chat delivery are separate durable states: a failed handoff keeps
+  the approval, reopens the exact deck action, and retries only the prompt under
+  the original payload/id. This keeps the owner in the loop after leaving the
+  deck without relying on the composer's one-request cycle selector.
   `dbtl.design_deck_feedback=false` restores the
   legacy Design card/sheet during the rollback window; non-Design review sheets
   are unchanged. Legacy, downloaded, wrong-thread, stale, superseded, or
@@ -577,13 +588,11 @@ Breeding-workspace note:
   radio group with a comment box and one button. Any depth records its verdict
   in that one action; depth changes how much justification is required, not how
   many clicks, so a high-stakes approval needs the reviewer's written rationale
-  rather than a depth override. Park keeps the Design
-  The deck's look is themeable: `dbtl.council_deck_theme_skill` names an
-  enabled skill supplying `assets/deck-theme.css` (worked example:
-  `skills/public/dbtl-deck-theme/`), appended after the built-in stylesheet.
-  A theme restyles and never restructures — markup-bearing or oversized CSS is
-  refused and the deck renders unthemed, because the deck's exact bytes are
-  hash-registered as the surface a person answers the gate through. Park keeps the Design
+  rather than a depth override. The deck uses one built-in editorial
+  presentation style. There is no theme
+  setting or skill-loading fallback, so every newly rendered review surface has
+  the same canonical appearance. Its exact bytes remain hash-registered as the
+  surface a person answers the gate through. Park keeps the Design
   open and routes ordinary cycle-scoped work to the lead agent with the exact
   evidence hash explicitly marked unapproved; any later gate decision clears
   the marker. Records accumulate with the flag off. Manual checkpoint manifests

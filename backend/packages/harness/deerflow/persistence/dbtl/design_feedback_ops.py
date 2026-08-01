@@ -524,6 +524,43 @@ class DesignFeedbackOpsMixin:
             if surface.deck_content_hash != expected_deck_hash:
                 raise DesignFeedbackConflict("The deck bytes no longer match the registered feedback surface.")
 
+            existing = await session.scalar(
+                select(DbtlDesignFeedbackActionRow).where(
+                    DbtlDesignFeedbackActionRow.surface_id == surface_id,
+                    DbtlDesignFeedbackActionRow.action_group == action_group,
+                )
+            )
+            existing_receipt = dict(existing.receipt or {}) if existing is not None else {}
+            if (
+                existing is not None
+                and existing.status == "handoff_failed"
+                and existing_receipt.get("handoff_status") == "failed"
+            ):
+                # The review itself is already committed. Retrying this exact
+                # payload only redelivers its next-stage card; it must not rebind
+                # the verdict to a newer cycle revision or execute review_stage
+                # again. The original payload hash includes that reviewed
+                # revision, so any changed answer still fails closed.
+                if existing.payload_hash != payload_hash or existing.id != submission_id:
+                    raise DesignFeedbackConflict(
+                        "The recorded approval can retry its handoff only with the exact original payload."
+                    )
+                existing.status = "pending"
+                existing.failure_code = None
+                existing.receipt = {
+                    **existing_receipt,
+                    "handoff_status": "retrying",
+                    "message": "The recorded approval's next-stage prompt is being retried.",
+                }
+                await session.commit()
+                return self._surface_payload(surface), self._action_payload(existing), True
+            if (
+                existing is not None
+                and existing.status == "pending"
+                and existing_receipt.get("handoff_status") == "retrying"
+            ):
+                raise DesignFeedbackConflict("The approval handoff retry is already in progress.")
+
             cycle = await session.scalar(
                 select(DbtlCycleRow).where(
                     DbtlCycleRow.id == cycle_id,
@@ -600,12 +637,6 @@ class DesignFeedbackOpsMixin:
                 if action_kind in {"advance", "park"} and card_ids:
                     raise DesignFeedbackConflict("A progressive route action cannot select issue cards.")
 
-            existing = await session.scalar(
-                select(DbtlDesignFeedbackActionRow).where(
-                    DbtlDesignFeedbackActionRow.surface_id == surface_id,
-                    DbtlDesignFeedbackActionRow.action_group == action_group,
-                )
-            )
             if existing is not None:
                 same_failed_retry = bool(
                     action_group == "chair_response"

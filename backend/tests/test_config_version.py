@@ -173,6 +173,39 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     assert upgraded["database"]["sqlite_dir"] == "custom-data"
 
 
+def test_version_36_upgrade_removes_retired_deck_theme_setting(tmp_path):
+    """The canonical deck style leaves no inert theme knob in upgraded configs."""
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example_src = repo_root / "config.example.yaml"
+    config_path = tmp_path / "config.yaml"
+    (tmp_path / "config.example.yaml").write_text(example_src.read_text(encoding="utf-8"), encoding="utf-8")
+    config_path.write_text(
+        yaml.dump(
+            {
+                "config_version": 36,
+                "dbtl": {"council_deck_theme_skill": "my-old-theme"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        env={**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == 37
+    assert "council_deck_theme_skill" not in upgraded["dbtl"]
+    assert "Removed 1 retired field" in result.stdout
+
+
 def _load_repo_example() -> dict:
     """Load the real repo config.example.yaml (first-run template)."""
     example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"

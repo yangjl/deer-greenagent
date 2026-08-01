@@ -148,6 +148,35 @@ class FakeRepo:
         }
 
 
+@pytest.mark.asyncio
+async def test_stale_handoff_is_refused_before_runtime_or_worker_dispatch() -> None:
+    adapter = LiveStageAdapter(
+        repo=FakeRepo(_cycle(state="test", revision=9)),
+        app_config=SimpleNamespace(),
+    )
+
+    refusal = await adapter.validate_stage_handoff(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        expected_db_revision=7,
+        expected_stage="build",
+    )
+    result = await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Start the governed Build stage now.",
+        state={},
+        config={},
+        expected_stage="build",
+        expected_cycle_revision=7,
+    )
+
+    assert refusal is not None and "revision 9" in refusal
+    assert result.stage == "build"
+    assert result.worker_count == 0
+    assert "nothing was started" in result.note.lower()
+
+
 class FakeDispatcher:
     def __init__(
         self,

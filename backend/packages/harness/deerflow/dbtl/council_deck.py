@@ -33,7 +33,6 @@ from __future__ import annotations
 import html
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from deerflow.dbtl.consensus import Consensus, parse_consensus
@@ -109,57 +108,6 @@ def _disagreement_body(consensus: Consensus) -> str:
             verdict = '<p class="verdict verdict--open"><span>Not resolved</span> still open for the project owner.</p>'
         cards.append(f'<article class="contested"><h3>{html.escape(_text(item.topic, limit=200))}</h3><ul class="positions">{positions}</ul>{verdict}</article>')
     return f'<div class="contested-grid">{"".join(cards)}</div>'
-
-
-#: A theme may restyle the deck; it may never add to it. The bytes of a
-#: registered deck are hash-bound as the actionable gate surface, so anything
-#: that could introduce markup or script is refused rather than escaped:
-#: inside a ``<style>`` element there is no escaping — a closing tag ends the
-#: stylesheet and everything after it is document content.
-DECK_THEME_MAX_CHARS = 128_000
-_THEME_REFUSED_SUBSTRINGS = ("</style", "<script", "<!--", "javascript:")
-
-
-@dataclass(frozen=True)
-class DeckThemeParse:
-    """A validated theme, or the reason there isn't one.
-
-    Never raises, mirroring ``parse_decision_request``: a malformed theme costs
-    the deck its styling, never the meeting whose results are already recorded.
-    """
-
-    css: str = ""
-    refusal: str = ""
-
-    @property
-    def accepted(self) -> bool:
-        return bool(self.css)
-
-
-def parse_deck_theme(raw: object) -> DeckThemeParse:
-    """Accept operator-supplied CSS for the deck, or say why not.
-
-    Only the *shape* is checked here. A theme is trusted operator content in
-    the same sense ``extensions.middlewares`` is — CSS can hide any element it
-    likes, including the inert notice — which is why the theme is named in
-    `config.yaml` rather than discovered from whatever happens to be on disk.
-    An agent that can write a skill directory still cannot make the server load
-    one.
-    """
-    if raw is None:
-        return DeckThemeParse()
-    if not isinstance(raw, str):
-        return DeckThemeParse(refusal=f"A deck theme must be CSS text, not {type(raw).__name__}.")
-    css = raw.strip()
-    if not css:
-        return DeckThemeParse()
-    if len(css) > DECK_THEME_MAX_CHARS:
-        return DeckThemeParse(refusal=f"The deck theme is {len(css)} characters; the cap is {DECK_THEME_MAX_CHARS}.")
-    lowered = css.casefold()
-    for marker in _THEME_REFUSED_SUBSTRINGS:
-        if marker in lowered:
-            return DeckThemeParse(refusal=f"A deck theme may not contain {marker!r}; it is a stylesheet, not markup.")
-    return DeckThemeParse(css=css)
 
 
 #: What the persisted file says instead of accepting an answer. It is the whole
@@ -353,11 +301,7 @@ def _stage_review_controls(
     difficulty = _text(assessment.get("difficulty") or "standard", limit=32)
     rationale = _text(assessment.get("rationale") or "", limit=2_000)
     assessment_html = (
-        f'<div class="assessment" data-assessed-difficulty="{html.escape(difficulty)}">'
-        f"<p><strong>Agent assessment: {html.escape(difficulty.replace('_', ' '))}</strong></p>"
-        f"<p>{html.escape(rationale)}</p></div>"
-        if assessment
-        else ""
+        f'<div class="assessment" data-assessed-difficulty="{html.escape(difficulty)}"><p><strong>Agent assessment: {html.escape(difficulty.replace("_", " "))}</strong></p><p>{html.escape(rationale)}</p></div>' if assessment else ""
     )
 
     buttons = [
@@ -372,11 +316,7 @@ def _stage_review_controls(
                 '<button type="button" data-deck-action="reject" disabled>Reject</button>',
             ]
         )
-    test_note = (
-        '<p class="option-detail">The scientific outcome and route are computed from the structured validity review; the meeting may annotate that pack but cannot choose an outcome.</p>'
-        if normalized == "test"
-        else ""
-    )
+    test_note = '<p class="option-detail">The scientific outcome and route are computed from the structured validity review; the meeting may annotate that pack but cannot choose an outcome.</p>' if normalized == "test" else ""
     stage_label = normalized.title() or "Stage"
     return (
         f'<fieldset class="review" disabled><legend>Move this {html.escape(stage_label)} evidence through its human gate</legend>'
@@ -384,9 +324,7 @@ def _stage_review_controls(
         f'<div class="comment"><label for="stage-review-comment">Reviewer comment or meeting brief</label>'
         '<textarea id="stage-review-comment" data-deck-comment rows="4" disabled></textarea></div>'
         f'<div class="review-actions">{"".join(buttons)}</div></fieldset>'
-        '<p class="inert" data-deck-status role="status" aria-live="polite">'
-        + html.escape(INERT_NOTICE)
-        + "</p>"
+        '<p class="inert" data-deck-status role="status" aria-live="polite">' + html.escape(INERT_NOTICE) + "</p>"
     )
 
 
@@ -681,17 +619,9 @@ def render_council_deck(
     surface_mode: str = "",
     transition_gate: Mapping[str, object] | None = None,
     stage: str = "design",
-    theme_css: str = "",
     generated_at: datetime | None = None,
 ) -> str:
-    """The meeting's outcome as one self-contained HTML slide deck.
-
-    ``theme_css`` is appended after the built-in stylesheet so an operator theme
-    overrides it by ordinary cascade rather than by fighting specificity. It is
-    validated by ``parse_deck_theme`` first; an unthemed render is byte-identical
-    to one from before themes existed, which is what keeps a re-rendered deck's
-    content hash stable.
-    """
+    """The meeting's outcome as one self-contained HTML slide deck."""
     chair = _chair_result(results) or {}
     consensus = parse_consensus(chair.get("consensus"))
     summary = _text(chair.get("summary"), limit=MAX_SUMMARY_CHARS)
@@ -754,11 +684,7 @@ def render_council_deck(
                 kind="review",
                 eyebrow="Human gate",
                 title=f"Review the {normalized_stage.title()}",
-                body=(
-                    _review_controls(consensus, transition_gate)
-                    if normalized_stage == "design"
-                    else _stage_review_controls(normalized_stage, transition_gate)
-                ),
+                body=(_review_controls(consensus, transition_gate) if normalized_stage == "design" else _stage_review_controls(normalized_stage, transition_gate)),
             )
         )
     next_actions = _bullets(list(chair.get("recommended_next_actions") or []))
@@ -772,13 +698,11 @@ def render_council_deck(
         )
     )
 
-    theme = parse_deck_theme(theme_css)
     return _DECK_TEMPLATE.format(
         title=html.escape(f"{cycle_title or 'Design meeting'} — {stage_title}"),
         slides="".join(slides),
         count=len(slides),
         bridge=_bridge_script_for_stage(surface_id, stage),
-        theme=f"\n<style data-deck-theme>\n{theme.css}\n</style>" if theme.accepted else "",
     )
 
 
@@ -790,34 +714,34 @@ _DECK_TEMPLATE = """<!doctype html>
 <title>{title}</title>
 <style>
   :root {{
-    --bg: #ffffff; --fg: #16181d; --muted: #5d6470; --line: #e3e6ec;
-    --accent: #1f6feb; --warn: #b45309; --card: #f7f8fa;
+    --bg: #fbf9f4; --fg: #1b1a17; --muted: #6a6459; --line: #e2ddd1;
+    --accent: #8a3324; --warn: #96601b; --card: #f3efe5;
   }}
   @media (prefers-color-scheme: dark) {{
     :root {{
-      --bg: #101216; --fg: #e8eaef; --muted: #9aa2b1; --line: #262b33;
-      --accent: #6ea8ff; --warn: #f0b45e; --card: #171a20;
+      --bg: #16150f; --fg: #f0ece2; --muted: #a49c8c; --line: #2e2b22;
+      --accent: #e0714f; --warn: #d9a441; --card: #1f1d16;
     }}
   }}
   * {{ box-sizing: border-box; }}
   body {{
     margin: 0; background: var(--bg); color: var(--fg);
-    font: 16px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font: 16px/1.55 ui-serif, Georgia, "Iowan Old Style", "Times New Roman", serif;
   }}
   .deck {{ height: 100vh; display: flex; align-items: center; justify-content: center; padding: 3rem 2rem 4.5rem; }}
   .slide {{ display: none; width: min(60rem, 100%); max-height: 100%; overflow-y: auto; }}
   .slide.is-active {{ display: block; animation: in .18s ease-out; }}
   @keyframes in {{ from {{ opacity: 0; transform: translateY(6px); }} to {{ opacity: 1; transform: none; }} }}
-  .eyebrow {{ margin: 0 0 .35rem; color: var(--muted); font-size: .8rem; letter-spacing: .09em; text-transform: uppercase; }}
-  h2 {{ margin: 0 0 1.25rem; font-size: clamp(1.7rem, 3.6vw, 2.7rem); line-height: 1.15; letter-spacing: -.02em; }}
-  .slide--title h2 {{ font-size: clamp(2.1rem, 5vw, 3.4rem); }}
+  .eyebrow {{ margin: 0 0 .35rem; color: var(--accent); font: .72rem/1.55 ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; letter-spacing: .16em; text-transform: uppercase; }}
+  h2 {{ margin: 0 0 1.25rem; font-size: clamp(1.7rem, 3.6vw, 2.7rem); font-weight: 600; line-height: 1.15; letter-spacing: -.025em; }}
+  .slide--title h2 {{ font-size: clamp(2.1rem, 5vw, 3.4rem); font-style: italic; }}
   .lede {{ font-size: 1.15rem; color: var(--muted); max-width: 42rem; }}
   .stamp {{ color: var(--muted); font-size: .82rem; margin-top: 1.75rem; word-break: break-all; }}
   ul {{ margin: 0; padding-left: 1.15rem; }}
   li {{ margin: .55rem 0; font-size: 1.08rem; }}
   .empty {{ color: var(--muted); font-style: italic; }}
   .contested-grid {{ display: grid; gap: .9rem; }}
-  .contested {{ border: 1px solid var(--line); border-radius: 10px; padding: .9rem 1.05rem; background: var(--card); }}
+  .contested {{ border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0; padding: 1rem 1.15rem; background: var(--card); }}
   .contested h3 {{ margin: 0 0 .5rem; font-size: 1.05rem; }}
   .positions {{ color: var(--muted); }}
   .positions li {{ font-size: .96rem; margin: .3rem 0; }}
@@ -825,6 +749,7 @@ _DECK_TEMPLATE = """<!doctype html>
   .verdict span {{ display: inline-block; margin-right: .5rem; padding: .08rem .5rem; border-radius: 999px; font-size: .74rem;
     letter-spacing: .05em; text-transform: uppercase; border: 1px solid currentColor; }}
   .verdict--open {{ color: var(--warn); }}
+  .verdict--open span {{ font-weight: 600; }}
   .verdict--settled span {{ color: var(--accent); }}
   .assessment {{ margin: 1rem 0; padding: .9rem; border: 1px solid var(--line); border-radius: .7rem; background: var(--card); }}
   .assessment p {{ margin: .2rem 0 .55rem; }}
@@ -841,11 +766,12 @@ _DECK_TEMPLATE = """<!doctype html>
     padding: .8rem .95rem; background: var(--card); }}
   .option input {{ margin: .3rem 0 0; flex: none; width: 1.05rem; height: 1.05rem; accent-color: var(--accent); }}
   .option label {{ display: grid; gap: .2rem; }}
+  .option input:checked + label {{ outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }}
   .option-label {{ font-weight: 600; font-size: 1.02rem; }}
   .option-value {{ color: var(--fg); font-size: .97rem; }}
   .option-detail {{ color: var(--muted); font-size: .9rem; }}
-  /* Not colour alone: the badge keeps its border and text in every theme and in
-     print, where an accent tint is the first thing to disappear. */
+  /* Not colour alone: the badge keeps its border and text in every palette and
+     in print, where an accent tint is the first thing to disappear. */
   .badge {{ margin-left: .55rem; padding: .08rem .5rem; border: 1px solid currentColor; border-radius: 999px;
     color: var(--accent); font-size: .68rem; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; vertical-align: middle; }}
   .decision[disabled] .option {{ opacity: .92; }}
@@ -869,7 +795,7 @@ _DECK_TEMPLATE = """<!doctype html>
   }}
   .submit-row button:disabled, .review-actions button:disabled {{ cursor: not-allowed; opacity: .55; }}
   .inert {{ margin: 0; padding: .55rem .8rem; border: 1px dashed var(--line); border-radius: 8px;
-    color: var(--muted); font-size: .88rem; }}
+    color: var(--muted); font: .8rem/1.55 ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; }}
   .gate {{ margin-top: 1.5rem; color: var(--muted); font-size: .9rem; border-left: 2px solid var(--line); padding-left: .85rem; }}
   .bar {{ position: fixed; left: 0; bottom: 0; width: 100%; display: flex; align-items: center; gap: 1rem;
     padding: .7rem 1.4rem; border-top: 1px solid var(--line); background: var(--bg); font-size: .82rem; color: var(--muted); }}
@@ -888,7 +814,7 @@ _DECK_TEMPLATE = """<!doctype html>
     .decision input, .review input {{ display: none; }}
     .bar {{ display: none; }}
   }}
-</style>{theme}
+</style>
 </head>
 <body>
 <main class="deck">{slides}</main>

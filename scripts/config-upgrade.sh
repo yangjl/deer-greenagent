@@ -74,6 +74,7 @@ print()
 # Each migration targets a specific version upgrade.
 # 'replacements': list of (old_string, new_string) applied to the raw YAML text.
 #   This handles value changes that a dict merge cannot catch.
+# 'remove_paths': tuple paths deleted from parsed YAML when a setting retires.
 
 MIGRATIONS = {
     1: {
@@ -85,6 +86,10 @@ MIGRATIONS = {
             ('src.tools.', 'deerflow.tools.'),
         ],
     },
+    37: {
+        'description': 'Make the DBTL deck style canonical instead of configurable',
+        'remove_paths': [('dbtl', 'council_deck_theme_skill')],
+    },
     # Future migrations go here:
     # 2: {
     #     'description': '...',
@@ -94,6 +99,7 @@ MIGRATIONS = {
 
 # Apply migrations in order for versions (user_version, example_version]
 migrated = []
+remove_paths = []
 for version in range(user_version + 1, example_version + 1):
     migration = MIGRATIONS.get(version)
     if not migration:
@@ -103,14 +109,33 @@ for version in range(user_version + 1, example_version + 1):
         if old in raw_text:
             raw_text = raw_text.replace(old, new)
             migrated.append(f'{old} -> {new}')
+    remove_paths.extend(migration.get('remove_paths', []))
 
 # Re-parse after text migrations
 user = yaml.safe_load(raw_text) or {}
+
+removed = []
+for path in remove_paths:
+    parent = user
+    for key in path[:-1]:
+        parent = parent.get(key)
+        if not isinstance(parent, dict):
+            break
+    else:
+        if path[-1] in parent:
+            parent.pop(path[-1])
+            removed.append('.'.join(path))
 
 if migrated:
     print(f'Applied {len(migrated)} migration(s):')
     for m in migrated:
         print(f'  ~ {m}')
+    print()
+
+if removed:
+    print(f'Removed {len(removed)} retired field(s):')
+    for path in removed:
+        print(f'  - {path}')
     print()
 
 # ── Merge missing fields ─────────────────────────────────────────────────
@@ -146,7 +171,7 @@ if added:
     for a in added:
         print(f'  + {a}')
 
-if not migrated and not added:
+if not migrated and not removed and not added:
     print('No changes needed (version bumped only).')
 
 print()

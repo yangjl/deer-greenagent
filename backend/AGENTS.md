@@ -1919,17 +1919,32 @@ construction because raising there would cost the user the cycle they just
 approved. The structured questions also ride on the card artifact as
 `setup_questions`, so a richer per-question UI needs no second emission path.
 
-**Setup and Design interactions use DeerFlow's native Human Input Card, and a
-card is only half the feature.** Setup clarification, setup confirmation, and
-the Design council's `needs_input` all use the existing `ask_clarification`
-AI-tool / ToolMessage pair. Their request-id prefixes are `dbtl-setup__`,
-`dbtl-setup-confirm__`, and `dbtl-design__` because they resume differently: a
-design answer feeds a running stage, a setup answer re-routes a request that has
-started nothing, and a confirmation answer either opens the design questions
-(approval) or receives a deterministic no-write acknowledgement, while the
-authenticated frontend action performs any requested cycle creation. No DBTL-specific card is mounted by proposal evaluation, and
-continuation is not a proposable route because that request already executes
-the selected stage. Emitting a card without handling its answer is the failure
+**Setup, Design, and post-approval handoffs use DeerFlow's native Human Input
+Card, and a card is only half the feature.** Setup clarification, setup
+confirmation, the Design council's `needs_input`, and the deterministic choice
+that follows a deck approval all use the existing `ask_clarification` AI-tool /
+ToolMessage pair. Their request-id prefixes are `dbtl-setup__`,
+`dbtl-setup-confirm__`, `dbtl-design__`, and `dbtl-stage-handoff__` because they
+resume differently: a design answer feeds a running stage, a setup answer
+re-routes a request that has started nothing, and a confirmation answer either
+opens the design questions (approval) or receives a deterministic no-write
+acknowledgement, while the authenticated frontend action performs any requested
+cycle creation. A deck approval starts one hidden cycle-scoped supervisor run;
+it emits **Start &lt;next stage&gt;** / **Hold here** without calling the stage
+adapter. Hold is terminal and does no work. Start uses the server-emitted option
+value, recovers the cycle from the card's `dbtl_cycle_id`, and validates both
+the card's `cycle_revision` and `next_stage` before calling the live adapter;
+the adapter repeats that validation against the cycle it loads, so a stale card
+cannot start whichever stage happens to be current. Approval and prompt delivery
+are separate durable outcomes in the feedback-action ledger. Synchronous run
+admission failure or a later terminal background failure writes
+`handoff_failed` without undoing the review, and an exact-payload retry under the
+original client submission id starts only a new handoff run. The process-local
+watcher posts the failure into chat and updates the ledger; the authenticated
+surface read model reconstructs the same retry state after a Gateway restart.
+No DBTL-specific card is mounted by proposal evaluation,
+and continuation is not a proposable route because that request already
+executes the selected stage. Emitting a card without handling its answer is the failure
 mode to watch for — routing reads the newest _visible_ user message, so a hidden
 card reply would be skipped and the request re-derived from the original prompt,
 looping straight back into the same question. `_routing_input` closes that: it
@@ -2520,30 +2535,15 @@ are already durable and supplied back to that chair.
 Failure to render or write returns `None` and logs — the deck is a presentation
 of a record already committed, so it must never fail the turn.
 
-**A theme may restyle the deck; it may never add to it.** `dbtl.council_deck_theme_skill`
-names an enabled skill supplying `assets/deck-theme.css`, which
-`render_council_deck(theme_css=...)` appends after its own stylesheet so plain
-selectors win by cascade rather than by an `!important` war. Three rules keep
-this from touching anything that matters. **Refuse, never escape**: inside a
-`<style>` element there is no escaping, so `parse_deck_theme` rejects any
-stylesheet containing `</style`, `<script`, `<!--`, or `javascript:`, plus
-anything over `DECK_THEME_MAX_CHARS` — the deck's exact bytes are hash-registered
-as the actionable gate surface, and a theme that could close the style element
-could add controls to it. **Unthemed is byte-identical to before themes
-existed**, so a re-render does not change a deck's content hash merely because
-the feature shipped. And **every failure costs styling only**: an unknown skill,
-a disabled one, a missing asset, a symlink escaping the skill directory, or an
-unreadable registry each log a reason and render the built-in look
-(`_load_deck_theme`), because the meeting's results are already committed by the
-time this runs. Resolution goes through the enabled-skill registry rather than a
-path join, so disabling the skill turns the theme off and custom-shadows-public
-behaves as it does everywhere else. The theme is named in **operator config**
-and not discovered from disk on purpose: `skills/custom` is agent-writable when
-agent-managed skills are on, and CSS can hide any element including the deck's
-inert notice — an agent that can write a skill directory still cannot make the
-server load one. `skills/public/dbtl-deck-theme/` is the worked example; it is
-asset-only and its frontmatter says so, since it is not a workflow to activate.
-Tests: `test_dbtl_deck_theme.py`.
+**The deck has one canonical editorial style.** Its palette, typography, and
+meeting-specific emphasis live directly in `council_deck._DECK_TEMPLATE`; there
+is no operator setting, theme parser, or skill-loading fallback. This keeps a
+newly rendered feedback surface visually consistent across deployments and
+removes the failure mode where a missing or disabled skill silently restored the
+older plain deck. The exact self-contained HTML bytes are still hash-registered
+as the actionable gate surface. Config version 37 removes the retired
+`dbtl.council_deck_theme_skill` key during `make config-upgrade`. Tests:
+`test_dbtl_deck_theme.py` and `test_config_version.py`.
 
 **A paused chair may return a structured `decision_request`, and the deck renders
 it as an inert choice.** `deerflow.dbtl.decision_request` defines

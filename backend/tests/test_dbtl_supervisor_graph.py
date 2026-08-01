@@ -825,6 +825,204 @@ class TestStageStubCannotDoScience:
         assert "nothing has been recorded" in answer.lower()
 
 
+class TestPostApprovalStageHandoff:
+    """A deck verdict opens the next stage, but a person still starts it."""
+
+    MARKER = {
+        "version": 1,
+        "cycle_id": "cyc-1",
+        "cycle_revision": 7,
+        "approved_stage": "design",
+        "next_stage": "build",
+        "surface_id": "surface-1",
+    }
+
+    @staticmethod
+    def _reply(request_id: str, option_id: str, *, echoed_value: str | None = None) -> HumanMessage:
+        return HumanMessage(
+            content=option_id,
+            id=f"answer-{option_id}",
+            additional_kwargs={
+                "hide_from_ui": True,
+                "human_input_response": {
+                    "version": 1,
+                    "kind": "human_input_response",
+                    "source": "ask_clarification",
+                    "request_id": request_id,
+                    "response_kind": "option",
+                    "option_id": option_id,
+                    "value": echoed_value or option_id,
+                },
+            },
+        )
+
+    @staticmethod
+    def _adapter(executed: list[dict], *, refusal: str | None = None):
+        class Adapter:
+            async def validate_stage_handoff(self, **kwargs):
+                return refusal
+
+            async def execute(self, **kwargs):
+                executed.append(kwargs)
+                return SimpleNamespace(
+                    stage="build",
+                    cycle_id=kwargs["cycle_id"],
+                    note="Build dispatch was admitted.",
+                    artifact_uri=None,
+                    clarification_question=None,
+                    produced_usable_evidence=False,
+                )
+
+        return Adapter()
+
+    async def _ask(self, adapter, *, thread_id: str):
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id="cyc-1",
+                explicit_choice=ExplicitChoice.CONTINUE_CYCLE,
+            ),
+            stage_adapter=adapter,
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+        return await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    HumanMessage(content="Review the Design package.", id="human-1"),
+                    AIMessage(content="The package is ready.", id="ai-ready"),
+                    HumanMessage(
+                        content="Design approval is recorded. Ask before starting Build.",
+                        id="handoff-marker",
+                        additional_kwargs={
+                            "hide_from_ui": True,
+                            "dbtl_post_approval_handoff": self.MARKER,
+                        },
+                    ),
+                ],
+            },
+            config={
+                "configurable": {"thread_id": thread_id},
+                "context": {"run_id": f"run-{thread_id}"},
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_approval_surfaces_a_cycle_bound_card_without_dispatching(self):
+        executed: list[dict] = []
+        asked = await self._ask(self._adapter(executed), thread_id="handoff-ask")
+
+        assert executed == []
+        call, card = asked["messages"][-2:]
+        assert isinstance(call, AIMessage)
+        assert isinstance(card, ToolMessage)
+        request = card.artifact["human_input"]
+        assert request["clarification_type"] == "dbtl_stage_handoff"
+        assert request["dbtl_cycle_id"] == "cyc-1"
+        assert request["approved_stage"] == "design"
+        assert request["next_stage"] == "build"
+        assert [option["id"] for option in request["options"]] == [
+            "start_next_stage",
+            "hold_here",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_hold_keeps_the_stage_open_and_dispatches_nothing(self):
+        executed: list[dict] = []
+        adapter = self._adapter(executed)
+        asked = await self._ask(adapter, thread_id="handoff-hold-ask")
+        request_id = asked["messages"][-1].artifact["human_input"]["request_id"]
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F"),
+            stage_adapter=adapter,
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    *asked["messages"],
+                    self._reply(request_id, "hold_here"),
+                ],
+            },
+            config={"configurable": {"thread_id": "handoff-hold-answer"}},
+        )
+
+        assert executed == []
+        assert "no stage work was started" in final["messages"][-1].content.lower()
+
+    @pytest.mark.asyncio
+    async def test_start_recovers_card_cycle_and_dispatches_the_governed_stage(self):
+        executed: list[dict] = []
+        adapter = self._adapter(executed)
+        asked = await self._ask(adapter, thread_id="handoff-start-ask")
+        request_id = asked["messages"][-1].artifact["human_input"]["request_id"]
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            # Deliberately omit selected_cycle_id: the durable card owns scope.
+            context=SupervisorContext(project_id="proj-1", project_name="G2F"),
+            stage_adapter=adapter,
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    *asked["messages"],
+                    # The reply echo is untrusted; the emitted option id wins.
+                    self._reply(
+                        request_id,
+                        "start_next_stage",
+                        echoed_value="hold_here",
+                    ),
+                ],
+            },
+            config={"configurable": {"thread_id": "handoff-start-answer"}},
+        )
+
+        assert len(executed) == 1
+        assert executed[0]["cycle_id"] == "cyc-1"
+        assert executed[0]["project_id"] == "proj-1"
+        assert executed[0]["request_text"] == "Start the governed build stage now."
+        assert executed[0]["expected_stage"] == "build"
+        assert executed[0]["expected_cycle_revision"] == 7
+
+    @pytest.mark.asyncio
+    async def test_stale_answer_is_refused_before_dispatch(self):
+        executed: list[dict] = []
+        asked = await self._ask(self._adapter(executed), thread_id="handoff-stale-ask")
+        request_id = asked["messages"][-1].artifact["human_input"]["request_id"]
+        stale_adapter = self._adapter(
+            executed,
+            refusal="The cycle changed after this prompt was rendered. Nothing was started.",
+        )
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F"),
+            stage_adapter=stale_adapter,
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    *asked["messages"],
+                    self._reply(request_id, "start_next_stage"),
+                ],
+            },
+            config={"configurable": {"thread_id": "handoff-stale-answer"}},
+        )
+
+        assert executed == []
+        assert "nothing was started" in final["messages"][-1].content.lower()
+
+
 class TestCouncilPreflight:
     """The roster is shown before the council convenes, not after."""
 

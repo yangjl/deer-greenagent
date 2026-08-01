@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from hashlib import sha256
 from inspect import isawaitable
@@ -123,6 +123,7 @@ DESIGN_CLARIFICATION_PREFIX = "dbtl-design__"
 DESIGN_AUTHORING_PREFIX = "dbtl-design-write__"
 TEST_REVIEW_PREFIX = "dbtl-test-review__"
 TEST_OUTCOME_PREFIX = "dbtl-test-outcome__"
+STAGE_HANDOFF_PREFIX = "dbtl-stage-handoff__"
 # Not a card: the id of the ``present_files`` pair that delivers a finished
 # package. Same provider constraint, same failure mode.
 PRESENT_ARTIFACT_PREFIX = "dbtl-present__"
@@ -308,6 +309,89 @@ def _answered_cycle_card_id(state: dict) -> str | None:
     return None
 
 
+def _pending_stage_handoff(state: dict) -> dict[str, Any] | None:
+    """The newest hidden, server-started post-approval handoff marker."""
+    from deerflow.agents.human_input import read_human_input_response
+
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+        if read_human_input_response(additional_kwargs) is not None:
+            return None
+        marker = additional_kwargs.get("dbtl_post_approval_handoff")
+        if isinstance(marker, dict):
+            required = ("cycle_id", "approved_stage", "next_stage", "surface_id")
+            return (
+                marker
+                if all(isinstance(marker.get(key), str) and marker.get(key) for key in required)
+                and isinstance(marker.get("cycle_revision"), int)
+                and int(marker["cycle_revision"]) > 0
+                else None
+            )
+        if not additional_kwargs.get("hide_from_ui"):
+            return None
+    return None
+
+
+def _answered_stage_handoff(state: dict) -> tuple[str, dict[str, Any]] | None:
+    """The server-owned handoff choice and request payload behind its reply."""
+    answered = _card_answer(state, STAGE_HANDOFF_PREFIX)
+    if answered is None:
+        return None
+    request_id, _echoed_value = answered
+    request = _emitted_card_request(state, request_id)
+    if request is None or request.get("clarification_type") != "dbtl_stage_handoff":
+        return None
+    from deerflow.agents.human_input import read_human_input_response
+
+    latest = next(
+        (
+            message
+            for message in reversed(state.get("messages") or [])
+            if isinstance(message, HumanMessage)
+        ),
+        None,
+    )
+    response = read_human_input_response(getattr(latest, "additional_kwargs", None) or {}) if latest is not None else None
+    if response is None or response.get("response_kind") != "option":
+        return None
+    option_id = str(response.get("option_id") or "")
+    option = next(
+        (
+            item
+            for item in request.get("options", [])
+            if isinstance(item, dict) and item.get("id") == option_id
+        ),
+        None,
+    )
+    return (str(option.get("value") or ""), request) if option is not None else None
+
+
+async def _validate_stage_handoff(
+    stage_adapter: Any,
+    context: SupervisorContext,
+    marker: Mapping[str, Any],
+) -> str | None:
+    """Fail closed unless the durable cycle still matches the emitted card."""
+    validator = getattr(stage_adapter, "validate_stage_handoff", None)
+    if not callable(validator):
+        return "This runtime cannot validate the next-stage prompt against current cycle state. Nothing was started."
+    try:
+        expected_revision = int(marker.get("cycle_revision") or 0)
+    except (TypeError, ValueError):
+        return "The next-stage prompt has no valid cycle revision. Nothing was started."
+    result = validator(
+        project_id=context.project_id,
+        cycle_id=str(marker.get("cycle_id") or ""),
+        expected_db_revision=expected_revision,
+        expected_stage=str(marker.get("next_stage") or ""),
+    )
+    if isawaitable(result):
+        result = await result
+    return str(result) if isinstance(result, str) and result.strip() else None
+
+
 def _routing_input(state: dict) -> tuple[str, ExplicitChoice | None, str | None]:
     """The text routing reads, plus any scope recovered from a card answer.
 
@@ -463,6 +547,86 @@ def _setup_clarification_message(
                     ],
                 }
             },
+        ),
+    )
+
+
+def _stage_handoff_message(
+    decision: BranchDecision,
+    marker: dict[str, Any],
+    *,
+    request_nonce: str,
+) -> tuple[AIMessage, ToolMessage]:
+    """Ask the owner before dispatching the stage opened by a deck approval."""
+    approved_stage = str(marker["approved_stage"]).strip().lower()
+    next_stage = str(marker["next_stage"]).strip().lower()
+    cycle_id = str(marker["cycle_id"])
+    surface_id = str(marker["surface_id"])
+    request_id = card_request_id(
+        STAGE_HANDOFF_PREFIX,
+        cycle_id,
+        request_nonce,
+        surface_id,
+        approved_stage,
+        next_stage,
+    )
+    approved_label = approved_stage.replace("_", " ").title()
+    next_label = next_stage.replace("_", " ").title()
+    question = f"{approved_label} is approved. What should happen next?"
+    context = (
+        f"{next_label} is open for this cycle, but it will not start until you choose. "
+        "Holding here leaves the approved record unchanged."
+    )
+    options = [
+        {
+            "id": "start_next_stage",
+            "label": f"Start {next_label}",
+            "value": "start_next_stage",
+            "description": f"Run the governed {next_label} stage now.",
+        },
+        {
+            "id": "hold_here",
+            "label": "Hold here",
+            "value": "hold_here",
+            "description": "Keep the next stage open without starting work.",
+        },
+    ]
+    request = {
+        "version": 1,
+        "kind": "human_input_request",
+        "source": "ask_clarification",
+        "request_id": request_id,
+        "clarification_type": "dbtl_stage_handoff",
+        "title": f"{approved_label} approved",
+        "question": question,
+        "context": context,
+        "input_mode": "single_choice",
+        "options": options,
+        "dbtl_cycle_id": decision.cycle_id or cycle_id,
+        "cycle_revision": int(marker.get("cycle_revision") or 0),
+        "approved_stage": approved_stage,
+        "next_stage": next_stage,
+        "design_feedback_surface_id": surface_id,
+    }
+    tool_call = {
+        "name": "ask_clarification",
+        "args": {
+            "question": question,
+            "context": context,
+            "clarification_type": "dbtl_stage_handoff",
+            "options": options,
+        },
+        "id": request_id,
+        "type": "tool_call",
+    }
+    return (
+        AIMessage(id=f"{request_id}:call", content="", tool_calls=[tool_call]),
+        ToolMessage(
+            id=request_id,
+            name="ask_clarification",
+            tool_call_id=request_id,
+            content=f"{context}\n\n{question}",
+            artifact={"human_input": request},
         ),
     )
 
@@ -1472,6 +1636,44 @@ def build_supervisor_graph(
         raw_context = request_context(config)
         request_nonce = str(raw_context.get("run_id") or "")
 
+        pending_handoff = _pending_stage_handoff(state)
+        if pending_handoff is not None:
+            if str(pending_handoff.get("cycle_id") or "") != str(decision.cycle_id or ""):
+                return {
+                    "messages": [
+                        AIMessage(
+                            content="The post-approval handoff no longer matches the selected cycle; no stage was started."
+                        )
+                    ]
+                }
+            refusal = await _validate_stage_handoff(stage_adapter, context, pending_handoff)
+            if refusal is not None:
+                return {"messages": [AIMessage(content=refusal)]}
+            return {
+                "messages": list(
+                    _stage_handoff_message(
+                        decision,
+                        pending_handoff,
+                        request_nonce=request_nonce,
+                    )
+                )
+            }
+
+        handoff_answer = _answered_stage_handoff(state)
+        if handoff_answer is not None and handoff_answer[0] == "hold_here":
+            next_stage = str(handoff_answer[1].get("next_stage") or "the next stage").replace("_", " ").title()
+            return {
+                "messages": [
+                    AIMessage(
+                        content=f"Holding here. {next_stage} remains open, and no stage work was started."
+                    )
+                ]
+            }
+        if handoff_answer is not None and handoff_answer[0] == "start_next_stage":
+            refusal = await _validate_stage_handoff(stage_adapter, context, handoff_answer[1])
+            if refusal is not None:
+                return {"messages": [AIMessage(content=refusal)]}
+
         outcome_answer = _answered_test_card(state, TEST_OUTCOME_PREFIX)
         if outcome_answer is not None:
             request_id, recommendation, snapshot = outcome_answer
@@ -1551,7 +1753,11 @@ def build_supervisor_graph(
                 **({"artifacts": [path for path in (result.artifact_uri, getattr(result, "deck_uri", None)) if path]} if choice == "convene_review_meeting" and getattr(result, "artifact_uri", None) else {}),
             }
 
-        request_text = _latest_cycle_request_text(state)
+        request_text = (
+            f"Start the governed {str(handoff_answer[1].get('next_stage') or '').replace('_', ' ')} stage now."
+            if handoff_answer is not None and handoff_answer[0] == "start_next_stage"
+            else _latest_cycle_request_text(state)
+        )
         review_intent = _review_intent(request_text)
         if review_intent is not None:
             return {
@@ -1631,6 +1837,9 @@ def build_supervisor_graph(
             "state": state,
             "config": config,
         }
+        if handoff_answer is not None and handoff_answer[0] == "start_next_stage":
+            execute_kwargs["expected_stage"] = str(handoff_answer[1].get("next_stage") or "")
+            execute_kwargs["expected_cycle_revision"] = int(handoff_answer[1].get("cycle_revision") or 0)
         if review_meeting_stage:
             # Convening is its own kind of request: the adapter reads the named
             # stage's recorded evidence rather than deriving a stage from cycle

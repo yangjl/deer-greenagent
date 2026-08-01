@@ -475,6 +475,15 @@ designNotes` and are handed to the council as the owner's decisions rather
   the first offers or requires the configured review meeting, and the second
   offers only routes allowed by the server-computed outcome. Status always has
   a text label and never depends on colour alone.
+  A deck approval that opens another stage uses the same generic card renderer:
+  the backend posts a `dbtl_stage_handoff` single-choice request with **Start
+  &lt;next stage&gt;** and **Hold here**. The frontend does not infer or persist a
+  stage transition from that card; it submits the ordinary hidden card response,
+  and the backend recovers the card-bound cycle if the one-shot composer scope
+  has already cleared. A `handoff_failed` receipt is not a failed review: the
+  parent restores the original action/comment/client submission id, sends the
+  original reviewed revision on retry, and re-enables only that approval action
+  so the backend can redeliver the prompt without recording a second verdict.
 - DBTL Phase 8 lives in `src/core/dbtl/knowledge-{view,api,hooks}.ts` and
   `project-rail/learn-review.tsx`. The Learn sheet labels every agent-created
   item as a provisional candidate and keeps candidate disposition, human

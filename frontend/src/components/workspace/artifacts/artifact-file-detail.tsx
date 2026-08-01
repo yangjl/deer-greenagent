@@ -85,6 +85,10 @@ const WRITE_FILE_PREVIEW_REFRESH_INTERVAL_MS = 3000;
 const DESIGN_CHAIR_POLL_INTERVAL_MS = 750;
 const DESIGN_CHAIR_MAX_POLLS = 800;
 
+function isRetryableDeckReceipt(status: string | undefined): boolean {
+  return status === "failed" || status === "handoff_failed";
+}
+
 type DeckProgress = {
   surfaceId: string;
   state: "submitting" | "running" | "completed" | "failed";
@@ -485,8 +489,9 @@ export function ArtifactFilePreview({
   const [deckProgress, setDeckProgress] = useState<DeckProgress | null>(null);
   const deckChannelRef = useRef<string | null>(null);
   const deckSurfaceRef = useRef<DesignFeedbackSurface | null>(null);
-  const [deckSurface, setDeckSurface] =
-    useState<DesignFeedbackSurface | null>(null);
+  const [deckSurface, setDeckSurface] = useState<DesignFeedbackSurface | null>(
+    null,
+  );
   const deckSubmissionIdRef = useRef<string | null>(null);
   const deckChairPollingSurfaceRef = useRef<string | null>(null);
   const citationSources = useMemo(
@@ -594,7 +599,9 @@ export function ArtifactFilePreview({
       deckChairPollingSurfaceRef.current = surfaceId;
       const activeStage = deckSurfaceRef.current?.stage ?? "design";
       const followUpLabel =
-        activeStage === "design" ? "Design chair" : `${activeStage} review meeting`;
+        activeStage === "design"
+          ? "Design chair"
+          : `${activeStage} review meeting`;
       setDeckProgress({
         surfaceId,
         state: "running",
@@ -712,8 +719,8 @@ export function ArtifactFilePreview({
           deckSurfaceRef.current = surface;
           setDeckSurface(surface);
           if (
-            surface.receipt?.status === "failed" &&
-            surface.receipt.client_submission_id
+            isRetryableDeckReceipt(surface.receipt?.status) &&
+            surface.receipt?.client_submission_id
           ) {
             // A remount must retry under the action ledger's original id.
             // Generating a new UUID would turn the same answer into a second
@@ -726,12 +733,12 @@ export function ArtifactFilePreview({
             type: "initialize",
             allowedActions: bytesMatch ? surface.allowed_actions : [],
             selectedOptionIds:
-              bytesMatch && surface.receipt?.status === "failed"
-                ? surface.receipt.selected_card_ids
+              bytesMatch && isRetryableDeckReceipt(surface.receipt?.status)
+                ? surface.receipt?.selected_card_ids
                 : undefined,
             comment:
-              bytesMatch && surface.receipt?.status === "failed"
-                ? (surface.receipt.human_comment ?? "")
+              bytesMatch && isRetryableDeckReceipt(surface.receipt?.status)
+                ? (surface.receipt?.human_comment ?? "")
                 : undefined,
             note: bytesMatch
               ? surface.note
@@ -828,6 +835,29 @@ export function ArtifactFilePreview({
                 ? "Cycle parked. You can continue from this deck when ready."
                 : `Submitted. Choose the final ${stageLabel} verdict.`),
           });
+        } else if (result.status === "handoff_failed") {
+          const refreshed = await fetchDesignFeedbackSurface({
+            projectId,
+            surfaceId,
+            viewerThreadId: threadId,
+          });
+          deckSurfaceRef.current = refreshed;
+          setDeckSurface(refreshed);
+          const note =
+            result.receipt?.message ??
+            "The approval is recorded, but its next-stage prompt could not start. Retry the same decision.";
+          setDeckProgress({
+            surfaceId,
+            state: "failed",
+            note,
+          });
+          send(surfaceId, channel, {
+            type: "initialize",
+            allowedActions: refreshed.allowed_actions,
+            selectedOptionIds: refreshed.receipt?.selected_card_ids ?? [],
+            comment: refreshed.receipt?.human_comment ?? "",
+            note,
+          });
         } else if (
           result.status === "resume_started" &&
           (intent.action.kind.startsWith("chair_") ||
@@ -884,14 +914,16 @@ export function ArtifactFilePreview({
               return;
             }
             if (
-              refreshed.receipt?.status === "failed" &&
+              isRetryableDeckReceipt(refreshed.receipt?.status) &&
               refreshed.allowed_actions.some(
                 (action) =>
                   action.startsWith("chair_") ||
-                  action === "convene_review_meeting",
+                  action === "convene_review_meeting" ||
+                  action === "approve" ||
+                  action === "advance",
               )
             ) {
-              if (refreshed.receipt.client_submission_id) {
+              if (refreshed.receipt?.client_submission_id) {
                 deckSubmissionIdRef.current =
                   refreshed.receipt.client_submission_id;
               }
@@ -902,8 +934,8 @@ export function ArtifactFilePreview({
               send(surfaceId, channel, {
                 type: "initialize",
                 allowedActions: refreshed.allowed_actions,
-                selectedOptionIds: refreshed.receipt.selected_card_ids ?? [],
-                comment: refreshed.receipt.human_comment ?? "",
+                selectedOptionIds: refreshed.receipt?.selected_card_ids ?? [],
+                comment: refreshed.receipt?.human_comment ?? "",
                 note:
                   error.message +
                   " The original recorded answer has been restored for retry.",

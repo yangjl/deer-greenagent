@@ -64,6 +64,7 @@ async def announce_failed_background_round(
     surface_id: str,
     explanation: str,
     success_has_follow_up: Callable[[], Awaitable[bool]] | None = None,
+    on_failure: Callable[[str], Awaitable[None]] | None = None,
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS,
     deadline_seconds: float = WATCH_DEADLINE_SECONDS,
     success_follow_up_grace_seconds: float = SUCCESS_FOLLOW_UP_GRACE_SECONDS,
@@ -105,6 +106,14 @@ async def announce_failed_background_round(
         if status not in _FAILED_STATUSES:
             if status != "success_without_follow_up":
                 continue
+        if on_failure is not None:
+            try:
+                await on_failure(status)
+            except Exception:  # noqa: BLE001 - recovery metadata must not hide the visible failure
+                logger.exception(
+                    "Failed to persist background-run recovery state for %s",
+                    run_id,
+                )
         message = AIMessage(
             # The identity binds the surface and run: a second watcher for the
             # same round writes the same row, and `put_if_absent` drops it.
@@ -150,6 +159,7 @@ def watch_background_round(
     surface_id: str,
     explanation: str,
     success_has_follow_up: Callable[[], Awaitable[bool]] | None = None,
+    on_failure: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
     """Spawn the fail-soft watcher as a detached task."""
     task = asyncio.create_task(
@@ -162,6 +172,7 @@ def watch_background_round(
             surface_id=surface_id,
             explanation=explanation,
             success_has_follow_up=success_has_follow_up,
+            on_failure=on_failure,
         )
     )
     _WATCHERS.add(task)

@@ -45,6 +45,19 @@ def _close_test_engine():
     anyio.run(close_engine)
 
 
+@pytest.fixture(autouse=True)
+def _stub_background_runs(monkeypatch):
+    """Router tests admit deterministic runs without booting the full runtime."""
+    started: list[tuple[object, str]] = []
+
+    async def fake_start_run(body, thread_id, request):
+        started.append((body, thread_id))
+        return SimpleNamespace(run_id=f"run-stub-{len(started)}")
+
+    monkeypatch.setattr(dbtl_cycles, "start_run", fake_start_run)
+    return started
+
+
 def _user() -> User:
     return User(id=_USER_ID, email="breeder@example.com", password_hash="x", system_role="user")
 
@@ -451,7 +464,10 @@ def test_a_terminal_chair_resume_without_a_followup_surface_reopens_the_same_ans
     assert started_runs == ["started", "started"]
 
 
-def test_design_submission_and_approval_are_two_bound_deck_transitions(tmp_path: Path) -> None:
+def test_design_submission_and_approval_are_two_bound_deck_transitions(
+    tmp_path: Path,
+    _stub_background_runs,
+) -> None:
     workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
     evidence_hash = "c" * 64
     with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
@@ -523,12 +539,156 @@ def test_design_submission_and_approval_are_two_bound_deck_transitions(tmp_path:
 
         assert reviewed.status_code == 200
         assert reviewed.json()["status"] == "review_recorded"
+        handoff_body, handoff_thread = _stub_background_runs[-1]
+        assert handoff_thread == "thread-1"
+        handoff_message = handoff_body.input["messages"][0]
+        marker = handoff_message["additional_kwargs"]["dbtl_post_approval_handoff"]
+        assert handoff_message["additional_kwargs"]["hide_from_ui"] is True
+        assert marker["cycle_id"] == cycle["id"]
+        assert marker["approved_stage"] == "design"
+        assert marker["next_stage"] in {"reconciliation", "build"}
+        assert reviewed.json()["receipt"]["handoff_run_id"].startswith("run-stub-")
         activity = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/activity").json()["events"]
         review_event = next(item for item in activity if item["event_type"] == "stage.reviewed")
         provenance = review_event["payload"]["design_feedback_provenance"]
         assert provenance["input_source"] == "design_deck"
         assert provenance["feedback_surface_id"] == surface["surface_id"]
         assert provenance["deck_content_hash"] == DECK_HASH
+
+        # A Gateway restart can lose the process-local watcher. The durable read
+        # model still recovers a terminal handoff failure without undoing the
+        # review and reopens only the exact approval action for retry.
+        client.app.state.run_store = SimpleNamespace(
+            get=AsyncMock(return_value={"status": "error"})
+        )
+        recovered = client.get(
+            f"{_url(project_id, cycle['id'], surface['surface_id'])}?viewer_thread_id=thread-1"
+        ).json()
+        assert recovered["receipt"]["status"] == "handoff_failed"
+        assert recovered["allowed_actions"] == ["approve"]
+        assert recovered["interactive"] is True
+        assert "approval remains recorded" in recovered["note"].lower()
+        assert next(
+            item
+            for item in client.get(
+                f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}"
+            ).json()["stages"]
+            if item["stage"] == "design"
+        )["status"] == "approved"
+
+
+def test_recorded_approval_survives_handoff_admission_failure_and_retries_exactly_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        project_id = _seed_project(client)
+        client.app.state.thread_store.get = AsyncMock(
+            return_value={"thread_id": "thread-1", "project_id": project_id}
+        )
+        cycle = _create_cycle(client, project_id)
+        attached = client.post(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/artifacts",
+            json={
+                "stage": "design",
+                "artifact_type": "design_brief.v2",
+                "uri": "/mnt/user-data/outputs/handoff-retry.md",
+                "content_hash": EVIDENCE_HASH,
+                "expected_db_revision": cycle["db_revision"],
+                "idempotency_key": "artifact-handoff-retry",
+            },
+        ).json()
+        cycle = client.get(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}"
+        ).json()
+        surface = anyio.run(
+            partial(
+                _register,
+                cycle_repo,
+                cycle,
+                mode="stage_review",
+                evidence_artifact_id=attached["id"],
+                evidence_artifact_revision=attached["revision"],
+                evidence_content_hash=EVIDENCE_HASH,
+                decision_request={"review_issue_ids": []},
+            )
+        )
+        action_url = f"{_url(project_id, cycle['id'], surface['surface_id'])}/actions"
+        submitted = client.post(
+            action_url,
+            json={
+                "version": 1,
+                "action": {"kind": "submit_for_review", "option_ids": []},
+                "comment": "",
+                "client_submission_id": "submit-before-handoff-retry",
+                "originating_thread_id": "thread-1",
+                "expected_db_revision": cycle["db_revision"],
+                "expected_evidence": {
+                    "artifact_id": attached["id"],
+                    "revision": attached["revision"],
+                    "content_hash": EVIDENCE_HASH,
+                },
+                "expected_deck_hash": DECK_HASH,
+            },
+        )
+        assert submitted.status_code == 200, submitted.text
+        cycle = submitted.json()["cycle"]
+        common = {
+            "version": 1,
+            "action": {"kind": "approve", "option_ids": []},
+            "comment": "The evidence is bounded.",
+            "client_submission_id": "approval-with-retry",
+            "originating_thread_id": "thread-1",
+            "expected_db_revision": cycle["db_revision"],
+            "expected_evidence": {
+                "artifact_id": attached["id"],
+                "revision": attached["revision"],
+                "content_hash": EVIDENCE_HASH,
+            },
+            "expected_deck_hash": DECK_HASH,
+        }
+
+        async def fail_start_run(*args, **kwargs):
+            raise RuntimeError("run admission unavailable")
+
+        monkeypatch.setattr(dbtl_cycles, "start_run", fail_start_run)
+        failed_handoff = client.post(action_url, json=common)
+
+        assert failed_handoff.status_code == 200, failed_handoff.text
+        assert failed_handoff.json()["status"] == "handoff_failed"
+        approved_cycle = failed_handoff.json()["cycle"]
+        approved_revision = approved_cycle["db_revision"]
+        assert next(
+            item for item in approved_cycle["stages"] if item["stage"] == "design"
+        )["status"] == "approved"
+
+        read = client.get(
+            f"{_url(project_id, cycle['id'], surface['surface_id'])}?viewer_thread_id=thread-1"
+        ).json()
+        assert read["allowed_actions"] == ["approve"]
+        assert read["receipt"]["expected_db_revision"] == common["expected_db_revision"]
+
+        started: list[tuple[object, str]] = []
+
+        async def succeed_start_run(body, thread_id, request):
+            started.append((body, thread_id))
+            return SimpleNamespace(run_id="run-handoff-retry")
+
+        monkeypatch.setattr(dbtl_cycles, "start_run", succeed_start_run)
+        retried = client.post(action_url, json=common)
+
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["status"] == "review_recorded"
+        assert retried.json()["replayed"] is True
+        assert retried.json()["cycle"]["db_revision"] == approved_revision
+        assert len(started) == 1
+        activity = client.get(
+            f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/activity"
+        ).json()["events"]
+        assert len(
+            [item for item in activity if item["event_type"] == "stage.reviewed"]
+        ) == 1
 
 
 def test_routine_progressive_gate_records_submit_and_approval_in_one_action(

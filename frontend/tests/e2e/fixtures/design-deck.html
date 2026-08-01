@@ -6,34 +6,34 @@
 <title>Simulate a maize breeding population — Design meeting</title>
 <style>
   :root {
-    --bg: #ffffff; --fg: #16181d; --muted: #5d6470; --line: #e3e6ec;
-    --accent: #1f6feb; --warn: #b45309; --card: #f7f8fa;
+    --bg: #fbf9f4; --fg: #1b1a17; --muted: #6a6459; --line: #e2ddd1;
+    --accent: #8a3324; --warn: #96601b; --card: #f3efe5;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #101216; --fg: #e8eaef; --muted: #9aa2b1; --line: #262b33;
-      --accent: #6ea8ff; --warn: #f0b45e; --card: #171a20;
+      --bg: #16150f; --fg: #f0ece2; --muted: #a49c8c; --line: #2e2b22;
+      --accent: #e0714f; --warn: #d9a441; --card: #1f1d16;
     }
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--fg);
-    font: 16px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font: 16px/1.55 ui-serif, Georgia, "Iowan Old Style", "Times New Roman", serif;
   }
   .deck { height: 100vh; display: flex; align-items: center; justify-content: center; padding: 3rem 2rem 4.5rem; }
   .slide { display: none; width: min(60rem, 100%); max-height: 100%; overflow-y: auto; }
   .slide.is-active { display: block; animation: in .18s ease-out; }
   @keyframes in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-  .eyebrow { margin: 0 0 .35rem; color: var(--muted); font-size: .8rem; letter-spacing: .09em; text-transform: uppercase; }
-  h2 { margin: 0 0 1.25rem; font-size: clamp(1.7rem, 3.6vw, 2.7rem); line-height: 1.15; letter-spacing: -.02em; }
-  .slide--title h2 { font-size: clamp(2.1rem, 5vw, 3.4rem); }
+  .eyebrow { margin: 0 0 .35rem; color: var(--accent); font: .72rem/1.55 ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; letter-spacing: .16em; text-transform: uppercase; }
+  h2 { margin: 0 0 1.25rem; font-size: clamp(1.7rem, 3.6vw, 2.7rem); font-weight: 600; line-height: 1.15; letter-spacing: -.025em; }
+  .slide--title h2 { font-size: clamp(2.1rem, 5vw, 3.4rem); font-style: italic; }
   .lede { font-size: 1.15rem; color: var(--muted); max-width: 42rem; }
   .stamp { color: var(--muted); font-size: .82rem; margin-top: 1.75rem; word-break: break-all; }
   ul { margin: 0; padding-left: 1.15rem; }
   li { margin: .55rem 0; font-size: 1.08rem; }
   .empty { color: var(--muted); font-style: italic; }
   .contested-grid { display: grid; gap: .9rem; }
-  .contested { border: 1px solid var(--line); border-radius: 10px; padding: .9rem 1.05rem; background: var(--card); }
+  .contested { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0; padding: 1rem 1.15rem; background: var(--card); }
   .contested h3 { margin: 0 0 .5rem; font-size: 1.05rem; }
   .positions { color: var(--muted); }
   .positions li { font-size: .96rem; margin: .3rem 0; }
@@ -41,6 +41,7 @@
   .verdict span { display: inline-block; margin-right: .5rem; padding: .08rem .5rem; border-radius: 999px; font-size: .74rem;
     letter-spacing: .05em; text-transform: uppercase; border: 1px solid currentColor; }
   .verdict--open { color: var(--warn); }
+  .verdict--open span { font-weight: 600; }
   .verdict--settled span { color: var(--accent); }
   .assessment { margin: 1rem 0; padding: .9rem; border: 1px solid var(--line); border-radius: .7rem; background: var(--card); }
   .assessment p { margin: .2rem 0 .55rem; }
@@ -57,11 +58,12 @@
     padding: .8rem .95rem; background: var(--card); }
   .option input { margin: .3rem 0 0; flex: none; width: 1.05rem; height: 1.05rem; accent-color: var(--accent); }
   .option label { display: grid; gap: .2rem; }
+  .option input:checked + label { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
   .option-label { font-weight: 600; font-size: 1.02rem; }
   .option-value { color: var(--fg); font-size: .97rem; }
   .option-detail { color: var(--muted); font-size: .9rem; }
-  /* Not colour alone: the badge keeps its border and text in every theme and in
-     print, where an accent tint is the first thing to disappear. */
+  /* Not colour alone: the badge keeps its border and text in every palette and
+     in print, where an accent tint is the first thing to disappear. */
   .badge { margin-left: .55rem; padding: .08rem .5rem; border: 1px solid currentColor; border-radius: 999px;
     color: var(--accent); font-size: .68rem; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; vertical-align: middle; }
   .decision[disabled] .option { opacity: .92; }
@@ -85,7 +87,7 @@
   }
   .submit-row button:disabled, .review-actions button:disabled { cursor: not-allowed; opacity: .55; }
   .inert { margin: 0; padding: .55rem .8rem; border: 1px dashed var(--line); border-radius: 8px;
-    color: var(--muted); font-size: .88rem; }
+    color: var(--muted); font: .8rem/1.55 ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; }
   .gate { margin-top: 1.5rem; color: var(--muted); font-size: .9rem; border-left: 2px solid var(--line); padding-left: .85rem; }
   .bar { position: fixed; left: 0; bottom: 0; width: 100%; display: flex; align-items: center; gap: 1rem;
     padding: .7rem 1.4rem; border-top: 1px solid var(--line); background: var(--bg); font-size: .82rem; color: var(--muted); }

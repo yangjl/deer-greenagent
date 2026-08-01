@@ -53,7 +53,17 @@ Design–Build–Test–Learn (DBTL) governance.
   asks one focused clarification or presents a Design package for human review.
   After the meeting convenes, its registered slide deck is the input surface:
   the owner can answer the chair, submit the exact Design package, and record a
-  final verdict there. The authenticated parent verifies the exact deck and
+  final verdict there. Every newly rendered meeting deck uses the same built-in
+  editorial presentation style; there is no theme setting or skill to enable.
+  When an approval opens the next DBTL stage, DeerFlow posts a deterministic
+  Human Input Card in the originating conversation before any stage worker
+  runs. The owner chooses **Start &lt;stage&gt;** or **Hold here**; the durable card
+  carries the cycle binding so a one-shot composer scope cannot strand the
+  reply. The card also binds the exact cycle revision and next stage: if either
+  changes before Start is chosen, DeerFlow expires the handoff and dispatches
+  nothing. Approval remains recorded when the background prompt cannot start;
+  reopening the same deck retries only that prompt, never the review itself.
+  The authenticated parent verifies the exact deck and
   evidence hashes before enabling controls; downloaded, stale, or wrong-thread
   copies remain read-only. Approval language in ordinary chat does not mutate
   the gate or rerun the council. When a chair-resume run ends without producing

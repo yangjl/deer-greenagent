@@ -82,10 +82,16 @@ export interface DesignFeedbackSurface {
   current_stage_status: string | null;
   receipt: {
     client_submission_id?: string;
+    expected_db_revision?: number;
     status: string;
     selected_card_ids?: string[];
     human_comment?: string | null;
-    receipt?: { message?: string; run_id?: string; db_revision?: number };
+    receipt?: {
+      message?: string;
+      run_id?: string;
+      db_revision?: number;
+      handoff_status?: "started" | "failed" | "retrying" | "not_needed";
+    };
   } | null;
   note: string;
   transition_gate: TransitionGate | null;
@@ -201,6 +207,8 @@ export async function applyDesignFeedbackAction(input: {
   comment: string;
   clientSubmissionId: string;
 }) {
+  const retryingRecordedHandoff =
+    input.surface.receipt?.status === "handoff_failed";
   return post<{
     status: string;
     run_id?: string | null;
@@ -218,7 +226,10 @@ export async function applyDesignFeedbackAction(input: {
       comment: input.comment,
       client_submission_id: input.clientSubmissionId,
       originating_thread_id: input.viewerThreadId,
-      expected_db_revision: input.surface.current_db_revision,
+      expected_db_revision: retryingRecordedHandoff
+        ? (input.surface.receipt?.expected_db_revision ??
+          input.surface.current_db_revision)
+        : input.surface.current_db_revision,
       expected_evidence: input.surface.evidence_artifact_id
         ? {
             artifact_id: input.surface.evidence_artifact_id,

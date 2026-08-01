@@ -43,7 +43,7 @@ from deerflow.dbtl.council import (
     plan_from_proposal,
     recommend_depth,
 )
-from deerflow.dbtl.council_deck import parse_deck_theme, render_council_deck
+from deerflow.dbtl.council_deck import render_council_deck
 from deerflow.dbtl.council_proposal import (
     CouncilProposal,
     build_proposal_prompt,
@@ -116,8 +116,6 @@ from deerflow.dbtl.worker_result import (
     parse_worker_result,
 )
 from deerflow.projects.storage import ensure_project_dirs, project_outputs_dir
-from deerflow.runtime.user_context import DEFAULT_USER_ID
-from deerflow.skills.storage import get_or_new_user_skill_storage
 from deerflow.trace_context import (
     DEERFLOW_TRACE_METADATA_KEY,
     get_current_trace_id,
@@ -1234,6 +1232,28 @@ def _executable_stage(cycle: Mapping[str, Any]) -> str | None:
     return fallback
 
 
+def _stage_handoff_refusal(
+    cycle: Mapping[str, Any],
+    *,
+    expected_db_revision: int,
+    expected_stage: str,
+) -> str | None:
+    """Refuse a card whose recorded approval no longer names current state."""
+    current_revision = int(cycle.get("db_revision") or 0)
+    if current_revision != expected_db_revision:
+        return (
+            f"This next-stage prompt was created at cycle revision {expected_db_revision}, "
+            f"but the cycle is now at revision {current_revision}. Nothing was started; open the current cycle state and try again."
+        )
+    current_stage = _executable_stage(cycle)
+    if current_stage != expected_stage:
+        return (
+            f"This prompt offered {expected_stage.title()}, but the cycle's current executable stage is "
+            f"{current_stage.title() if current_stage else 'none'}. Nothing was started."
+        )
+    return None
+
+
 def _safe_token(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:20]
 
@@ -1935,71 +1955,6 @@ class RenderedDeck:
     content_hash: str
 
 
-#: Where a theme skill keeps its stylesheet. One fixed relative path, because a
-#: configurable one inside a configurable skill is two things to get wrong for
-#: no gain — and because the file must be readable without executing the skill.
-DECK_THEME_ASSET = Path("assets") / "deck-theme.css"
-
-
-def _configured_deck_theme_skill() -> str:
-    """The theme skill named in operator config, or nothing."""
-    from deerflow.config.app_config import get_app_config
-
-    try:
-        app_config = get_app_config()
-    except Exception:  # noqa: BLE001 - an unreadable config costs styling only
-        return ""
-    return str(getattr(getattr(app_config, "dbtl", None), "council_deck_theme_skill", None) or "")
-
-
-def _load_deck_theme(skill_name: str, *, user_id: str) -> str:
-    """Read the configured theme skill's stylesheet, or return nothing.
-
-    Blocking file IO; call it off the event loop. Fail-soft throughout: an
-    unknown skill, a disabled one, a missing asset, or an unreadable file each
-    cost the deck its styling and nothing else. The refusal is logged with its
-    reason, because a theme that silently does not apply is worse than one that
-    is visibly rejected.
-
-    Resolution goes through the enabled-skill registry rather than a raw path
-    join so a disabled skill stops theming decks, and so custom-shadows-public
-    behaves the same here as everywhere else.
-    """
-    name = (skill_name or "").strip()
-    if not name:
-        return ""
-    try:
-        storage = get_or_new_user_skill_storage(user_id or DEFAULT_USER_ID)
-        skill = next((item for item in storage.load_skills(enabled_only=True) if item.name == name), None)
-        if skill is None:
-            logger.warning("Design deck theme skill %r is not an enabled skill; rendering the deck unthemed.", name)
-            return ""
-        asset = (skill.skill_dir / DECK_THEME_ASSET).resolve()
-        # The skill directory is the boundary: a symlinked or traversing asset
-        # path must not turn "read this skill's stylesheet" into an arbitrary
-        # file read.
-        if not asset.is_relative_to(skill.skill_dir.resolve()):
-            logger.warning("Design deck theme %r resolves outside its skill directory; rendering the deck unthemed.", name)
-            return ""
-        raw = asset.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        logger.warning("Design deck theme skill %r has no %s; rendering the deck unthemed.", name, DECK_THEME_ASSET.as_posix())
-        return ""
-    except Exception:  # noqa: BLE001 - a presentation must not break the record
-        logger.warning("Could not read the design deck theme from skill %r.", name, exc_info=True)
-        return ""
-
-    theme = parse_deck_theme(raw)
-    if theme.refusal:
-        logger.warning("Design deck theme skill %r was refused: %s", name, theme.refusal)
-    return theme.css
-
-
-def _deck_theme_css(user_id: str) -> str:
-    """Config read plus file read in one hop, for a single ``to_thread`` call."""
-    return _load_deck_theme(_configured_deck_theme_skill(), user_id=user_id)
-
-
 def _write_council_deck(
     *,
     project_root: str,
@@ -2013,7 +1968,6 @@ def _write_council_deck(
     surface_id: str = "",
     surface_mode: str = "",
     transition_gate: Mapping[str, Any] | None = None,
-    theme_css: str = "",
 ) -> RenderedDeck | None:
     """Write the meeting's outcome as a slide deck, beside the review package.
 
@@ -2040,7 +1994,6 @@ def _write_council_deck(
             surface_mode=surface_mode,
             transition_gate=transition_gate,
             stage=stage,
-            theme_css=theme_css,
         ).encode("utf-8")
     except Exception:  # noqa: BLE001 - a presentation must not break the record
         logger.warning("Could not render the design meeting slide deck.", exc_info=True)
@@ -2185,6 +2138,26 @@ class LiveStageAdapter:
         merged = _runtime_view(self._runtime_config) if self._runtime_config is not None else {}
         merged.update(_runtime_view(config))
         return merged
+
+    async def validate_stage_handoff(
+        self,
+        *,
+        project_id: str | None,
+        cycle_id: str | None,
+        expected_db_revision: int,
+        expected_stage: str,
+    ) -> str | None:
+        """Validate a durable handoff marker without dispatching workers."""
+        if not project_id or not cycle_id:
+            return "The handoff no longer has a project-owned cycle. Nothing was started."
+        cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
+        if cycle is None:
+            return "The handoff's cycle is no longer available in this project. Nothing was started."
+        return _stage_handoff_refusal(
+            cycle,
+            expected_db_revision=expected_db_revision,
+            expected_stage=expected_stage,
+        )
 
     async def parked_design_context(
         self,
@@ -3076,7 +3049,6 @@ class LiveStageAdapter:
                 review_issue_ids=(tuple(f"issue-{index + 1}" for index, _item in enumerate(chair_result.consensus.disagreements)) if chair_result is not None and chair_result.consensus is not None else ()),
                 transition_gate=transition_gate,
             )
-            theme_css = await asyncio.to_thread(_deck_theme_css, str(user_id or ""))
             deck = await asyncio.to_thread(
                 _write_council_deck,
                 project_root=project_root,
@@ -3090,7 +3062,6 @@ class LiveStageAdapter:
                 surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
                 surface_mode=(surface_plan.mode if surface_plan is not None else ""),
                 transition_gate=transition_gate,
-                theme_css=theme_css,
             )
             if deck is not None:
                 deck_uri = deck.uri
@@ -3252,6 +3223,8 @@ class LiveStageAdapter:
         approved_council_proposal: CouncilProposal | None = None,
         clarification_answer: str | None = None,
         review_meeting_stage: str | None = None,
+        expected_stage: str | None = None,
+        expected_cycle_revision: int | None = None,
     ) -> LiveStageResult:
         if not project_id or not cycle_id:
             return LiveStageResult(
@@ -3266,6 +3239,18 @@ class LiveStageAdapter:
                 cycle_id=cycle_id,
                 note=f"Cycle {cycle_id} is not available in this project; no workers were dispatched and nothing was recorded.",
             )
+        if expected_stage is not None and expected_cycle_revision is not None:
+            refusal = _stage_handoff_refusal(
+                cycle,
+                expected_db_revision=expected_cycle_revision,
+                expected_stage=expected_stage,
+            )
+            if refusal is not None:
+                return LiveStageResult(
+                    stage=expected_stage,
+                    cycle_id=cycle_id,
+                    note=refusal,
+                )
 
         runtime = self._runtime(config)
         project_root = runtime.get("project_root")
@@ -4050,7 +4035,6 @@ class LiveStageAdapter:
                 review_issue_ids=(tuple(f"issue-{index + 1}" for index, _item in enumerate(chair_result.consensus.disagreements)) if chair_result is not None and chair_result.consensus is not None else ()),
                 transition_gate=transition_gate,
             )
-            theme_css = await asyncio.to_thread(_deck_theme_css, str(user_id or ""))
             deck = await asyncio.to_thread(
                 _write_council_deck,
                 project_root=project_root,
@@ -4064,7 +4048,6 @@ class LiveStageAdapter:
                 surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
                 surface_mode=(surface_plan.mode if surface_plan is not None else ""),
                 transition_gate=transition_gate,
-                theme_css=theme_css,
             )
             if deck is not None:
                 deck_uri = deck.uri
