@@ -986,6 +986,39 @@ class TestPostApprovalStageHandoff:
         assert executed[0]["expected_cycle_revision"] == 7
 
     @pytest.mark.asyncio
+    async def test_an_unoffered_option_cannot_close_the_card_or_dispatch_the_stage(self):
+        """A request id authenticates the card, not an arbitrary answer to it."""
+        executed: list[dict] = []
+        adapter = self._adapter(executed)
+        asked = await self._ask(adapter, thread_id="handoff-invalid-option-ask")
+        request_id = asked["messages"][-1].artifact["human_input"]["request_id"]
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F"),
+            stage_adapter=adapter,
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    *asked["messages"],
+                    self._reply(request_id, "not_an_offered_option"),
+                ],
+            },
+            config={
+                "configurable": {"thread_id": "handoff-invalid-option-answer"},
+                "context": {"run_id": "run-handoff-invalid-option-answer"},
+            },
+        )
+
+        assert executed == []
+        card = final["messages"][-1]
+        assert isinstance(card, ToolMessage)
+        assert card.artifact["human_input"]["clarification_type"] == "dbtl_stage_handoff"
+
+    @pytest.mark.asyncio
     async def test_stale_answer_is_refused_before_dispatch(self):
         executed: list[dict] = []
         asked = await self._ask(self._adapter(executed), thread_id="handoff-stale-ask")

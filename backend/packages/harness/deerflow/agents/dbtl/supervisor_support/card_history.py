@@ -103,6 +103,17 @@ def emitted_card_request(state: dict, request_id: str) -> dict | None:
     return None
 
 
+def _stage_handoff_option(request: dict[str, Any], response: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve a reply only when it selects an offered Start/Hold option."""
+    if request.get("clarification_type") != "dbtl_stage_handoff" or response.get("response_kind") != "option":
+        return None
+    option_id = str(response.get("option_id") or "")
+    option = next((item for item in request.get("options", []) if isinstance(item, dict) and item.get("id") == option_id), None)
+    if option is None or str(option.get("value") or "") not in {"start_next_stage", "hold_here"}:
+        return None
+    return option
+
+
 def answered_cycle_card_id(state: dict) -> str | None:
     """Recover the cycle bound to the newest server-emitted card reply."""
     for message in reversed(state.get("messages") or []):
@@ -147,22 +158,26 @@ def answered_stage_handoff(state: dict) -> tuple[str, dict[str, Any]] | None:
         return None
     latest = next((message for message in reversed(state.get("messages") or []) if isinstance(message, HumanMessage)), None)
     response = read_human_input_response(getattr(latest, "additional_kwargs", None) or {}) if latest is not None else None
-    if response is None or response.get("response_kind") != "option":
+    if response is None:
         return None
-    option_id = str(response.get("option_id") or "")
-    option = next((item for item in request.get("options", []) if isinstance(item, dict) and item.get("id") == option_id), None)
+    option = _stage_handoff_option(request, response)
     return (str(option.get("value") or ""), request) if option is not None else None
 
 
 def answers_a_server_card(state: dict) -> bool:
-    """Whether the newest message answers a card this server emitted."""
+    """Whether the newest message validly answers a card this server emitted."""
     for message in reversed(state.get("messages") or []):
         if not isinstance(message, HumanMessage):
             continue
         response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
         if not response or response.get("source") != "ask_clarification":
             return False
-        return emitted_card_request(state, str(response.get("request_id") or "")) is not None
+        request = emitted_card_request(state, str(response.get("request_id") or ""))
+        if request is None:
+            return False
+        if request.get("clarification_type") == "dbtl_stage_handoff":
+            return _stage_handoff_option(request, response) is not None
+        return True
     return False
 
 
@@ -185,8 +200,12 @@ def unanswered_stage_handoff_card(state: dict) -> dict[str, Any] | None:
         if not isinstance(message, HumanMessage):
             continue
         response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
-        if response and response.get("source") == "ask_clarification":
-            answered.add(str(response.get("request_id") or ""))
+        if not response or response.get("source") != "ask_clarification":
+            continue
+        request_id = str(response.get("request_id") or "")
+        request = emitted_card_request(state, request_id)
+        if request is not None and _stage_handoff_option(request, response) is not None:
+            answered.add(request_id)
     for message in reversed(state.get("messages") or []):
         if not isinstance(message, ToolMessage):
             continue

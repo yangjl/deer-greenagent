@@ -31,6 +31,7 @@ from app.gateway.internal_auth import (
 )
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
+from deerflow.agents.dbtl.supervisor_support.human_input_protocol import STAGE_HANDOFF_REFUSED_KEY
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
@@ -110,6 +111,9 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = frozenset(
         # Marks an assistant turn the graph authored itself; the journal treats
         # it as reconcile-worthy, so a client must not be able to supply one.
         GRAPH_RECEIPT_KEY,
+        # Closes a stale Start/Hold control and releases its routing fence. Like
+        # the receipt marker above, only the supervisor may assert it.
+        STAGE_HANDOFF_REFUSED_KEY,
     }
 )
 
