@@ -367,6 +367,6 @@ class TestAskingForADifferentRoster:
 
     @pytest.mark.asyncio
     async def test_adjust_is_never_read_as_a_depth(self):
-        from deerflow.agents.dbtl.supervisor import _confirmed_council_depth
+        from deerflow.agents.dbtl.supervisor_support.card_history import confirmed_council_depth
 
-        assert _confirmed_council_depth(_answered_state("adjust")) is None
+        assert confirmed_council_depth(_answered_state("adjust")) is None

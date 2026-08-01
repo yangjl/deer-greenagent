@@ -2065,9 +2065,13 @@ is worse than none — and a crashed or unparseable worker is kept as a `failed`
 result rather than dropped. `StageExecutionOutcome.satisfies_gate` is the Phase
 5 stub's constant `False` property, carried over unchanged.
 
-`agents/dbtl/stage_execution.py` is the production bridge. It derives the active
-stage from durable cycle state, refuses locked/awaiting-review stages, and
-builds candidates from currently available subagents. Custom specialists opt in
+`agents/dbtl/stage_execution.py` is the stable production import facade;
+`agents/dbtl/live_stage/adapter.py` contains the concrete bridge. Replay and
+typed Test review/write authority are separate services in
+`agents/dbtl/live_stage/replay.py` and `agents/dbtl/live_stage/test_review.py`.
+The adapter derives the active stage from durable cycle state, refuses
+locked/awaiting-review stages, and builds candidates from currently available
+subagents. Custom specialists opt in
 with `subagents.custom_agents.<name>.dbtl_capabilities`; undeclared specialists
 cover nothing, while `general-purpose` remains the explicit recorded fallback.
 Each work unit gets its own `SubagentExecutor`, but its `max_turns`,

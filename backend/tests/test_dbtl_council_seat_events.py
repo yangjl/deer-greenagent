@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 
-from deerflow.agents.dbtl.stage_execution import (
+from deerflow.agents.dbtl.live_stage.adapter import (
     _seat_description,
     _seat_identity,
     _terminal_seat_event,

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from deerflow.agents.dbtl.stage_execution import (
+from deerflow.agents.dbtl.live_stage.adapter import (
     LiveStageAdapter,
     _reconciliation_ready_after_design_approval,
 )

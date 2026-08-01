@@ -6,14 +6,17 @@ from types import SimpleNamespace
 
 from langchain_core.messages import HumanMessage
 
-from deerflow.agents.dbtl.stage_execution import _validated_test_assessment
+from deerflow.agents.dbtl.live_stage.test_review import validated_test_assessment as _validated_test_assessment
 from deerflow.agents.dbtl.supervisor import (
-    TEST_OUTCOME_PREFIX,
-    TEST_REVIEW_PREFIX,
-    _answered_cycle_card_id,
-    _answered_test_card,
     _test_card_messages,
 )
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    answered_cycle_card_id as _answered_cycle_card_id,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    answered_test_card as _answered_test_card,
+)
+from deerflow.agents.dbtl.supervisor_support.human_input_protocol import TEST_OUTCOME_PREFIX, TEST_REVIEW_PREFIX
 from deerflow.dbtl.branches import BranchDecision, SupervisorBranch
 from deerflow.dbtl.worker_result import StageWorkerResult, WorkerStatus
 from deerflow.persistence.dbtl import DbtlCycleRepository
@@ -74,7 +77,7 @@ def _assessment_result() -> StageWorkerResult:
 
 def test_server_computes_supported_from_complete_typed_test_evidence(monkeypatch):
     monkeypatch.setattr(
-        "deerflow.agents.dbtl.stage_execution.reconciliation_required",
+        "deerflow.agents.dbtl.live_stage.test_review.reconciliation_required",
         lambda: False,
     )
     snapshot = _validated_test_assessment(

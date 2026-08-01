@@ -223,7 +223,7 @@ class TestStageWiring:
 
     def test_the_stage_layer_uses_the_shared_budget(self):
         """One computation, so the deadline and the graph cannot disagree."""
-        from deerflow.agents.dbtl.stage_execution import _model_call_budget
+        from deerflow.agents.dbtl.live_stage.adapter import _model_call_budget
         from deerflow.agents.middlewares.finalization_deadline_middleware import model_call_budget
 
         assert _model_call_budget(120) == model_call_budget(120)

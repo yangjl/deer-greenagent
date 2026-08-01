@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from deerflow.agents.dbtl.stage_execution import (
+from deerflow.agents.dbtl.live_stage.adapter import (
     LiveStageAdapter,
     _bound_evidence,
     _build_input_artifacts,
@@ -1159,7 +1159,7 @@ async def test_optional_reconciliation_tells_test_to_judge_bound_build_lineage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("deerflow.agents.dbtl.stage_execution.reconciliation_required", lambda: False)
+    monkeypatch.setattr("deerflow.agents.dbtl.live_stage.adapter.reconciliation_required", lambda: False)
     repo = FakeRepo(_cycle(state="test"))
     repo.lineage.append(
         {
@@ -1956,7 +1956,7 @@ async def test_a_wedged_roster_writer_does_not_swallow_the_meeting(
     only way out. The timeout degrades to capability selection, which is what
     ran before proposals existed.
     """
-    import deerflow.agents.dbtl.stage_execution as module
+    import deerflow.agents.dbtl.live_stage.adapter as module
 
     monkeypatch.setattr(module, "ROSTER_PROPOSAL_TIMEOUT_SECONDS", 0.05)
 

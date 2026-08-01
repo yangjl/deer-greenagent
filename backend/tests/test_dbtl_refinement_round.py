@@ -17,7 +17,7 @@ import json
 
 import pytest
 
-from deerflow.agents.dbtl.stage_execution import (
+from deerflow.agents.dbtl.live_stage.adapter import (
     MAX_DESIGN_ROUNDS,
     _change_request,
     _design_round,
@@ -131,7 +131,7 @@ class TestTheRoundThatActuallyRuns:
     def _adapter(dispatcher, activity):
         from test_dbtl_live_stage_execution import FakeRepo, _cycle
 
-        from deerflow.agents.dbtl.stage_execution import LiveStageAdapter
+        from deerflow.agents.dbtl.live_stage.adapter import LiveStageAdapter
         from deerflow.dbtl.agent_selector import AgentCandidate
         from deerflow.dbtl.capabilities import Capability
 

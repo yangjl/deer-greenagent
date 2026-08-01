@@ -1,0 +1,295 @@
+"""Read DBTL Human Input state without trusting client-echoed scope.
+
+Every helper in this module resolves replies against a card the server emitted.
+That is the boundary that lets the supervisor recover one-shot project/cycle
+intent after browser state has disappeared without accepting forged replies.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any
+
+from langchain_core.messages import HumanMessage, ToolMessage
+
+from deerflow.agents.human_input import read_human_input_response
+from deerflow.dbtl.council import CouncilDepth
+from deerflow.dbtl.council_proposal import CouncilProposal, proposal_from_dict
+from deerflow.dbtl.council_settings import ParticipantSettings, parse_participant_settings
+from deerflow.dbtl.routing import ExplicitChoice
+from deerflow.utils.messages import message_content_to_text
+
+from .human_input_protocol import (
+    COUNCIL_ADJUST_PREFIX,
+    COUNCIL_PREFLIGHT_PREFIX,
+    DESIGN_AUTHORING_PREFIX,
+    DESIGN_CLARIFICATION_PREFIX,
+    SETUP_CLARIFICATION_PREFIX,
+    SETUP_CONFIRMATION_PREFIX,
+    STAGE_HANDOFF_PREFIX,
+)
+
+
+def latest_user_text(state: dict) -> str:
+    """Return the newest visible, user-authored message as plain text."""
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        extra = getattr(message, "additional_kwargs", None) or {}
+        if extra.get("hide_from_ui") or extra.get("human_input_response"):
+            continue
+        return message_content_to_text(message.content) or ""
+    return ""
+
+
+def is_new_conversation(state: dict) -> bool:
+    """Return whether this is the checkpoint's first visible user turn."""
+    visible_user_turns = 0
+    for message in state.get("messages") or []:
+        if not isinstance(message, HumanMessage):
+            continue
+        extra = getattr(message, "additional_kwargs", None) or {}
+        if extra.get("hide_from_ui") or extra.get("human_input_response"):
+            continue
+        visible_user_turns += 1
+        if visible_user_turns > 1:
+            return False
+    return visible_user_turns == 1
+
+
+def latest_cycle_request_text(state: dict) -> str:
+    """Recover the request that owns the current Design meeting exchange."""
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        extra = getattr(message, "additional_kwargs", None) or {}
+        response = read_human_input_response(extra)
+        if response and response.get("source") == "ask_clarification" and str(response.get("request_id") or "").startswith(DESIGN_CLARIFICATION_PREFIX):
+            return str(response.get("value") or "")
+        if response is not None:
+            continue
+        if extra.get("dbtl_design_kickoff") is True:
+            return message_content_to_text(message.content) or ""
+        if extra.get("hide_from_ui"):
+            continue
+        return message_content_to_text(message.content) or ""
+    return ""
+
+
+def card_answer(state: dict, prefix: str) -> tuple[str, str] | None:
+    """Return ``(request_id, answer)`` if the newest message answers a card."""
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if not response or response.get("source") != "ask_clarification":
+            return None
+        request_id = str(response.get("request_id") or "")
+        if not request_id.startswith(prefix):
+            return None
+        return request_id, str(response.get("value") or "")
+    return None
+
+
+def emitted_card_request(state: dict, request_id: str) -> dict | None:
+    """Resolve a Human Input request from the server-emitted ToolMessage."""
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, ToolMessage) or message.tool_call_id != request_id:
+            continue
+        artifact = getattr(message, "artifact", None)
+        request = artifact.get("human_input") if isinstance(artifact, dict) else None
+        return request if isinstance(request, dict) else None
+    return None
+
+
+def answered_cycle_card_id(state: dict) -> str | None:
+    """Recover the cycle bound to the newest server-emitted card reply."""
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if not response or response.get("source") != "ask_clarification":
+            return None
+        request = emitted_card_request(state, str(response.get("request_id") or ""))
+        if request is None:
+            return None
+        cycle_id = request.get("dbtl_cycle_id")
+        return str(cycle_id) if cycle_id else None
+    return None
+
+
+def pending_stage_handoff(state: dict) -> dict[str, Any] | None:
+    """Return the newest valid hidden post-approval handoff marker."""
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        extra = getattr(message, "additional_kwargs", None) or {}
+        if read_human_input_response(extra) is not None:
+            return None
+        marker = extra.get("dbtl_post_approval_handoff")
+        if isinstance(marker, dict):
+            required = ("cycle_id", "approved_stage", "next_stage", "surface_id")
+            return marker if all(isinstance(marker.get(key), str) and marker.get(key) for key in required) and isinstance(marker.get("cycle_revision"), int) and int(marker["cycle_revision"]) > 0 else None
+        if not extra.get("hide_from_ui"):
+            return None
+    return None
+
+
+def answered_stage_handoff(state: dict) -> tuple[str, dict[str, Any]] | None:
+    """Resolve a stage-handoff option through its server-owned request."""
+    answered = card_answer(state, STAGE_HANDOFF_PREFIX)
+    if answered is None:
+        return None
+    request_id, _ = answered
+    request = emitted_card_request(state, request_id)
+    if request is None or request.get("clarification_type") != "dbtl_stage_handoff":
+        return None
+    latest = next((message for message in reversed(state.get("messages") or []) if isinstance(message, HumanMessage)), None)
+    response = read_human_input_response(getattr(latest, "additional_kwargs", None) or {}) if latest is not None else None
+    if response is None or response.get("response_kind") != "option":
+        return None
+    option_id = str(response.get("option_id") or "")
+    option = next((item for item in request.get("options", []) if isinstance(item, dict) and item.get("id") == option_id), None)
+    return (str(option.get("value") or ""), request) if option is not None else None
+
+
+def routing_input(state: dict) -> tuple[str, ExplicitChoice | None, str | None]:
+    """Return routing text and any scope recovered from an answered card."""
+    confirmed = card_answer(state, SETUP_CONFIRMATION_PREFIX)
+    if confirmed is not None:
+        request = emitted_card_request(state, confirmed[0])
+        if request is not None:
+            return str(request.get("source_request") or ""), ExplicitChoice.START_CYCLE, None
+    answered = card_answer(state, SETUP_CLARIFICATION_PREFIX)
+    if answered is not None:
+        request = emitted_card_request(state, answered[0])
+        if request is not None:
+            source_request = str(request.get("source_request") or "")
+            return f"{source_request}\n\n{answered[1]}".strip(), ExplicitChoice.START_CYCLE, None
+    cycle_id = answered_cycle_card_id(state)
+    if cycle_id is not None:
+        return latest_cycle_request_text(state), ExplicitChoice.CONTINUE_CYCLE, cycle_id
+    return latest_user_text(state), None, None
+
+
+def confirmation_answer(state: dict) -> str | None:
+    answered = card_answer(state, SETUP_CONFIRMATION_PREFIX)
+    if answered is None or emitted_card_request(state, answered[0]) is None:
+        return None
+    return answered[1].strip().lower()
+
+
+def has_emitted_card(state: dict, prefix: str) -> bool:
+    for message in state.get("messages") or []:
+        artifact = getattr(message, "artifact", None)
+        payload = artifact.get("human_input") if isinstance(artifact, dict) else None
+        if isinstance(payload, dict) and str(payload.get("request_id") or "").startswith(prefix):
+            return True
+    return False
+
+
+def answered_test_card(state: dict, prefix: str) -> tuple[str, str, dict[str, Any]] | None:
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if not response or response.get("source") != "ask_clarification":
+            return None
+        request_id = str(response.get("request_id") or "")
+        if not request_id.startswith(prefix) or response.get("response_kind") != "option":
+            return None
+        emitted = emitted_card_request(state, request_id)
+        snapshot = dict((emitted or {}).get("test_review_snapshot") or {})
+        if not snapshot or not (emitted or {}).get("dbtl_cycle_id"):
+            return None
+        option_id = str(response.get("option_id") or "")
+        option = next((item for item in (emitted or {}).get("options", []) if isinstance(item, dict) and item.get("id") == option_id), None)
+        if option is None:
+            return None
+        return request_id, str(option.get("value") or ""), snapshot
+    return None
+
+
+def authored_design(state: dict) -> str | None:
+    answered = card_answer(state, DESIGN_AUTHORING_PREFIX)
+    if answered is None:
+        return None
+    request = emitted_card_request(state, answered[0])
+    return answered[1] if request is not None and request.get("council_depth") == CouncilDepth.HUMAN_INPUT.value else None
+
+
+def wants_roster_adjustment(state: dict, adjust_option: str = "adjust") -> bool:
+    answered = card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
+    return bool(answered and emitted_card_request(state, answered[0]) is not None and answered[1].strip().lower() == adjust_option)
+
+
+def council_adjustment(state: dict) -> str | None:
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if not response or response.get("source") != "ask_clarification":
+            continue
+        request_id = str(response.get("request_id") or "")
+        if not request_id.startswith(COUNCIL_ADJUST_PREFIX):
+            continue
+        if emitted_card_request(state, request_id) is None:
+            return None
+        return str(response.get("value") or "").strip() or None
+    return None
+
+
+def confirmed_council_depth(state: dict) -> CouncilDepth | None:
+    answered = card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
+    if answered is None or emitted_card_request(state, answered[0]) is None:
+        return None
+    try:
+        return CouncilDepth(answered[1].strip().lower())
+    except ValueError:
+        return None
+
+
+def confirmed_participant_settings(state: dict, known_models: Sequence[str]) -> dict[str, ParticipantSettings]:
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        raw = (getattr(message, "additional_kwargs", None) or {}).get("human_input_response")
+        if not isinstance(raw, dict):
+            return {}
+        request_id = str(raw.get("request_id") or "")
+        if raw.get("source") != "ask_clarification" or not request_id.startswith(COUNCIL_PREFLIGHT_PREFIX):
+            return {}
+        if emitted_card_request(state, request_id) is None:
+            return {}
+        return parse_participant_settings(raw.get("participants"), known_models=known_models)
+    return {}
+
+
+def confirmed_council_proposal(state: dict) -> CouncilProposal | None:
+    answered = card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
+    request = emitted_card_request(state, answered[0]) if answered is not None else None
+    return proposal_from_dict(request.get("council_proposal")) if request is not None else None
+
+
+def latest_answered_council_preflight(state: dict) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        raw = (getattr(message, "additional_kwargs", None) or {}).get("human_input_response")
+        if not isinstance(raw, dict):
+            continue
+        request_id = str(raw.get("request_id") or "")
+        if raw.get("source") != "ask_clarification" or not request_id.startswith(COUNCIL_PREFLIGHT_PREFIX):
+            continue
+        request = emitted_card_request(state, request_id)
+        if request is not None:
+            return request, raw
+    return None
+
+
+def resumed_council_setup(state: dict, known_models: Sequence[str]) -> tuple[CouncilProposal | None, dict[str, ParticipantSettings]]:
+    answered = latest_answered_council_preflight(state)
+    if answered is None:
+        return None, {}
+    request, raw = answered
+    return proposal_from_dict(request.get("council_proposal")), parse_participant_settings(raw.get("participants"), known_models=known_models)

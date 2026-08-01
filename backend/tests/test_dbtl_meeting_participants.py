@@ -417,7 +417,7 @@ class TestTheEditsReachTheMeeting:
 
 class TestTheEditsReachTheWorkers:
     def test_proposed_units_carry_the_owners_dials(self):
-        from deerflow.agents.dbtl.stage_execution import _proposed_units
+        from deerflow.agents.dbtl.live_stage.adapter import _proposed_units
         from deerflow.dbtl.council_proposal import CouncilProposal, ProposedSeat
 
         proposal = CouncilProposal(
@@ -448,7 +448,7 @@ class TestTheEditsReachTheWorkers:
         assert "quoted exactly" not in units[1].prompt
 
     def test_an_instructions_prefill_echoed_back_is_not_quoted_as_the_owners(self):
-        from deerflow.agents.dbtl.stage_execution import _proposed_units
+        from deerflow.agents.dbtl.live_stage.adapter import _proposed_units
         from deerflow.dbtl.council_proposal import CouncilProposal, ProposedSeat
 
         brief = "Argue from the trial statistics."
@@ -477,7 +477,7 @@ class TestWorkersCanActuallyOpenWhatTheManifestLists:
     """
 
     def test_manifest_paths_are_the_paths_a_worker_may_open(self, tmp_path):
-        from deerflow.agents.dbtl.stage_execution import (
+        from deerflow.agents.dbtl.live_stage.adapter import (
             WORKSPACE_VIRTUAL_ROOT,
             _project_manifest,
         )
@@ -493,7 +493,7 @@ class TestWorkersCanActuallyOpenWhatTheManifestLists:
         assert any(entry["path"] == f"{WORKSPACE_VIRTUAL_ROOT}/outputs/design.json" for entry in entries)
 
     def test_the_ignored_directories_are_still_ignored(self, tmp_path):
-        from deerflow.agents.dbtl.stage_execution import _project_manifest
+        from deerflow.agents.dbtl.live_stage.adapter import _project_manifest
 
         (tmp_path / ".git").mkdir()
         (tmp_path / ".git" / "config").write_text("x", encoding="utf-8")
@@ -506,7 +506,7 @@ class TestWorkersCanActuallyOpenWhatTheManifestLists:
 
     def test_every_worker_prompt_states_the_prefix_its_tools_require(self):
         """A worker that constructs a path has no other way to learn it."""
-        from deerflow.agents.dbtl.stage_execution import _proposed_units
+        from deerflow.agents.dbtl.live_stage.adapter import _proposed_units
         from deerflow.dbtl.agent_selector import Assignment
         from deerflow.dbtl.council_proposal import CouncilProposal, ProposedSeat
         from deerflow.dbtl.stage_runner import WORKSPACE_PATH_NOTE, build_prompt

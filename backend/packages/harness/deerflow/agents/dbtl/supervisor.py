@@ -42,14 +42,80 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from hashlib import sha256
 from inspect import isawaitable
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    authored_design as _authored_design,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    card_answer as _card_answer,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    confirmation_answer as _confirmation_answer,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    confirmed_council_depth as _confirmed_council_depth,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    confirmed_council_proposal as _confirmed_council_proposal,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    confirmed_participant_settings as _confirmed_participant_settings,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    council_adjustment as _council_adjustment,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    emitted_card_request as _emitted_card_request,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    has_emitted_card as _has_emitted_card,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    is_new_conversation as _is_new_conversation,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    latest_cycle_request_text as _latest_cycle_request_text,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    latest_user_text as _latest_user_text,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    resumed_council_setup as _resumed_council_setup,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    routing_input as _routing_input,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    wants_roster_adjustment as _wants_roster_adjustment,
+)
+from deerflow.agents.dbtl.supervisor_support.continuation import (
+    handle_stage_handoff,
+    handle_test_cards,
+)
+from deerflow.agents.dbtl.supervisor_support.human_input_protocol import (
+    COUNCIL_ADJUST_PREFIX,
+    COUNCIL_PREFLIGHT_PREFIX,
+    DESIGN_AUTHORING_PREFIX,
+    DESIGN_CLARIFICATION_PREFIX,
+    PRESENT_ARTIFACT_PREFIX,
+    SETUP_CLARIFICATION_PREFIX,
+    SETUP_CONFIRMATION_PREFIX,
+    STAGE_HANDOFF_PREFIX,
+    TEST_OUTCOME_PREFIX,
+    TEST_REVIEW_PREFIX,
+    build_human_input_messages,
+    card_request_id,
+)
+from deerflow.agents.dbtl.supervisor_support.human_input_protocol import (
+    MAX_CARD_REQUEST_ID_CHARS as _MAX_CARD_REQUEST_ID_CHARS,
+)
+from deerflow.agents.dbtl.supervisor_support.ports import StageExecutionPort, compatible_stage_port
 from deerflow.dbtl.branches import (
     BranchDecision,
     SupervisorBranch,
@@ -66,14 +132,10 @@ from deerflow.dbtl.council import (
     request_context,
 )
 from deerflow.dbtl.council_proposal import (
-    CouncilProposal,
     proposal_as_dict,
-    proposal_from_dict,
     proposal_from_plan,
 )
 from deerflow.dbtl.council_settings import (
-    ParticipantSettings,
-    parse_participant_settings,
     participants_payload,
 )
 from deerflow.dbtl.routing import ExplicitChoice
@@ -87,6 +149,9 @@ from deerflow.dbtl.setup_questions import (
 
 logger = logging.getLogger(__name__)
 
+# Compatibility export while external callers migrate to the protocol module.
+MAX_CARD_REQUEST_ID_CHARS = _MAX_CARD_REQUEST_ID_CHARS
+
 # Runtime-context keys the frontend's context chip sets for the *next* request
 # only. Read from runtime context rather than ``configurable`` because
 # ``configurable`` is checkpointed: a per-request selection written there would
@@ -99,68 +164,6 @@ EXPLICIT_CHOICE_CONTEXT_KEY = "dbtl_explicit_choice"
 #: makes an ``awaiting_review`` stage dispatchable — it must never come from a
 #: client, or a deck could convene a meeting over evidence it never saw.
 REVIEW_MEETING_STAGE_CONTEXT_KEY = "dbtl_review_meeting_stage"
-
-# Request-id prefixes, one per clarification the supervisor can raise. They are
-# what a resuming turn matches on, so the two must stay distinguishable: a
-# Design-council answer feeds a running stage, a setup answer re-routes a
-# request that has not started anything yet.
-# The separator is ``__`` rather than ``:`` because these strings become
-# ``tool_use.id`` values, and Anthropic validates those against
-# ``^[a-zA-Z0-9_-]+$``. A colon is accepted locally and written to the
-# checkpoint, then rejects *every later turn in the thread* when the history is
-# replayed — one turn after the card, on an unrelated request, naming message 0.
-#
-# ``__`` also keeps the set collision-free under ``startswith``: the pairs that
-# share a stem (``dbtl-setup`` / ``dbtl-setup-confirm``, ``dbtl-design`` /
-# ``dbtl-design-write``) diverge at ``_`` versus ``-``, so a reply to the longer
-# card cannot be consumed by the branch waiting on the shorter one.
-SETUP_CLARIFICATION_PREFIX = "dbtl-setup__"
-SETUP_CONFIRMATION_PREFIX = "dbtl-setup-confirm__"
-DESIGN_CLARIFICATION_PREFIX = "dbtl-design__"
-# Distinct from the clarification prefix because the two answers do opposite
-# things: a clarification answer feeds a council that already ran, this one
-# *is* the design, submitted where no council ran at all.
-DESIGN_AUTHORING_PREFIX = "dbtl-design-write__"
-TEST_REVIEW_PREFIX = "dbtl-test-review__"
-TEST_OUTCOME_PREFIX = "dbtl-test-outcome__"
-STAGE_HANDOFF_PREFIX = "dbtl-stage-handoff__"
-# Not a card: the id of the ``present_files`` pair that delivers a finished
-# package. Same provider constraint, same failure mode.
-PRESENT_ARTIFACT_PREFIX = "dbtl-present__"
-
-#: OpenAI's Responses API rejects a ``call_id`` longer than this. Anthropic has
-#: no such limit, so embedding a full cycle id in the request id passed every
-#: local check and every Claude turn, then failed **every** later turn on a GPT
-#: model in that thread with ``Invalid 'input[N].call_id': string too long`` —
-#: a 74-character id, one turn after the card, naming a message the reader never
-#: sent. Same shape as the ``:``-in-the-id bug the grammar rule above prevents:
-#: a provider constraint that becomes durable the moment it reaches a checkpoint.
-MAX_CARD_REQUEST_ID_CHARS = 64
-
-#: Enough of the cycle id to correlate a card with its cycle by eye. Uniqueness
-#: comes from the digest, which hashes the *full* cycle id, so truncating here
-#: cannot collide two cycles onto one card.
-_CYCLE_TOKEN_CHARS = 12
-
-
-def card_request_id(prefix: str, cycle: str, *parts: str) -> str:
-    """A card id that fits every provider's ``call_id`` limit.
-
-    Built as ``<prefix><cycle-token>__<digest>`` so it stays matchable by
-    ``startswith``, readable enough to correlate with a cycle, and unique per
-    card — the digest covers the full cycle id plus whatever else distinguishes
-    this card (the run nonce, the question). Nothing parses the cycle back out
-    of the id, so shortening it costs no behavior.
-    """
-    digest = sha256("\x1f".join((cycle, *parts)).encode()).hexdigest()[:16]
-    token = "".join(char for char in cycle[:_CYCLE_TOKEN_CHARS] if char.isalnum() or char in "_-")
-    request_id = f"{prefix}{token}__{digest}"
-    if len(request_id) > MAX_CARD_REQUEST_ID_CHARS:  # pragma: no cover - guarded by test
-        # A future prefix long enough to overflow drops the readable token
-        # rather than shipping an id that breaks the thread on its next turn.
-        request_id = f"{prefix}{digest}"
-    return request_id
-
 
 _REVIEW_INTENT_RE = re.compile(
     r"""
@@ -187,187 +190,6 @@ _REVIEW_INTENT_RE = re.compile(
 )
 
 
-def _latest_user_text(state: dict) -> str:
-    """The newest visible user message, as plain text.
-
-    Hidden ``HumanMessage``s are skipped: goal continuations, human-input card
-    replies, and injected context blocks are machine-authored, and routing on
-    one would let internal plumbing steer a research decision.
-    """
-    from deerflow.utils.messages import message_content_to_text
-
-    for message in reversed(state.get("messages") or []):
-        if not isinstance(message, HumanMessage):
-            continue
-        extra = getattr(message, "additional_kwargs", None) or {}
-        if extra.get("hide_from_ui") or extra.get("human_input_response"):
-            continue
-        return message_content_to_text(message.content) or ""
-    return ""
-
-
-def _is_new_conversation(state: dict) -> bool:
-    """Whether this request is the first visible user turn in the checkpoint."""
-    visible_user_turns = 0
-    for message in state.get("messages") or []:
-        if not isinstance(message, HumanMessage):
-            continue
-        extra = getattr(message, "additional_kwargs", None) or {}
-        if extra.get("hide_from_ui") or extra.get("human_input_response"):
-            continue
-        visible_user_turns += 1
-        if visible_user_turns > 1:
-            return False
-    return visible_user_turns == 1
-
-
-def _latest_cycle_request_text(state: dict) -> str:
-    """Recover the request that owns the current Design-council exchange.
-
-    Human-input replies are hidden plumbing. A preflight answer such as
-    ``"light"`` must not make routing fall back to the older visible
-    ``"start a DBTL cycle"`` request when an automatic Design kickoff sits
-    between them. Scan through card replies and other hidden messages until we
-    find either the chair's clarification answer, that kickoff, or the newest
-    visible request.
-    """
-    from deerflow.agents.human_input import read_human_input_response
-    from deerflow.utils.messages import message_content_to_text
-
-    for message in reversed(state.get("messages") or []):
-        if not isinstance(message, HumanMessage):
-            continue
-        additional_kwargs = getattr(message, "additional_kwargs", None) or {}
-        response = read_human_input_response(additional_kwargs)
-        if response and response.get("source") == "ask_clarification" and str(response.get("request_id") or "").startswith(DESIGN_CLARIFICATION_PREFIX):
-            return str(response.get("value") or "")
-        if response is not None:
-            continue
-        if additional_kwargs.get("dbtl_design_kickoff") is True:
-            return message_content_to_text(message.content) or ""
-        if additional_kwargs.get("hide_from_ui"):
-            continue
-        return message_content_to_text(message.content) or ""
-    return ""
-
-
-def _card_answer(state: dict, prefix: str) -> tuple[str, str] | None:
-    """``(request_id, answer)`` when the newest message answers *prefix*'s card."""
-    from deerflow.agents.human_input import read_human_input_response
-
-    for message in reversed(state.get("messages") or []):
-        if not isinstance(message, HumanMessage):
-            continue
-        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
-        if not response or response.get("source") != "ask_clarification":
-            return None
-        request_id = str(response.get("request_id") or "")
-        if not request_id.startswith(prefix):
-            return None
-        return (request_id, str(response.get("value") or ""))
-    return None
-
-
-def _emitted_card_request(state: dict, request_id: str) -> dict | None:
-    """The human-input request the server itself sent for *request_id*.
-
-    Resolving the card from thread state rather than trusting the reply is what
-    makes the recovered intent server-owned: a reply naming a card that was
-    never emitted matches nothing and routes as ordinary text.
-    """
-    for message in reversed(state.get("messages") or []):
-        if not isinstance(message, ToolMessage) or message.tool_call_id != request_id:
-            continue
-        artifact = getattr(message, "artifact", None)
-        request = artifact.get("human_input") if isinstance(artifact, dict) else None
-        return request if isinstance(request, dict) else None
-    return None
-
-
-def _answered_cycle_card_id(state: dict) -> str | None:
-    """Recover the cycle bound to the newest server-emitted card reply.
-
-    The browser normally echoes its selected cycle in request context, but
-    selection is UI state and can disappear while a card is waiting. The card
-    is durable thread state and was emitted after the server resolved the
-    cycle, so it is the authoritative fallback. Cards without a cycle binding
-    — notably setup, before a cycle exists — deliberately recover nothing.
-    """
-    from deerflow.agents.human_input import read_human_input_response
-
-    for message in reversed(state.get("messages") or []):
-        if not isinstance(message, HumanMessage):
-            continue
-        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
-        if not response or response.get("source") != "ask_clarification":
-            return None
-        request = _emitted_card_request(state, str(response.get("request_id") or ""))
-        if request is None:
-            return None
-        cycle_id = request.get("dbtl_cycle_id")
-        return str(cycle_id) if cycle_id else None
-    return None
-
-
-def _pending_stage_handoff(state: dict) -> dict[str, Any] | None:
-    """The newest hidden, server-started post-approval handoff marker."""
-    from deerflow.agents.human_input import read_human_input_response
-
-    for message in reversed(state.get("messages") or []):
-        if not isinstance(message, HumanMessage):
-            continue
-        additional_kwargs = getattr(message, "additional_kwargs", None) or {}
-        if read_human_input_response(additional_kwargs) is not None:
-            return None
-        marker = additional_kwargs.get("dbtl_post_approval_handoff")
-        if isinstance(marker, dict):
-            required = ("cycle_id", "approved_stage", "next_stage", "surface_id")
-            return (
-                marker
-                if all(isinstance(marker.get(key), str) and marker.get(key) for key in required)
-                and isinstance(marker.get("cycle_revision"), int)
-                and int(marker["cycle_revision"]) > 0
-                else None
-            )
-        if not additional_kwargs.get("hide_from_ui"):
-            return None
-    return None
-
-
-def _answered_stage_handoff(state: dict) -> tuple[str, dict[str, Any]] | None:
-    """The server-owned handoff choice and request payload behind its reply."""
-    answered = _card_answer(state, STAGE_HANDOFF_PREFIX)
-    if answered is None:
-        return None
-    request_id, _echoed_value = answered
-    request = _emitted_card_request(state, request_id)
-    if request is None or request.get("clarification_type") != "dbtl_stage_handoff":
-        return None
-    from deerflow.agents.human_input import read_human_input_response
-
-    latest = next(
-        (
-            message
-            for message in reversed(state.get("messages") or [])
-            if isinstance(message, HumanMessage)
-        ),
-        None,
-    )
-    response = read_human_input_response(getattr(latest, "additional_kwargs", None) or {}) if latest is not None else None
-    if response is None or response.get("response_kind") != "option":
-        return None
-    option_id = str(response.get("option_id") or "")
-    option = next(
-        (
-            item
-            for item in request.get("options", [])
-            if isinstance(item, dict) and item.get("id") == option_id
-        ),
-        None,
-    )
-    return (str(option.get("value") or ""), request) if option is not None else None
-
-
 async def _validate_stage_handoff(
     stage_adapter: Any,
     context: SupervisorContext,
@@ -390,43 +212,6 @@ async def _validate_stage_handoff(
     if isawaitable(result):
         result = await result
     return str(result) if isinstance(result, str) and result.strip() else None
-
-
-def _routing_input(state: dict) -> tuple[str, ExplicitChoice | None, str | None]:
-    """The text routing reads, plus any scope recovered from a card answer.
-
-    A setup clarification is only ever raised for an explicit start request, and
-    the choice that produced it applies to that one request by design — so it is
-    already gone when the answer arrives. Recovering it here is what keeps an
-    answered clarification on the branch that asked the question; routing the
-    answer on its own merits lands it in ordinary work, where the lead agent
-    absorbs the reply and the user never reaches the confirmation.
-
-    The originating request is carried too. Routing needs both halves: the
-    answer supplies the missing fields, while the original request is what
-    still says a cycle was being started at all.
-    """
-    confirmed = _card_answer(state, SETUP_CONFIRMATION_PREFIX)
-    if confirmed is not None:
-        request_id, _answer = confirmed
-        request = _emitted_card_request(state, request_id)
-        if request is not None:
-            return (str(request.get("source_request") or ""), ExplicitChoice.START_CYCLE, None)
-
-    answered = _card_answer(state, SETUP_CLARIFICATION_PREFIX)
-    if answered is not None:
-        request_id, answer = answered
-        request = _emitted_card_request(state, request_id)
-        if request is not None:
-            source_request = str(request.get("source_request") or "")
-            combined = f"{source_request}\n\n{answer}".strip()
-            return (combined, ExplicitChoice.START_CYCLE, None)
-
-    cycle_id = _answered_cycle_card_id(state)
-    if cycle_id is not None:
-        return (_latest_cycle_request_text(state), ExplicitChoice.CONTINUE_CYCLE, cycle_id)
-
-    return (_latest_user_text(state), None, None)
 
 
 def _bullets(items: tuple[str, ...] | list[str]) -> str:
@@ -489,65 +274,49 @@ def _setup_clarification_message(
     note = "I proposed an answer to each — correct the ones that are wrong."
     question = render_questions(questions) or f"Please provide:\n{_bullets(decision.missing_fields)}"
     request_id = card_request_id(SETUP_CLARIFICATION_PREFIX, context.project_id or "", request_nonce, source_request)
-    tool_call = {
-        "name": "ask_clarification",
-        "args": {
+    request = {
+        "version": 1,
+        "kind": "human_input_request",
+        "source": "ask_clarification",
+        "request_id": request_id,
+        "clarification_type": "cycle_setup",
+        "title": "Designing this DBTL cycle",
+        "question": question,
+        "context": note,
+        "input_mode": "free_text",
+        "source_request": source_request,
+        "missing_fields": list(decision.missing_fields),
+        # The structured form of what the question text renders, so a later
+        # card UI can show per-question fields without emitting them twice.
+        "setup_questions": [
+            {
+                "id": item.id,
+                "question": item.question,
+                "why": item.why,
+                "options": [
+                    {
+                        "id": option.id,
+                        "label": option.label,
+                        "description": option.description,
+                    }
+                    for option in item.options
+                ],
+                "recommended_option_id": item.recommended_option_id,
+                "recommendation": item.recommendation,
+                "grounded": item.grounded,
+            }
+            for item in questions
+        ],
+    }
+    return build_human_input_messages(
+        request_id=request_id,
+        tool_args={
             "question": question,
             "context": note,
             "clarification_type": "cycle_setup",
         },
-        "id": request_id,
-        "type": "tool_call",
-    }
-    return (
-        AIMessage(
-            id=f"{request_id}:call",
-            content="",
-            tool_calls=[tool_call],
-        ),
-        ToolMessage(
-            id=request_id,
-            name="ask_clarification",
-            tool_call_id=request_id,
-            content=f"{note}\n\n{question}",
-            artifact={
-                "human_input": {
-                    "version": 1,
-                    "kind": "human_input_request",
-                    "source": "ask_clarification",
-                    "request_id": request_id,
-                    "clarification_type": "cycle_setup",
-                    "title": "Designing this DBTL cycle",
-                    "question": question,
-                    "context": note,
-                    "input_mode": "free_text",
-                    "source_request": source_request,
-                    "missing_fields": list(decision.missing_fields),
-                    # The structured form of what the question text renders, so
-                    # a later card UI can show per-question fields without the
-                    # supervisor having to emit the questions a second way.
-                    "setup_questions": [
-                        {
-                            "id": item.id,
-                            "question": item.question,
-                            "why": item.why,
-                            "options": [
-                                {
-                                    "id": option.id,
-                                    "label": option.label,
-                                    "description": option.description,
-                                }
-                                for option in item.options
-                            ],
-                            "recommended_option_id": item.recommended_option_id,
-                            "recommendation": item.recommendation,
-                            "grounded": item.grounded,
-                        }
-                        for item in questions
-                    ],
-                }
-            },
-        ),
+        request=request,
+        fallback_content=f"{note}\n\n{question}",
     )
 
 
@@ -608,26 +377,16 @@ def _stage_handoff_message(
         "next_stage": next_stage,
         "design_feedback_surface_id": surface_id,
     }
-    tool_call = {
-        "name": "ask_clarification",
-        "args": {
+    return build_human_input_messages(
+        request_id=request_id,
+        tool_args={
             "question": question,
             "context": context,
             "clarification_type": "dbtl_stage_handoff",
             "options": options,
         },
-        "id": request_id,
-        "type": "tool_call",
-    }
-    return (
-        AIMessage(id=f"{request_id}:call", content="", tool_calls=[tool_call]),
-        ToolMessage(
-            id=request_id,
-            name="ask_clarification",
-            tool_call_id=request_id,
-            content=f"{context}\n\n{question}",
-            artifact={"human_input": request},
-        ),
+        request=request,
+        fallback_content=f"{context}\n\n{question}",
     )
 
 
@@ -678,78 +437,37 @@ def _setup_confirmation_message(
             "value": "not_sure",
         },
     ]
-    tool_call = {
-        "name": "ask_clarification",
-        "args": {
+    objective = decision.objective.strip() or source_request.strip()
+    title = objective[:80].strip() or "New DBTL cycle"
+    request = {
+        "version": 1,
+        "kind": "human_input_request",
+        "source": "ask_clarification",
+        "request_id": request_id,
+        "clarification_type": "cycle_setup_confirmation",
+        "title": "Review DBTL cycle setup",
+        "question": question,
+        "context": summary,
+        "input_mode": "single_choice",
+        "options": options,
+        "source_request": source_request,
+        "dbtl_cycle_setup": {
+            "title": title,
+            "objective": objective,
+            "success_criteria": source_request[:4_000],
+        },
+    }
+    return build_human_input_messages(
+        request_id=request_id,
+        tool_args={
             "question": question,
             "context": summary,
             "clarification_type": "cycle_setup_confirmation",
             "options": options,
         },
-        "id": request_id,
-        "type": "tool_call",
-    }
-    objective = decision.objective.strip() or source_request.strip()
-    title = objective[:80].strip() or "New DBTL cycle"
-    return (
-        AIMessage(
-            id=f"{request_id}:call",
-            content="",
-            tool_calls=[tool_call],
-        ),
-        ToolMessage(
-            id=request_id,
-            name="ask_clarification",
-            tool_call_id=request_id,
-            content=f"{summary}\n\n{question}",
-            artifact={
-                "human_input": {
-                    "version": 1,
-                    "kind": "human_input_request",
-                    "source": "ask_clarification",
-                    "request_id": request_id,
-                    "clarification_type": "cycle_setup_confirmation",
-                    "title": "Review DBTL cycle setup",
-                    "question": question,
-                    "context": summary,
-                    "input_mode": "single_choice",
-                    "options": options,
-                    "source_request": source_request,
-                    "dbtl_cycle_setup": {
-                        "title": title,
-                        "objective": objective,
-                        "success_criteria": source_request[:4_000],
-                    },
-                }
-            },
-        ),
+        request=request,
+        fallback_content=f"{summary}\n\n{question}",
     )
-
-
-def _confirmation_answer(state: dict) -> str | None:
-    """The verdict on a confirmation card this supervisor actually emitted.
-
-    The emitted-card check is what makes a forged ``request_id`` inert: a reply
-    that matches no card the server raised is not an approval.
-    """
-    answered = _card_answer(state, SETUP_CONFIRMATION_PREFIX)
-    if answered is None:
-        return None
-    request_id, answer = answered
-    if _emitted_card_request(state, request_id) is None:
-        return None
-    return answer.strip().lower()
-
-
-def _has_emitted_card(state: dict, prefix: str) -> bool:
-    """Whether this thread already raised a card of that kind."""
-    for message in state.get("messages") or []:
-        request = getattr(message, "artifact", None)
-        if isinstance(request, dict):
-            payload = request.get("human_input")
-            if isinstance(payload, dict) and str(payload.get("request_id") or "").startswith(prefix):
-                return True
-    return False
 
 
 def _design_inputs_acknowledgement(state: dict) -> str | None:
@@ -793,9 +511,6 @@ def _render_continuation(decision: BranchDecision, note: str) -> str:
     cycle = decision.cycle_id or "the selected cycle"
     return f"This request is scoped to {cycle}.\n\n{note}\n\nThis run cannot satisfy a review gate. Design and Data reconciliation advance only through the project's human review records."
 
-
-COUNCIL_PREFLIGHT_PREFIX = "dbtl-council__"
-COUNCIL_ADJUST_PREFIX = "dbtl-council-edit__"
 
 #: The preflight option that is not a depth. Choosing it asks what should
 #: change instead of how much debate to buy, so it is kept out of
@@ -865,49 +580,33 @@ def _council_preflight_message(
         }
     )
     proposal = proposal_from_plan(plan)
-    return (
-        AIMessage(
-            id=f"{request_id}:call",
-            content="",
-            tool_calls=[
-                {
-                    "name": "ask_clarification",
-                    "args": {
-                        "question": question,
-                        "context": note,
-                        "clarification_type": "council_preflight",
-                    },
-                    "id": request_id,
-                    "type": "tool_call",
-                }
-            ],
-        ),
-        ToolMessage(
-            id=request_id,
-            name="ask_clarification",
-            tool_call_id=request_id,
-            content=f"{note}\n\n{question}",
-            artifact={
-                "human_input": {
-                    "version": 1,
-                    "kind": "human_input_request",
-                    "source": "ask_clarification",
-                    "request_id": request_id,
-                    "clarification_type": "council_preflight",
-                    "dbtl_cycle_id": cycle,
-                    "title": "Before the design meeting starts",
-                    "question": question,
-                    "context": note,
-                    "input_mode": "single_choice",
-                    "options": options,
-                    "council_plan": plan.as_dict(),
-                    **({"council_proposal": proposal_as_dict(proposal)} if proposal is not None else {}),
-                    "council_participants": participants_payload(plan, model_options=model_options),
-                    "recommended_depth": recommendation.depth.value,
-                    "recommended_option_id": recommendation.depth.value,
-                }
-            },
-        ),
+    request = {
+        "version": 1,
+        "kind": "human_input_request",
+        "source": "ask_clarification",
+        "request_id": request_id,
+        "clarification_type": "council_preflight",
+        "dbtl_cycle_id": cycle,
+        "title": "Before the design meeting starts",
+        "question": question,
+        "context": note,
+        "input_mode": "single_choice",
+        "options": options,
+        "council_plan": plan.as_dict(),
+        **({"council_proposal": proposal_as_dict(proposal)} if proposal is not None else {}),
+        "council_participants": participants_payload(plan, model_options=model_options),
+        "recommended_depth": recommendation.depth.value,
+        "recommended_option_id": recommendation.depth.value,
+    }
+    return build_human_input_messages(
+        request_id=request_id,
+        tool_args={
+            "question": question,
+            "context": note,
+            "clarification_type": "council_preflight",
+        },
+        request=request,
+        fallback_content=f"{note}\n\n{question}",
     )
 
 
@@ -921,43 +620,28 @@ def _design_clarification_message(
 ) -> tuple[AIMessage, ToolMessage]:
     cycle = decision.cycle_id or "selected-cycle"
     request_id = card_request_id(DESIGN_CLARIFICATION_PREFIX, cycle, request_nonce, question)
-    tool_call = {
-        "name": "ask_clarification",
-        "args": {
+    request = {
+        "version": 1,
+        "kind": "human_input_request",
+        "source": "ask_clarification",
+        "request_id": request_id,
+        "clarification_type": "design_decision",
+        "dbtl_cycle_id": cycle,
+        **({"design_feedback_surface_id": feedback_surface_id} if feedback_surface_id else {}),
+        "title": "The design meeting needs your input",
+        "question": question,
+        "context": note,
+        "input_mode": "free_text",
+    }
+    return build_human_input_messages(
+        request_id=request_id,
+        tool_args={
             "question": question,
             "context": note,
             "clarification_type": "design_decision",
         },
-        "id": request_id,
-        "type": "tool_call",
-    }
-    return (
-        AIMessage(
-            id=f"{request_id}:call",
-            content="",
-            tool_calls=[tool_call],
-        ),
-        ToolMessage(
-            id=request_id,
-            name="ask_clarification",
-            tool_call_id=request_id,
-            content=f"{note}\n\n{question}",
-            artifact={
-                "human_input": {
-                    "version": 1,
-                    "kind": "human_input_request",
-                    "source": "ask_clarification",
-                    "request_id": request_id,
-                    "clarification_type": "design_decision",
-                    "dbtl_cycle_id": cycle,
-                    **({"design_feedback_surface_id": feedback_surface_id} if feedback_surface_id else {}),
-                    "title": "The design meeting needs your input",
-                    "question": question,
-                    "context": note,
-                    "input_mode": "free_text",
-                }
-            },
-        ),
+        request=request,
+        fallback_content=f"{note}\n\n{question}",
     )
 
 
@@ -980,39 +664,28 @@ def _design_authoring_message(
     """
     cycle = decision.cycle_id or "selected-cycle"
     request_id = card_request_id(DESIGN_AUTHORING_PREFIX, cycle, request_nonce)
-    tool_call = {
-        "name": "ask_clarification",
-        "args": {
+    request = {
+        "version": 1,
+        "kind": "human_input_request",
+        "source": "ask_clarification",
+        "request_id": request_id,
+        "clarification_type": "design_authoring",
+        "dbtl_cycle_id": cycle,
+        "title": "Write the design yourself",
+        "question": question,
+        "context": note,
+        "input_mode": "free_text",
+        "council_depth": CouncilDepth.HUMAN_INPUT.value,
+    }
+    return build_human_input_messages(
+        request_id=request_id,
+        tool_args={
             "question": question,
             "context": note,
             "clarification_type": "design_authoring",
         },
-        "id": request_id,
-        "type": "tool_call",
-    }
-    return (
-        AIMessage(id=f"{request_id}:call", content="", tool_calls=[tool_call]),
-        ToolMessage(
-            id=request_id,
-            name="ask_clarification",
-            tool_call_id=request_id,
-            content=f"{note}\n\n{question}",
-            artifact={
-                "human_input": {
-                    "version": 1,
-                    "kind": "human_input_request",
-                    "source": "ask_clarification",
-                    "request_id": request_id,
-                    "clarification_type": "design_authoring",
-                    "dbtl_cycle_id": cycle,
-                    "title": "Write the design yourself",
-                    "question": question,
-                    "context": note,
-                    "input_mode": "free_text",
-                    "council_depth": CouncilDepth.HUMAN_INPUT.value,
-                }
-            },
-        ),
+        request=request,
+        fallback_content=f"{note}\n\n{question}",
     )
 
 
@@ -1078,78 +751,17 @@ def _test_card_messages(
         "dbtl_cycle_id": decision.cycle_id,
         "test_review_snapshot": snapshot,
     }
-    return (
-        AIMessage(
-            id=f"{request_id}:call",
-            content="",
-            tool_calls=[
-                {
-                    "name": "ask_clarification",
-                    "args": {
-                        "question": question,
-                        "context": context,
-                        "clarification_type": request["clarification_type"],
-                        "options": options,
-                    },
-                    "id": request_id,
-                    "type": "tool_call",
-                }
-            ],
-        ),
-        ToolMessage(
-            id=request_id,
-            name="ask_clarification",
-            tool_call_id=request_id,
-            content=f"{context}\n\n{question}",
-            artifact={"human_input": request},
-        ),
+    return build_human_input_messages(
+        request_id=request_id,
+        tool_args={
+            "question": question,
+            "context": context,
+            "clarification_type": request["clarification_type"],
+            "options": options,
+        },
+        request=request,
+        fallback_content=f"{context}\n\n{question}",
     )
-
-
-def _answered_test_card(state: dict, prefix: str) -> tuple[str, str, dict[str, Any]] | None:
-    from deerflow.agents.human_input import read_human_input_response
-
-    for message in reversed(state.get("messages") or []):
-        if not isinstance(message, HumanMessage):
-            continue
-        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
-        if not response or response.get("source") != "ask_clarification":
-            return None
-        request_id = str(response.get("request_id") or "")
-        if not request_id.startswith(prefix) or response.get("response_kind") != "option":
-            return None
-        emitted = _emitted_card_request(state, request_id)
-        snapshot = dict((emitted or {}).get("test_review_snapshot") or {})
-        if not snapshot or not (emitted or {}).get("dbtl_cycle_id"):
-            return None
-        option_id = str(response.get("option_id") or "")
-        option = next(
-            (item for item in (emitted or {}).get("options", []) if isinstance(item, dict) and item.get("id") == option_id),
-            None,
-        )
-        if option is None:
-            return None
-        # The emitted option is the authority. The reply's duplicate value is
-        # display compatibility and may be stale or forged.
-        return request_id, str(option.get("value") or ""), snapshot
-    return None
-
-
-def _authored_design(state: dict) -> str | None:
-    """The design text, only when the server itself asked for it.
-
-    Resolved from the emitted card rather than from the reply, so a forged
-    ``request_id`` matches nothing and the text is ignored instead of being
-    recorded as a Design package nobody was asked for.
-    """
-    answered = _card_answer(state, DESIGN_AUTHORING_PREFIX)
-    if answered is None:
-        return None
-    request_id, value = answered
-    request = _emitted_card_request(state, request_id)
-    if request is None or request.get("council_depth") != CouncilDepth.HUMAN_INPUT.value:
-        return None
-    return value
 
 
 def _council_adjustment_message(
@@ -1166,195 +778,27 @@ def _council_adjustment_message(
     """
     cycle = decision.cycle_id or "selected-cycle"
     request_id = card_request_id(COUNCIL_ADJUST_PREFIX, cycle, request_nonce)
-    return (
-        AIMessage(
-            id=f"{request_id}:call",
-            content="",
-            tool_calls=[
-                {
-                    "name": "ask_clarification",
-                    "args": {
-                        "question": _ADJUST_QUESTION,
-                        "context": _ADJUST_NOTE,
-                        "clarification_type": "council_adjustment",
-                    },
-                    "id": request_id,
-                    "type": "tool_call",
-                }
-            ],
-        ),
-        ToolMessage(
-            id=request_id,
-            name="ask_clarification",
-            tool_call_id=request_id,
-            content=f"{_ADJUST_NOTE}\n\n{_ADJUST_QUESTION}",
-            artifact={
-                "human_input": {
-                    "version": 1,
-                    "kind": "human_input_request",
-                    "source": "ask_clarification",
-                    "request_id": request_id,
-                    "clarification_type": "council_adjustment",
-                    "dbtl_cycle_id": cycle,
-                    "title": "Adjust the design meeting",
-                    "question": _ADJUST_QUESTION,
-                    "context": _ADJUST_NOTE,
-                    "input_mode": "free_text",
-                }
-            },
-        ),
-    )
-
-
-def _wants_roster_adjustment(state: dict) -> bool:
-    """Whether the newest message answered the preflight by asking for changes."""
-    answered = _card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
-    if answered is None:
-        return False
-    request_id, value = answered
-    if _emitted_card_request(state, request_id) is None:
-        return False
-    return value.strip().lower() == COUNCIL_ADJUST_OPTION
-
-
-def _council_adjustment(state: dict) -> str | None:
-    """The newest roster change a person asked for in this cycle.
-
-    Unlike the depth, this is *not* read only from the newest message: the
-    adjustment is answered one turn and the depth the next, so by the time the
-    council runs the adjustment is no longer the last thing said. Scanning back
-    for the most recent answered adjustment card is what carries it to dispatch.
-
-    Resolved from the emitted card rather than the reply, so a forged
-    ``request_id`` matches nothing.
-    """
-    from deerflow.agents.human_input import read_human_input_response
-
-    for message in reversed(state.get("messages") or []):
-        if not isinstance(message, HumanMessage):
-            continue
-        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
-        if not response or response.get("source") != "ask_clarification":
-            continue
-        request_id = str(response.get("request_id") or "")
-        if not request_id.startswith(COUNCIL_ADJUST_PREFIX):
-            continue
-        if _emitted_card_request(state, request_id) is None:
-            return None
-        return str(response.get("value") or "").strip() or None
-    return None
-
-
-def _confirmed_council_depth(state: dict) -> CouncilDepth | None:
-    """The depth a person chose, read off the card the server itself emitted.
-
-    The browser echoes the choice back in the next request's context, but a
-    reply that loses it is indistinguishable from one that never carried a
-    choice — and the fallback is the server's own recommendation, so the
-    council convenes at a depth nobody picked and nothing says so. The answer
-    is already in state; recovering it here needs no cooperation from the
-    client and, like ``_authored_design``, resolves the card rather than
-    trusting the reply, so a forged ``request_id`` matches nothing.
-
-    Scoped to the answering turn by ``_card_answer``, which matches only when
-    the newest message is that reply. A preflight answer stays in history
-    forever, and re-reading it on every later request would pin the whole cycle
-    to one depth with no way to say otherwise.
-    """
-    answered = _card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
-    if answered is None:
-        return None
-    request_id, value = answered
-    if _emitted_card_request(state, request_id) is None:
-        return None
-    try:
-        return CouncilDepth(value.strip().lower())
-    except ValueError:
-        # A stale client losing a preference is a far smaller failure than a
-        # cycle that cannot be designed; fall back to the recommendation.
-        return None
-
-
-def _confirmed_participant_settings(state: dict, known_models: Sequence[str]) -> dict[str, ParticipantSettings]:
-    """The participant edits from the answered preflight card, validated.
-
-    The typed ``read_human_input_response`` deliberately strips unknown keys,
-    so the edits are read off the raw reply payload — then validated field by
-    field by ``parse_participant_settings``, which is what keeps this
-    server-owned rather than trusting the client's shapes. Like the depth,
-    this is scoped to the answering turn (only the newest message counts) and
-    the reply must name a card the server itself emitted; a forged
-    ``request_id`` matches nothing and the edits are ignored.
-    """
-    for message in reversed(state.get("messages") or []):
-        if not isinstance(message, HumanMessage):
-            continue
-        raw = (getattr(message, "additional_kwargs", None) or {}).get("human_input_response")
-        if not isinstance(raw, dict):
-            return {}
-        request_id = str(raw.get("request_id") or "")
-        if raw.get("source") != "ask_clarification" or not request_id.startswith(COUNCIL_PREFLIGHT_PREFIX):
-            return {}
-        if _emitted_card_request(state, request_id) is None:
-            return {}
-        return parse_participant_settings(raw.get("participants"), known_models=known_models)
-    return {}
-
-
-def _confirmed_council_proposal(state: dict) -> CouncilProposal | None:
-    """Return the exact question-specific roster shown on the answered card.
-
-    The roster writer is a model call, so invoking it again at dispatch can
-    legitimately return different seats and models. The emitted card is
-    server-owned and matched by request id; replay its serialized proposal
-    instead of redrawing the meeting after the person approves it.
-    """
-    answered = _card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
-    if answered is None:
-        return None
-    request = _emitted_card_request(state, answered[0])
-    if request is None:
-        return None
-    return proposal_from_dict(request.get("council_proposal"))
-
-
-def _latest_answered_council_preflight(state: dict) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """The most recent approved meeting setup, for a chair resume only.
-
-    Normal Design turns must not inherit an old meeting's roster. A chair
-    clarification is different: it is explicitly the second half of the same
-    meeting, so rebuilding its chair from today's defaults changes who is
-    finishing the synthesis. Return both server-owned card and raw validated
-    reply so the exact roster and participant dials can be restored.
-    """
-    for message in reversed(state.get("messages") or []):
-        if not isinstance(message, HumanMessage):
-            continue
-        raw = (getattr(message, "additional_kwargs", None) or {}).get("human_input_response")
-        if not isinstance(raw, dict):
-            continue
-        request_id = str(raw.get("request_id") or "")
-        if raw.get("source") != "ask_clarification" or not request_id.startswith(COUNCIL_PREFLIGHT_PREFIX):
-            continue
-        request = _emitted_card_request(state, request_id)
-        if request is None:
-            continue
-        return request, raw
-    return None
-
-
-def _resumed_council_setup(
-    state: dict,
-    known_models: Sequence[str],
-) -> tuple[CouncilProposal | None, dict[str, ParticipantSettings]]:
-    """Restore the approved roster and dials for a paused meeting."""
-    answered = _latest_answered_council_preflight(state)
-    if answered is None:
-        return None, {}
-    request, raw = answered
-    return (
-        proposal_from_dict(request.get("council_proposal")),
-        parse_participant_settings(raw.get("participants"), known_models=known_models),
+    request = {
+        "version": 1,
+        "kind": "human_input_request",
+        "source": "ask_clarification",
+        "request_id": request_id,
+        "clarification_type": "council_adjustment",
+        "dbtl_cycle_id": cycle,
+        "title": "Adjust the design meeting",
+        "question": _ADJUST_QUESTION,
+        "context": _ADJUST_NOTE,
+        "input_mode": "free_text",
+    }
+    return build_human_input_messages(
+        request_id=request_id,
+        tool_args={
+            "question": _ADJUST_QUESTION,
+            "context": _ADJUST_NOTE,
+            "clarification_type": "council_adjustment",
+        },
+        request=request,
+        fallback_content=f"{_ADJUST_NOTE}\n\n{_ADJUST_QUESTION}",
     )
 
 
@@ -1506,7 +950,7 @@ def build_supervisor_graph(
     lead_agent,
     context: SupervisorContext,
     state_schema,
-    stage_adapter,
+    stage_adapter: StageExecutionPort,
     question_writer=None,
     depth_interpreter=None,
 ) -> StateGraph:
@@ -1527,6 +971,7 @@ def build_supervisor_graph(
     card on a depth the owner did not ask for. ``None`` uses the configured
     model and every failure keeps the deterministic default.
     """
+    stage_adapter = compatible_stage_port(stage_adapter)
     writer = question_writer or _make_llm_question_writer(context)
     depth_reader = depth_interpreter or make_llm_depth_interpreter()
 
@@ -1636,122 +1081,32 @@ def build_supervisor_graph(
         raw_context = request_context(config)
         request_nonce = str(raw_context.get("run_id") or "")
 
-        pending_handoff = _pending_stage_handoff(state)
-        if pending_handoff is not None:
-            if str(pending_handoff.get("cycle_id") or "") != str(decision.cycle_id or ""):
-                return {
-                    "messages": [
-                        AIMessage(
-                            content="The post-approval handoff no longer matches the selected cycle; no stage was started."
-                        )
-                    ]
-                }
-            refusal = await _validate_stage_handoff(stage_adapter, context, pending_handoff)
-            if refusal is not None:
-                return {"messages": [AIMessage(content=refusal)]}
-            return {
-                "messages": list(
-                    _stage_handoff_message(
-                        decision,
-                        pending_handoff,
-                        request_nonce=request_nonce,
-                    )
-                )
-            }
+        handoff = await handle_stage_handoff(
+            state=state,
+            decision=decision,
+            context=context,
+            stage_adapter=stage_adapter,
+            request_nonce=request_nonce,
+            validate=_validate_stage_handoff,
+            build_card=_stage_handoff_message,
+        )
+        if handoff.handled:
+            return handoff.update or {}
+        handoff_answer = handoff.handoff_answer
 
-        handoff_answer = _answered_stage_handoff(state)
-        if handoff_answer is not None and handoff_answer[0] == "hold_here":
-            next_stage = str(handoff_answer[1].get("next_stage") or "the next stage").replace("_", " ").title()
-            return {
-                "messages": [
-                    AIMessage(
-                        content=f"Holding here. {next_stage} remains open, and no stage work was started."
-                    )
-                ]
-            }
-        if handoff_answer is not None and handoff_answer[0] == "start_next_stage":
-            refusal = await _validate_stage_handoff(stage_adapter, context, handoff_answer[1])
-            if refusal is not None:
-                return {"messages": [AIMessage(content=refusal)]}
-
-        outcome_answer = _answered_test_card(state, TEST_OUTCOME_PREFIX)
-        if outcome_answer is not None:
-            request_id, recommendation, snapshot = outcome_answer
-            recorder = getattr(stage_adapter, "record_test_outcome", None)
-            if not callable(recorder):
-                return {"messages": [AIMessage(content="This runtime cannot record a Test outcome from chat yet; no decision was written.")]}
-            try:
-                recorded = recorder(
-                    project_id=str(context.project_id or ""),
-                    cycle_id=str(decision.cycle_id or ""),
-                    snapshot=snapshot,
-                    recommendation=recommendation,
-                    config=config,
-                    idempotency_key=f"{request_id}:{recommendation}",
-                )
-                if isawaitable(recorded):
-                    recorded = await recorded
-            except Exception as exc:  # noqa: BLE001 - refusal must be visible in chat
-                logger.warning("Could not record the Test outcome from chat.", exc_info=True)
-                return {"messages": [AIMessage(content=f"The Test decision was not recorded: {exc}")]}
-            assessment = dict(recorded.get("validity_assessment") or {}) if isinstance(recorded, dict) else {}
-            next_state = dict(recorded.get("cycle") or {}).get("state") if isinstance(recorded, dict) else None
-            return {
-                "messages": [
-                    AIMessage(
-                        content=(
-                            f"Recorded your Test decision as {assessment.get('recommendation', recommendation).replace('_', ' ')} "
-                            f"with outcome {str(assessment.get('outcome') or snapshot.get('evaluation', {}).get('outcome') or '').replace('_', ' ')}. "
-                            f"The cycle is now at {next_state or 'its recorded next stage'}."
-                        )
-                    )
-                ]
-            }
-
-        review_answer = _answered_test_card(state, TEST_REVIEW_PREFIX)
-        if review_answer is not None:
-            _request_id, choice, snapshot = review_answer
-            presented: list = []
-            if choice == "convene_review_meeting":
-                result = stage_adapter.execute(
-                    project_id=context.project_id,
-                    cycle_id=decision.cycle_id,
-                    request_text="Convene the Test review meeting for the recorded evidence.",
-                    state=state,
-                    config=config,
-                    review_meeting_stage="test",
-                )
-                if isawaitable(result):
-                    result = await result
-                if not getattr(result, "produced_usable_evidence", False):
-                    return {"messages": [AIMessage(content=_render_continuation(decision, result.note))]}
-                if getattr(result, "artifact_uri", None):
-                    presented.extend(
-                        _present_artifact_messages(
-                            decision,
-                            note=result.note,
-                            artifact_uri=result.artifact_uri,
-                            request_nonce=request_nonce,
-                            deck_uri=getattr(result, "deck_uri", None),
-                        )
-                    )
-            snapshot_reader = getattr(stage_adapter, "test_review_snapshot", None)
-            if callable(snapshot_reader):
-                refreshed = snapshot_reader(
-                    project_id=str(context.project_id or ""),
-                    cycle_id=str(decision.cycle_id or ""),
-                )
-                if isawaitable(refreshed):
-                    refreshed = await refreshed
-                if isinstance(refreshed, dict):
-                    snapshot = refreshed
-            return {
-                "messages": [
-                    *presented,
-                    *_test_card_messages(decision, snapshot, request_nonce=request_nonce, outcome=True),
-                ],
-                **({"artifacts": [path for path in (result.artifact_uri, getattr(result, "deck_uri", None)) if path]} if choice == "convene_review_meeting" and getattr(result, "artifact_uri", None) else {}),
-            }
+        test_cards = await handle_test_cards(
+            state=state,
+            config=config,
+            context=context,
+            decision=decision,
+            stage_adapter=stage_adapter,
+            request_nonce=request_nonce,
+            render_continuation=_render_continuation,
+            present_artifacts=_present_artifact_messages,
+            build_test_card=_test_card_messages,
+        )
+        if test_cards.handled:
+            return test_cards.update or {}
 
         request_text = (
             f"Start the governed {str(handoff_answer[1].get('next_stage') or '').replace('_', ' ')} stage now."

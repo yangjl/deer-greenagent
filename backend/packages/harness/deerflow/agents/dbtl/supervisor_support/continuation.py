@@ -1,0 +1,174 @@
+"""Ordered handlers used by the supervisor's cycle-continuation node."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
+from inspect import isawaitable
+from typing import Any
+
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.runnables import RunnableConfig
+
+from deerflow.dbtl.branches import BranchDecision, SupervisorContext
+
+from .card_history import answered_stage_handoff, answered_test_card, pending_stage_handoff
+from .human_input_protocol import TEST_OUTCOME_PREFIX, TEST_REVIEW_PREFIX
+from .ports import StageExecutionPort
+
+logger = logging.getLogger(__name__)
+
+StateUpdate = dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class HandlerResult:
+    """A terminal update, or state carried to the next ordered handler."""
+
+    update: StateUpdate | None = None
+    handoff_answer: tuple[str, dict[str, Any]] | None = None
+
+    @property
+    def handled(self) -> bool:
+        return self.update is not None
+
+
+async def handle_stage_handoff(
+    *,
+    state: dict,
+    decision: BranchDecision,
+    context: SupervisorContext,
+    stage_adapter: StageExecutionPort,
+    request_nonce: str,
+    validate: Callable[[StageExecutionPort, SupervisorContext, Mapping[str, Any]], Awaitable[str | None]],
+    build_card: Callable[..., tuple[BaseMessage, BaseMessage]],
+) -> HandlerResult:
+    """Render or consume the durable Start/Hold post-approval handoff."""
+    pending = pending_stage_handoff(state)
+    if pending is not None:
+        if str(pending.get("cycle_id") or "") != str(decision.cycle_id or ""):
+            return HandlerResult(
+                update={"messages": [AIMessage(content="The post-approval handoff no longer matches the selected cycle; no stage was started.")]}
+            )
+        refusal = await validate(stage_adapter, context, pending)
+        if refusal is not None:
+            return HandlerResult(update={"messages": [AIMessage(content=refusal)]})
+        return HandlerResult(
+            update={"messages": list(build_card(decision, pending, request_nonce=request_nonce))}
+        )
+
+    answer = answered_stage_handoff(state)
+    if answer is not None and answer[0] == "hold_here":
+        next_stage = str(answer[1].get("next_stage") or "the next stage").replace("_", " ").title()
+        return HandlerResult(
+            update={"messages": [AIMessage(content=f"Holding here. {next_stage} remains open, and no stage work was started.")]}
+        )
+    if answer is not None and answer[0] == "start_next_stage":
+        refusal = await validate(stage_adapter, context, answer[1])
+        if refusal is not None:
+            return HandlerResult(update={"messages": [AIMessage(content=refusal)]})
+    return HandlerResult(handoff_answer=answer)
+
+
+async def handle_test_cards(
+    *,
+    state: dict,
+    config: RunnableConfig,
+    context: SupervisorContext,
+    decision: BranchDecision,
+    stage_adapter: StageExecutionPort,
+    request_nonce: str,
+    render_continuation: Callable[[BranchDecision, str], str],
+    present_artifacts: Callable[..., Sequence[BaseMessage]],
+    build_test_card: Callable[..., tuple[BaseMessage, BaseMessage]],
+) -> HandlerResult:
+    """Handle server-bound Test review and outcome card answers."""
+    outcome_answer = answered_test_card(state, TEST_OUTCOME_PREFIX)
+    if outcome_answer is not None:
+        request_id, recommendation, snapshot = outcome_answer
+        try:
+            recorded = stage_adapter.record_test_outcome(
+                project_id=str(context.project_id or ""),
+                cycle_id=str(decision.cycle_id or ""),
+                snapshot=snapshot,
+                recommendation=recommendation,
+                config=config,
+                idempotency_key=f"{request_id}:{recommendation}",
+            )
+            if isawaitable(recorded):
+                recorded = await recorded
+        except AttributeError:
+            return HandlerResult(
+                update={"messages": [AIMessage(content="This runtime cannot record a Test outcome from chat yet; no decision was written.")]}
+            )
+        except Exception as exc:  # noqa: BLE001 - a write refusal must be visible
+            logger.warning("Could not record the Test outcome from chat.", exc_info=True)
+            return HandlerResult(update={"messages": [AIMessage(content=f"The Test decision was not recorded: {exc}")]})
+        assessment = dict(recorded.get("validity_assessment") or {}) if isinstance(recorded, dict) else {}
+        next_state = dict(recorded.get("cycle") or {}).get("state") if isinstance(recorded, dict) else None
+        return HandlerResult(
+            update={
+                "messages": [
+                    AIMessage(
+                        content=(
+                            f"Recorded your Test decision as {assessment.get('recommendation', recommendation).replace('_', ' ')} "
+                            f"with outcome {str(assessment.get('outcome') or snapshot.get('evaluation', {}).get('outcome') or '').replace('_', ' ')}. "
+                            f"The cycle is now at {next_state or 'its recorded next stage'}."
+                        )
+                    )
+                ]
+            }
+        )
+
+    review_answer = answered_test_card(state, TEST_REVIEW_PREFIX)
+    if review_answer is None:
+        return HandlerResult()
+    _, choice, snapshot = review_answer
+    presented: list[BaseMessage] = []
+    result: Any = None
+    if choice == "convene_review_meeting":
+        result = stage_adapter.execute(
+            project_id=context.project_id,
+            cycle_id=decision.cycle_id,
+            request_text="Convene the Test review meeting for the recorded evidence.",
+            state=state,
+            config=config,
+            review_meeting_stage="test",
+        )
+        if isawaitable(result):
+            result = await result
+        if not getattr(result, "produced_usable_evidence", False):
+            return HandlerResult(update={"messages": [AIMessage(content=render_continuation(decision, result.note))]})
+        if getattr(result, "artifact_uri", None):
+            presented.extend(
+                present_artifacts(
+                    decision,
+                    note=result.note,
+                    artifact_uri=result.artifact_uri,
+                    request_nonce=request_nonce,
+                    deck_uri=getattr(result, "deck_uri", None),
+                )
+            )
+    try:
+        refreshed = stage_adapter.test_review_snapshot(
+            project_id=str(context.project_id or ""),
+            cycle_id=str(decision.cycle_id or ""),
+        )
+        if isawaitable(refreshed):
+            refreshed = await refreshed
+        if isinstance(refreshed, dict):
+            snapshot = refreshed
+    except AttributeError:
+        pass
+    artifacts = (
+        [path for path in (result.artifact_uri, getattr(result, "deck_uri", None)) if path]
+        if choice == "convene_review_meeting" and getattr(result, "artifact_uri", None)
+        else []
+    )
+    return HandlerResult(
+        update={
+            "messages": [*presented, *build_test_card(decision, snapshot, request_nonce=request_nonce, outcome=True)],
+            **({"artifacts": artifacts} if artifacts else {}),
+        }
+    )

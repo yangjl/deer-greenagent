@@ -150,6 +150,13 @@ Breeding-workspace note:
   council's bounded task timeline remains available separately. See
   [backend/AGENTS.md](backend/AGENTS.md) for the reducer-idempotency and
   stream-contract constraints that make delegation safe.
+- The supervisor's deterministic Human Input transport, durable card-history
+  recovery, continuation handlers, and injected stage ports live under
+  `deerflow.agents.dbtl.supervisor_support`. The stable
+  `deerflow.agents.dbtl.stage_execution` import is a facade over
+  `deerflow.agents.dbtl.live_stage`; replay and Test human-write revalidation
+  have separate service owners there. Keep new orchestration behind those
+  boundaries instead of growing the graph-factory or compatibility modules.
 - DBTL Phase 6 replaces the continuation stub with a production
   `LiveStageAdapter` for Design and Data Reconciliation. It verifies the
   selected cycle belongs to the runtime project, fans bounded work units out

@@ -1,7 +1,31 @@
 # DBTL Supervisor and Stage Execution Refactoring Plan
 
 **Date:** 2026-07-31  
-**Status:** Revised proposal only — no implementation changes
+**Status:** Implemented on `codex/dbtl-supervisor-stage-refactor`
+
+## Implementation result
+
+The refactor landed with the existing production imports preserved:
+
+- `agents/dbtl/supervisor.py` remains the graph factory and delegates durable
+  card-history queries plus the first ordered continuation handlers to
+  `supervisor_support/`.
+- `agents/dbtl/stage_execution.py` is now a compatibility facade. The concrete
+  adapter lives in `agents/dbtl/live_stage/adapter.py`.
+- `live_stage/replay.py` owns idempotent replay, including Design clarification
+  recovery and Learn synthesis repair.
+- `live_stage/test_review.py` owns typed Test reconstruction and the fresh,
+  server-revalidated human outcome write.
+- `live_stage/types.py` owns the immutable supervisor result contract.
+
+The remaining large Design, meeting, dispatcher, recording, artifact, and
+feedback methods stay together in `live_stage/adapter.py` for now. They retain
+the seams described below, but were not mechanically scattered merely to meet
+a line-count target; follow-up extraction can move one tested responsibility at
+a time without another public import migration. The completed change therefore
+implements the dependency-direction and highest-risk authority boundaries of
+this plan while treating the finer-grained filenames below as the intended
+next ownership map, not a requirement to duplicate tightly coupled helpers.
 
 ## Purpose
 

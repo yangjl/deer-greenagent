@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from deerflow.agents.dbtl.stage_execution import _approved_design_brief
+from deerflow.agents.dbtl.live_stage.adapter import _approved_design_brief
 
 
 def _cycle(*, design_status: str = "approved", with_artifact: bool = True) -> dict:

@@ -22,11 +22,8 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from deerflow.agents.dbtl.supervisor import (
-    _latest_cycle_request_text,
-    _make_llm_question_writer,
-    build_supervisor_graph,
-)
+from deerflow.agents.dbtl.supervisor import _make_llm_question_writer, build_supervisor_graph
+from deerflow.agents.dbtl.supervisor_support.card_history import latest_cycle_request_text as _latest_cycle_request_text
 from deerflow.agents.thread_state import get_thread_state_schema
 from deerflow.dbtl.branches import SupervisorBranch, SupervisorContext
 from deerflow.dbtl.council import request_context
