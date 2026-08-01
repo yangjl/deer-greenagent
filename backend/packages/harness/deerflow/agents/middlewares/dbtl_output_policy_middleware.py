@@ -20,6 +20,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result
+from deerflow.runtime.secret_context import write_pre_isolation_command
 
 _PATH_WRITE_TOOLS = frozenset({"write_file", "str_replace"})
 _DBTL_SEGMENTS = ("outputs", "dbtl")
@@ -114,6 +115,13 @@ class DbtlOutputPolicyMiddleware(AgentMiddleware):
             ]
         profile = " ".join(["(version 1)", "(allow default)", *rules])
         isolated = f"sandbox-exec -p {shlex.quote(profile)} /bin/bash --noprofile --norc -c {shlex.quote(command)}"
+        # The wrapper is server-authored and names host scratch directories the
+        # local-bash path guard excludes on purpose. Pair it with the model's
+        # own command so that guard audits what the model asked for instead of
+        # rejecting this middleware's text (which blocked every stage-worker
+        # shell call, and only once a grant existed to put those paths in the
+        # profile at all).
+        write_pre_isolation_command(getattr(request.runtime, "context", None), authored=isolated, original=command)
         raw_args = request.tool_call.get("args")
         args = {**(raw_args if isinstance(raw_args, Mapping) else {}), "command": isolated}
         return request.override(tool_call={**request.tool_call, "args": args})
@@ -129,10 +137,7 @@ class DbtlOutputPolicyMiddleware(AgentMiddleware):
         args = request.tool_call.get("args")
         arguments = args if isinstance(args, Mapping) else {}
         path = arguments.get("path")
-        if name in _PATH_WRITE_TOOLS and (
-            is_dbtl_owned_path(path)
-            or (is_dbtl_stage_work_path(path) and not self._stage_path_allowed(path))
-        ):
+        if name in _PATH_WRITE_TOOLS and (is_dbtl_owned_path(path) or (is_dbtl_stage_work_path(path) and not self._stage_path_allowed(path))):
             return normalize_tool_result(
                 ToolMessage(
                     content=_BLOCKED.format(tool=name),
@@ -142,10 +147,7 @@ class DbtlOutputPolicyMiddleware(AgentMiddleware):
         if name == "bash":
             command = arguments.get("command")
             protected = list(_SHELL_PROTECTED_PATH.finditer(command)) if isinstance(command, str) else []
-            if protected and any(
-                is_dbtl_owned_path(match.group("path")) or not self._stage_path_allowed(match.group("path"))
-                for match in protected
-            ):
+            if protected and any(is_dbtl_owned_path(match.group("path")) or not self._stage_path_allowed(match.group("path")) for match in protected):
                 return normalize_tool_result(
                     ToolMessage(
                         content=_BLOCKED.format(tool=name),

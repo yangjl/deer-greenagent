@@ -143,17 +143,9 @@ def test_local_shell_uses_process_level_isolation_for_relative_path_bypasses() -
     result = middleware.wrap_tool_call(
         _request(
             "bash",
-            {
-                "command": (
-                    "cd /mnt/user-data/outputs && "
-                    "touch .dbtl-stage-work/attempt-2/build/forged.json"
-                )
-            },
+            {"command": ("cd /mnt/user-data/outputs && touch .dbtl-stage-work/attempt-2/build/forged.json")},
         ),
-        lambda request: (
-            seen.append(request.tool_call["args"]["command"])
-            or ToolMessage(content="ran", tool_call_id="call-1")
-        ),
+        lambda request: seen.append(request.tool_call["args"]["command"]) or ToolMessage(content="ran", tool_call_id="call-1"),
     )
 
     assert result.content == "ran"
@@ -169,10 +161,7 @@ def test_ordinary_local_shell_cannot_bypass_governed_paths_with_cd() -> None:
             "bash",
             {"command": "cd /mnt/user-data/outputs && touch dbtl/forged.json"},
         ),
-        lambda request: (
-            seen.append(request.tool_call["args"]["command"])
-            or ToolMessage(content="ran", tool_call_id="call-1")
-        ),
+        lambda request: seen.append(request.tool_call["args"]["command"]) or ToolMessage(content="ran", tool_call_id="call-1"),
     )
 
     assert result.content == "ran"
@@ -192,3 +181,60 @@ def test_stage_shell_fails_closed_without_a_process_isolation_backend() -> None:
     )
 
     assert "cannot enforce" in str(result.content)
+
+
+class TestTheIsolationWrapperSurvivesTheLocalBashPathGuard:
+    """The middleware's own wrapper is server-authored, not model input.
+
+    ``validate_local_bash_command_paths`` is a best-effort guard over paths a
+    *model* wrote. The sandbox-exec profile this middleware injects carries host
+    scratch directories (``/tmp``, ``tempfile.gettempdir()``) that the guard's
+    allowlist deliberately excludes, so auditing the rewritten string rejected
+    every command a DBTL stage worker issued — and only when a stage grant made
+    the profile carry those paths at all, which is exactly when a Build worker
+    needs to execute something.
+    """
+
+    WORKSPACE = "/mnt/user-data/outputs/.dbtl-stage-work/attempt-1/build/unit-1"
+
+    def _wrap(self, command: str):
+        request = _request("bash", {"command": command})
+        seen: list[str] = []
+
+        def handler(prepared):
+            seen.append(prepared.tool_call["args"]["command"])
+            return ToolMessage(content="ran", tool_call_id="call-1")
+
+        DbtlOutputPolicyMiddleware(
+            writable_paths=(self.WORKSPACE,),
+            shell_isolation="sandbox-exec",
+        ).wrap_tool_call(request, handler)
+        return seen[0], request.runtime.context
+
+    def test_the_guard_audits_the_model_command_not_the_wrapper(self) -> None:
+        from deerflow.runtime.secret_context import read_pre_isolation_command
+        from deerflow.sandbox.tools import validate_local_bash_command_paths
+
+        command = f"cd {self.WORKSPACE} && python3 simulate.py --outdir run1"
+        wrapped, context = self._wrap(command)
+        thread_data = {"thread_id": "t", "user_id": "default", "base_dir": "/tmp"}
+
+        audited = read_pre_isolation_command(context, authored=wrapped)
+        assert audited == command
+        validate_local_bash_command_paths(audited, thread_data)
+
+    def test_an_unwrapped_command_is_still_audited_as_written(self) -> None:
+        from deerflow.runtime.secret_context import read_pre_isolation_command
+
+        _, context = self._wrap(f"cd {self.WORKSPACE} && python3 simulate.py")
+
+        assert read_pre_isolation_command(context, authored="rm -rf /Users/someone") is None
+        assert read_pre_isolation_command({}, authored="anything") is None
+
+    def test_the_record_is_redacted_from_observable_context_copies(self) -> None:
+        from deerflow.runtime.secret_context import redact_secret_context_keys
+
+        _, context = self._wrap(f"cd {self.WORKSPACE} && ls")
+
+        assert context
+        assert redact_secret_context_keys(context) == {}

@@ -321,10 +321,7 @@ BUILD_SPEC_V2 = StageSpec(
     domain_profile=GENERIC_PROFILE,
     version=2,
     title="Build",
-    purpose=(
-        "Produce a rerunnable implementation from the approved design, discover the data actually used, "
-        "and bind those inputs to server-computed content hashes."
-    ),
+    purpose=("Produce a rerunnable implementation from the approved design, discover the data actually used, and bind those inputs to server-computed content hashes."),
     cycle_classes=_ALL_CLASSES,
     cycle_weights=_ALL_WEIGHTS,
     required_inputs=(
@@ -353,10 +350,7 @@ BUILD_SPEC_V3 = StageSpec(
     domain_profile=GENERIC_PROFILE,
     version=3,
     title="Build",
-    purpose=(
-        "Produce and execute a rerunnable implementation from the approved design, discover the data actually used, "
-        "and bind those inputs to server-computed content hashes."
-    ),
+    purpose=("Produce and execute a rerunnable implementation from the approved design, discover the data actually used, and bind those inputs to server-computed content hashes."),
     cycle_classes=_ALL_CLASSES,
     cycle_weights=_ALL_WEIGHTS,
     required_inputs=BUILD_SPEC_V2.required_inputs,
@@ -377,6 +371,36 @@ BUILD_SPEC_V3 = StageSpec(
         max_tokens=400_000,
         timeout_seconds=900,
     ),
+)
+
+
+BUILD_SPEC_V4 = StageSpec(
+    stage="build",
+    domain_profile=GENERIC_PROFILE,
+    version=4,
+    title="Build",
+    purpose=("Produce and execute an implementation from the approved design, discover the data actually used, bind those inputs to server-computed content hashes, and record everything another person needs to re-run it."),
+    cycle_classes=_ALL_CLASSES,
+    cycle_weights=_ALL_WEIGHTS,
+    required_inputs=BUILD_SPEC_V3.required_inputs,
+    required_artifact_types=("build_package",),
+    output_schema="build_package.v4",
+    required_capabilities=(Capability.SOFTWARE_ENGINEERING,),
+    optional_capabilities=BUILD_SPEC_V3.optional_capabilities,
+    # `reproducible_execution` asked Build to *prove* a repeat run. A worker
+    # that wrote a complete implementation but could not run it twice marked
+    # its own result failed, so the whole attempt produced no reviewable
+    # evidence — a strictly worse outcome than a recorded implementation with a
+    # stated caveat. Build now records the rerun procedure; whether the work is
+    # reproducible is judged at Test, where `reproducibility` is a required
+    # check of the pinned validity pack, and settled by the human reviewer.
+    validity_gates=(
+        "server_bound_input_lineage",
+        "versioned_derived_outputs",
+        "recorded_rerun_procedure",
+    ),
+    memory_write_policy=MemoryWritePolicy.NONE,
+    budget=BUILD_SPEC_V3.budget,
 )
 
 
@@ -532,6 +556,7 @@ _REGISTRY: dict[str, StageSpec] = {
         BUILD_SPEC_V1,
         BUILD_SPEC_V2,
         BUILD_SPEC_V3,
+        BUILD_SPEC_V4,
         TEST_SPEC_V1,
         TEST_SPEC_V2,
         TEST_SPEC_V3,
@@ -549,7 +574,7 @@ _CURRENT: MappingProxyType[tuple[str, str], int] = MappingProxyType(
     {
         (GENERIC_PROFILE, "design"): DESIGN_SPEC_V2.version,
         (GENERIC_PROFILE, "reconciliation"): RECONCILIATION_SPEC_V1.version,
-        (GENERIC_PROFILE, "build"): BUILD_SPEC_V3.version,
+        (GENERIC_PROFILE, "build"): BUILD_SPEC_V4.version,
         (GENERIC_PROFILE, "test"): TEST_SPEC_V3.version,
         (GENERIC_PROFILE, "learn"): LEARN_SPEC_V1.version,
     }

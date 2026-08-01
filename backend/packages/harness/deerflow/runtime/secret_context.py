@@ -76,6 +76,39 @@ def read_active_secrets(context: Any) -> dict[str, str]:
     return _string_pairs(context.get(ACTIVE_SECRETS_CONTEXT_KEY))
 
 
+def write_pre_isolation_command(context: Any, *, authored: str, original: str) -> None:
+    """Record the model's command beside the wrapper a middleware authored.
+
+    ``DbtlOutputPolicyMiddleware`` rewrites a ``bash`` call into a
+    ``sandbox-exec`` invocation whose profile names host scratch directories.
+    The local-bash path guard audits paths a *model* wrote and deliberately
+    excludes those, so auditing the rewritten string rejects the middleware's
+    own text. This lets the tool audit what the model actually asked for.
+    """
+    if isinstance(context, dict) and isinstance(authored, str) and authored and isinstance(original, str):
+        context[PRE_ISOLATION_COMMAND_CONTEXT_KEY] = {"authored": authored, "original": original}
+
+
+def read_pre_isolation_command(context: Any, *, authored: str) -> str | None:
+    """Return the model command behind ``authored``, or ``None``.
+
+    The record is trusted only when ``authored`` is byte-identical to the
+    wrapper the middleware produced for this very call, so it can never
+    redirect the audit away from a command the middleware did not write. The
+    key is ``__``-prefixed, and ``build_run_config`` strips those from
+    caller-supplied context, so a client cannot plant one. This substitutes
+    *which string is audited*; it never relaxes the audit itself, and the real
+    write confinement remains the sandbox profile rather than this guard.
+    """
+    if not isinstance(context, dict) or not isinstance(authored, str) or not authored:
+        return None
+    record = context.get(PRE_ISOLATION_COMMAND_CONTEXT_KEY)
+    if not isinstance(record, dict) or record.get("authored") != authored:
+        return None
+    original = record.get("original")
+    return original if isinstance(original, str) else None
+
+
 def write_slash_skill_source_path(context: Any, path: str, *, owner_token: str) -> None:
     """Persist an authenticated slash-activated skill path in a run context.
 
@@ -109,6 +142,12 @@ def read_slash_skill_source_path(context: Any, *, owner_token: str) -> str | Non
 _SLASH_SECRET_SOURCE_KEY = "__slash_skill_secret_source"
 _SECRETS_BINDING_AUDIT_KEY = "__skill_secrets_binding_audit"
 
+# Pairs a middleware-authored shell wrapper with the model command inside it, so
+# the local-bash path guard audits the model's text rather than the wrapper's
+# own host scratch paths. Holds command text, never a secret value; listed in
+# the redaction allowlist so a context copy cannot leak a command into a trace.
+PRE_ISOLATION_COMMAND_CONTEXT_KEY = "__pre_isolation_command"
+
 # Identity of the latest slash activation that has already fired in this run, so
 # the reminder injection, skill disk read, and ``activate`` audit event happen
 # once per user slash command rather than on every model call of the tool loop.
@@ -129,6 +168,7 @@ REDACTED_CONTEXT_KEYS = frozenset(
         _SECRETS_BINDING_AUDIT_KEY,
         _SLASH_SKILL_ACTIVATION_RUN_KEY,
         SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY,
+        PRE_ISOLATION_COMMAND_CONTEXT_KEY,
     }
 )
 

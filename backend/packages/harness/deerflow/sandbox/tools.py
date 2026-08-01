@@ -15,7 +15,7 @@ from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-from deerflow.runtime.secret_context import read_active_secrets
+from deerflow.runtime.secret_context import read_active_secrets, read_pre_isolation_command
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.exceptions import (
     SandboxError,
@@ -1801,7 +1801,13 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
             ensure_thread_directories_exist(runtime)
             thread_data = get_thread_data(runtime)
-            validate_local_bash_command_paths(command, thread_data)
+            # A middleware may have wrapped the model's command in a process
+            # isolation launcher whose profile names host scratch paths this
+            # guard excludes. Audit the model's own text in that case; the
+            # wrapper still runs, and its profile — not this guard — is what
+            # confines writes.
+            audited = read_pre_isolation_command(getattr(runtime, "context", None), authored=command) or command
+            validate_local_bash_command_paths(audited, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via

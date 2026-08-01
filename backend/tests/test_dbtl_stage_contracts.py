@@ -117,7 +117,7 @@ class TestStageSpecRegistry:
         assert current_spec_keys() == (
             "generic:design:v2",
             "generic:reconciliation:v1",
-            "generic:build:v3",
+            "generic:build:v4",
             "generic:test:v3",
             "generic:learn:v1",
         )
@@ -596,3 +596,58 @@ class TestStageFanOut:
     def test_the_outcome_projection_is_json_safe(self) -> None:
         plan = plan_stage(RECONCILIATION_SPEC_V1, self._candidates(), attempt_id="a1")
         json.dumps(collect_results(plan, []).as_dict())
+
+
+class TestBuildRecordsRerunInformationRatherThanProvingIt:
+    """Reproducibility is Test's question and a human's verdict, not Build's gate.
+
+    A Build worker that could not demonstrate a second identical run marked its
+    own result failed, so a complete implementation produced no reviewable
+    evidence at all. Build's job is to record what someone else needs in order
+    to re-run it; whether the work *is* reproducible is decided against the
+    Test validity pack, where ``reproducibility`` remains a required check.
+    """
+
+    def test_build_no_longer_gates_on_proven_reproducibility(self) -> None:
+        from deerflow.dbtl.stage_spec import BUILD_SPEC_V4
+
+        assert "reproducible_execution" not in BUILD_SPEC_V4.validity_gates
+        assert "recorded_rerun_procedure" in BUILD_SPEC_V4.validity_gates
+        assert "server_bound_input_lineage" in BUILD_SPEC_V4.validity_gates
+
+    def test_build_v4_is_current_and_keeps_v3_budget_and_inputs(self) -> None:
+        from deerflow.dbtl.stage_spec import BUILD_SPEC_V3, BUILD_SPEC_V4
+
+        assert resolve_stage_spec("build").spec_key == "generic:build:v4"
+        assert BUILD_SPEC_V4.required_inputs == BUILD_SPEC_V3.required_inputs
+        assert BUILD_SPEC_V4.budget == BUILD_SPEC_V3.budget
+
+    def test_the_older_build_contracts_are_unchanged(self) -> None:
+        from deerflow.dbtl.stage_spec import BUILD_SPEC_V2, BUILD_SPEC_V3
+
+        # An approved attempt records the spec it ran under, so relaxing the
+        # rule must add a version rather than rewrite the ones people approved.
+        assert "reproducible_execution" in BUILD_SPEC_V2.validity_gates
+        assert "reproducible_execution" in BUILD_SPEC_V3.validity_gates
+
+    def test_test_still_requires_the_reproducibility_check(self) -> None:
+        from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK, ValidityCheckName
+
+        assert ValidityCheckName.REPRODUCIBILITY in DEFAULT_VALIDITY_PACK.required_checks
+
+    def test_the_build_worker_is_told_not_to_fail_over_an_unrepeated_run(self) -> None:
+        from deerflow.dbtl.agent_selector import Assignment
+        from deerflow.dbtl.stage_runner import build_prompt
+
+        spec = resolve_stage_spec("build")
+        assignment = Assignment(
+            capability=Capability.SOFTWARE_ENGINEERING,
+            agent_name="general-purpose",
+            via_generalist=True,
+        )
+        prompt = build_prompt(spec, assignment, context="ctx")
+
+        assert "Reproducibility" in prompt
+        assert "NOT required" in prompt
+        assert "Do not mark your own result failed" in prompt
+        assert "limitations" in prompt

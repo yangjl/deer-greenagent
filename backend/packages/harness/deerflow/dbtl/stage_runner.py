@@ -251,6 +251,21 @@ def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> st
         "",
         RESULT_CONTRACT,
     ]
+    if spec.stage == "build" and "recorded_rerun_procedure" in spec.validity_gates:
+        lines.extend(
+            [
+                "",
+                "Reproducibility (read this before judging your own result):",
+                "- Record what someone else needs to re-run this: the exact command, any seed,",
+                "  the input paths, and the interpreter or environment you used.",
+                "- Demonstrating a second identical run is welcome but NOT required. If you could",
+                "  not run it twice — or could not run it at all — say so in limitations and keep",
+                "  status completed when the implementation and its record are otherwise sound.",
+                "- Do not mark your own result failed for an unrepeated or unexecuted run.",
+                "  Whether this work is reproducible is checked at the Test stage and decided by",
+                "  a human reviewer; it is not yours to settle here.",
+            ]
+        )
     if spec.stage == "test":
         lines.extend(
             [
