@@ -111,12 +111,17 @@ class BuildControlGate:
         *,
         resumed_step_run_id: str | None = None,
         meeting_id: str | None = None,
-    ) -> None:
-        """Attach the human decision to the control it answered."""
+    ) -> dict[str, Any] | None:
+        """Attach the human decision to the control it answered.
+
+        Returns the settled record, which is how a caller recovers the question
+        the person was answering: the reply carries their words and the option
+        they chose, never the sentence that was put to them.
+        """
         if not self.available or not answer.request_id:
-            return
+            return None
         try:
-            await self.repo.answer_build_collaboration(  # type: ignore[union-attr]
+            return await self.repo.answer_build_collaboration(  # type: ignore[union-attr]
                 project_id=self.project_id,
                 request_id=answer.request_id,
                 action=answer.action.value,
@@ -128,6 +133,7 @@ class BuildControlGate:
             )
         except Exception:  # noqa: BLE001 - see the module docstring
             logger.warning("Could not record the answer to Build control %s.", answer.request_id, exc_info=True)
+            return None
 
     async def plan_is_confirmed(self, plan_digest: str) -> bool:
         """Has a person already agreed to run *this* plan?

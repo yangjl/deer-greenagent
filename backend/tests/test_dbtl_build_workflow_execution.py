@@ -679,7 +679,12 @@ class TestABuildStopsBeingOneOpaqueWorker:
         result, dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=question))
 
         assert dispatcher.phase_units == []
-        assert result.clarification_question == "Which year is the holdout?"
+        # Raised as a control bound to `plan_build`, so the answer comes back to
+        # the step that asked rather than to whatever the next request happens
+        # to be.
+        assert result.control_request is not None
+        assert result.control_request["question"] == "Which year is the holdout?"
+        assert result.control_request["step_key"] == BuildStepKey.PLAN_BUILD.value
         plan_step = _step(await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id), BuildStepKey.PLAN_BUILD)
         assert plan_step["status"] == StepState.NEEDS_INPUT.value
 

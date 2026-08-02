@@ -38,6 +38,7 @@ from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.build_control import BuildControlAction, BuildControlKind, resolve_answer
 from deerflow.dbtl.build_workflow import BuildStepKey, StepState
 from deerflow.dbtl.capabilities import Capability
+from deerflow.dbtl.stage_runner import DispatchOutcome
 from deerflow.persistence.dbtl import DbtlCycleRepository
 
 pytestmark = pytest.mark.asyncio
@@ -74,10 +75,23 @@ class _RefusingSecondPhase(_WritingDispatcher):
         return await super().__call__(units, budget=budget)
 
 
-def _adapter(repo: DbtlCycleRepository, *, dispatcher, confirmation: bool = False, candidates=CANDIDATES) -> LiveStageAdapter:
+def _adapter(
+    repo: DbtlCycleRepository,
+    *,
+    dispatcher,
+    confirmation: bool = False,
+    candidates=CANDIDATES,
+    meetings: bool = False,
+) -> LiveStageAdapter:
     return LiveStageAdapter(
         repo=repo,
-        app_config=SimpleNamespace(dbtl=SimpleNamespace(build_workflow_steps=True, build_plan_confirmation=confirmation)),
+        app_config=SimpleNamespace(
+            dbtl=SimpleNamespace(
+                build_workflow_steps=True,
+                build_plan_confirmation=confirmation,
+                build_work_meetings=meetings,
+            )
+        ),
         candidate_provider=lambda: candidates,
         dispatcher=dispatcher,
     )
@@ -92,8 +106,9 @@ async def _run(
     run_id: str = "run-1",
     build_control=None,
     candidates=CANDIDATES,
+    meetings: bool = False,
 ):
-    return await _adapter(repo, dispatcher=dispatcher, confirmation=confirmation, candidates=candidates).execute(
+    return await _adapter(repo, dispatcher=dispatcher, confirmation=confirmation, candidates=candidates, meetings=meetings).execute(
         project_id="project-1",
         cycle_id="cycle-1",
         request_text="Build the approved design.",
@@ -378,3 +393,121 @@ class TestAForgedAnswerStartsNothing:
         first = await _run(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), confirmation=True)
 
         assert resolve_answer(first.control_request, {"option_id": "restart", "value": "Restart the build"}) is None
+
+
+MEETING_CHAIR = json.dumps(
+    {
+        "outcome": "recommendation_ready",
+        "summary": "Two defensible splits; the family holdout answers the stated question.",
+        "options": [
+            {"label": "Family holdout", "consequence": "Answers generalization across families."},
+            {"label": "Year holdout", "consequence": "Answers generalization across seasons."},
+        ],
+        "recommended": "Family holdout",
+        "reasoning": "The research question is about independent populations.",
+    }
+)
+
+
+class _MeetingDispatcher:
+    """Answers meeting seats; refuses to be given a workspace grant."""
+
+    def __init__(self) -> None:
+        self.units: list = []
+
+    async def __call__(self, units, *, budget):
+        self.units.extend(units)
+        return [DispatchOutcome(unit_id=unit.unit_id, text=MEETING_CHAIR if unit.role == "chair" else "My position.") for unit in units]
+
+
+NEEDS_INPUT_PLAN = json.dumps({"feasibility": "needs_input", "clarification_question": "Should the holdout be by family or by year?"})
+
+
+class TestAMeetingIsConvenedByAPersonAndAdvisesOnly:
+    async def test_a_paused_planner_offers_the_meeting_only_when_it_is_enabled(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        off = await _run(repo, root, dispatcher=_WritingDispatcher(plan=NEEDS_INPUT_PLAN))
+
+        assert off.control_request is not None
+        assert off.control_request["options"] == []
+
+    async def test_with_meetings_on_the_paused_question_offers_one(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        result = await _run(repo, root, dispatcher=_WritingDispatcher(plan=NEEDS_INPUT_PLAN), meetings=True)
+
+        assert [option["value"] for option in result.control_request["options"]] == [
+            BuildControlAction.START_MEETING.value,
+            BuildControlAction.HOLD.value,
+        ]
+
+    async def test_choosing_it_runs_three_seats_and_asks_again(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        paused = await _run(repo, root, dispatcher=_WritingDispatcher(plan=NEEDS_INPUT_PLAN), meetings=True)
+
+        dispatcher = _MeetingDispatcher()
+        result = await _run(
+            repo,
+            root,
+            dispatcher=dispatcher,
+            meetings=True,
+            run_id="run-2",
+            build_control=_answer(paused.control_request, "meeting"),
+        )
+
+        assert [unit.role for unit in dispatcher.units] == ["position", "red_team", "chair"]
+        # The same question comes back: a meeting advises, and only the person's
+        # answer resumes the Build.
+        assert result.control_request is not None
+        assert result.control_request["question"] == "Should the holdout be by family or by year?"
+        assert result.control_request["input_mode"] == "text"
+
+    async def test_the_recommendation_is_context_above_the_answer(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        paused = await _run(repo, root, dispatcher=_WritingDispatcher(plan=NEEDS_INPUT_PLAN), meetings=True)
+
+        result = await _run(
+            repo,
+            root,
+            dispatcher=_MeetingDispatcher(),
+            meetings=True,
+            run_id="run-2",
+            build_control=_answer(paused.control_request, "meeting"),
+        )
+
+        assert "Family holdout" in result.control_request["rationale"]
+        assert "leans towards Family holdout" in result.control_request["rationale"]
+
+    async def test_a_meeting_that_cannot_run_still_leaves_the_question_answerable(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        paused = await _run(repo, root, dispatcher=_WritingDispatcher(plan=NEEDS_INPUT_PLAN), meetings=True)
+
+        async def _broken(units, *, budget):
+            raise RuntimeError("the provider is down")
+
+        result = await _run(
+            repo,
+            root,
+            dispatcher=_broken,
+            meetings=True,
+            run_id="run-2",
+            build_control=_answer(paused.control_request, "meeting"),
+        )
+
+        assert result.control_request is not None
+        assert "answer directly" in result.control_request["rationale"]
+
+    async def test_no_meeting_runs_unless_somebody_chose_one(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        dispatcher = _MeetingDispatcher()
+        await _run(repo, root, dispatcher=dispatcher, meetings=True)
+
+        assert not [unit for unit in dispatcher.units if unit.role == "red_team"]

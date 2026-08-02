@@ -244,6 +244,7 @@ class BuildStepRecorder:
         code: BuildErrorCode | None = None,
         summary: str = "",
         execution: dict[str, Any] | None = None,
+        human_input_request_id: str = "",
     ) -> None:
         """Settle a non-success outcome; the chain deliberately does not advance.
 
@@ -260,6 +261,10 @@ class BuildStepRecorder:
                 status=state.value,
                 error_code=code.value if code else None,
                 error_summary=summary,
+                # A paused step names the control holding its question, so a
+                # reader of the record can find the exchange rather than only
+                # the sentence.
+                human_input_request_id=human_input_request_id or None,
                 execution=execution,
             )
         except Exception as exc:  # noqa: BLE001 - see the module docstring

@@ -28,6 +28,7 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.dbtl.live_stage.build_controls import DISABLED_GATE, BuildControlGate
+from deerflow.agents.dbtl.live_stage.build_meeting import BUILD_WORK_MEETING_CONTRACT, MeetingContext, meeting_units, parse_recommendation
 from deerflow.agents.dbtl.live_stage.build_phases import (
     GENERALIST,
     PLANNER_ROLE,
@@ -87,11 +88,12 @@ from deerflow.dbtl.build_control import (
     phase_pause_request,
     plan_confirmation_request,
     step_failure_request,
+    worker_question_request,
 )
 from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError
 from deerflow.dbtl.build_plan import BuildPhasePlan, parse_build_plan, restore_build_plan, single_phase_plan
 from deerflow.dbtl.build_summary import BuildReviewPackage
-from deerflow.dbtl.build_workflow import BuildErrorCode, BuildStepKey, StepState, plan_output_digest
+from deerflow.dbtl.build_workflow import BuildErrorCode, BuildStepKey, StepState, plan_output_digest, resolve_build_workflow
 from deerflow.dbtl.consensus import CONSENSUS_CONTRACT
 from deerflow.dbtl.council import (
     ROLE_BRIEFS,
@@ -3259,6 +3261,46 @@ class LiveStageAdapter:
             failure_code=failure_code,
         )
 
+    async def _run_build_work_meeting(
+        self,
+        *,
+        dispatcher: Callable[..., Any],
+        budget: WorkerBudget,
+        attempt_id: str,
+        context: MeetingContext,
+        candidates: Sequence[AgentCandidate],
+    ) -> tuple[str, dict[str, Any]]:
+        """Convene the meeting and return ``(briefing, record)``.
+
+        Never raises and never fails the Build. The meeting is advisory, so an
+        outage costs the advice — the person still has the question in front of
+        them and can answer it directly, which is the cheaper interaction this
+        meeting was an escalation from.
+        """
+        agent = next((item.name for item in candidates if item.name == GENERALIST), None) or (candidates[0].name if candidates else GENERALIST)
+        units = meeting_units(
+            attempt_id=attempt_id,
+            agent_name=agent,
+            model=self._council_model(),
+            via_generalist=agent == GENERALIST,
+            context=context,
+        )
+        try:
+            dispatched = await dispatcher(units, budget=budget)
+        except Exception:  # noqa: BLE001 - see the docstring
+            logger.warning("The Build work meeting could not be dispatched.", exc_info=True)
+            return "", {"contract": BUILD_WORK_MEETING_CONTRACT, "refusal": "The meeting could not be run."}
+        by_id = {str(getattr(item, "unit_id", "")): str(getattr(item, "text", "") or "") for item in dispatched}
+        chair = next((unit for unit in units if unit.role == "chair"), None)
+        recommendation = parse_recommendation(by_id.get(chair.unit_id, "") if chair is not None else "")
+        record = {
+            **recommendation.as_dict(),
+            "question": context.question,
+            "step_key": context.step_key,
+            "seats": [{"unit_id": unit.unit_id, "role": unit.role, "reported": bool(by_id.get(unit.unit_id))} for unit in units],
+        }
+        return (recommendation.as_briefing() if recommendation.usable else ""), record
+
     async def _build_pause_control(
         self,
         phase_run: _PhaseRun | None,
@@ -3339,10 +3381,10 @@ class LiveStageAdapter:
         published: Sequence[Mapping[str, Any]],
         inputs: BuildInputBundle | None,
         cycle: Mapping[str, Any],
-    ) -> tuple[BuildReviewPackage | None, str]:
+    ) -> tuple[BuildReviewPackage | None, str, str]:
         """Run the read-only summarizer over the verified execution bundle.
 
-        Returns ``(package, refusal)``. Never raises: the execution behind this
+        Returns ``(package, refusal, question)``. Never raises: the execution behind this
         is already committed and hash-bound, so a provider outage or an
         unparseable answer must cost the write-up rather than the Build.
         """
@@ -3359,17 +3401,18 @@ class LiveStageAdapter:
             dispatched = await dispatcher((unit,), budget=budget)
         except Exception:  # noqa: BLE001 - see the docstring
             logger.warning("The Build summarizer could not be dispatched.", exc_info=True)
-            return None, "The Build summarizer could not be run."
+            return None, "The Build summarizer could not be run.", ""
         text = str(getattr(dispatched[0], "text", "") or "") if dispatched else ""
         parsed = parse_summary(text, bundle=bundle)
         if parsed.needs_input:
-            # Recorded as a refusal of this step rather than silently discarded.
-            # Phase 6 turns it into a typed collaboration request; until then the
-            # honest report is "the write-up is waiting on a person".
-            return None, parsed.clarification_question
+            # A question, not a refusal, and the difference decides what the
+            # person is shown: one asks them to fix something, the other asks
+            # them to decide something. The caller turns this into a control
+            # they can answer.
+            return None, "", parsed.clarification_question
         if not parsed.ok:
-            return None, parsed.refusal
-        return parsed.package, ""
+            return None, parsed.refusal, ""
+        return parsed.package, "", ""
 
     async def _record_human_authored_design(
         self,
@@ -4142,7 +4185,60 @@ class LiveStageAdapter:
             # and leave the button doing nothing.
             if build_control is not None and build_control.stage_attempt_id == stage_attempt_row_id:
                 settled = _settled_control(build_control)
-                await control_gate.record_answer(settled)
+                answered_control = await control_gate.record_answer(settled)
+                if settled.action is BuildControlAction.START_MEETING:
+                    # Advisory by construction: the meeting returns options and
+                    # a recommendation, and the same question is put back with
+                    # that briefing above it. Nothing about running a meeting
+                    # resumes the Build — only the person's answer does.
+                    question = str((answered_control or {}).get("question") or "")
+                    design = _approved_design_brief(cycle) or {}
+                    briefing, record = await self._run_build_work_meeting(
+                        dispatcher=self._dispatcher
+                        or self._production_dispatcher(
+                            config=config,
+                            state=state,
+                            project_id=project_id,
+                            project_root=project_root,
+                            cycle_id=cycle_id,
+                            stage=stage,
+                            meeting=True,
+                        ),
+                        budget=resolve_stage_spec(stage).budget,
+                        attempt_id=attempt_id,
+                        context=MeetingContext(
+                            question=question,
+                            step_key=settled.step_key,
+                            cycle_title=str(cycle.get("title") or ""),
+                            research_question=str(cycle.get("research_question") or ""),
+                            objective=str(cycle.get("objective") or ""),
+                            success_criteria=str(cycle.get("success_criteria") or ""),
+                            design_uri=str(design.get("uri") or ""),
+                            design_hash=str(design.get("content_hash") or ""),
+                            workspace_note=WORKSPACE_PATH_NOTE,
+                            manifest=project_manifest[:24],
+                        ),
+                        candidates=self._candidates(),
+                    )
+                    logger.info("Build work meeting for %s recorded outcome %s.", cycle_id, record.get("outcome"))
+                    return LiveStageResult(
+                        stage=stage,
+                        cycle_id=cycle_id,
+                        note="The build meeting is finished. It can advise, but the decision stays yours.",
+                        control_request=await control_gate.raise_control(
+                            worker_question_request(
+                                question=question or "How should the build continue?",
+                                rationale=briefing or "The meeting could not reach a usable recommendation, so answer directly.",
+                                step_key=settled.step_key,
+                                cycle_id=cycle_id,
+                                stage_attempt_id=stage_attempt_row_id,
+                                workflow_spec_key=resolve_build_workflow().spec_key,
+                                cycle_revision=int(cycle.get("db_revision") or 0),
+                                plan_digest=settled.plan_digest,
+                                input_digest=f"meeting:{settled.request_id}",
+                            )
+                        ),
+                    )
                 if settled.action is BuildControlAction.HOLD:
                     return LiveStageResult(
                         stage=stage,
@@ -4427,17 +4523,34 @@ class LiveStageAdapter:
                 )
                 if not build_plan.dispatchable:
                     # `needs_input`. The stage stays safely paused rather than
-                    # guessing at what the Design left unresolved.
+                    # guessing at what the Design left unresolved — and the
+                    # question is raised as a control bound to this step, so the
+                    # answer comes back to the step that asked rather than to
+                    # whatever the next request happens to be.
+                    control = await control_gate.raise_control(
+                        worker_question_request(
+                            question=build_plan.clarification_question,
+                            rationale="Answering this lets the plan be drawn; nothing has run yet.",
+                            step_key=BuildStepKey.PLAN_BUILD.value,
+                            cycle_id=cycle_id,
+                            stage_attempt_id=str((attempt or {}).get("id") or ""),
+                            workflow_spec_key=build_recorder.spec_key,
+                            cycle_revision=int(cycle.get("db_revision") or 0),
+                            input_digest=build_inputs.digest,
+                            meeting_available=bool(getattr(dbtl_config, "build_work_meetings", False)),
+                        )
+                    )
                     await build_recorder.settle(
                         plan_handle,
                         state=StepState.NEEDS_INPUT,
                         summary=build_plan.clarification_question,
+                        human_input_request_id=str(control.get("request_id") or ""),
                     )
                     return LiveStageResult(
                         stage=stage,
                         cycle_id=cycle_id,
                         note="The build planner needs one decision before any work starts.",
-                        clarification_question=build_plan.clarification_question,
+                        control_request=control,
                     )
                 await build_recorder.succeed(
                     plan_handle,
@@ -4764,6 +4877,7 @@ class LiveStageAdapter:
         build_summary_owns_evidence = build_workflow_enabled and produced_usable_evidence and bool(published_build_artifacts)
         build_package = None
         summary_refusal = ""
+        summary_question = ""
         if produced_usable_evidence and not build_summary_owns_evidence:
             artifact_uri, artifact_hash, artifact_digest = await asyncio.to_thread(
                 _write_stage_package,
@@ -4775,7 +4889,7 @@ class LiveStageAdapter:
             )
             artifact_type = spec.required_artifact_types[0]
         elif build_summary_owns_evidence:
-            build_package, summary_refusal = await self._summarize_build(
+            build_package, summary_refusal, summary_question = await self._summarize_build(
                 dispatcher=dispatcher,
                 budget=spec.budget,
                 attempt_id=attempt_id,
@@ -4803,9 +4917,34 @@ class LiveStageAdapter:
                 # failed, and its code says so, so a person is not told to
                 # re-run an hour of sandbox work to recover a write-up.
                 produced_usable_evidence = False
+        summary_control: dict[str, Any] | None = None
         if build_workflow_enabled and summary_handle.recorded:
             if artifact_hash and build_summary_owns_evidence:
                 await build_recorder.succeed(summary_handle, artifact_hash, execution={"artifact_uri": artifact_uri or ""})
+            elif summary_question:
+                # `needs_input` is deliberately not a failure code: it renders
+                # as **Waiting for you**, must not count against worker failure
+                # telemetry, and the execution behind it stays selected — so the
+                # answer resumes the write-up instead of the Build.
+                summary_control = await control_gate.raise_control(
+                    worker_question_request(
+                        question=summary_question,
+                        rationale="The build ran and its outputs are recorded. This decides how they are written up.",
+                        step_key=BuildStepKey.SUMMARIZE_RESULTS.value,
+                        cycle_id=cycle_id,
+                        stage_attempt_id=str((attempt or {}).get("id") or ""),
+                        workflow_spec_key=build_recorder.spec_key,
+                        cycle_revision=int(cycle.get("db_revision") or 0),
+                        plan_digest=str(getattr(build_plan, "digest", "") or ""),
+                        meeting_available=bool(getattr(dbtl_config, "build_work_meetings", False)),
+                    )
+                )
+                await build_recorder.settle(
+                    summary_handle,
+                    state=StepState.NEEDS_INPUT,
+                    summary=summary_question,
+                    human_input_request_id=str(summary_control.get("request_id") or ""),
+                )
             else:
                 await build_recorder.fail(
                     summary_handle,
