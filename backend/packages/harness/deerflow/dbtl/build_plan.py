@@ -462,6 +462,12 @@ Rules:
   next phase consumes it.
 - Use "needs_input" when the design leaves something you cannot resolve, or the work as
   specified cannot be built at all.
+- Do not ask the owner to author an entire technical specification from scratch. When a
+  reversible pilot default is enough, propose one concrete, reproducible baseline in
+  assumptions and emit a dispatchable plan. When an owner decision is genuinely required,
+  ask exactly one focused question, include your concrete recommendation in assumptions,
+  and put at most that one blocker in open_questions. Later blockers can be asked after the
+  first answer; an omnibus questionnaire is not a usable Build control.
 
 Registered capabilities: {_CAPABILITY_LIST}
 """

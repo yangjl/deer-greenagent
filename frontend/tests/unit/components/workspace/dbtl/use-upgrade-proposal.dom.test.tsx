@@ -99,6 +99,7 @@ describe("useDbtlUpgradeProposal native confirmation", () => {
           success_criteria: "Use held-out validation.",
         },
         "dbtl-setup-confirm:abc123",
+        "thread-origin",
       );
     });
 
@@ -110,6 +111,7 @@ describe("useDbtlUpgradeProposal native confirmation", () => {
       objective: "Rank candidate lines",
       successCriteria: "Use held-out validation.",
       parentCycleId: null,
+      originatingThreadId: "thread-origin",
       idempotencyKey: "cycle-dbtl-setup-confirm:abc123",
     });
     expect(cycle).toEqual(created);
@@ -131,6 +133,7 @@ describe("useDbtlUpgradeProposal native confirmation", () => {
           success_criteria: "",
         },
         "request-1",
+        "thread-origin",
       );
     });
 

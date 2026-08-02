@@ -513,11 +513,10 @@ def _build_control_message(
     card and the record naming different exchanges, and an answer could bind to
     neither.
 
-    ``request_nonce`` is deliberately unused for that reason. It stays in the
-    signature so this builder is interchangeable with the other card builders
-    the continuation handlers call.
+    The request id remains stable, while ``request_nonce`` gives this particular
+    delivery its own message ids.  A later re-presentation therefore appears
+    after the person's follow-up instead of being reduced into the old card.
     """
-    del request_nonce
     payload = dict(request)
     request_id = str(payload.get("request_id") or "")
     kind = str(payload.get("build_control_kind") or "")
@@ -552,6 +551,7 @@ def _build_control_message(
         tool_args["options"] = options
     return build_human_input_messages(
         request_id=request_id,
+        message_id=f"{request_id}:delivery:{request_nonce or 'initial'}",
         tool_args=tool_args,
         request=payload,
         fallback_content="\n\n".join(part for part in (context, question) if part),
@@ -572,7 +572,6 @@ def _stage_handoff_message(
     request_id = card_request_id(
         STAGE_HANDOFF_PREFIX,
         cycle_id,
-        request_nonce,
         surface_id,
         approved_stage,
         next_stage,
@@ -617,6 +616,7 @@ def _stage_handoff_message(
     }
     return build_human_input_messages(
         request_id=request_id,
+        message_id=f"{request_id}:delivery:{request_nonce or 'initial'}",
         tool_args={
             "question": question,
             "context": context,
@@ -1111,14 +1111,16 @@ def _present_artifact_messages(
     )
 
 
-def make_llm_depth_interpreter():
+def make_llm_depth_interpreter(request_context: Mapping[str, Any] | None = None):
     """The production depth interpreter: one nostream model call, fail-soft.
 
     Returns ``None`` when no drafting model is configured, which
     :func:`interpret_depth` reads as "the phrase table is the whole answer".
     Only requests the phrases did not match reach this, and the result is a
     suggestion on a card a person confirms, so a misread costs one dropdown
-    change and never a meeting.
+    change and never a meeting. ``model:use`` is enforced against
+    ``request_context`` on every call; a fail-closed denial raises and the
+    caller keeps the deterministic default.
     """
     from deerflow.config.app_config import get_app_config
 
@@ -1131,6 +1133,7 @@ def make_llm_depth_interpreter():
         return None
 
     async def interpret(prompt: str) -> str:
+        from deerflow.agents.dbtl.model_access import authorize_model_use
         from deerflow.utils.oneshot_llm import run_oneshot_llm
 
         return await run_oneshot_llm(
@@ -1138,23 +1141,27 @@ def make_llm_depth_interpreter():
             user_content=prompt,
             run_name="dbtl_depth_intent",
             app_config=app_config,
-            model_name=model_name,
+            model_name=authorize_model_use(model_name, context=request_context, app_config=app_config),
         )
 
     return interpret
 
 
-def _make_llm_question_writer(context: SupervisorContext):
+def _make_llm_question_writer(context: SupervisorContext, request_context: Mapping[str, Any] | None = None):
     """The production question writer: one non-graph model call, fail-soft.
 
     Every failure — drafting disabled, no config, a model outage, a reply that
     is not JSON — resolves to the deterministic gaps. A card that asks plainly
     is a worse card; a turn that raises here would cost the user the cycle they
     just approved, which is not a trade this step is allowed to make.
+    ``model:use`` is enforced against ``request_context`` on every call; a
+    fail-closed denial degrades to the deterministic gaps like any other
+    drafting failure.
     """
 
     async def write(request_text: str, missing_fields: tuple[str, ...]) -> tuple[SetupQuestion, ...]:
         try:
+            from deerflow.agents.dbtl.model_access import authorize_model_use
             from deerflow.config.app_config import get_app_config
             from deerflow.utils.oneshot_llm import run_oneshot_llm
 
@@ -1173,7 +1180,7 @@ def _make_llm_question_writer(context: SupervisorContext):
                 ),
                 run_name="dbtl_setup_questions",
                 app_config=app_config,
-                model_name=model_name,
+                model_name=authorize_model_use(model_name, context=request_context, app_config=app_config),
             )
             return parse_questions_response(raw, missing_fields=missing_fields)
         except Exception:  # noqa: BLE001 - a drafting failure must not fail the turn
@@ -1191,6 +1198,7 @@ def build_supervisor_graph(
     stage_adapter: StageExecutionPort,
     question_writer=None,
     depth_interpreter=None,
+    principal_request_context: Mapping[str, Any] | None = None,
 ) -> StateGraph:
     """Build (but do not compile) the supervisor graph.
 
@@ -1210,8 +1218,8 @@ def build_supervisor_graph(
     model and every failure keeps the deterministic default.
     """
     stage_adapter = compatible_stage_port(stage_adapter)
-    writer = question_writer or _make_llm_question_writer(context)
-    depth_reader = depth_interpreter or make_llm_depth_interpreter()
+    writer = question_writer or _make_llm_question_writer(context, principal_request_context)
+    depth_reader = depth_interpreter or make_llm_depth_interpreter(principal_request_context)
 
     def decide(state: dict) -> BranchDecision:
         text, recovered_choice, recovered_cycle_id = _routing_input(state)
@@ -1924,6 +1932,12 @@ def make_project_supervisor(config: RunnableConfig):
     if session_factory is None:
         raise RuntimeError("DBTL stage execution requires an initialized SQL persistence layer.")
 
+    # The run's principal travels into every one-shot factory so DBTL's
+    # internal model calls enforce the same ``model:use`` policy as the
+    # composer path — a role denied a model cannot reach it through DBTL.
+    from deerflow.agents.dbtl.model_access import principal_context
+
+    run_principal_context = principal_context(config)
     graph = build_supervisor_graph(
         lead_agent=lead_agent,
         context=supervisor_context_from_config(config),
@@ -1932,10 +1946,11 @@ def make_project_supervisor(config: RunnableConfig):
             repo=DbtlCycleRepository(session_factory),
             app_config=runtime_app_config,
             runtime_config=config,
-            roster_writer=make_llm_roster_writer(),
-            intent_interpreter=make_llm_intent_interpreter(),
-            revision_interpreter=make_llm_revision_interpreter(),
-            transition_assessor=make_llm_transition_assessor(),
+            roster_writer=make_llm_roster_writer(run_principal_context),
+            intent_interpreter=make_llm_intent_interpreter(run_principal_context),
+            revision_interpreter=make_llm_revision_interpreter(run_principal_context),
+            transition_assessor=make_llm_transition_assessor(run_principal_context),
         ),
+        principal_request_context=run_principal_context,
     )
     return graph.compile()

@@ -54,6 +54,12 @@ export interface BuildWorkflowView {
   phases: BuildWorkflowPhaseRow[];
   next_step: string | null;
   is_complete: boolean;
+  waiting_control?: {
+    kind: string;
+    request_id: string;
+    label: string;
+    originating_thread_id: string | null;
+  } | null;
 }
 
 /**
@@ -184,11 +190,11 @@ export function buildPlanProjection(
     rows,
     progress: rows.length ? `${done} of ${rows.length}` : "",
     emptyNote: rows.length ? "" : "No build has started.",
-    attention: stopped
+    attention: view.waiting_control?.label ?? (stopped
       ? stopped.status === "needs_input"
         ? `${stopped.title} is waiting for you.`
         : `${stopped.title} stopped.`
-      : "",
+      : ""),
   };
 }
 

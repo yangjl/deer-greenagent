@@ -1222,6 +1222,16 @@ export function MessageList({
                 if (isDeckOwnedHumanInputRequest(humanInputRequest)) {
                   return null;
                 }
+                const latestDeliveryId =
+                  humanInputState.latestRequestMessageIds.get(
+                    humanInputRequest.request_id,
+                  );
+                if (
+                  latestDeliveryId !== undefined &&
+                  message.id !== latestDeliveryId
+                ) {
+                  return null;
+                }
                 const answeredResponse =
                   humanInputState.answeredResponses.get(
                     humanInputRequest.request_id,
@@ -1438,6 +1448,7 @@ export function MessageList({
           )}
           <StageWorkPanel
             className="w-full"
+            isLoading={thread.isLoading}
             runId={latestRunId}
             threadId={threadId}
           />

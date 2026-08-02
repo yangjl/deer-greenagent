@@ -250,7 +250,7 @@ class TestChangingThePlanCarriesTheOwnersWords:
         result = await _run(repo, root, dispatcher=dispatcher, confirmation=True, run_id="run-2", build_control=_answer(first.control_request, "change"))
 
         assert result.control_request is not None
-        assert result.control_request["input_mode"] == "text"
+        assert result.control_request["input_mode"] == "free_text"
         assert dispatcher.calls == []
 
     async def test_the_follow_up_is_a_different_control_from_the_one_it_answers(self, project) -> None:
@@ -472,6 +472,7 @@ class TestAMeetingIsConvenedByAPersonAndAdvisesOnly:
             BuildControlAction.START_MEETING.value,
             BuildControlAction.HOLD.value,
         ]
+        assert result.control_request["input_mode"] == "choice_with_other"
 
     async def test_choosing_it_runs_three_seats_and_asks_again(self, project) -> None:
         repo, root = project
@@ -493,7 +494,7 @@ class TestAMeetingIsConvenedByAPersonAndAdvisesOnly:
         # answer resumes the Build.
         assert result.control_request is not None
         assert result.control_request["question"] == "Should the holdout be by family or by year?"
-        assert result.control_request["input_mode"] == "text"
+        assert result.control_request["input_mode"] == "free_text"
 
     async def test_the_recommendation_is_context_above_the_answer(self, project) -> None:
         repo, root = project

@@ -1,10 +1,13 @@
 "use client";
 
 import { Loader2Icon } from "lucide-react";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { fetchStageWorkers } from "@/core/tasks/api";
-import { useSubtaskContext, useUpdateSubtask } from "@/core/tasks/context";
+import {
+  fetchStageWorkers,
+  StageWorkerFetchError,
+} from "@/core/tasks/api";
+import { useReconcileSubtasks, useSubtaskContext } from "@/core/tasks/context";
 import {
   stageLabel,
   stageWorkGroups,
@@ -13,6 +16,18 @@ import {
 import { cn } from "@/lib/utils";
 
 import { SubtaskCard } from "./subtask-card";
+
+const MAX_HYDRATION_RETRIES = 3;
+
+function shouldRetryHydration(error: unknown): boolean {
+  const permanentClientError =
+    error instanceof StageWorkerFetchError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408 &&
+    error.status !== 429;
+  return !permanentClientError;
+}
 
 /**
  * Governed stage work, in the conversation where it was started.
@@ -33,49 +48,85 @@ export function StageWorkPanel({
   className,
   threadId,
   runId,
+  isLoading,
 }: {
   className?: string;
   threadId?: string;
   runId?: string;
+  isLoading: boolean;
 }) {
   const { tasks: taskMap } = useSubtaskContext();
-  const updateSubtask = useUpdateSubtask();
+  const reconcileSubtasks = useReconcileSubtasks();
   const groups = useMemo(
     () => stageWorkGroups(Object.values(taskMap)),
     [taskMap],
   );
 
-  // Rebuild stage work for a page that missed the stream. Live runs already
-  // have their tasks, so the `groups.length` guard skips the fetch; a reloaded
-  // one has nothing in the transcript to rebuild from, because a stage worker
-  // has no `task` tool call to hang from.
+  // Rebuild stage work for a page that missed the stream and reconcile a
+  // partial live task against its durable terminal event. A stage worker has
+  // no `task` tool call in the transcript to rebuild from.
   const hydratedRef = useRef<string | null>(null);
-  const hasStageWork = groups.length > 0;
+  const retryEpochRef = useRef<string | null>(null);
+  const retryAttemptRef = useRef(0);
+  const [retryToken, setRetryToken] = useState(0);
   useEffect(() => {
-    if (!threadId || !runId || hasStageWork || hydratedRef.current === runId) {
+    if (!threadId || isLoading) {
       return;
     }
-    hydratedRef.current = runId;
-    fetchStageWorkers(threadId, runId)
+    const epoch = `${threadId}:${runId ?? "history"}`;
+    if (retryEpochRef.current !== epoch) {
+      retryEpochRef.current = epoch;
+      retryAttemptRef.current = 0;
+    }
+    if (hydratedRef.current === epoch) return;
+    hydratedRef.current = epoch;
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    fetchStageWorkers(threadId)
       .then((workers) => {
-        for (const worker of workers) {
-          updateSubtask({
+        if (cancelled || hydratedRef.current !== epoch) return;
+        retryAttemptRef.current = 0;
+        reconcileSubtasks(
+          workers.map((worker) => ({
             id: worker.taskId,
             status: worker.status,
             description: worker.description,
             dbtlStage: worker.dbtlStage,
             subagent_type: "subagent",
             prompt: "",
-            runId,
-          });
-        }
+            runId: worker.runId,
+            result: worker.result,
+            displaySummary: worker.displaySummary,
+            error: worker.error,
+            modelName: worker.modelName,
+            usage: worker.usage,
+          })),
+        );
       })
-      .catch(() => {
-        // Allow a retry on the next render pass rather than leaving the
-        // conversation permanently missing work that did happen.
+      .catch((error: unknown) => {
+        if (cancelled || hydratedRef.current !== epoch) return;
+        if (
+          !shouldRetryHydration(error) ||
+          retryAttemptRef.current >= MAX_HYDRATION_RETRIES
+        ) {
+          return;
+        }
         hydratedRef.current = null;
+        const delay = 500 * 2 ** retryAttemptRef.current;
+        retryAttemptRef.current += 1;
+        // A failed request does not otherwise change any dependency, so an
+        // explicit capped backoff signal is required to make the retry real.
+        retryTimer = setTimeout(
+          () => setRetryToken((value) => value + 1),
+          delay,
+        );
       });
-  }, [threadId, runId, hasStageWork, updateSubtask]);
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (hydratedRef.current === epoch) hydratedRef.current = null;
+    };
+  }, [threadId, runId, isLoading, retryToken, reconcileSubtasks]);
 
   if (groups.length === 0) {
     return null;

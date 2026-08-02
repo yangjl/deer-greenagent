@@ -303,7 +303,10 @@ export function humanInputRunContext(
     // so it belongs to that cycle. The card carries its own cycle id and the
     // backend recovers it, but sending the scope keeps the two agreeing and
     // means a Start does not depend on recovery to route correctly.
-    if (request.clarification_type === "dbtl_stage_handoff") {
+    if (
+      request.clarification_type === "dbtl_stage_handoff" ||
+      request.clarification_type === "dbtl_build_control"
+    ) {
       return selectedCycleId
         ? runContextPayload({ kind: "cycle", cycleId: selectedCycleId })
         : runContextPayload(AUTO_REQUEST_CONTEXT);

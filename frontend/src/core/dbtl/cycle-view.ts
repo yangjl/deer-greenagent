@@ -131,6 +131,7 @@ export interface CycleRecord {
   id: string;
   project_id: string;
   parent_cycle_id: string | null;
+  originating_thread_id?: string | null;
   title: string;
   cycle_class: CycleClass;
   cycle_weight: CycleWeight;

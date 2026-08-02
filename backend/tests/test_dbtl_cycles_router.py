@@ -327,6 +327,58 @@ def test_removing_a_cycle_records_an_abandonment_instead_of_deleting_it(tmp_path
         assert events[-1]["event_type"] == "cycle.abandoned"
 
 
+def test_cycle_creation_validates_and_records_its_originating_conversation(tmp_path: Path) -> None:
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    app = _make_app(workspace_repo, cycle_repo)
+
+    with TestClient(app) as client:
+        project_id = _seed_project(client)
+
+        class ThreadStore:
+            async def get(self, thread_id, *, user_id=None):
+                del user_id
+                return {"project_id": project_id if thread_id == "thread-origin" else "another-project"}
+
+        app.state.thread_store = ThreadStore()
+        cycle = _create_cycle(
+            client,
+            project_id,
+            originating_thread_id="thread-origin",
+        )
+        assert cycle["originating_thread_id"] == "thread-origin"
+
+        wrong_project = client.post(
+            f"/api/projects/{project_id}/dbtl/cycles",
+            json={
+                "title": "Another cycle",
+                "cycle_class": "computational",
+                "research_question": "Does it generalize?",
+                "idempotency_key": "create-origin-2",
+                "originating_thread_id": "thread-other",
+            },
+        )
+        assert wrong_project.status_code == 422
+        assert len(client.get(f"/api/projects/{project_id}/dbtl/cycles").json()["cycles"]) == 1
+
+
+def test_cycle_creation_rejects_a_malformed_originating_thread_id(tmp_path: Path) -> None:
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        project_id = _seed_project(client)
+        response = client.post(
+            f"/api/projects/{project_id}/dbtl/cycles",
+            json={
+                "title": "Drought",
+                "cycle_class": "computational",
+                "research_question": "Does it generalize?",
+                "idempotency_key": "create-origin-invalid",
+                "originating_thread_id": "../escape",
+            },
+        )
+
+    assert response.status_code == 422
+
+
 # --------------------------------------------------------------------------
 # The demo path
 # --------------------------------------------------------------------------

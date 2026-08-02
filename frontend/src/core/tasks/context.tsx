@@ -120,3 +120,24 @@ export function useUpdateSubtask() {
 
   return updateSubtask;
 }
+
+/** Publish async durable reconciliation as one eager, freshest-state update. */
+export function useReconcileSubtasks() {
+  const { tasksRef, setTasks } = useSubtaskContext();
+  return useCallback(
+    (updates: Array<Partial<Subtask> & { id: string }>) => {
+      const nextTasks = { ...tasksRef.current };
+      let changed = false;
+      for (const update of updates) {
+        const transition = computeNextSubtask(nextTasks[update.id], update);
+        nextTasks[update.id] = transition.next;
+        changed ||= transition.changed;
+      }
+      if (changed) {
+        tasksRef.current = nextTasks;
+        setTasks(nextTasks);
+      }
+    },
+    [setTasks, tasksRef],
+  );
+}

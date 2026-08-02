@@ -110,15 +110,15 @@ class TestNoVisibleStringIsAnInternalIdentifier:
         assert resolve_display_name(ActorKind.DBTL_SUPERVISOR) == "Cycle supervisor"
 
     def test_the_adapter_is_named_for_its_stage(self):
-        assert resolve_display_name(ActorKind.STAGE_ADAPTER, stage="build") == "Build stage"
-        assert resolve_display_name(ActorKind.STAGE_ADAPTER, stage="reconciliation") == "Data reconciliation stage"
+        assert resolve_display_name(ActorKind.STAGE_ADAPTER, stage="build") == "Build coordinator"
+        assert resolve_display_name(ActorKind.STAGE_ADAPTER, stage="reconciliation") == "Data reconciliation coordinator"
 
     def test_a_meeting_seat_keeps_its_validated_label(self):
         assert resolve_display_name(ActorKind.STAGE_WORKER, stage="design", index=1, label="Red team") == "Red team"
 
     def test_a_missing_stage_degrades_to_plain_words_rather_than_raising(self):
         # Instrumentation must never be the reason a run fails.
-        assert resolve_display_name(ActorKind.STAGE_ADAPTER) == "Cycle stage"
+        assert resolve_display_name(ActorKind.STAGE_ADAPTER) == "Cycle coordinator"
         assert resolve_display_name(ActorKind.STAGE_WORKER) == "Cycle worker"
 
 

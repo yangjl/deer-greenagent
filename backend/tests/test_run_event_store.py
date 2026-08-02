@@ -80,6 +80,28 @@ class TestPutAndSeq:
         assert duplicate == first
         assert [event["content"] for event in await store.list_events("t1", "r1") if event["event_type"] == "run.delivery"] == [{"presented": 1}]
 
+    @pytest.mark.anyio
+    async def test_put_batch_if_absent_writes_the_whole_batch_or_none_of_it(self, store):
+        batch = [
+            {"thread_id": "t1", "run_id": "seed-1", "event_type": "human_message", "category": "message", "content": "one"},
+            {"thread_id": "t1", "run_id": "seed-1", "event_type": "ai_message", "category": "message", "content": "two"},
+        ]
+
+        records, created = await store.put_batch_if_absent(batch)
+        duplicate, duplicate_created = await store.put_batch_if_absent(batch)
+
+        assert created is True
+        assert [record["content"] for record in records] == ["one", "two"]
+        # A second claim writes nothing at all, rather than appending a
+        # second copy of the tail behind the already-present first event.
+        assert duplicate_created is False
+        assert duplicate == []
+        assert [message["content"] for message in await store.list_messages("t1")] == ["one", "two"]
+
+    @pytest.mark.anyio
+    async def test_put_batch_if_absent_ignores_an_empty_batch(self, store):
+        assert await store.put_batch_if_absent([]) == ([], False)
+
 
 # -- list_messages --
 
@@ -381,6 +403,32 @@ class TestDbRunEventStore:
         assert duplicate_created is False
         assert duplicate["seq"] == first["seq"]
         assert duplicate["content"] == {"presented": 2}
+        await close_engine()
+
+    @pytest.mark.anyio
+    async def test_put_batch_if_absent_commits_the_batch_in_one_transaction(self, tmp_path):
+        """The claim and the remainder must share one transaction: a consumer
+        that treats any existing row as proof the batch was written can never
+        repair a batch left half-committed by a crash."""
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+        batch = [
+            {"thread_id": "t1", "run_id": "seed-1", "event_type": "human_message", "category": "message", "content": "one"},
+            {"thread_id": "t1", "run_id": "seed-1", "event_type": "ai_message", "category": "message", "content": "two"},
+        ]
+
+        records, created = await s.put_batch_if_absent(batch)
+        duplicate, duplicate_created = await s.put_batch_if_absent(batch)
+
+        assert created is True
+        assert [record["seq"] for record in records] == [1, 2]
+        assert duplicate_created is False
+        assert duplicate == []
+        assert [message["content"] for message in await s.list_messages("t1")] == ["one", "two"]
         await close_engine()
 
     @pytest.mark.anyio
@@ -761,6 +809,27 @@ class TestJsonlRunEventStore:
         assert duplicate_created is False
         assert duplicate == first
         assert len(await s.list_events("t1", "r1", event_types=["run.delivery"])) == 1
+
+    @pytest.mark.anyio
+    async def test_put_batch_if_absent_claims_the_whole_batch(self, tmp_path):
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        batch = [
+            {"thread_id": "t1", "run_id": "seed-1", "event_type": "human_message", "category": "message", "content": "one"},
+            {"thread_id": "t1", "run_id": "seed-2", "event_type": "ai_message", "category": "message", "content": "two"},
+        ]
+
+        records, created = await s.put_batch_if_absent(batch)
+        duplicate, duplicate_created = await s.put_batch_if_absent(batch)
+
+        assert created is True
+        assert [record["seq"] for record in records] == [1, 2]
+        # Seed batches span one run per inherited turn, so the records must
+        # reach each run's own file rather than all landing in the first.
+        assert duplicate_created is False
+        assert duplicate == []
+        assert [message["content"] for message in await s.list_messages("t1")] == ["one", "two"]
 
     @pytest.mark.anyio
     async def test_file_at_correct_path(self, tmp_path):

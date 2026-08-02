@@ -243,3 +243,71 @@ def test_key_prefix_override_wins():
     assert checkpoint_cache_key_prefix(app_config) == "custom:"
     default = checkpoint_cache_key_prefix(_app_config({"backend": "sqlite"}))
     assert default.startswith("ckpt-hist:v1:")
+
+
+@pytest.mark.anyio
+async def test_corrupt_entry_is_a_miss_and_is_discarded(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    """A malformed cache entry must never abort checkpoint materialization.
+
+    Missing tag separator, undecodable tag bytes, or a payload the serde
+    rejects all degrade to a per-key miss; the corrupt key is unlinked so it
+    cannot keep failing every later read, and healthy sibling keys still hit.
+    """
+    fake = _FakeRedis()
+    cache = _make_cache(monkeypatch, fake)
+    await cache.aset_many({"good": _entry(1)})
+    fake.store["no-separator"] = b"garbage-without-a-tag-separator"
+    fake.store["bad-tag"] = b"\xff\xfe\x00payload"
+    fake.store["bad-payload"] = b"json\x00{not-valid-json"
+
+    with caplog.at_level("WARNING"):
+        hit = await cache.aget_many(["good", "no-separator", "bad-tag", "bad-payload", "absent"])
+
+    assert set(hit) == {"good"}
+    assert cache.stats().hits == 1 and cache.stats().misses == 4
+    unlinked = {key for batch in fake.unlinked for key in batch}
+    assert unlinked == {"no-separator", "bad-tag", "bad-payload"}
+    assert "corrupt" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_corrupt_entry_discard_failure_still_returns_misses(monkeypatch: pytest.MonkeyPatch):
+    """A failing unlink costs the cleanup, never the read."""
+    fake = _FakeRedis()
+    cache = _make_cache(monkeypatch, fake)
+    await cache.aset_many({"good": _entry(1)})
+    fake.store["corrupt"] = b"garbage-without-a-tag-separator"
+
+    async def failing_unlink(*keys: str) -> int:
+        from redis.exceptions import RedisError
+
+        raise RedisError("connection refused")
+
+    fake.unlink = failing_unlink  # type: ignore[method-assign]
+    hit = await cache.aget_many(["good", "corrupt"])
+    assert set(hit) == {"good"}
+
+
+@pytest.mark.anyio
+async def test_unserializable_entry_fails_open_without_costing_siblings(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    """A write-side serialization failure is per-entry and fail-open."""
+
+    class _ExplodingSerde(JsonPlusSerializer):
+        def dumps_typed(self, obj):
+            if isinstance(obj, dict) and obj.get("boom"):
+                raise ValueError("unserializable entry")
+            return super().dumps_typed(obj)
+
+    import deerflow.runtime.checkpoint_cache.redis as redis_mod
+
+    fake = _FakeRedis()
+    monkeypatch.setattr(redis_mod, "_create_client", lambda *a, **k: fake)
+    cache = redis_mod.RedisCheckpointHistoryCache("redis://unused", serde=_ExplodingSerde(), ttl_seconds=60)
+
+    with caplog.at_level("WARNING"):
+        await cache.aset_many({"bad": {"boom": True}, "good": _entry(1)})
+
+    assert list(fake.store) == ["good"]
+    assert "failed to serialize" in caplog.text
+    hit = await cache.aget_many(["good"])
+    assert set(hit) == {"good"}

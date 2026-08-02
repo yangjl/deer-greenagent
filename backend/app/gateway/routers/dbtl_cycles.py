@@ -62,6 +62,7 @@ from deerflow.persistence.dbtl import (
     DesignFeedbackConflict,
 )
 from deerflow.utils.file_io import run_file_io
+from deerflow.utils.thread_id import ThreadId
 
 router = APIRouter(prefix="/api", tags=["dbtl-cycles"])
 logger = logging.getLogger(__name__)
@@ -362,6 +363,7 @@ class CycleCreateRequest(BaseModel):
     objective: str = Field(default="", max_length=4000)
     success_criteria: str = Field(default="", max_length=4000)
     parent_cycle_id: str | None = Field(default=None, max_length=64)
+    originating_thread_id: ThreadId | None = None
     idempotency_key: str = Field(min_length=1, max_length=128)
 
     @field_validator("title", "research_question")
@@ -725,7 +727,60 @@ async def _design_feedback_read_model(
             run = None
         raw_status = (run or {}).get("status") if isinstance(run, dict) else None
         run_status = str(getattr(raw_status, "value", raw_status) or "")
-        if run_status in {"error", "timeout", "interrupted"}:
+        if run_status == "success":
+            # The deck action starts this run outside the mounted chat's
+            # LangGraph stream.  A successful run therefore does not wake the
+            # conversation by itself.  Publish a durable convergence signal
+            # only after the same message projection used by chat can see the
+            # Start/Hold card; the browser polls this read model and invalidates
+            # the thread at that point.
+            delivered = await _handoff_card_is_visible(
+                request,
+                thread_id=str(surface["originating_thread_id"]),
+                run_id=str(latest_action["run_id"]),
+                user_id=user_id,
+            )
+            if delivered:
+                handoff_receipt.update(
+                    {
+                        "handoff_status": "delivered",
+                        "message": "Approval recorded. The next-stage choice is ready in this conversation.",
+                    }
+                )
+                handoff_receipt.pop("handoff_failure_code", None)
+                latest_action, _changed = await repo.transition_stage_feedback_handoff(
+                    str(latest_action["client_submission_id"]),
+                    project_id=project_id,
+                    run_id=str(latest_action["run_id"]),
+                    status="review_recorded",
+                    receipt=handoff_receipt,
+                    failure_code=None,
+                )
+            elif await _handoff_delivery_is_settled(
+                request,
+                thread_id=str(surface["originating_thread_id"]),
+                run_id=str(latest_action["run_id"]),
+            ):
+                # A Gateway restart loses the detached watcher. The terminal
+                # delivery receipt is the durable ordering fence: the journal
+                # flushed every message before it, so a missing card is now a
+                # completed empty delivery rather than eventual consistency.
+                handoff_receipt.update(
+                    {
+                        "handoff_status": "failed",
+                        "handoff_failure_code": "success_without_follow_up",
+                        "message": (f"{str(handoff_receipt.get('approved_stage') or surface_stage).title()} approval remains recorded, but the next-stage prompt stopped before it appeared. Retry the same decision from this deck."),
+                    }
+                )
+                latest_action, _changed = await repo.transition_stage_feedback_handoff(
+                    str(latest_action["client_submission_id"]),
+                    project_id=project_id,
+                    run_id=str(latest_action["run_id"]),
+                    status="handoff_failed",
+                    receipt=handoff_receipt,
+                    failure_code="handoff_success_without_follow_up",
+                )
+        elif run_status in {"error", "timeout", "interrupted"}:
             handoff_receipt.update(
                 {
                     "handoff_status": "failed",
@@ -733,9 +788,10 @@ async def _design_feedback_read_model(
                     "message": (f"{str(handoff_receipt.get('approved_stage') or surface_stage).title()} approval remains recorded, but the next-stage prompt stopped before it appeared. Retry the same decision from this deck."),
                 }
             )
-            latest_action = await repo.update_stage_feedback_action(
+            latest_action, _changed = await repo.transition_stage_feedback_handoff(
                 str(latest_action["client_submission_id"]),
                 project_id=project_id,
+                run_id=str(latest_action["run_id"]),
                 status="handoff_failed",
                 receipt=handoff_receipt,
                 failure_code=f"handoff_run_{run_status}"[:64],
@@ -1071,6 +1127,26 @@ async def _handoff_card_is_visible(
     return False
 
 
+async def _handoff_delivery_is_settled(
+    request: Request,
+    *,
+    thread_id: str,
+    run_id: str,
+) -> bool:
+    """Whether the run journal has finished writing its message projection."""
+    try:
+        event_store = get_run_event_store(request)
+    except HTTPException:
+        return True
+    receipts = await event_store.list_events(
+        thread_id,
+        run_id,
+        event_types=["run.delivery"],
+        limit=1,
+    )
+    return bool(receipts)
+
+
 def _watch_post_approval_handoff(
     request: Request,
     *,
@@ -1089,12 +1165,22 @@ def _watch_post_approval_handoff(
         return
 
     async def card_delivered() -> bool:
-        return await _handoff_card_is_visible(
+        visible = await _handoff_card_is_visible(
             request,
             thread_id=thread_id,
             run_id=str(handoff.run_id),
             user_id=user_id,
         )
+        if not visible and not await _handoff_delivery_is_settled(
+            request,
+            thread_id=thread_id,
+            run_id=str(handoff.run_id),
+        ):
+            # Run status can become visible before the worker flushes the
+            # journal. Absence is not evidence until the terminal delivery
+            # receipt establishes that every preceding message has landed.
+            raise RuntimeError("Handoff delivery is still finalizing")
+        return visible
 
     async def mark_failed(run_status: str) -> None:
         actions = await repo.stage_feedback_actions(surface_id, project_id=project_id)
@@ -1105,6 +1191,30 @@ def _watch_post_approval_handoff(
         if current is None or current.get("status") != "review_recorded" or str(current.get("run_id") or "") != handoff.run_id:
             return
         receipt = dict(current.get("receipt") or {})
+        if receipt.get("handoff_status") != "started":
+            return
+        if await _handoff_card_is_visible(
+            request,
+            thread_id=thread_id,
+            run_id=str(handoff.run_id),
+            user_id=user_id,
+        ):
+            receipt.update(
+                {
+                    "handoff_status": "delivered",
+                    "message": "Approval recorded. The next-stage choice is ready in this conversation.",
+                }
+            )
+            receipt.pop("handoff_failure_code", None)
+            await repo.transition_stage_feedback_handoff(
+                action_id,
+                project_id=project_id,
+                run_id=handoff.run_id,
+                status="review_recorded",
+                receipt=receipt,
+                failure_code=None,
+            )
+            return
         receipt.update(
             {
                 "handoff_status": "failed",
@@ -1112,9 +1222,10 @@ def _watch_post_approval_handoff(
                 "message": (f"{approved_stage.title()} approval remains recorded, but the next-stage prompt stopped before it appeared. Reopen this deck and retry the same decision."),
             }
         )
-        await repo.update_stage_feedback_action(
+        await repo.transition_stage_feedback_handoff(
             action_id,
             project_id=project_id,
+            run_id=handoff.run_id,
             status="handoff_failed",
             receipt=receipt,
             failure_code=f"handoff_run_{run_status}"[:64],
@@ -1841,6 +1952,16 @@ async def create_cycle(
     """Open a durable research record."""
     _project, user_id = await _require_project(project_id, request)
     _require_mutations_enabled(request, config)
+    if body.originating_thread_id is not None:
+        origin = await get_thread_store(request).get(
+            body.originating_thread_id,
+            user_id=user_id,
+        )
+        if not origin or origin.get("project_id") != project_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="The originating conversation is not available in this project.",
+            )
     try:
         return await repo.create_cycle(
             cycle_id=f"cycle-{uuid4()}",
@@ -1855,6 +1976,7 @@ async def create_cycle(
             policy_version=getattr(request.app.state, "dbtl_config_override", config.dbtl).policy_version,
             idempotency_key=body.idempotency_key,
             parent_cycle_id=body.parent_cycle_id,
+            originating_thread_id=(str(body.originating_thread_id) if body.originating_thread_id is not None else None),
         )
     except Exception as exc:  # noqa: BLE001 - translated to typed HTTP errors
         raise _translate(exc) from exc

@@ -144,15 +144,19 @@ function StageRow({
   onOpen,
   designDeckFeedback,
   openWorkCount = 0,
+  waitingForHuman = false,
 }: {
   cycle: CycleRecord;
   stage: DbtlStage;
   onOpen: (stage: DbtlStage) => void;
   designDeckFeedback: boolean;
   openWorkCount?: number;
+  waitingForHuman?: boolean;
 }) {
   const record = cycle.stages.find((item) => item.stage === stage);
-  const mark = STATUS_MARK[record?.status ?? "locked"] ?? LOCKED_MARK;
+  const mark = waitingForHuman
+    ? { icon: AlertTriangle, tone: "text-amber-700 dark:text-amber-400" }
+    : (STATUS_MARK[record?.status ?? "locked"] ?? LOCKED_MARK);
   const Icon = mark.icon;
   const badge = blockerBadge(openWorkCount);
   const label =
@@ -177,7 +181,9 @@ function StageRow({
         </span>
       )}
       <span className="text-muted-foreground shrink-0 text-[11px]">
-        {STATUS_LABELS[record?.status ?? "locked"]}
+        {waitingForHuman
+          ? "Waiting for you"
+          : STATUS_LABELS[record?.status ?? "locked"]}
       </span>
     </button>
   );
@@ -260,7 +266,9 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const buildWorkflow = useStageWorkflow(project?.id, selected?.id, "build", {
     live: Boolean(selected && isLive(selected)),
   });
-  const buildProgress = buildPlanProjection(buildWorkflow.data).progress;
+  const buildProjection = buildPlanProjection(buildWorkflow.data);
+  const buildProgress = buildProjection.progress;
+  const buildWaitingForHuman = Boolean(buildWorkflow.data?.waiting_control);
 
   // Cycles minimize themselves once nothing is running; an explicit click
   // always wins over that default.
@@ -413,6 +421,12 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           ) : (
             cycles.map((entry) => {
               const active = disclosedCycleId === entry.id;
+              const originConversation = entry.originating_thread_id
+                ? conversations.data?.find(
+                    (conversation) =>
+                      conversation.threadId === entry.originating_thread_id,
+                  )
+                : undefined;
               return (
                 <div key={entry.id} className="mb-1">
                   <div className="group/cycle flex items-center">
@@ -490,8 +504,36 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                               ? reconciliationBlockers
                               : 0
                           }
+                          waitingForHuman={
+                            entry.id === selected?.id &&
+                            stage === "build" &&
+                            buildWaitingForHuman
+                          }
                         />
                       ))}
+                      {entry.originating_thread_id &&
+                        (originConversation ? (
+                          <Link
+                            href={pathOfProjectThread(
+                              projectSlug,
+                              originConversation.threadId,
+                            )}
+                            onClick={() => selectCycle(null)}
+                            className="text-muted-foreground hover:text-foreground flex items-center gap-2 rounded px-2 py-1.5 text-[11px] transition-colors"
+                          >
+                            <MessagesSquare className="size-3.5 shrink-0" />
+                            <span className="min-w-0 truncate">
+                              Origin · {originConversation.title ??
+                                "Untitled conversation"}
+                            </span>
+                          </Link>
+                        ) : (
+                          <div className="text-muted-foreground px-2 py-1.5 text-[11px]">
+                            {conversations.isLoading
+                              ? "Loading originating conversation…"
+                              : "Originating conversation unavailable"}
+                          </div>
+                        ))}
                     </div>
                   )}
                 </div>

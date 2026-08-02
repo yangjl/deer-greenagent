@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from langchain_core.messages import BaseMessage
@@ -262,6 +263,13 @@ def _strip_external_message_metadata(message: Any) -> Any:
     return message.model_copy(update=update) if update else message
 
 
+def _ensure_input_message_id(message: Any) -> Any:
+    """Mint the durable boundary identity the journal and UI both require."""
+    if not isinstance(message, BaseMessage) or getattr(message, "id", None):
+        return message
+    return message.model_copy(update={"id": f"gateway-input__{uuid4().hex}"})
+
+
 def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool = False) -> dict[str, Any]:
     """Convert LangGraph Platform input format to LangChain state dict.
 
@@ -301,6 +309,7 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
                 converted.append(msg)
         if not trusted_internal:
             converted = [_strip_external_message_metadata(message) for message in converted]
+        converted = [_ensure_input_message_id(message) for message in converted]
         return {**raw_input, "messages": converted}
     return raw_input
 
@@ -1309,7 +1318,22 @@ async def ensure_checkpoint_history_seeded(
     )
     if not events:
         return
-    await event_store.put_batch(events)
+    # The empty-feed check above races other Gateway workers: two processes can
+    # both see an empty feed and both build the same seed batch. The batch's
+    # first event doubles as a durable claim — ``put_batch_if_absent``
+    # serializes that existence check with every other writer for the thread
+    # (advisory lock on PostgreSQL, in-process lock on SQLite), and seeding is
+    # deterministic, so the loser finds the winner's identical first row and
+    # stands down instead of duplicating the transcript.
+    #
+    # Claim and remainder commit together, because the guard above reads *any*
+    # message as "already seeded": a batch left half written by a crash between
+    # two commits could never be completed, silently truncating the inherited
+    # transcript for the life of the thread.
+    _, created = await event_store.put_batch_if_absent(events)
+    if not created:
+        logger.info("Checkpoint-history seed already claimed for thread %s; skipping duplicate seed", thread_id)
+        return
     logger.info("Seeded %d checkpoint-history events for thread %s", len(events), thread_id)
 
 

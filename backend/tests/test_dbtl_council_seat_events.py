@@ -96,6 +96,43 @@ class TestSeatDescription:
 
 
 class TestTerminalSeatEvent:
+    def test_a_build_planner_uses_the_plan_contract_in_the_live_lane(self):
+        event = _terminal_seat_event(
+            _unit(role="planner", capability="software_engineering"),
+            DispatchOutcome(
+                unit_id="dbtl-build-plan",
+                text=json.dumps(
+                    {
+                        "feasibility": "needs_input",
+                        "rationale": "One owner choice remains.",
+                        "phases": [],
+                        "assumptions": ["Use one population."],
+                        "open_questions": ["Which holdout?"],
+                        "clarification_question": "Which holdout should the pilot use?",
+                    }
+                ),
+            ),
+            model="gpt-5.6-sol",
+            meeting_stage=None,
+        )
+
+        assert event["type"] == "task_completed"
+        assert event["display_summary"] == "Which holdout should the pilot use?"
+        assert json.loads(event["result"])["feasibility"] == "needs_input"
+
+    def test_an_unreadable_build_plan_reports_the_recorded_fallback_as_completed(self):
+        event = _terminal_seat_event(
+            _unit(role="planner", capability="software_engineering"),
+            DispatchOutcome(unit_id="dbtl-build-plan", text="not a plan"),
+            model="gpt-5.6-sol",
+            meeting_stage=None,
+        )
+
+        assert event["type"] == "task_completed"
+        assert event["degraded"] is True
+        assert event["result"] == "not a plan"
+        assert "one recorded fallback phase" in event["display_summary"]
+
     def test_contract_valid_output_completes_the_live_lane(self):
         event = _terminal_seat_event(
             _unit(role="chair"),
@@ -114,6 +151,7 @@ class TestTerminalSeatEvent:
 
         assert event["type"] == "task_completed"
         assert event["council_seat"]["role"] == "chair"
+        assert event["display_summary"] == "Use two seasons."
         assert json.loads(event["result"])["summary"] == "Use two seasons."
 
     def test_a_valid_result_wrapped_in_prose_is_normalized_for_the_live_view(self):

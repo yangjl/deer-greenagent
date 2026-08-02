@@ -204,12 +204,14 @@ class TestTheHandlerDecidesOnceForBothDirections:
         assert result.control_answer.action is BuildControlAction.START_BUILD
 
     async def test_an_unanswered_control_is_shown_again_instead_of_dispatching(self) -> None:
-        state = {"messages": [*_emitted(_card()), HumanMessage(content="go ahead and build it")]}
+        first = _emitted(_card())
+        state = {"messages": [*first, HumanMessage(content="go ahead and build it")]}
 
         result = await handle_build_control(state=state, decision=DECISION, context=CONTEXT, request_nonce="run-2", build_card=_build_control_message)
 
         assert result.handled
         assert result.update["messages"][-1].tool_call_id == REQUEST_ID
+        assert result.update["messages"][-1].id != first[-1].id
 
     async def test_an_answer_bound_to_another_cycle_starts_nothing(self) -> None:
         state = {"messages": [*_emitted(_card()), _reply(REQUEST_ID, "start")]}

@@ -142,6 +142,8 @@ export type HumanInputResponse =
 export type HumanInputThreadState = {
   answeredResponses: Map<string, HumanInputResponse>;
   latestOpenRequestId: string | null;
+  /** The newest physical delivery for each stable logical request id. */
+  latestRequestMessageIds: Map<string, string>;
 };
 
 export function shouldClearPendingHumanInputOnThreadError({
@@ -778,8 +780,10 @@ export function deriveHumanInputThreadState(
     message.additional_kwargs?.hide_from_ui !== true,
 ): HumanInputThreadState {
   const answeredResponses = new Map<string, HumanInputResponse>();
+  const syntheticResponseRequestIds = new Set<string>();
   const seenRequests = new Map<string, HumanInputRequest>();
   const requestOrder: string[] = [];
+  const latestRequestMessageIds = new Map<string, string>();
 
   for (const message of messages) {
     if (isVisibleMessage(message)) {
@@ -787,6 +791,16 @@ export function deriveHumanInputThreadState(
       if (request) {
         seenRequests.set(request.request_id, request);
         requestOrder.push(request.request_id);
+        if (typeof message.id === "string" && message.id.length > 0) {
+          latestRequestMessageIds.set(request.request_id, message.id);
+        }
+        // A plain composer message is only a compatibility guess that it
+        // answered the then-visible card. If the graph subsequently delivers
+        // that same logical control again, the guess was wrong: reopen it.
+        // A structured response remains authoritative across redelivery.
+        if (syntheticResponseRequestIds.delete(request.request_id)) {
+          answeredResponses.delete(request.request_id);
+        }
       }
     }
 
@@ -797,6 +811,7 @@ export function deriveHumanInputThreadState(
       !answeredResponses.has(response.request_id)
     ) {
       answeredResponses.set(response.request_id, response);
+      syntheticResponseRequestIds.delete(response.request_id);
       continue;
     }
 
@@ -825,6 +840,7 @@ export function deriveHumanInputThreadState(
           response_kind: "text",
           value: extractPlainMessageText(message) || "-",
         });
+        syntheticResponseRequestIds.add(latestUnansweredId);
       }
     }
   }
@@ -834,7 +850,11 @@ export function deriveHumanInputThreadState(
       .reverse()
       .find((requestId) => !answeredResponses.has(requestId)) ?? null;
 
-  return { answeredResponses, latestOpenRequestId };
+  return {
+    answeredResponses,
+    latestOpenRequestId,
+    latestRequestMessageIds,
+  };
 }
 
 /**

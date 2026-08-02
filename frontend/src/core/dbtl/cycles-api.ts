@@ -91,7 +91,13 @@ export interface DesignFeedbackSurface {
       message?: string;
       run_id?: string;
       db_revision?: number;
-      handoff_status?: "started" | "failed" | "retrying" | "not_needed";
+      handoff_status?:
+        | "started"
+        | "delivered"
+        | "failed"
+        | "retrying"
+        | "not_needed";
+      handoff_run_id?: string | null;
     };
   } | null;
   note: string;
@@ -213,7 +219,18 @@ export async function applyDesignFeedbackAction(input: {
   return post<{
     status: string;
     run_id?: string | null;
-    receipt?: { message?: string; run_id?: string; db_revision?: number };
+    receipt?: {
+      message?: string;
+      run_id?: string;
+      db_revision?: number;
+      handoff_status?:
+        | "started"
+        | "delivered"
+        | "failed"
+        | "retrying"
+        | "not_needed";
+      handoff_run_id?: string | null;
+    };
     replayed: boolean;
   }>(
     `${base(input.projectId)}/cycles/${encodeURIComponent(input.surface.cycle_id)}/stage-feedback/${encodeURIComponent(input.surface.surface_id)}/actions`,
@@ -253,6 +270,7 @@ export interface CreateCycleInput {
   objective?: string;
   successCriteria?: string;
   parentCycleId?: string | null;
+  originatingThreadId?: string | null;
   /** Makes a retried submit resolve to the same durable record. */
   idempotencyKey: string;
 }
@@ -270,6 +288,7 @@ export async function createCycle(
       objective: input.objective ?? "",
       success_criteria: input.successCriteria ?? "",
       parent_cycle_id: input.parentCycleId ?? null,
+      originating_thread_id: input.originatingThreadId ?? null,
       idempotency_key: input.idempotencyKey,
     },
     "Could not start the cycle",
@@ -417,7 +436,9 @@ export async function fetchStageWorkflow(
     `${base(projectId)}/cycles/${encodeURIComponent(cycleId)}/stages/${encodeURIComponent(stage)}/workflow`,
   );
   if (!response.ok) {
-    throw new Error(await parseError(response, "Failed to load the build plan"));
+    throw new Error(
+      await parseError(response, "Failed to load the build plan"),
+    );
   }
   return (await response.json()) as BuildWorkflowView;
 }

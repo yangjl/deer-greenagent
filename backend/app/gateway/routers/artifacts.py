@@ -3,6 +3,7 @@ import hashlib
 import logging
 import mimetypes
 import os
+import posixpath
 import stat
 import tempfile
 import zipfile
@@ -40,6 +41,10 @@ MAX_SKILL_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 _SKILL_ARCHIVE_READ_CHUNK_SIZE = 64 * 1024
 MAX_EDITABLE_ARTIFACT_BYTES = 2 * 1024 * 1024
 _EDITABLE_OUTPUTS_PREFIX = "mnt/user-data/outputs/"
+# The DBTL evidence subtree is published by repository code and mounted
+# read-only into the sandbox; content-addressed review packages and registered
+# decks must not be mutable through the generic artifact editor either.
+_DBTL_OUTPUTS_PREFIX = "mnt/user-data/outputs/dbtl/"
 _ARTIFACT_EDIT_TEMP_PREFIX = ".artifact-edit-"
 
 
@@ -67,9 +72,15 @@ async def reserve_artifact_write(request: Request, thread_id: str, *, user_id: s
 
 
 def _normalize_editable_artifact_path(path: str) -> str:
-    stripped = path.lstrip("/")
+    # Judge the path the filesystem will actually resolve. Project and legacy
+    # resolution both call Path.resolve() and then only check containment in
+    # the thread/project root, so a '..' segment that keeps the literal string
+    # outside a guarded prefix still lands inside it.
+    stripped = posixpath.normpath(path.lstrip("/")).lstrip("/")
     if not stripped.startswith(_EDITABLE_OUTPUTS_PREFIX):
         raise HTTPException(status_code=400, detail="Only files in /mnt/user-data/outputs can be edited")
+    if stripped.startswith(_DBTL_OUTPUTS_PREFIX) or stripped.rstrip("/") == _DBTL_OUTPUTS_PREFIX.rstrip("/"):
+        raise HTTPException(status_code=403, detail="DBTL evidence under /mnt/user-data/outputs/dbtl is read-only")
     if ".skill/" in stripped or stripped.endswith(".skill"):
         raise HTTPException(status_code=415, detail="Skill archives cannot be edited in the artifacts panel")
     return f"/{stripped}"
@@ -407,11 +418,17 @@ async def update_artifact(
     sandbox = None
     try:
         async with reserve_artifact_write(request, thread_id, user_id=effective_user_id):
+            # Resolve the same durable project scope the read path uses: a
+            # project-scoped thread stores its outputs in the project folder,
+            # and omitting project_root here would 404 or update a shadow copy
+            # in the legacy thread directory.
+            _, project_root = await resolve_thread_project_scope(request, thread_id)
             actual_path = await asyncio.to_thread(
                 resolve_thread_virtual_path,
                 thread_id,
                 virtual_path,
                 user_id=effective_user_id,
+                project_root=project_root,
             )
             current, file_stat = await asyncio.to_thread(
                 _load_editable_artifact,

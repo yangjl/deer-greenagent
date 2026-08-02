@@ -71,13 +71,31 @@ class RedisCheckpointHistoryCache:
             self._misses += len(keys)
             return {}
         found: dict[str, dict[str, Any]] = {}
+        corrupt: list[str] = []
         for key, raw in zip(keys, raws, strict=True):
             if raw is None:
                 self._misses += 1
                 continue
+            # A malformed entry (missing tag separator, undecodable tag, or a
+            # payload the serde rejects) is a cache problem, never the reader's:
+            # treat it as a miss so checkpoint materialization recomputes from
+            # the source of truth, and discard the entry so it cannot keep
+            # failing every later read.
+            try:
+                tag, payload = raw.split(_TAG_SEPARATOR, 1)
+                value = self._serde.loads_typed((tag.decode(), payload))
+            except Exception:
+                logger.warning("checkpoint history cache entry is corrupt; treating as miss and discarding: %s", key, exc_info=True)
+                self._misses += 1
+                corrupt.append(key)
+                continue
             self._hits += 1
-            tag, payload = raw.split(_TAG_SEPARATOR, 1)
-            found[key] = self._serde.loads_typed((tag.decode(), payload))
+            found[key] = value
+        if corrupt:
+            try:
+                await self._client.unlink(*corrupt)
+            except _redis_error() as exc:
+                logger.warning("checkpoint history cache could not discard corrupt entries; they expire via TTL: %s", exc)
         return found
 
     async def aset_many(self, entries: dict[str, dict[str, Any]]) -> None:
@@ -85,10 +103,20 @@ class RedisCheckpointHistoryCache:
             return
         try:
             pipe = self._client.pipeline(transaction=False)
+            queued = 0
             for key, entry in entries.items():
-                tag, data = self._serde.dumps_typed(entry)
+                # Serialization failures are per-entry and fail open: this is a
+                # performance-only cache, so an unserializable entry costs a
+                # future hit, never the write of its siblings or the caller.
+                try:
+                    tag, data = self._serde.dumps_typed(entry)
+                except Exception:
+                    logger.warning("checkpoint history cache entry failed to serialize; skipping: %s", key, exc_info=True)
+                    continue
                 pipe.set(key, tag.encode() + _TAG_SEPARATOR + data, ex=self._ttl)
-            await pipe.execute()
+                queued += 1
+            if queued:
+                await pipe.execute()
         except _redis_error() as exc:
             # Writes are optional; the next read simply recomputes the history.
             logger.warning("checkpoint history cache write failed; skipping: %s", exc)

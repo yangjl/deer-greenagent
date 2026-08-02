@@ -208,6 +208,24 @@ describe("state is in words, and stopping is called out", () => {
 
     expect(projection.attention).toBe("");
   });
+
+  it("surfaces a durable plan-confirmation pause above queued phase state", () => {
+    const projection = buildPlanProjection(
+      view({
+        phases: [phase("simulate", "queued")],
+        waiting_control: {
+          kind: "plan_confirmation",
+          request_id: "request-1",
+          label: "Waiting for you — confirm the Build plan.",
+          originating_thread_id: "thread-1",
+        },
+      }),
+    );
+
+    expect(projection.attention).toBe(
+      "Waiting for you — confirm the Build plan.",
+    );
+  });
 });
 
 describe("capability rides in the accessible name, not a third column", () => {

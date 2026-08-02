@@ -1002,3 +1002,20 @@ read model, refreshes the originating conversation, and remounts the successor
 deck. A terminal run with no successor restores the ledger-bound action for an
 identical retry. Progress and failure copy uses the surface's stage instead of
 calling every action Design.
+
+Human Input rendering deduplicates by stable request id but displays only the
+newest physical delivery. A structured response settles that request; a
+plain-composer compatibility guess is cleared if the server re-delivers it.
+Both `dbtl_stage_handoff` and `dbtl_build_control` route back through the cycle.
+
+`StageWorkPanel` converges from the thread-scoped stage-worker lifecycle read
+after a run settles, even when a partial live task already exists. Async
+terminal hydration uses eager batch reconciliation rather than the
+render-deferred ToolMessage path. Governed cards render `displaySummary` (or a
+safe legacy structured summary), never raw contract JSON. The Build rail
+projects an open collaboration as **Waiting for you**.
+
+A cycle may name its immutable `originating_thread_id`. The expanded rail links
+it only when that conversation remains in the authenticated project list; the
+link clears cycle selection and never arms request scope. Missing origins stay
+visible as unavailable provenance.

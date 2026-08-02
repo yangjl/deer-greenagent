@@ -33,6 +33,8 @@ import { useSubtask, useUpdateSubtask } from "@/core/tasks/context";
 import {
   formatSubtaskTokenUsage,
   resolveSubtaskModelLabel,
+  shouldHideTrailingDbtlContract,
+  subtaskResultForDisplay,
 } from "@/core/tasks/presentation";
 import { taskTranscript } from "@/core/tasks/tool-transcript";
 import { explainLastToolCall } from "@/core/tools/utils";
@@ -73,41 +75,51 @@ export function SubtaskCard({
         ? t.tokenUsage.collecting
         : t.tokenUsage.unavailableShort
     : undefined;
+  const displayResult = subtaskResultForDisplay(task);
 
   // The card shows the subagent's step timeline (#3779): its reasoning turns
   // interleaved with the tools it ran. Each tool call is paired with the output
   // it produced (`taskTranscript`) so the row can open to show what was asked
   // and what came back, rather than naming the tool and stopping there.
-  const entries = useMemo(
-    () =>
-      taskTranscript(task.steps, {
-        dropTrailingAnswer: task.status === "completed",
-      }),
-    [task.steps, task.status],
-  );
+  const entries = useMemo(() => {
+    return taskTranscript(task.steps, {
+      dropTrailingAnswer:
+        task.status === "completed" ||
+        shouldHideTrailingDbtlContract(task.dbtlStage, task.steps),
+    });
+  }, [task.dbtlStage, task.steps, task.status]);
 
   // Backfill step history on expand for historical runs (#3779). Live runs
   // already have steps from SSE, so the `steps.length` guard skips the fetch.
   const stepsCount = task.steps?.length ?? 0;
-  const backfilledRef = useRef(false);
+  const backfilledRef = useRef<string | null>(null);
   useEffect(() => {
-    if (collapsed || backfilledRef.current || stepsCount > 0) {
+    const backfillKey = `${runId ?? ""}\u0000${taskId}`;
+    if (collapsed || backfilledRef.current === backfillKey || stepsCount > 0) {
       return;
     }
     if (!threadId || !runId) {
       return;
     }
-    backfilledRef.current = true;
+    backfilledRef.current = backfillKey;
+    let cancelled = false;
     fetchSubtaskSteps(threadId, runId, taskId)
       .then((steps) => {
+        if (cancelled || backfilledRef.current !== backfillKey) return;
         if (steps.length > 0) {
-          updateSubtask({ id: taskId, steps });
+          updateSubtask({ id: taskId, runId, steps });
         }
       })
       .catch(() => {
+        if (cancelled) return;
         // Allow a retry on the next expand if the fetch failed.
-        backfilledRef.current = false;
+        if (backfilledRef.current === backfillKey) {
+          backfilledRef.current = null;
+        }
       });
+    return () => {
+      cancelled = true;
+    };
   }, [collapsed, stepsCount, threadId, runId, taskId, updateSubtask]);
   const icon = useMemo(() => {
     if (task.status === "completed") {
@@ -251,8 +263,8 @@ export function SubtaskCard({
               ></ChainOfThoughtStep>
               <ChainOfThoughtStep
                 label={
-                  task.result ? (
-                    <MarkdownContent content={task.result} isLoading={false} />
+                  displayResult ? (
+                    <MarkdownContent content={displayResult} isLoading={false} />
                   ) : null
                 }
               ></ChainOfThoughtStep>

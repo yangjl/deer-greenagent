@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -6,10 +7,10 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import (
     _AuthorizationUnavailable,
     _is_internal_caller,
+    is_model_use_authorized,
     resolve_model_authorization,
 )
 from app.gateway.deps import get_config, get_optional_user_from_request
-from deerflow.authz.provider import AuthzDecision, AuthzRequest
 from deerflow.config.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,10 @@ async def list_models(
         else:
             if provider is not None and principal is not None:
                 try:
-                    allowed_names = provider.filter_resources(principal, "model", [m.name for m in config.models])
+                    # ``filter_resources`` is a sync provider method; a custom
+                    # provider may perform blocking I/O, so it runs in a worker
+                    # thread instead of on the Gateway event loop.
+                    allowed_names = await asyncio.to_thread(provider.filter_resources, principal, "model", [m.name for m in config.models])
                     if not isinstance(allowed_names, list) or any(not isinstance(n, str) for n in allowed_names):
                         raise TypeError("AuthorizationProvider.filter_resources must return list[str]")
                     allowed_set = set(allowed_names)
@@ -169,31 +173,12 @@ async def get_model(
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
 
     # Phase 3: enforce model:use authorization (deny → 403, not 404, since the
-    # model exists but the role lacks permission to use it).
-    fail_closed = config.authorization.fail_closed
+    # model exists but the role lacks permission to use it). The shared helper
+    # uses the provider's async ``aauthorize`` so a custom provider doing
+    # blocking I/O cannot stall the Gateway event loop.
     user = await get_optional_user_from_request(request)
-    if user is not None:
-        try:
-            provider, principal = resolve_model_authorization(user, is_internal=_is_internal_caller(request, user))
-        except _AuthorizationUnavailable:
-            if fail_closed:
-                raise HTTPException(status_code=403, detail=f"Model '{model_name}' is not available for your role")
-        else:
-            if provider is not None and principal is not None:
-                try:
-                    decision = provider.authorize(AuthzRequest(principal=principal, resource="model", action="use", target=model_name))
-                    if not isinstance(decision, AuthzDecision):
-                        raise TypeError("AuthorizationProvider.authorize must return AuthzDecision")
-                    allowed = decision.allow
-                except Exception:
-                    logger.warning(
-                        "Authorization provider failed while checking model:use for %s",
-                        model_name,
-                        exc_info=True,
-                    )
-                    allowed = not fail_closed
-                if not allowed:
-                    raise HTTPException(status_code=403, detail=f"Model '{model_name}' is not available for your role")
+    if not await is_model_use_authorized(request, model_name, user=user):
+        raise HTTPException(status_code=403, detail=f"Model '{model_name}' is not available for your role")
 
     return ModelResponse(
         name=model.name,

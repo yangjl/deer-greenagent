@@ -239,7 +239,11 @@ class BuildControlRequest:
             "open_questions": [_text(item, limit=400) for item in self.open_questions[:MAX_PLAN_ROWS]],
             "build_plan_rows": [dict(row) for row in self.plan_rows[:MAX_PLAN_ROWS]],
             "recommended_option_id": self.recommended_option_id,
-            "input_mode": "text" if self.free_text else "single_choice",
+            # Human Input's wire vocabulary is shared with the frontend.  A
+            # free-text control that also offers Discuss/Hold is exactly the
+            # protocol's ``choice_with_other`` shape; ``text`` was never a
+            # valid mode and made the entire request fail frontend parsing.
+            "input_mode": ("choice_with_other" if self.options else "free_text") if self.free_text else "single_choice",
             "options": [option.as_dict() for option in self.options],
         }
 
@@ -318,7 +322,7 @@ def resolve_answer(request: Mapping[str, Any] | None, response: Mapping[str, Any
         # server wrote to the person who clicked it.
         if comment == str(offered.get("label") or "") or comment == action.value:
             comment = ""
-    elif bool(request.get("input_mode") == "text"):
+    elif request.get("input_mode") in {"free_text", "choice_with_other"}:
         if not comment:
             return None
         action = BuildControlAction.ANSWER_DIRECTLY
@@ -551,6 +555,8 @@ def worker_question_request(
     input_digest: str = "",
     step_run_id: str = "",
     meeting_available: bool = False,
+    assumptions: Sequence[str] = (),
+    open_questions: Sequence[str] = (),
 ) -> BuildControlRequest:
     """One focused question a worker could not answer for itself.
 
@@ -584,6 +590,8 @@ def worker_question_request(
         step_run_id=step_run_id,
         free_text=True,
         options=options,
+        assumptions=tuple(_text(item, limit=400) for item in assumptions if _text(item, limit=400)),
+        open_questions=tuple(_text(item, limit=400) for item in open_questions if _text(item, limit=400)),
     )
 
 

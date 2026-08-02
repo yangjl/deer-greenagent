@@ -359,6 +359,42 @@ class TestWorkerResultContract:
                 agent_name="chair",
             )
 
+    def test_an_unresolved_completed_design_chair_is_normalized_to_needs_input(self) -> None:
+        result = parse_worker_result(
+            _valid_payload(
+                status="completed",
+                consensus={
+                    "version": 1,
+                    "agreements": ["Use an additive pilot."],
+                    "disagreements": [],
+                    "open_questions": ["Which heritability should the pilot use?"],
+                },
+            ),
+            capability="design_council_chair",
+            agent_name="chair",
+        )
+
+        assert result.status is WorkerStatus.NEEDS_INPUT
+        assert result.clarification_question == "Which heritability should the pilot use?"
+        assert not result.is_trustworthy
+
+    def test_unresolved_consensus_does_not_pause_a_non_chair_worker(self) -> None:
+        result = parse_worker_result(
+            _valid_payload(
+                status="completed",
+                consensus={
+                    "version": 1,
+                    "agreements": ["Use an additive pilot."],
+                    "disagreements": [],
+                    "open_questions": ["Which heritability should the pilot use?"],
+                },
+            ),
+            capability="quantitative_genetics",
+            agent_name="position",
+        )
+
+        assert result.status is WorkerStatus.COMPLETED
+
     def test_the_dispatcher_owns_capability_and_agent_not_the_worker(self) -> None:
         # Accepting the worker's own account of which capability it exercised
         # would let a selection failure look like a satisfied requirement.
@@ -456,6 +492,136 @@ class TestWorkerResultContract:
         assert result.claims == ("The breeding population has a fixed scope.",)
         assert result.evidence_refs[0].kind == "workspace_file"
         assert result.evidence_refs[0].reference == "/mnt/user-data/design.md"
+
+    def test_explicit_artifact_and_evidence_aliases_normalize_to_the_canonical_contract(self) -> None:
+        """Do not discard completed work over a richer, lossless JSON shape."""
+        result = parse_worker_result(
+            _valid_payload(
+                artifact_refs=[
+                    {
+                        "id": "artifact_spec",
+                        "path": "/mnt/user-data/outputs/spec.json",
+                        "role": "Normative specification",
+                    }
+                ],
+                claims=[
+                    {
+                        "id": "claim_specified",
+                        "statement": "The baseline is explicitly versioned.",
+                        "evidence_refs": ["evidence_spec"],
+                    }
+                ],
+                evidence_refs=[
+                    {
+                        "id": "evidence_spec",
+                        "artifact_ref": "artifact_spec",
+                        "description": "Versioned specification",
+                    },
+                    {
+                        "id": "evidence_input",
+                        "path": "/mnt/user-data/outputs/design.md",
+                        "description": "Approved design input",
+                    },
+                ],
+                quality_checks=[
+                    {"name": "artifact creation", "status": "passed", "detail": "Written"},
+                    {"name": "post-fix rerun", "status": "not_run", "detail": "Deadline"},
+                ],
+            ),
+            capability="quantitative_genetics",
+            agent_name="general-purpose",
+        )
+
+        assert result.artifact_refs == ("/mnt/user-data/outputs/spec.json",)
+        assert [item.as_dict() for item in result.evidence_refs] == [
+            {
+                "kind": "workspace_file",
+                "reference": "/mnt/user-data/outputs/spec.json",
+                "description": "Versioned specification",
+            },
+            {
+                "kind": "workspace_file",
+                "reference": "/mnt/user-data/outputs/design.md",
+                "description": "Approved design input",
+            },
+        ]
+        assert [item.passed for item in result.quality_checks] == [True, False]
+
+    def test_ambiguous_artifact_objects_and_quality_statuses_are_still_rejected(self) -> None:
+        with pytest.raises(WorkerResultRejected, match="'id' and 'path'"):
+            parse_worker_result(
+                _valid_payload(artifact_refs=[{"path": "/mnt/user-data/outputs/spec.json"}]),
+                capability="c",
+                agent_name="a",
+            )
+        with pytest.raises(WorkerResultRejected, match="unknown 'status'"):
+            parse_worker_result(
+                _valid_payload(quality_checks=[{"name": "unclear", "status": "mostly"}]),
+                capability="c",
+                agent_name="a",
+            )
+        with pytest.raises(WorkerResultRejected, match="conflicting"):
+            parse_worker_result(
+                _valid_payload(quality_checks=[{"name": "contradiction", "passed": True, "status": "failed"}]),
+                capability="c",
+                agent_name="a",
+            )
+
+    def test_named_contract_aliases_must_be_unique_unambiguous_and_resolved(self) -> None:
+        artifact = {"id": "spec", "path": "/mnt/user-data/outputs/spec.json"}
+        with pytest.raises(WorkerResultRejected, match="Duplicate artifact"):
+            parse_worker_result(
+                _valid_payload(artifact_refs=[artifact, artifact]),
+                capability="c",
+                agent_name="a",
+            )
+        with pytest.raises(WorkerResultRejected, match="exactly one locator"):
+            parse_worker_result(
+                _valid_payload(
+                    evidence_refs=[
+                        {
+                            "id": "evidence-1",
+                            "path": "/mnt/user-data/outputs/spec.json",
+                            "artifact_ref": "spec",
+                        }
+                    ]
+                ),
+                capability="c",
+                agent_name="a",
+            )
+        with pytest.raises(WorkerResultRejected, match="conflicts"):
+            parse_worker_result(
+                _valid_payload(
+                    evidence_refs=[
+                        {
+                            "id": "evidence-1",
+                            "kind": "external",
+                            "path": "/mnt/user-data/outputs/spec.json",
+                        }
+                    ]
+                ),
+                capability="c",
+                agent_name="a",
+            )
+        with pytest.raises(WorkerResultRejected, match="unknown evidence id"):
+            parse_worker_result(
+                _valid_payload(
+                    claims=[{"statement": "Claim", "evidence_refs": ["missing"]}],
+                ),
+                capability="c",
+                agent_name="a",
+            )
+        with pytest.raises(WorkerResultRejected, match="Duplicate evidence"):
+            parse_worker_result(
+                _valid_payload(
+                    evidence_refs=[
+                        {"id": "same", "kind": "dataset", "reference": "a"},
+                        {"id": "same", "kind": "dataset", "reference": "b"},
+                    ]
+                ),
+                capability="c",
+                agent_name="a",
+            )
 
     def test_an_unnamed_claim_object_is_still_rejected(self) -> None:
         with pytest.raises(WorkerResultRejected, match="recognized text field"):

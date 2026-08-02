@@ -72,4 +72,16 @@ describe("opened artifact edit eligibility", () => {
       false,
     );
   });
+
+  it("does not expose editing for DBTL evidence under outputs/dbtl", () => {
+    // Content-addressed review packages and registered decks are published by
+    // repository code; the server rejects edits under this subtree, so the
+    // editor must never offer them.
+    expect(
+      canEditOpenedArtifact({
+        ...editable,
+        filepath: "/mnt/user-data/outputs/dbtl/cycle-hash/design/review.md",
+      }),
+    ).toBe(false);
+  });
 });

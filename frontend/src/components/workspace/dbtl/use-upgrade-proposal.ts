@@ -113,6 +113,7 @@ export function useDbtlUpgradeProposal(projectId: string | null | undefined) {
     async (
       setup: DbtlCycleSetup,
       requestId: string,
+      originatingThreadId: string,
     ): Promise<CycleRecord | null> => {
       if (!projectId) return null;
       const currentEvaluationId = evaluation?.evaluation_id ?? null;
@@ -125,6 +126,7 @@ export function useDbtlUpgradeProposal(projectId: string | null | undefined) {
           objective: setup.objective,
           successCriteria: setup.success_criteria,
           parentCycleId: parentCycle?.id ?? null,
+          originatingThreadId,
           idempotencyKey: `cycle-${requestId}`,
         });
         if (currentEvaluationId) {

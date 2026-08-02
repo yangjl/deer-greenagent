@@ -75,15 +75,51 @@ describe("computeNextSubtask", () => {
   });
 
   it("keeps a terminal status stable against a late in_progress write", () => {
-    const previous = baseTask({ status: "completed" });
+    const previous = baseTask({ status: "completed", runId: "run-1" });
 
     const { next, becameTerminal } = computeNextSubtask(previous, {
       id: "t1",
       status: "in_progress",
+      runId: "run-1",
     });
 
     expect(next.status).toBe("completed");
     expect(becameTerminal).toBe(false);
+  });
+
+  it("lets a newer run reset a reused logical worker id", () => {
+    const previous = baseTask({
+      status: "completed",
+      runId: "run-1",
+      result: "old result",
+      displaySummary: "old summary",
+      error: "old error",
+      stopReason: "turn_capped",
+      steps: [step(1)],
+      latestMessage: { id: "old-message" } as never,
+      modelName: "old-model",
+      usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+    });
+
+    const { next } = computeNextSubtask(previous, {
+      id: "t1",
+      status: "in_progress",
+      runId: "run-2",
+      subagent_type: "subagent",
+      description: "Build planner",
+      prompt: "",
+    });
+
+    expect(next.status).toBe("in_progress");
+    expect(next.runId).toBe("run-2");
+    expect(next.result).toBeUndefined();
+    expect(next.displaySummary).toBeUndefined();
+    expect(next.error).toBeUndefined();
+    expect(next.stopReason).toBeUndefined();
+    expect(next.steps).toBeUndefined();
+    expect(next.latestMessage).toBeUndefined();
+    expect(next.modelName).toBeUndefined();
+    expect(next.usage).toBeUndefined();
   });
 
   it("flags becameTerminal on the first transition to a terminal status", () => {
@@ -152,6 +188,23 @@ describe("computeNextSubtask", () => {
     });
 
     expect(changed).toBe(true);
+  });
+
+  it("detects durable run identity and display-summary convergence", () => {
+    const previous = baseTask({
+      runId: "run-old",
+      displaySummary: "Planning",
+    });
+
+    const { changed, next } = computeNextSubtask(previous, {
+      id: "t1",
+      runId: "run-new",
+      displaySummary: "Build plan ready",
+    });
+
+    expect(changed).toBe(true);
+    expect(next.runId).toBe("run-new");
+    expect(next.displaySummary).toBe("Build plan ready");
   });
 });
 

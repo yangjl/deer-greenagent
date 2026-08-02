@@ -22,6 +22,8 @@ export interface Subtask {
   steps?: SubtaskStep[];
   prompt: string;
   result?: string;
+  /** Bounded server-authored prose for structured DBTL results. */
+  displaySummary?: string;
   error?: string;
   /**
    * Why a guardrail cap ended the run early (``token_capped`` / ``turn_capped``

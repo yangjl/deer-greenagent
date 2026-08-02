@@ -75,6 +75,7 @@ from deerflow.agents.dbtl.live_stage.workspace import (
     workspace_lexical_path,
     workspace_relative_path,
 )
+from deerflow.agents.dbtl.model_access import authorize_model_use, filter_authorized_model_names
 from deerflow.agents.middlewares.finalization_deadline_middleware import (
     FinalizationDeadlineMiddleware,
     model_call_budget,
@@ -553,6 +554,37 @@ def _terminal_seat_event(
             "error": outcome.error or "The worker returned no output.",
             "stop_reason": outcome.stop_reason,
         }
+    # The Build planner has its own typed contract (``feasibility`` and
+    # ``phases``), not the stage-worker ``status`` contract.  It completed its
+    # job when that plan parses, even when the plan says human input is needed.
+    # Validating it as StageWorkerResult made the live task lane report failure
+    # while the adapter consumed the same output successfully.
+    if unit.role == "planner":
+        planned = parse_build_plan(outcome.text, objective="Build the approved design.")
+        if "unparseable_plan" in planned.reasons:
+            return {
+                "type": "task_completed",
+                **base,
+                # Keep the worker's own response as audit data. The canonical
+                # fallback plan is parsed once more with the cycle's actual
+                # objective in ``_plan_build`` and recorded by the Build
+                # workflow; reconstructing it here with a generic objective
+                # would create two conflicting plans.
+                "result": outcome.text or "",
+                "display_summary": "The planner response was unreadable, so Build will run as one recorded fallback phase.",
+                "degraded": True,
+                "stop_reason": outcome.stop_reason,
+            }
+        return {
+            "type": "task_completed",
+            **base,
+            # Preserve the planner's typed response here; the authoritative
+            # normalized plan is stored by the Build workflow using the real
+            # cycle objective.
+            "result": outcome.text or "",
+            "display_summary": _build_plan_display_summary(planned.plan),
+            "stop_reason": outcome.stop_reason,
+        }
     try:
         parsed = parse_worker_result(
             extract_result_payload(outcome.text),
@@ -582,8 +614,19 @@ def _terminal_seat_event(
         # text would make the browser's bounded live summary unreadable even
         # though the durable stage package parsed correctly.
         "result": json.dumps(parsed.as_dict(), ensure_ascii=False),
+        "display_summary": parsed.summary,
         "stop_reason": outcome.stop_reason,
     }
+
+
+def _build_plan_display_summary(plan: BuildPhasePlan) -> str:
+    """A bounded human view of the plan; the typed JSON remains audit data."""
+    if not plan.phases:
+        return plan.clarification_question or plan.rationale or "The Build plan needs input."
+    label = "phase" if len(plan.phases) == 1 else "phases"
+    lines = [f"Build plan ready · {len(plan.phases)} {label}"]
+    lines.extend(f"{index}. {phase.title}" for index, phase in enumerate(plan.phases, start=1))
+    return "\n".join(lines)[:1_600]
 
 
 RosterWriter = Callable[[str], Any]
@@ -620,7 +663,7 @@ _DEBATE_INTENT_INSTRUCTION = (
 )
 
 
-def make_llm_intent_interpreter() -> IntentInterpreter | None:
+def make_llm_intent_interpreter(request_context: Mapping[str, Any] | None = None) -> IntentInterpreter | None:
     """The production debate-intent interpreter: one nostream model call.
 
     Returns ``None`` when no drafting model is configured, which the adapter
@@ -628,6 +671,11 @@ def make_llm_intent_interpreter() -> IntentInterpreter | None:
     fail-soft contract as the roster writer: interpretation is an improvement
     on the phrase table, and no failure here may cost the owner their design —
     an unreadable verdict holds the package on the table, it never convenes.
+
+    ``request_context`` carries the run's principal; ``model:use`` is enforced
+    against it on every call, so a role denied the drafting model cannot invoke
+    it through this side channel. A fail-closed denial raises and the caller's
+    existing fail-soft handling holds.
     """
     from deerflow.config.app_config import get_app_config
 
@@ -647,19 +695,20 @@ def make_llm_intent_interpreter() -> IntentInterpreter | None:
             user_content=prompt,
             run_name="dbtl_debate_intent",
             app_config=app_config,
-            model_name=model_name,
+            model_name=authorize_model_use(model_name, context=request_context, app_config=app_config),
         )
 
     return interpret
 
 
-def make_llm_revision_interpreter() -> RevisionInterpreter | None:
+def make_llm_revision_interpreter(request_context: Mapping[str, Any] | None = None) -> RevisionInterpreter | None:
     """The production revision-route reader: one nostream model call.
 
     Returns ``None`` when no drafting model is configured, which the adapter
     reads as "take the cheap route". Same fail-soft contract as its siblings,
     with the direction of the failure chosen deliberately: an unavailable
-    reader must never be the reason a full meeting reconvenes.
+    reader must never be the reason a full meeting reconvenes. ``model:use``
+    is enforced against ``request_context`` on every call.
     """
     from deerflow.config.app_config import get_app_config
 
@@ -679,13 +728,13 @@ def make_llm_revision_interpreter() -> RevisionInterpreter | None:
             user_content=prompt,
             run_name="dbtl_revision_intent",
             app_config=app_config,
-            model_name=model_name,
+            model_name=authorize_model_use(model_name, context=request_context, app_config=app_config),
         )
 
     return interpret
 
 
-def make_llm_roster_writer() -> RosterWriter | None:
+def make_llm_roster_writer(request_context: Mapping[str, Any] | None = None) -> RosterWriter | None:
     """The production roster writer: one non-graph model call, tagged nostream.
 
     Returns ``None`` when no drafting model is configured, which the adapter
@@ -693,6 +742,7 @@ def make_llm_roster_writer() -> RosterWriter | None:
     the setup-question writer: a roster is an improvement on selection, and no
     failure here may cost a cycle its Design stage. The call goes through
     ``run_oneshot_llm``, so its prompt and raw JSON never enter the thread.
+    ``model:use`` is enforced against ``request_context`` on every call.
     """
     from deerflow.config.app_config import get_app_config
 
@@ -712,14 +762,18 @@ def make_llm_roster_writer() -> RosterWriter | None:
             user_content=prompt,
             run_name="dbtl_council_roster",
             app_config=app_config,
-            model_name=model_name,
+            model_name=authorize_model_use(model_name, context=request_context, app_config=app_config),
         )
 
     return write
 
 
-def make_llm_transition_assessor() -> TransitionAssessor | None:
-    """The production remaining-work assessor: one nostream model call."""
+def make_llm_transition_assessor(request_context: Mapping[str, Any] | None = None) -> TransitionAssessor | None:
+    """The production remaining-work assessor: one nostream model call.
+
+    ``model:use`` is enforced against ``request_context`` on every call; a
+    fail-closed denial raises and the caller falls back to the standard gate.
+    """
     from deerflow.config.app_config import get_app_config
 
     try:
@@ -738,7 +792,7 @@ def make_llm_transition_assessor() -> TransitionAssessor | None:
             user_content=prompt,
             run_name="dbtl_transition_assessment",
             app_config=app_config,
-            model_name=model_name,
+            model_name=authorize_model_use(model_name, context=request_context, app_config=app_config),
         )
 
     return assess
@@ -2686,11 +2740,20 @@ class LiveStageAdapter:
         return self._known_models()
 
     def _known_models(self) -> tuple[str, ...]:
+        """Configured model names the current principal may see.
+
+        Filtered through the authorization provider so the participant card's
+        pickers — and ``parse_participant_settings``' edit validation, which
+        reads the same list — cannot offer a model the role is denied. The
+        principal comes from the run's own context, the same merged view the
+        worker dispatch path reads.
+        """
         app_config = self._app_config
         models = getattr(app_config, "models", None) if app_config is not None else None
         if not models:
             return ()
-        return tuple(str(getattr(item, "name", "") or "") for item in models if getattr(item, "name", None))
+        names = tuple(str(getattr(item, "name", "") or "") for item in models if getattr(item, "name", None))
+        return filter_authorized_model_names(names, context=self._runtime({}), app_config=app_config)
 
     def _council_model(self) -> str:
         """The configured default model for meeting seats, if any.
@@ -3040,6 +3103,21 @@ class LiveStageAdapter:
                 str(parent_model) if parent_model else None,
                 app_config=self._app_config,
             )
+            # ``model:use`` is enforced here, immediately before dispatch,
+            # because the picker filter above is only a visibility rule: a
+            # cached card reply or a proposal-written seat can still name a
+            # model the principal's role is denied. Deny falls back to the
+            # first authorized model; fail-closed with nothing allowed refuses
+            # the worker instead of running it on a restricted model.
+            if effective_model:
+                try:
+                    effective_model = authorize_model_use(effective_model, context=runtime, app_config=self._app_config)
+                except ValueError as exc:
+                    return DispatchOutcome(
+                        unit_id=unit.unit_id,
+                        text=None,
+                        error=f"Model {effective_model!r} is not authorized for this role: {exc}",
+                    )
             # Pin the same effective model onto the executor config. Previously
             # only tool loading and stream labels used ``unit.model`` while the
             # executor still resolved ``model="inherit"`` from the composer's
@@ -3181,21 +3259,20 @@ class LiveStageAdapter:
                     forced_finalization=deadline.forced_any(),
                     token_usage=token_usage,
                 )
-                await emit(
-                    _terminal_seat_event(
-                        unit,
-                        dispatch_outcome,
-                        model=effective_model,
-                        meeting_stage=stage if meeting else None,
-                        lineage=worker_lineage,
-                    )
+                terminal_event = _terminal_seat_event(
+                    unit,
+                    dispatch_outcome,
+                    model=effective_model,
+                    meeting_stage=stage if meeting else None,
+                    lineage=worker_lineage,
                 )
+                await emit(terminal_event)
                 if worker_activity is not None:
                     # The row's outcome follows the *contract*, not the child
                     # graph: a worker that stopped cleanly but returned prose is
                     # a failed piece of evidence, and reporting it as completed
                     # would disagree with its own terminal event.
-                    await worker_activity.settle(ActivityState.FAILED if dispatch_outcome.error else ActivityState.COMPLETED)
+                    await worker_activity.settle(ActivityState.FAILED if terminal_event.get("type") == "task_failed" else ActivityState.COMPLETED)
                 return dispatch_outcome
 
             error = result.error or f"Subagent ended with status {result.status.value}."
@@ -4901,6 +4978,8 @@ class LiveStageAdapter:
                             cycle_revision=int(cycle.get("db_revision") or 0),
                             input_digest=build_inputs.digest,
                             meeting_available=bool(getattr(dbtl_config, "build_work_meetings", False)),
+                            assumptions=build_plan.assumptions,
+                            open_questions=build_plan.open_questions,
                         )
                     )
                     await build_recorder.settle(

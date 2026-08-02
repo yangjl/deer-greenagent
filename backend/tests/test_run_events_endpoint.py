@@ -143,3 +143,77 @@ async def test_effective_memory_flows_from_injection_to_the_existing_debug_api()
 
     effective_content = update["messages"][1].content
     assert events[0]["content"] == {"content_sha256": hashlib.sha256(effective_content.encode("utf-8")).hexdigest()}
+
+
+@pytest.mark.anyio
+async def test_stage_worker_events_page_across_runs_and_redacts_metadata():
+    from app.gateway.routers.thread_runs import list_stage_worker_events
+
+    calls: list[dict] = []
+    pages = {
+        None: [
+            {
+                "seq": 7,
+                "run_id": "run-2",
+                "event_type": "subagent.start",
+                "content": {"task_id": "worker-2", "dbtl_stage": "build"},
+                "metadata": {"task_id": "worker-2", "auth_token": "secret"},
+            },
+            {
+                "seq": 8,
+                "run_id": "run-2",
+                "event_type": "subagent.end",
+                "content": {"task_id": "worker-2", "status": "completed"},
+                "metadata": {"task_id": "worker-2"},
+            },
+        ],
+        7: [
+            {
+                "seq": 2,
+                "run_id": "run-1",
+                "event_type": "subagent.start",
+                "content": {"task_id": "worker-1", "dbtl_stage": "design"},
+                "metadata": {"task_id": "worker-1"},
+            }
+        ],
+    }
+
+    class FakeStore:
+        async def list_thread_events(self, thread_id, *, event_types=None, limit=200, before_seq=None):
+            calls.append(
+                {
+                    "thread_id": thread_id,
+                    "event_types": event_types,
+                    "limit": limit,
+                    "before_seq": before_seq,
+                }
+            )
+            return pages[before_seq]
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(run_event_store=FakeStore())),
+        _deerflow_test_bypass_auth=True,
+    )
+
+    newest = await list_stage_worker_events(
+        thread_id="thread-1",
+        request=request,
+        limit=2,
+        before_seq=None,
+    )
+    older = await list_stage_worker_events(
+        thread_id="thread-1",
+        request=request,
+        limit=2,
+        before_seq=newest["next_before_seq"],
+    )
+
+    assert newest["next_before_seq"] == 7
+    assert older["next_before_seq"] is None
+    assert [event["run_id"] for event in [*older["events"], *newest["events"]]] == [
+        "run-1",
+        "run-2",
+        "run-2",
+    ]
+    assert newest["events"][0]["metadata"] == {"task_id": "worker-2"}
+    assert calls[0]["event_types"] == ["subagent.start", "subagent.end"]

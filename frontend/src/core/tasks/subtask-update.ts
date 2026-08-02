@@ -24,26 +24,35 @@ export function computeNextSubtask(
   task: Partial<Subtask> & { id: string },
 ): { next: Subtask; becameTerminal: boolean; changed: boolean } {
   const previousStatus = previous?.status;
+  const isNewExecution = Boolean(
+    previous?.runId && task.runId && previous.runId !== task.runId,
+  );
 
   // MessageList writes the pending task tool-call state before parsing the
   // matching ToolMessage in the same render. Keep terminal results stable
   // across the next render so the refresh notification does not loop.
   const next = {
-    ...previous,
+    ...(isNewExecution ? { id: previous?.id } : previous),
     ...task,
-    ...(task.status === "in_progress" && isTerminalSubtaskStatus(previousStatus)
+    ...(task.status === "in_progress" &&
+    isTerminalSubtaskStatus(previousStatus) &&
+    // A delayed start from the same execution must not reopen completed work.
+    // A later run reusing the logical unit id is new work and must be allowed
+    // to reset the card instead of inheriting the old terminal state.
+    !isNewExecution
       ? { status: previousStatus }
       : {}),
   } as Subtask;
 
   if (task.steps) {
-    next.steps = mergeSteps(previous?.steps ?? [], task.steps);
+    next.steps = mergeSteps(isNewExecution ? [] : (previous?.steps ?? []), task.steps);
   }
 
   // Usage events are cumulative snapshots. A delayed older frame must never
   // make the folded card appear to spend fewer tokens than it already did.
   if (
     task.usage &&
+    !isNewExecution &&
     previous?.usage &&
     task.usage.totalTokens < previous.usage.totalTokens
   ) {
@@ -73,12 +82,14 @@ function subtaskChanged(prev: Subtask | undefined, next: Subtask): boolean {
     prev.status !== next.status ||
     prev.modelName !== next.modelName ||
     prev.result !== next.result ||
+    prev.displaySummary !== next.displaySummary ||
     prev.error !== next.error ||
     prev.stopReason !== next.stopReason ||
     prev.subagent_type !== next.subagent_type ||
     prev.description !== next.description ||
     prev.prompt !== next.prompt ||
     prev.dbtlStage !== next.dbtlStage ||
+    prev.runId !== next.runId ||
     !councilSeatEquals(prev.councilSeat, next.councilSeat) ||
     prev.latestMessage !== next.latestMessage ||
     prev.steps !== next.steps ||

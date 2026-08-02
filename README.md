@@ -45,7 +45,10 @@ Design–Build–Test–Learn (DBTL) governance.
   One-click Build approval opens Test atomically, and older checkpoints whose
   summary lags their active stage recover from the active row instead of
   rerunning Build. Live worker cards use the actual DBTL stage instead of
-  presenting Build work as another Design meeting.
+  presenting Build work as another Design meeting. A paused Build is shown as
+  **Waiting for you** in both the stage row and Build plan, and the Human Input
+  Card remains the only control that can resume it. Worker cards render bounded
+  prose while typed result JSON stays available as audit data.
 - **Human-controlled automation** — AI may recommend or route DBTL work, but it
   cannot satisfy scientific gates or create authoritative results by itself.
   Starting a cycle launches a project-grounded Design council: independent
@@ -59,7 +62,9 @@ Design–Build–Test–Learn (DBTL) governance.
   Human Input Card in the originating conversation before any stage worker
   runs. The owner chooses **Start &lt;stage&gt;** or **Hold here**; the durable card
   carries the cycle binding so a one-shot composer scope cannot strand the
-  reply. The card also binds the exact cycle revision and next stage: if either
+  reply. Re-presenting a still-open card keeps one logical request while minting
+  a new delivery, so chat shows one current control instead of duplicates. The
+  card also binds the exact cycle revision and next stage: if either
   changes before Start is chosen, DeerFlow expires the handoff and dispatches
   nothing. Approval remains recorded when the background prompt cannot start;
   reopening the same deck retries only that prompt, never the review itself.

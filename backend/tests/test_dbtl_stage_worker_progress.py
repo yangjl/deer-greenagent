@@ -79,6 +79,7 @@ def dispatch(monkeypatch):
     from deerflow.agents.dbtl.live_stage import adapter as adapter_module
 
     events: list[dict] = []
+    _FakeExecutor.answer = '{"status": "completed", "summary": "done"}'
 
     monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: events.append)
 
@@ -186,3 +187,14 @@ class TestAStageWorkerReportsItsSteps:
         # The worker's activity row rides the same writer; this is about the
         # task lifecycle not gaining a step it never took.
         assert [event["type"] for event in events if event["type"].startswith("task_")] == ["task_started", "task_completed"]
+
+    async def test_contract_rejection_fails_the_worker_activity_too(self, dispatch):
+        _FakeExecutor.steps = []
+        _FakeExecutor.answer = "I finished, but did not return the contract."
+
+        _, events = await dispatch([_unit()])
+
+        assert next(event for event in events if event["type"] == "task_failed")
+        terminal_activity = next(event for event in reversed(events) if event.get("type") == "agent_activity" and event.get("actor_kind") == "stage_worker" and event.get("transition") in {"completed", "failed"})
+        assert terminal_activity["transition"] == "failed"
+        assert terminal_activity["state"] == "failed"

@@ -108,6 +108,34 @@ async def test_creation_records_the_research_question_and_criteria(tmp_path: Pat
     assert cycle["cycle_weight"] == "full"
 
 
+async def test_creation_records_the_originating_conversation_outside_the_governance_hash(tmp_path: Path) -> None:
+    repo, project_id = await _repos(tmp_path)
+
+    cycle = await _cycle(
+        repo,
+        project_id,
+        originating_thread_id="thread-origin",
+    )
+    loaded = await repo.get_cycle(cycle["id"], project_id=project_id)
+
+    assert cycle["originating_thread_id"] == "thread-origin"
+    assert loaded is not None
+    assert loaded["originating_thread_id"] == "thread-origin"
+
+
+async def test_creation_replay_cannot_rebind_the_originating_conversation(tmp_path: Path) -> None:
+    repo, project_id = await _repos(tmp_path)
+    await _cycle(repo, project_id, originating_thread_id="thread-origin")
+
+    with pytest.raises(DbtlWorkflowRefused, match="different cycle"):
+        await _cycle(
+            repo,
+            project_id,
+            cycle_id="cycle-2",
+            originating_thread_id="thread-other",
+        )
+
+
 async def test_project_cycle_summary_distinguishes_new_and_active_projects(tmp_path: Path) -> None:
     repo, project_id = await _repos(tmp_path)
 

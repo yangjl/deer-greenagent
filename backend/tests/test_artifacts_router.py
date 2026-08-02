@@ -16,6 +16,7 @@ from starlette.responses import FileResponse
 import app.gateway.routers.artifacts as artifacts_router
 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
 from deerflow.config.paths import make_safe_user_id
+from deerflow.projects.storage import resolve_project_virtual_path
 
 ACTIVE_ARTIFACT_CASES = [
     ("poc.html", "<html><body><script>alert('xss')</script></body></html>"),
@@ -94,7 +95,12 @@ def _artifact_sha256(content: str) -> str:
 
 
 def _patch_artifact_update_dependencies(monkeypatch, artifact_path: Path, provider=None) -> None:
-    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None, project_root=None: artifact_path)
+
+    async def _no_project_scope(_request, _thread_id):
+        return None, None
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_project_scope", _no_project_scope)
     monkeypatch.setattr(artifacts_router, "reserve_artifact_write", _allow_artifact_write)
     monkeypatch.setattr(artifacts_router, "get_sandbox_provider", lambda: provider or _MountedSandboxProvider())
 
@@ -534,3 +540,88 @@ def test_skill_archive_preview_rejects_oversized_member_before_decompression(tmp
         artifacts_router._extract_file_from_skill_archive(skill_path, "SKILL.md")
 
     assert exc_info.value.status_code == 413
+
+
+def test_update_artifact_rejects_dbtl_evidence_subtree(tmp_path, monkeypatch) -> None:
+    """DBTL review packages and registered decks are repository-published,
+    content-addressed evidence; the generic editor must refuse them even
+    though they live under the editable outputs prefix."""
+    artifact_path = tmp_path / "review.md"
+    artifact_path.write_text("evidence", encoding="utf-8")
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            call_unwrapped(
+                artifacts_router.update_artifact,
+                "thread-1",
+                "mnt/user-data/outputs/dbtl/cycle-hash/design/review.md",
+                artifacts_router.ArtifactUpdateRequest(content="tampered", expected_sha256=_artifact_sha256("evidence")),
+                _make_request(),
+            )
+        )
+
+    assert exc_info.value.status_code == 403
+    assert artifact_path.read_text(encoding="utf-8") == "evidence"
+
+
+def test_the_dbtl_refusal_survives_a_traversal_that_normalizes_into_it(tmp_path) -> None:
+    """The guard must judge the path the filesystem will resolve, not the
+    string the client sent. ``resolve_project_virtual_path`` calls
+    ``Path.resolve()`` and only checks containment in the project root, so a
+    '..' segment that keeps the literal prefix outside outputs/dbtl still
+    lands inside it -- and would overwrite content-addressed evidence."""
+    escaping = "mnt/user-data/outputs/design/../dbtl/cycle-hash/design/review.md"
+
+    project_root = tmp_path / "project"
+    (project_root / "outputs" / "dbtl" / "cycle-hash" / "design").mkdir(parents=True)
+    assert resolve_project_virtual_path(project_root, f"/{escaping}") == (project_root / "outputs/dbtl/cycle-hash/design/review.md")
+
+    with pytest.raises(HTTPException) as exc_info:
+        artifacts_router._normalize_editable_artifact_path(escaping)
+
+    assert exc_info.value.status_code == 403
+
+
+def test_a_traversal_escaping_the_editable_prefix_is_still_refused(tmp_path) -> None:
+    """Normalizing before the prefix check must not let a '..' walk out of
+    /mnt/user-data/outputs into the rest of the project folder."""
+    with pytest.raises(HTTPException) as exc_info:
+        artifacts_router._normalize_editable_artifact_path("mnt/user-data/outputs/../uploads/secret.txt")
+
+    assert exc_info.value.status_code == 400
+
+
+def test_update_artifact_resolves_the_thread_project_root(tmp_path, monkeypatch) -> None:
+    """PUT must resolve the same durable project scope as GET: a
+    project-scoped thread stores outputs in the project folder, and omitting
+    project_root would edit a shadow copy in the legacy thread directory."""
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def resolving(_thread_id, _path, user_id=None, project_root=None):
+        seen["project_root"] = project_root
+        return artifact_path
+
+    async def project_scope(_request, _thread_id):
+        return "proj-1", str(tmp_path)
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", resolving)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_project_scope", project_scope)
+    monkeypatch.setattr(artifacts_router, "reserve_artifact_write", _allow_artifact_write)
+    monkeypatch.setattr(artifacts_router, "get_sandbox_provider", lambda: _MountedSandboxProvider())
+
+    response = asyncio.run(
+        call_unwrapped(
+            artifacts_router.update_artifact,
+            "thread-1",
+            "mnt/user-data/outputs/note.txt",
+            artifacts_router.ArtifactUpdateRequest(content="after", expected_sha256=_artifact_sha256("before")),
+            _make_request(),
+        )
+    )
+
+    assert seen["project_root"] == str(tmp_path)
+    assert response.sha256 == _artifact_sha256("after")
+    assert artifact_path.read_text(encoding="utf-8") == "after"

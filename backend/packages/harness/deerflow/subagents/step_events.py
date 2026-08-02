@@ -52,6 +52,20 @@ _TERMINAL_EVENT_STATUS: dict[str, str] = {
 }
 
 
+def _bounded_council_seat(value: Any) -> dict[str, Any] | None:
+    """Keep the small server-authored seat marker needed after reload."""
+    if not isinstance(value, dict):
+        return None
+    string_keys = ("stage", "role", "role_label", "focus", "capability", "agent_name", "model")
+    seat = {key: str(value[key])[:240] for key in string_keys if isinstance(value.get(key), str)}
+    if isinstance(value.get("round"), int) and not isinstance(value.get("round"), bool):
+        seat["round"] = value["round"]
+    for key in ("via_generalist", "counts_toward_stage_output"):
+        if isinstance(value.get(key), bool):
+            seat[key] = value[key]
+    return seat or None
+
+
 def capture_step_message(
     message: BaseMessage,
     captured: list[dict[str, Any]],
@@ -225,6 +239,12 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
         content: dict[str, Any] = {"task_id": task_id, "description": description}
         if isinstance(dbtl_stage, str) and dbtl_stage.strip():
             content["dbtl_stage"] = dbtl_stage.strip()[:48]
+        # Meeting seats also carry ``dbtl_stage`` but render in DebatePanel,
+        # not the generic stage-work lane. Preserve the server-authored marker
+        # so a reload can make the same routing decision as the live stream.
+        council_seat = _bounded_council_seat(chunk.get("council_seat"))
+        if council_seat is not None:
+            content["council_seat"] = council_seat
         return {
             "event_type": SUBAGENT_START_EVENT.event_type,
             "category": SUBAGENT_START_EVENT.category,
@@ -268,6 +288,11 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
             content["error"] = error
             if error_truncated:
                 content["error_truncated"] = True
+        if chunk.get("display_summary") is not None:
+            summary, summary_truncated = truncate_step_text(str(chunk["display_summary"]), 1_600)
+            content["display_summary"] = summary
+            if summary_truncated:
+                content["display_summary_truncated"] = True
         return {
             "event_type": SUBAGENT_END_EVENT.event_type,
             "category": SUBAGENT_END_EVENT.category,

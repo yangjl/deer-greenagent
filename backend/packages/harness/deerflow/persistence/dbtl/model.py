@@ -43,6 +43,9 @@ class DbtlCycleRow(Base):
         index=True,
     )
     create_idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Immutable provenance, intentionally not a foreign key: deleting a chat
+    # must not erase which conversation launched the research record.
+    originating_thread_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     title: Mapped[str] = mapped_column(String(240), nullable=False)
     cycle_class: Mapped[str] = mapped_column(String(32), nullable=False)
     state: Mapped[str] = mapped_column(String(48), nullable=False)

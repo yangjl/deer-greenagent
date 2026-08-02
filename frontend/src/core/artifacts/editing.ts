@@ -52,9 +52,14 @@ export function canEditOpenedArtifact({
   hasRevision: boolean;
   isStaticWebsite: boolean;
 }): boolean {
-  const isOutputArtifact = filepath
-    .replace(/^\/+/, "")
-    .startsWith("mnt/user-data/outputs/");
+  const normalizedPath = filepath.replace(/^\/+/, "");
+  const isOutputArtifact = normalizedPath.startsWith("mnt/user-data/outputs/");
+  // DBTL evidence (content-addressed review packages, registered decks) is
+  // published by repository code and read-only to agents; the server rejects
+  // edits under this subtree, so the editor never offers them.
+  const isDbtlEvidence = normalizedPath.startsWith(
+    "mnt/user-data/outputs/dbtl/",
+  );
   return (
     isCodeFile &&
     !isWriteFile &&
@@ -62,6 +67,7 @@ export function canEditOpenedArtifact({
     !isMock &&
     hasRevision &&
     !isStaticWebsite &&
-    isOutputArtifact
+    isOutputArtifact &&
+    !isDbtlEvidence
   );
 }

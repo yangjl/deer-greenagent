@@ -151,6 +151,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
             "id": cycle.id,
             "project_id": cycle.project_id,
             "parent_cycle_id": cycle.parent_cycle_id,
+            "originating_thread_id": cycle.originating_thread_id,
             "title": cycle.title,
             "cycle_class": cycle.cycle_class,
             "cycle_weight": detail.get("cycle_weight", "full"),
@@ -346,6 +347,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
         created_by: str,
         policy_version: str,
         parent_cycle_id: str | None,
+        originating_thread_id: str | None,
     ) -> None:
         detail = dict(cycle.projection_json or {})
         expected = {
@@ -358,6 +360,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
             "created_by": created_by,
             "policy_version": policy_version,
             "parent_cycle_id": parent_cycle_id,
+            "originating_thread_id": originating_thread_id,
         }
         actual = {
             "title": cycle.title,
@@ -369,6 +372,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
             "created_by": cycle.created_by,
             "policy_version": cycle.policy_version,
             "parent_cycle_id": cycle.parent_cycle_id,
+            "originating_thread_id": cycle.originating_thread_id,
         }
         if actual != expected:
             raise DbtlWorkflowRefused("This idempotency key was already used to create a different cycle.")
@@ -390,6 +394,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
         idempotency_key: str,
         cycle_weight: str = "full",
         parent_cycle_id: str | None = None,
+        originating_thread_id: str | None = None,
     ) -> dict[str, Any]:
         """Open a durable research record. Refuses rather than guesses."""
         validate_cycle_class(cycle_class)
@@ -419,6 +424,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
                     created_by=created_by,
                     policy_version=policy_version,
                     parent_cycle_id=parent_cycle_id,
+                    originating_thread_id=originating_thread_id,
                 )
                 _, stages = await self._load(session, replay.id, project_id)  # type: ignore[misc]
                 return self._cycle_payload(replay, stages)
@@ -440,6 +446,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
                 project_id=project_id,
                 parent_cycle_id=parent_cycle_id,
                 create_idempotency_key=idempotency_key,
+                originating_thread_id=originating_thread_id,
                 title=title.strip(),
                 cycle_class=cycle_class,
                 state=STAGE_ORDER[0],
@@ -499,6 +506,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
                             created_by=created_by,
                             policy_version=policy_version,
                             parent_cycle_id=parent_cycle_id,
+                            originating_thread_id=originating_thread_id,
                         )
                         loaded = await self._load(replay_session, replay.id, project_id)
                         assert loaded is not None
@@ -515,7 +523,11 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
                 cycle=cycle,
                 event_type="cycle.created",
                 actor_user_id=created_by,
-                payload={"idempotency_key": idempotency_key, "cycle_class": cycle_class},
+                payload={
+                    "idempotency_key": idempotency_key,
+                    "cycle_class": cycle_class,
+                    "originating_thread_id": originating_thread_id,
+                },
             )
             await session.commit()
             return self._cycle_payload(cycle, stages)
@@ -743,9 +755,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
                     stage_attempt_id=row.id,
                 )
                 if not workflow.get("is_complete"):
-                    raise DbtlWorkflowRefused(
-                        "Build's durable workflow is incomplete; every selected step and the registered review deck must succeed before submission."
-                    )
+                    raise DbtlWorkflowRefused("Build's durable workflow is incomplete; every selected step and the registered review deck must succeed before submission.")
             if stage == "test" and await self._latest_build_lineage(session, cycle_id) is None:
                 raise DbtlWorkflowRefused("Test cannot be reviewed without Build lineage.")
             row.status = str(StageStatus.AWAITING_REVIEW)

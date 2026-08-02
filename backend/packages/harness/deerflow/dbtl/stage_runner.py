@@ -222,7 +222,9 @@ Answer with a single JSON object and nothing else:
 Every claim must be traceable to an entry in evidence_refs. If you could not
 verify something, say so in limitations rather than asserting it. Report
 status "blocked" when the data or the design prevents the work, not when you
-merely found a negative answer.
+merely found a negative answer. Use the exact field shapes above: artifact_refs
+contains path strings, evidence_refs uses kind/reference, and quality_checks
+uses a boolean passed field.
 """.strip()
 
 

@@ -247,6 +247,55 @@ class DbRunEventStore(RunEventStore):
                     session.add(row)
                 return self._row_to_dict(row), True
 
+    async def put_batch_if_absent(self, events):
+        if not events:
+            return [], False
+        thread_ids = {e["thread_id"] for e in events}
+        if len(thread_ids) > 1:
+            raise ValueError(f"put_batch_if_absent requires all events to belong to the same thread; got {thread_ids!r}")
+        user_id = self._user_id_from_context()
+        thread_id = events[0]["thread_id"]
+        claim = events[0]
+        # One lock, one transaction: the existence check and every row commit
+        # together, so a crash can never leave the batch half written.
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    existing = await session.scalar(
+                        select(RunEventRow)
+                        .where(
+                            RunEventRow.thread_id == thread_id,
+                            RunEventRow.run_id == claim["run_id"],
+                            RunEventRow.event_type == claim["event_type"],
+                        )
+                        .order_by(RunEventRow.seq.asc())
+                        .limit(1)
+                    )
+                    if existing is not None:
+                        return [], False
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
+                    seq = max_seq or 0
+                    rows = []
+                    for e in events:
+                        seq += 1
+                        category = e.get("category", "trace")
+                        content, metadata = self._truncate_trace(category, e.get("content", ""), e.get("metadata"))
+                        db_content, metadata = self._content_to_db(content, metadata)
+                        row = RunEventRow(
+                            thread_id=e["thread_id"],
+                            run_id=e["run_id"],
+                            user_id=e.get("user_id", user_id),
+                            event_type=e["event_type"],
+                            category=category,
+                            content=db_content,
+                            event_metadata=metadata,
+                            seq=seq,
+                            created_at=datetime.fromisoformat(e["created_at"]) if e.get("created_at") else datetime.now(UTC),
+                        )
+                        session.add(row)
+                        rows.append(row)
+                return [self._row_to_dict(r) for r in rows], True
+
     async def list_messages(
         self,
         thread_id,

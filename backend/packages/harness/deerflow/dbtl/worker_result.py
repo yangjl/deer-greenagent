@@ -225,10 +225,52 @@ def _string_tuple(raw: object, field_name: str) -> tuple[str, ...]:
     return tuple(items)
 
 
+def _artifact_tuple(raw: object) -> tuple[tuple[str, ...], dict[str, str]]:
+    """Normalize canonical paths or the common explicit ``id``/``path`` form.
+
+    The identifier is only an alias inside this one worker result; the server
+    still validates and remaps the resulting workspace path later. Requiring
+    both recognized fields avoids stringifying arbitrary metadata objects into
+    paths that look reviewable.
+    """
+    if raw is None:
+        return (), {}
+    if isinstance(raw, str) or not isinstance(raw, Sequence):
+        raise WorkerResultRejected("'artifact_refs' must be a list of path strings or named path objects.")
+    refs: list[str] = []
+    aliases: dict[str, str] = {}
+    for entry in raw[:MAX_ITEMS]:
+        if isinstance(entry, str):
+            path = entry.strip()
+            alias = ""
+        elif isinstance(entry, Mapping):
+            raw_alias = entry.get("id")
+            raw_path = entry.get("path")
+            if not isinstance(raw_alias, str) or not raw_alias.strip() or not isinstance(raw_path, str) or not raw_path.strip():
+                raise WorkerResultRejected("Each artifact reference object must contain non-empty string 'id' and 'path' fields.")
+            alias = raw_alias.strip()[:MAX_ITEM_CHARS]
+            path = raw_path.strip()
+        else:
+            raise WorkerResultRejected("'artifact_refs' must contain only path strings or named path objects.")
+        if path:
+            bounded = path[:MAX_ITEM_CHARS]
+            refs.append(bounded)
+            if alias:
+                if alias in aliases:
+                    raise WorkerResultRejected(f"Duplicate artifact reference id {alias!r}.")
+                aliases[alias] = bounded
+    return tuple(dict.fromkeys(refs)), aliases
+
+
 _CLAIM_TEXT_FIELDS = ("claim", "statement", "text")
 
 
-def _claim_tuple(raw: object) -> tuple[tuple[str, ...], tuple[EvidenceRef, ...]]:
+def _claim_tuple(
+    raw: object,
+    *,
+    artifact_aliases: Mapping[str, str] | None = None,
+    evidence_ids: Mapping[str, EvidenceRef] | None = None,
+) -> tuple[tuple[str, ...], tuple[EvidenceRef, ...]]:
     """Normalize strings or explicitly named structured claims.
 
     Some models make the claim/evidence relationship more explicit than the
@@ -244,6 +286,7 @@ def _claim_tuple(raw: object) -> tuple[tuple[str, ...], tuple[EvidenceRef, ...]]
 
     claims: list[str] = []
     nested_evidence: list[EvidenceRef] = []
+    indexed_evidence = evidence_ids or {}
     for entry in raw[:MAX_ITEMS]:
         if isinstance(entry, str):
             text = entry.strip()
@@ -258,18 +301,29 @@ def _claim_tuple(raw: object) -> tuple[tuple[str, ...], tuple[EvidenceRef, ...]]
                 expected = ", ".join(repr(name) for name in _CLAIM_TEXT_FIELDS)
                 raise WorkerResultRejected(f"Each claim object needs a recognized text field: {expected}.")
 
-            # A structured claim may carry fully typed evidence beside it. A
-            # list of string ids is not silently promoted to external evidence;
-            # top-level evidence can still support that claim, and otherwise
-            # StageWorkerResult rejects it as an unsupported claim below.
+            # A structured claim may carry typed evidence beside it or link to
+            # a named top-level evidence entry. IDs are resolved, never treated
+            # as external evidence by implication.
             claim_evidence = entry.get("evidence_refs")
             if isinstance(claim_evidence, Mapping):
-                nested_evidence.extend(_evidence_tuple([claim_evidence]))
-            elif isinstance(claim_evidence, Sequence) and not isinstance(claim_evidence, str) and all(isinstance(item, Mapping) for item in claim_evidence):
-                nested_evidence.extend(_evidence_tuple(claim_evidence))
+                nested_evidence.extend(_evidence_tuple([claim_evidence], artifact_aliases=artifact_aliases))
+            elif isinstance(claim_evidence, Sequence) and not isinstance(claim_evidence, str):
+                inline: list[Mapping[str, Any]] = []
+                for evidence_item in claim_evidence:
+                    if isinstance(evidence_item, str):
+                        evidence_id = evidence_item.strip()
+                        resolved = indexed_evidence.get(evidence_id)
+                        if not evidence_id or resolved is None:
+                            raise WorkerResultRejected(f"Claim references unknown evidence id {evidence_id!r}.")
+                        nested_evidence.append(resolved)
+                    elif isinstance(evidence_item, Mapping):
+                        inline.append(evidence_item)
+                    else:
+                        raise WorkerResultRejected("Claim evidence references must be evidence ids or typed evidence objects.")
+                nested_evidence.extend(_evidence_tuple(inline, artifact_aliases=artifact_aliases))
             singular_evidence = entry.get("evidence_ref")
             if isinstance(singular_evidence, Mapping):
-                nested_evidence.extend(_evidence_tuple([singular_evidence]))
+                nested_evidence.extend(_evidence_tuple([singular_evidence], artifact_aliases=artifact_aliases))
         else:
             raise WorkerResultRejected("'claims' must contain only strings or named claim objects.")
         if text:
@@ -277,23 +331,81 @@ def _claim_tuple(raw: object) -> tuple[tuple[str, ...], tuple[EvidenceRef, ...]]
     return tuple(claims), tuple(nested_evidence)
 
 
-def _evidence_tuple(raw: object) -> tuple[EvidenceRef, ...]:
+def _evidence_items(
+    raw: object,
+    *,
+    artifact_aliases: Mapping[str, str] | None = None,
+) -> tuple[tuple[EvidenceRef, ...], dict[str, EvidenceRef]]:
     if raw is None:
-        return ()
+        return (), {}
     if isinstance(raw, str) or not isinstance(raw, Sequence):
         raise WorkerResultRejected("'evidence_refs' must be a list of objects.")
     refs: list[EvidenceRef] = []
+    ids: dict[str, EvidenceRef] = {}
+    aliases = artifact_aliases or {}
     for entry in raw[:MAX_ITEMS]:
         if not isinstance(entry, Mapping):
             raise WorkerResultRejected("Each evidence reference must be an object with 'kind' and 'reference'.")
-        refs.append(
-            EvidenceRef(
-                kind=str(entry.get("kind", "")).strip(),
-                reference=str(entry.get("reference", "")).strip()[:MAX_ITEM_CHARS],
-                description=str(entry.get("description", "") or "").strip()[:MAX_ITEM_CHARS],
-            )
+        raw_id = entry.get("id")
+        evidence_id = raw_id.strip()[:MAX_ITEM_CHARS] if isinstance(raw_id, str) else ""
+        if raw_id is not None and not evidence_id:
+            raise WorkerResultRejected("An evidence reference 'id' must be a non-empty string when provided.")
+        if evidence_id and evidence_id in ids:
+            raise WorkerResultRejected(f"Duplicate evidence reference id {evidence_id!r}.")
+
+        raw_kind = entry.get("kind")
+        kind = raw_kind.strip() if isinstance(raw_kind, str) else ""
+        raw_reference = entry.get("reference")
+        reference = raw_reference.strip() if isinstance(raw_reference, str) else ""
+
+        # Models often preserve more linkage than the compact contract asks
+        # for. Normalize only explicit, unambiguous locator fields; an unknown
+        # ``kind`` is still rejected by EvidenceRef and an arbitrary object is
+        # never coerced into evidence.
+        locators: list[tuple[str | None, str]] = []
+        if reference:
+            locators.append((None, reference))
+        for field_name, inferred_kind in (
+            ("path", "workspace_file"),
+            ("artifact_ref", "artifact"),
+            ("dataset_ref", "dataset"),
+            ("external_ref", "external"),
+            ("url", "external"),
+        ):
+            candidate = entry.get(field_name)
+            if isinstance(candidate, str) and candidate.strip():
+                locators.append((inferred_kind, candidate.strip()))
+        if len(locators) != 1:
+            raise WorkerResultRejected("Each evidence reference must provide exactly one locator: reference, path, artifact_ref, dataset_ref, external_ref, or url.")
+
+        inferred_kind, reference = locators[0]
+        if inferred_kind == "artifact":
+            resolved = aliases.get(reference)
+            if resolved:
+                reference = resolved
+                inferred_kind = "workspace_file"
+        if inferred_kind is not None:
+            if kind and kind != inferred_kind:
+                raise WorkerResultRejected(f"Evidence kind {kind!r} conflicts with its {inferred_kind!r} locator.")
+            kind = inferred_kind
+        parsed = EvidenceRef(
+            kind=kind,
+            reference=reference[:MAX_ITEM_CHARS],
+            description=str(entry.get("description", "") or "").strip()[:MAX_ITEM_CHARS],
         )
-    return tuple(refs)
+        refs.append(parsed)
+        if evidence_id:
+            ids[evidence_id] = parsed
+    return tuple(refs), ids
+
+
+def _evidence_tuple(
+    raw: object,
+    *,
+    artifact_aliases: Mapping[str, str] | None = None,
+) -> tuple[EvidenceRef, ...]:
+    refs, _ids = _evidence_items(raw, artifact_aliases=artifact_aliases)
+    return refs
 
 
 def _dedupe_evidence(refs: Sequence[EvidenceRef]) -> tuple[EvidenceRef, ...]:
@@ -310,6 +422,20 @@ def _quality_tuple(raw: object) -> tuple[QualityCheck, ...]:
         if not isinstance(entry, Mapping):
             raise WorkerResultRejected("Each quality check must be an object with 'name' and 'passed'.")
         passed = entry.get("passed")
+        raw_status = entry.get("status")
+        normalized_status = raw_status.strip().lower() if isinstance(raw_status, str) else ""
+        status_passed: bool | None = None
+        if raw_status is not None:
+            if normalized_status in {"passed", "pass"}:
+                status_passed = True
+            elif normalized_status in {"failed", "fail", "not_run", "skipped"}:
+                status_passed = False
+            else:
+                raise WorkerResultRejected(f"Quality check {entry.get('name')!r} has an unknown 'status'.")
+        if passed is None:
+            passed = status_passed
+        elif isinstance(passed, bool) and status_passed is not None and passed is not status_passed:
+            raise WorkerResultRejected(f"Quality check {entry.get('name')!r} reports conflicting 'passed' and 'status' verdicts.")
         if not isinstance(passed, bool):
             # Refused rather than coerced: a truthy string here would turn an
             # unanswered check into a passing one.
@@ -386,10 +512,29 @@ def parse_worker_result(
     if raw_clarification is not None and not isinstance(raw_clarification, str):
         raise WorkerResultRejected("'clarification_question' must be a string.")
 
-    claims, claim_evidence = _claim_tuple(payload.get("claims"))
-    evidence_refs = _dedupe_evidence((*_evidence_tuple(payload.get("evidence_refs")), *claim_evidence))
+    artifact_refs, artifact_aliases = _artifact_tuple(payload.get("artifact_refs"))
+    top_level_evidence, evidence_ids = _evidence_items(payload.get("evidence_refs"), artifact_aliases=artifact_aliases)
+    claims, claim_evidence = _claim_tuple(
+        payload.get("claims"),
+        artifact_aliases=artifact_aliases,
+        evidence_ids=evidence_ids,
+    )
+    evidence_refs = _dedupe_evidence((*top_level_evidence, *claim_evidence))
 
     clarification_question = raw_clarification.strip()[:MAX_ITEM_CHARS] if isinstance(raw_clarification, str) else None
+    consensus = parse_consensus(payload.get("consensus"))
+    # A Design chair cannot call the meeting complete while its structured
+    # consensus still names a decision only the owner can make.  Normalize that
+    # contradiction into the existing paused-chair protocol so no incomplete
+    # Design package can become reviewable merely because the prose says
+    # "completed".  Existing durable packages remain readable; new meetings
+    # stop and ask before the human review gate.
+    if status is WorkerStatus.COMPLETED and capability == "design_council_chair" and consensus is not None and consensus.has_unresolved:
+        unresolved = next(iter(consensus.open_questions), "")
+        if not unresolved:
+            unresolved = next((item.topic for item in consensus.disagreements if not item.resolved), "")
+        status = WorkerStatus.NEEDS_INPUT
+        clarification_question = clarification_question or unresolved[:MAX_ITEM_CHARS] or "What owner decision is needed to complete this Design?"
     # Only a paused chair is asking, so only a paused chair may offer options.
     # A completed result carrying them is describing a decision already taken.
     decision_request = None
@@ -407,7 +552,7 @@ def parse_worker_result(
         summary=summary.strip()[:MAX_SUMMARY_CHARS],
         capability=capability,
         agent_name=agent_name,
-        artifact_refs=_string_tuple(payload.get("artifact_refs"), "artifact_refs"),
+        artifact_refs=artifact_refs,
         evidence_refs=evidence_refs,
         claims=claims,
         limitations=_string_tuple(payload.get("limitations"), "limitations"),
@@ -420,7 +565,7 @@ def parse_worker_result(
         # result. The chair's prose summary is still the binding synthesis, and
         # rejecting a whole Design attempt over a misshapen sub-object would
         # trade the thing that works for the thing that reads nicely.
-        consensus=parse_consensus(payload.get("consensus")),
+        consensus=consensus,
         decision_request=decision_request,
         figures=parse_figures(payload.get("figures")),
         key_outcomes=parse_key_outcomes(payload.get("key_outcomes")),

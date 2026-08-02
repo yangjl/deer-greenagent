@@ -97,6 +97,13 @@ import { artifactMarkdownPlugins } from "./markdown-preview-plugins";
 const WRITE_FILE_PREVIEW_REFRESH_INTERVAL_MS = 3000;
 const DESIGN_CHAIR_POLL_INTERVAL_MS = 750;
 const DESIGN_CHAIR_MAX_POLLS = 800;
+const STAGE_HANDOFF_FAST_POLLS = 60;
+// The handoff card is emitted by a short deterministic run, so a wait this
+// long means it is not coming. Bounded for the same reason the chair wait is:
+// an unbounded loop leaves the deck claiming it is still preparing forever,
+// with no way for the owner to retry a decision that was already recorded.
+const STAGE_HANDOFF_MAX_POLLS = 240;
+const STAGE_HANDOFF_SLOW_POLL_INTERVAL_MS = 5000;
 
 function isRetryableDeckReceipt(status: string | undefined): boolean {
   return status === "failed" || status === "handoff_failed";
@@ -754,6 +761,7 @@ export function ArtifactFilePreview({
   );
   const deckSubmissionIdRef = useRef<string | null>(null);
   const deckChairPollingSurfaceRef = useRef<string | null>(null);
+  const deckHandoffPollingSurfaceRef = useRef<string | null>(null);
   const citationSources = useMemo(
     () =>
       language === "markdown" ? extractCitationSources(content ?? "") : [],
@@ -950,6 +958,105 @@ export function ArtifactFilePreview({
       }
     };
 
+    const waitForStageHandoff = async (surfaceId: string, channel: string) => {
+      if (deckHandoffPollingSurfaceRef.current === surfaceId) {
+        return;
+      }
+      deckHandoffPollingSurfaceRef.current = surfaceId;
+      setDeckProgress({
+        surfaceId,
+        state: "running",
+        note: "Approval recorded. Preparing the next-stage choice in this conversation…",
+      });
+      try {
+        for (let poll = 0; poll < STAGE_HANDOFF_MAX_POLLS && !cancelled; poll += 1) {
+          await new Promise((resolve) =>
+            window.setTimeout(
+              resolve,
+              poll < STAGE_HANDOFF_FAST_POLLS
+                ? DESIGN_CHAIR_POLL_INTERVAL_MS
+                : STAGE_HANDOFF_SLOW_POLL_INTERVAL_MS,
+            ),
+          );
+          if (cancelled) return;
+          try {
+            const refreshed = await fetchDesignFeedbackSurface({
+              projectId,
+              surfaceId,
+              viewerThreadId: threadId,
+            });
+            if (cancelled) return;
+            deckSurfaceRef.current = refreshed;
+            setDeckSurface(refreshed);
+            const handoffStatus = refreshed.receipt?.receipt?.handoff_status;
+
+            if (handoffStatus === "delivered") {
+              const note =
+                refreshed.note ||
+                "Approval recorded. The next-stage choice is ready in this conversation.";
+              deckSubmissionIdRef.current = null;
+              refreshConversation();
+              setDeckProgress({
+                surfaceId,
+                state: "completed",
+                note,
+              });
+              send(surfaceId, channel, {
+                type: "accepted",
+                note,
+              });
+              return;
+            }
+
+            if (
+              refreshed.receipt?.status === "handoff_failed" ||
+              handoffStatus === "failed"
+            ) {
+              const note =
+                refreshed.note ||
+                "The approval is recorded, but the next-stage choice could not be delivered. Retry the same decision.";
+              setDeckProgress({
+                surfaceId,
+                state: "failed",
+                note,
+              });
+              send(surfaceId, channel, {
+                type: "initialize",
+                allowedActions: refreshed.allowed_actions,
+                selectedOptionIds: refreshed.receipt?.selected_card_ids ?? [],
+                comment: refreshed.receipt?.human_comment ?? "",
+                note,
+              });
+              return;
+            }
+          } catch {
+            // The approval and its idempotency key are durable. A temporary
+            // read failure cannot tell us whether chat delivery succeeded.
+          }
+        }
+        if (cancelled) return;
+
+        // The approval stands; only its chat prompt is missing. Hand the
+        // decision back so the same payload can be retried, rather than
+        // leaving the deck reporting progress that has stopped.
+        const note =
+          "The approval is recorded, but the next-stage choice is taking longer than expected. Retry the same decision.";
+        setDeckProgress({
+          surfaceId,
+          state: "failed",
+          note,
+        });
+        send(surfaceId, channel, {
+          type: "failed",
+          note,
+        });
+      } finally {
+        if (deckHandoffPollingSurfaceRef.current === surfaceId) {
+          deckHandoffPollingSurfaceRef.current = null;
+        }
+      }
+    };
+
     const handleMessage = async (event: MessageEvent) => {
       if (
         event.source !== iframeRef.current?.contentWindow ||
@@ -1004,7 +1111,24 @@ export function ArtifactFilePreview({
               ? surface.note
               : "This preview does not match the registered deck bytes.",
           });
-          if (bytesMatch && surface.receipt?.status === "resume_started") {
+          const handoffStatus = surface.receipt?.receipt?.handoff_status;
+          if (
+            bytesMatch &&
+            surface.receipt?.status === "review_recorded" &&
+            (handoffStatus === "started" || handoffStatus === "retrying")
+          ) {
+            // Approval runs are admitted through REST rather than the mounted
+            // chat stream. Resume delivery polling after a remount so the
+            // Start/Hold card cannot remain hidden until the person types.
+            refreshConversation();
+            void waitForStageHandoff(surfaceId, channel);
+          } else if (bytesMatch && handoffStatus === "delivered") {
+            refreshConversation();
+            setDeckProgress(null);
+          } else if (
+            bytesMatch &&
+            surface.receipt?.status === "resume_started"
+          ) {
             // A deck may be closed or remounted while its background chair run
             // is active. Resume both the visible progress state and successor
             // polling from the authenticated receipt; otherwise the old deck
@@ -1130,6 +1254,16 @@ export function ArtifactFilePreview({
           // or releases this exact answer for retry.
           refreshConversation();
           await waitForChairOutcome(surfaceId, channel);
+        } else if (
+          result.status === "review_recorded" &&
+          (result.receipt?.handoff_status === "started" ||
+            result.receipt?.handoff_status === "retrying")
+        ) {
+          // The POST confirms admission, not delivery. Wait until the server
+          // proves the Start/Hold card is in durable conversation history,
+          // then invalidate the mounted chat so it appears without a prompt.
+          refreshConversation();
+          await waitForStageHandoff(surfaceId, channel);
         } else {
           setDeckProgress({
             surfaceId,
@@ -1242,6 +1376,7 @@ export function ArtifactFilePreview({
       setDeckSurface(null);
       deckSubmissionIdRef.current = null;
       deckChairPollingSurfaceRef.current = null;
+      deckHandoffPollingSurfaceRef.current = null;
     };
   }, [content, language, projectId, queryClient, threadId]);
 

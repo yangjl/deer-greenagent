@@ -1,5 +1,6 @@
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
+import { normalizeTokenUsage, type TokenUsage } from "../messages/usage";
 
 import { eventsToSteps, type SubtaskStep } from "./steps";
 
@@ -8,8 +9,16 @@ const SUBTASK_STEPS_PAGE_SIZE = 500;
 /** Safety bound on pagination so a misbehaving cursor can't loop forever. */
 const SUBTASK_STEPS_MAX_PAGES = 100;
 
+export class StageWorkerFetchError extends Error {
+  constructor(public readonly status: number) {
+    super(`Failed to load stage workers: ${status}`);
+    this.name = "StageWorkerFetchError";
+  }
+}
+
 type FetchedEvent = Parameters<typeof eventsToSteps>[0][number] & {
   seq?: number;
+  run_id?: string;
 };
 
 /**
@@ -66,10 +75,18 @@ export async function fetchSubtaskSteps(
 
 export interface StageWorkerRecord {
   taskId: string;
+  runId: string;
   description: string;
   dbtlStage: string;
   status: "in_progress" | "completed" | "failed";
+  result?: string;
+  displaySummary?: string;
+  error?: string;
+  modelName?: string;
+  usage?: TokenUsage;
 }
+
+type FoldedStageWorkerRecord = StageWorkerRecord & { lastSeq: number };
 
 /**
  * Governed stage workers recorded in one run, for a page that missed the stream.
@@ -87,27 +104,35 @@ export interface StageWorkerRecord {
  */
 export async function fetchStageWorkers(
   threadId: string,
-  runId: string,
+  pageSize: number = SUBTASK_STEPS_PAGE_SIZE,
 ): Promise<StageWorkerRecord[]> {
   const base = `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
     threadId,
-  )}/runs/${encodeURIComponent(runId)}/events`;
-  const params = new URLSearchParams({
-    event_types: "subagent.start,subagent.end",
-    limit: String(SUBTASK_STEPS_PAGE_SIZE),
-  });
-
-  const response = await fetch(`${base}?${params.toString()}`, {
-    credentials: "include",
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to load stage workers: ${response.status}`);
+  )}/stage-worker-events`;
+  const events: FetchedEvent[] = [];
+  let beforeSeq: number | undefined;
+  for (let page = 0; page < SUBTASK_STEPS_MAX_PAGES; page++) {
+    const params = new URLSearchParams({ limit: String(pageSize) });
+    if (beforeSeq !== undefined) params.set("before_seq", String(beforeSeq));
+    const response = await fetch(`${base}?${params.toString()}`, {
+      credentials: "include",
+    });
+    if (!response.ok) {
+      throw new StageWorkerFetchError(response.status);
+    }
+    const payload = (await response.json()) as {
+      events?: FetchedEvent[];
+      next_before_seq?: number | null;
+    };
+    events.push(...(payload.events ?? []));
+    if (payload.next_before_seq == null) break;
+    if (payload.next_before_seq === beforeSeq) break;
+    beforeSeq = payload.next_before_seq;
   }
-  // The endpoint returns a bare array, matching `fetchSubtaskSteps` above.
-  const events = (await response.json()) as FetchedEvent[];
 
-  const started = new Map<string, StageWorkerRecord>();
-  const ended = new Map<string, "completed" | "failed">();
+  events.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+
+  const started = new Map<string, FoldedStageWorkerRecord>();
   for (const event of events) {
     const content = (event.content ?? {}) as Record<string, unknown>;
     const taskId =
@@ -115,6 +140,9 @@ export async function fetchStageWorkers(
     if (!taskId) {
       continue;
     }
+    const runId = typeof event.run_id === "string" ? event.run_id : "";
+    if (!runId) continue;
+    const key = `${runId}\u0000${taskId}`;
     if (event.event_type === "subagent.start") {
       const stage =
         typeof content.dbtl_stage === "string" ? content.dbtl_stage.trim() : "";
@@ -123,23 +151,62 @@ export async function fetchStageWorkers(
         // from, and adopting it here would render it twice.
         continue;
       }
-      started.set(taskId, {
+      // Design meeting seats share the stage marker but already have their
+      // own DebatePanel. The persisted seat marker keeps reload behavior
+      // identical to the live stream instead of drawing the participant twice.
+      if (
+        content.council_seat &&
+        typeof content.council_seat === "object" &&
+        !Array.isArray(content.council_seat)
+      ) {
+        continue;
+      }
+      started.set(key, {
         taskId,
+        runId,
         description:
           typeof content.description === "string" && content.description.trim()
             ? content.description
             : "Stage work",
         dbtlStage: stage,
         status: "in_progress",
+        lastSeq: event.seq ?? 0,
       });
     } else if (event.event_type === "subagent.end") {
-      const status = content.status;
-      ended.set(taskId, status === "completed" ? "completed" : "failed");
+      const record = started.get(key);
+      if (!record) continue;
+      const status = content.status === "completed" ? "completed" : "failed";
+      const text = (value: unknown) =>
+        typeof value === "string" && value.trim() ? value.trim() : undefined;
+      const usage = normalizeTokenUsage(content.usage);
+      started.set(key, {
+        ...record,
+        status,
+        lastSeq: event.seq ?? record.lastSeq,
+        ...(text(content.result) ? { result: text(content.result) } : {}),
+        ...(text(content.display_summary)
+          ? { displaySummary: text(content.display_summary) }
+          : {}),
+        ...(text(content.error) ? { error: text(content.error) } : {}),
+        ...(text(content.model_name)
+          ? { modelName: text(content.model_name) }
+          : {}),
+        ...(usage ? { usage } : {}),
+      });
     }
   }
 
-  return [...started.values()].map((record) => ({
-    ...record,
-    status: ended.get(record.taskId) ?? record.status,
-  }));
+  // A re-plan/resume may reuse a logical work-unit id in a later run. The UI
+  // has one card per logical worker, so retain only its newest execution and
+  // let the newer run reset an older terminal state.
+  const latestByTask = new Map<string, FoldedStageWorkerRecord>();
+  for (const record of started.values()) {
+    const previous = latestByTask.get(record.taskId);
+    if (!previous || record.lastSeq > previous.lastSeq) {
+      latestByTask.set(record.taskId, record);
+    }
+  }
+  return [...latestByTask.values()]
+    .sort((a, b) => a.lastSeq - b.lastSeq)
+    .map(({ lastSeq: _lastSeq, ...record }) => record);
 }

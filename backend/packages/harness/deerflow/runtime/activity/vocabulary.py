@@ -116,7 +116,7 @@ _STAGE_LABELS: Final[Mapping[str, str]] = {
 _ACTOR_DEFAULT_NAMES: Final[Mapping[ActorKind, str]] = {
     ActorKind.LEAD_AGENT: "Lead agent",
     ActorKind.DBTL_SUPERVISOR: "Cycle supervisor",
-    ActorKind.STAGE_ADAPTER: "Cycle stage",
+    ActorKind.STAGE_ADAPTER: "Cycle coordinator",
     ActorKind.SUBAGENT: "Subagent",
     ActorKind.STAGE_WORKER: "Cycle worker",
 }
@@ -183,7 +183,7 @@ def resolve_display_name(
 
     visible_stage = stage_label(stage)
     if kind is ActorKind.STAGE_ADAPTER and visible_stage:
-        return f"{visible_stage} stage"
+        return f"{visible_stage} coordinator"
     if kind is ActorKind.STAGE_WORKER and visible_stage:
         return f"{visible_stage} worker {index}" if isinstance(index, int) else f"{visible_stage} worker"
 

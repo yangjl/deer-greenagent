@@ -922,6 +922,23 @@ class TestPostApprovalStageHandoff:
         ]
 
     @pytest.mark.asyncio
+    async def test_representing_a_handoff_keeps_one_request_with_a_new_delivery(self):
+        executed: list[dict] = []
+        first = await self._ask(self._adapter(executed), thread_id="handoff-delivery-one")
+        second = await self._ask(self._adapter(executed), thread_id="handoff-delivery-two")
+
+        first_call, first_card = first["messages"][-2:]
+        second_call, second_card = second["messages"][-2:]
+        first_request = first_card.artifact["human_input"]["request_id"]
+        second_request = second_card.artifact["human_input"]["request_id"]
+
+        assert first_request == second_request
+        assert first_call.tool_calls[0]["id"] == second_call.tool_calls[0]["id"] == first_request
+        assert first_card.tool_call_id == second_card.tool_call_id == first_request
+        assert first_call.id != second_call.id
+        assert first_card.id != second_card.id
+
+    @pytest.mark.asyncio
     async def test_hold_keeps_the_stage_open_and_dispatches_nothing(self):
         executed: list[dict] = []
         adapter = self._adapter(executed)
@@ -2250,8 +2267,9 @@ class TestAPausedBuildIsNotTalkedPast:
         final = await graph.ainvoke(state, config={"configurable": {"thread_id": "build-fence"}})
 
         assert marker == [], "an unanswered build control was talked past into the lead agent"
-        # Re-presented rather than answered: the card carries the ids it was
-        # emitted under, so `add_messages` replaces it in place instead of
-        # appending a second copy.
-        assert [message.tool_call_id for message in final["messages"] if isinstance(message, ToolMessage)] == ["dbtl-build__cyc-1__deadbeef"]
-        assert not [message for message in final["messages"] if isinstance(message, AIMessage) and message.content and not message.tool_calls]
+        # Re-presented rather than answered: both deliveries carry the same
+        # durable request/tool-call id, but distinct message ids keep the later
+        # card visible after this follow-up and deliverable by the journal.
+        cards = [message for message in final["messages"] if isinstance(message, ToolMessage)]
+        assert [message.tool_call_id for message in cards] == ["dbtl-build__cyc-1__deadbeef", "dbtl-build__cyc-1__deadbeef"]
+        assert len({message.id for message in cards}) == 2

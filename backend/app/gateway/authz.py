@@ -318,6 +318,48 @@ def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[Autho
     return provider, principal
 
 
+_UNRESOLVED_USER = object()
+
+
+async def is_model_use_authorized(request: Request, model_name: str, *, user: Any = _UNRESOLVED_USER) -> bool:
+    """Async ``model:use`` check for the current request's user.
+
+    Shared by the model-detail route and internal model-consuming routes (e.g.
+    DBTL setup drafting) so they enforce one contract. Uses the provider's
+    ``aauthorize`` so a custom provider doing blocking I/O cannot stall the
+    event loop. Semantics mirror ``get_model``: authorization disabled or no
+    user → allowed; provider unavailable or erroring → ``fail_closed`` decides.
+
+    ``user`` lets a route pass the user it already resolved; omitted, the
+    request's optional user is resolved here.
+    """
+    from deerflow.authz.provider import AuthzDecision, AuthzRequest
+
+    if user is _UNRESOLVED_USER:
+        from app.gateway.deps import get_optional_user_from_request
+
+        user = await get_optional_user_from_request(request)
+    if user is None:
+        return True
+
+    fail_closed = _get_route_authorization_config().fail_closed
+    try:
+        provider, principal = resolve_model_authorization(user, is_internal=_is_internal_caller(request, user))
+    except _AuthorizationUnavailable as exc:
+        return not exc.fail_closed
+    if provider is None or principal is None:
+        return True
+
+    try:
+        decision = await provider.aauthorize(AuthzRequest(principal=principal, resource="model", action="use", target=model_name))
+        if not isinstance(decision, AuthzDecision):
+            raise TypeError("AuthorizationProvider.aauthorize must return AuthzDecision")
+        return decision.allow
+    except Exception:
+        logger.warning("Authorization provider failed while checking model:use for %s", model_name, exc_info=True)
+        return not fail_closed
+
+
 async def _authenticate(request: Request) -> AuthContext:
     """Authenticate request and return AuthContext.
 

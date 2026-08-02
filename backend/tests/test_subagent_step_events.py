@@ -298,6 +298,32 @@ def test_run_event_for_task_started():
     assert record["content"]["description"] == "research X"
 
 
+def test_run_event_for_meeting_seat_preserves_reload_marker():
+    seat = {
+        "stage": "design",
+        "role": "chair",
+        "role_label": "Chair",
+        "focus": "synthesis",
+        "capability": "experimental_design",
+        "agent_name": "general-purpose",
+        "via_generalist": True,
+        "model": "gpt-5.6-sol",
+        "round": 2,
+        "counts_toward_stage_output": True,
+    }
+    record = subagent_run_event(
+        {
+            "type": "task_started",
+            "task_id": "chair-1",
+            "description": "Chair synthesis",
+            "dbtl_stage": "design",
+            "council_seat": seat,
+        }
+    )
+
+    assert record["content"]["council_seat"] == seat
+
+
 def test_run_event_for_task_running_carries_step_payload():
     chunk = {
         "type": "task_running",
@@ -322,6 +348,7 @@ def test_run_event_for_terminal_status():
             "result": "done",
             "model_name": "claude-3-7-sonnet",
             "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+            "display_summary": "Built the simulator and recorded its outputs.",
         }
     )
 
@@ -330,6 +357,7 @@ def test_run_event_for_terminal_status():
     assert record["content"]["result"] == "done"
     assert record["content"]["model_name"] == "claude-3-7-sonnet"
     assert record["content"]["usage"]["total_tokens"] == 120
+    assert record["content"]["display_summary"] == "Built the simulator and recorded its outputs."
 
     failed = subagent_run_event({"type": "task_failed", "task_id": "call_1", "error": "boom"})
     assert failed["content"]["status"] == "failed"

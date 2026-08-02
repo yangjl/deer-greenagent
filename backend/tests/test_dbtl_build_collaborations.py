@@ -136,6 +136,28 @@ class TestOneControlIsOpenAtATime:
         with pytest.raises(ValueError):
             await repo.open_build_collaboration(project_id="project-1", cycle_id="cycle-1", stage_attempt_id=stage_attempt_id, request=card)
 
+    async def test_the_workflow_view_surfaces_the_open_human_control(self, repo: DbtlCycleRepository, stage_attempt_id: str) -> None:
+        await repo.open_build_collaboration(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            stage_attempt_id=stage_attempt_id,
+            request=_card("req-plan", stage_attempt_id),
+            originating_thread_id="thread-build",
+        )
+
+        view = await repo.build_workflow_view(
+            project_id="project-1",
+            stage_attempt_id=stage_attempt_id,
+            workflow_spec_key=WORKFLOW,
+        )
+
+        assert view["waiting_control"] == {
+            "kind": "plan_confirmation",
+            "request_id": "req-plan",
+            "label": "Waiting for you — confirm the Build plan.",
+            "originating_thread_id": "thread-build",
+        }
+
 
 class TestTheAnswerIsRecordedOnce:
     async def test_it_keeps_the_persons_words_and_who_answered(self, repo: DbtlCycleRepository, stage_attempt_id: str) -> None:

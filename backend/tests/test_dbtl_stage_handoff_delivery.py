@@ -213,6 +213,33 @@ class TestTheHandoffRunPersistsItsCard:
         card_ids = {row["content"].get("tool_call_id") for row in _card_rows(rows)}
         assert card_ids == {CARD_ID}
 
+    def test_a_new_delivery_of_the_same_logical_card_is_not_retained_history(self):
+        old_ai, old_tool = _card_messages()
+        old_ai.id = f"{CARD_ID}:delivery:old:call"
+        old_tool.id = f"{CARD_ID}:delivery:old"
+        new_ai, new_tool = _card_messages()
+        new_ai.id = f"{CARD_ID}:delivery:new:call"
+        new_tool.id = f"{CARD_ID}:delivery:new"
+
+        async def drive() -> list[dict]:
+            store = MemoryRunEventStore()
+            journal = RunJournal("run-redelivery", "thread-1", store, flush_threshold=100)
+            user = HumanMessage(id="human-current", content="What is next?")
+            retained = [HumanMessage(id="human-old", content="Earlier"), old_ai, old_tool]
+            journal.record_input({"messages": [user]})
+            journal.record_pre_run_message_identities(retained)
+            journal.on_chain_end(
+                {"messages": [*retained, user, new_ai, new_tool]},
+                run_id=uuid4(),
+            )
+            await journal.flush()
+            return await store.list_messages("thread-1")
+
+        rows = asyncio.run(drive())
+        cards = _card_rows(rows)
+        assert len(cards) == 1
+        assert cards[0]["content"]["id"] == new_tool.id
+
 
 class TestTheCardIsReadableFromThreadHistory:
     def test_exactly_one_actionable_card_survives_a_reload(self):

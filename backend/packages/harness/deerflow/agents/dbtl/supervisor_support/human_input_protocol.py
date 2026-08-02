@@ -99,6 +99,7 @@ def build_human_input_messages(
     tool_args: Mapping[str, Any],
     request: Mapping[str, Any],
     fallback_content: str,
+    message_id: str | None = None,
 ) -> tuple[AIMessage, ToolMessage]:
     """Return the exact paired AI/tool envelope for one supervisor card.
 
@@ -108,6 +109,12 @@ def build_human_input_messages(
     recovery.  Inferring either from the other would collapse that boundary.
     """
 
+    # The request id is the durable authority binding.  The message id is only
+    # a delivery identity: a waiting control may be presented again in a later
+    # run while every answer must still resolve against the original request.
+    # Keeping the two separate prevents ``add_messages`` from replacing the old
+    # card in place and leaving the later run with nothing new to deliver.
+    envelope_id = message_id or request_id
     tool_call = {
         "name": "ask_clarification",
         "args": dict(tool_args),
@@ -116,12 +123,12 @@ def build_human_input_messages(
     }
     return (
         AIMessage(
-            id=f"{request_id}:call",
+            id=f"{envelope_id}:call",
             content="",
             tool_calls=[tool_call],
         ),
         ToolMessage(
-            id=request_id,
+            id=envelope_id,
             name="ask_clarification",
             tool_call_id=request_id,
             content=fallback_content,

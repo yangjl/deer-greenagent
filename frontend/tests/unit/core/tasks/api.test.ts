@@ -9,7 +9,7 @@ rs.mock("@/core/config", () => ({
 }));
 
 import { fetch as fetcher } from "@/core/api/fetcher";
-import { fetchSubtaskSteps } from "@/core/tasks/api";
+import { fetchStageWorkers, fetchSubtaskSteps } from "@/core/tasks/api";
 
 const mockedFetch = rs.mocked(fetcher);
 
@@ -94,5 +94,172 @@ describe("fetchSubtaskSteps", () => {
     mockedFetch.mockResolvedValueOnce(jsonResponse(500, { detail: "boom" }));
 
     await expect(fetchSubtaskSteps("t", "r", "A")).rejects.toThrow();
+  });
+});
+
+describe("fetchStageWorkers", () => {
+  test("pages across runs and folds durable terminal details", async () => {
+    mockedFetch
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          events: [
+            {
+              seq: 20,
+              run_id: "run-2",
+              event_type: "subagent.start",
+              content: {
+                task_id: "build-2",
+                description: "Build phase two",
+                dbtl_stage: "build",
+              },
+            },
+            {
+              seq: 21,
+              run_id: "run-2",
+              event_type: "subagent.end",
+              content: {
+                task_id: "build-2",
+                status: "completed",
+                result: '{"status":"completed"}',
+                display_summary: "Validated the population output.",
+                model_name: "gpt-5.6-sol",
+                usage: {
+                  input_tokens: 10,
+                  output_tokens: 4,
+                  total_tokens: 14,
+                },
+              },
+            },
+          ],
+          next_before_seq: 20,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          events: [
+            {
+              seq: 3,
+              run_id: "run-1",
+              event_type: "subagent.start",
+              content: {
+                task_id: "build-1",
+                description: "Build phase one",
+                dbtl_stage: "build",
+              },
+            },
+            {
+              seq: 4,
+              run_id: "run-1",
+              event_type: "subagent.end",
+              content: {
+                task_id: "build-1",
+                status: "failed",
+                error: "Execution stopped.",
+              },
+            },
+            {
+              seq: 5,
+              run_id: "run-1",
+              event_type: "subagent.start",
+              content: { task_id: "ordinary", description: "Research" },
+            },
+          ],
+          next_before_seq: null,
+        }),
+      );
+
+    const workers = await fetchStageWorkers("thread 1", 2);
+
+    expect(workers).toHaveLength(2);
+    expect(workers[0]).toMatchObject({
+      taskId: "build-1",
+      runId: "run-1",
+      status: "failed",
+      error: "Execution stopped.",
+    });
+    expect(workers[1]).toMatchObject({
+      taskId: "build-2",
+      runId: "run-2",
+      status: "completed",
+      displaySummary: "Validated the population output.",
+      modelName: "gpt-5.6-sol",
+      usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 },
+    });
+    expect(mockedFetch.mock.calls[0]![0] as string).toContain(
+      "/backend/api/threads/thread%201/stage-worker-events?limit=2",
+    );
+    expect(mockedFetch.mock.calls[1]![0] as string).toContain(
+      "before_seq=20",
+    );
+  });
+
+  test("excludes persisted Design meeting seats from the stage-work lane", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        events: [
+          {
+            seq: 1,
+            run_id: "run-design",
+            event_type: "subagent.start",
+            content: {
+              task_id: "chair-1",
+              description: "Chair synthesis",
+              dbtl_stage: "design",
+              council_seat: {
+                stage: "design",
+                role: "chair",
+              },
+            },
+          },
+        ],
+        next_before_seq: null,
+      }),
+    );
+
+    await expect(fetchStageWorkers("thread-1")).resolves.toEqual([]);
+  });
+
+  test("keeps only the newest execution when a later run reuses a task id", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        events: [
+          {
+            seq: 1,
+            run_id: "run-old",
+            event_type: "subagent.start",
+            content: {
+              task_id: "attempt-plan",
+              description: "Build planner",
+              dbtl_stage: "build",
+            },
+          },
+          {
+            seq: 2,
+            run_id: "run-old",
+            event_type: "subagent.end",
+            content: { task_id: "attempt-plan", status: "completed" },
+          },
+          {
+            seq: 10,
+            run_id: "run-new",
+            event_type: "subagent.start",
+            content: {
+              task_id: "attempt-plan",
+              description: "Build planner",
+              dbtl_stage: "build",
+            },
+          },
+        ],
+        next_before_seq: null,
+      }),
+    );
+
+    await expect(fetchStageWorkers("thread-1")).resolves.toEqual([
+      expect.objectContaining({
+        taskId: "attempt-plan",
+        runId: "run-new",
+        status: "in_progress",
+      }),
+    ]);
   });
 });

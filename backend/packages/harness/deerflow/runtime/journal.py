@@ -359,7 +359,7 @@ class RunJournal(BaseCallbackHandler):
                 message = _coerce_seed_message(raw_message)
                 if not isinstance(message, BaseMessage):
                     continue
-                identity = self._message_identity(message)
+                identity = self._message_boundary_identity(message)
                 if identity:
                     self._input_message_identities.add(identity)
             self._record_first_human_input(messages)
@@ -389,7 +389,7 @@ class RunJournal(BaseCallbackHandler):
             message = _coerce_seed_message(raw_message)
             if not isinstance(message, BaseMessage):
                 continue
-            identity = self._message_identity(message)
+            identity = self._message_boundary_identity(message)
             if identity:
                 identities.add(identity)
         self._pre_run_message_identities = identities
@@ -671,12 +671,38 @@ class RunJournal(BaseCallbackHandler):
 
     @staticmethod
     def _message_identity(message: BaseMessage) -> str | None:
+        """Return the logical identity used to deduplicate persisted output.
+
+        A tool result is logically the answer to one tool call, even when the
+        graph re-delivers that result in a later run.  Keep this identity
+        tool-call-first so callbacks and final-state reconciliation cannot
+        persist the same result twice within one run.
+        """
         tool_call_id = getattr(message, "tool_call_id", None)
         if isinstance(tool_call_id, str) and tool_call_id:
             return f"tool:{tool_call_id}"
         message_id = getattr(message, "id", None)
         if isinstance(message_id, str) and message_id:
             return f"message:{message_id}"
+        return None
+
+    @staticmethod
+    def _message_boundary_identity(message: BaseMessage) -> str | None:
+        """Return the physical message identity used at run boundaries.
+
+        Re-presented Human Input controls intentionally reuse their logical
+        ``tool_call_id`` while carrying a fresh message id per delivery.  A
+        boundary keyed by tool call therefore mistakes the new delivery for
+        retained history and drops it.  Prefer the concrete message id here;
+        old checkpoints without ids retain the conservative tool-call
+        fallback.
+        """
+        message_id = getattr(message, "id", None)
+        if isinstance(message_id, str) and message_id:
+            return f"message:{message_id}"
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if isinstance(tool_call_id, str) and tool_call_id:
+            return f"tool:{tool_call_id}"
         return None
 
     @staticmethod
@@ -802,7 +828,7 @@ class RunJournal(BaseCallbackHandler):
         for index, message in enumerate(messages):
             if not isinstance(message, BaseMessage):
                 continue
-            identity = self._message_identity(message)
+            identity = self._message_boundary_identity(message)
             if identity and identity in self._input_message_identities:
                 current_input_index = index
         if current_input_index >= 0:
@@ -815,7 +841,7 @@ class RunJournal(BaseCallbackHandler):
         for message in messages:
             if not isinstance(message, BaseMessage):
                 continue
-            identity = self._message_identity(message)
+            identity = self._message_boundary_identity(message)
             # An identity-less message cannot be reconciled anyway (both
             # ``_should_reconcile_*`` checks require one), so excluding it here
             # keeps the boundary honest rather than merely permissive.

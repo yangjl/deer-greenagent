@@ -30,7 +30,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import is_model_use_authorized, require_permission
 from app.gateway.deps import get_classifier_evaluation_repo, get_config, get_workspace_repo, require_admin_user
 from deerflow.config.app_config import AppConfig
 from deerflow.dbtl.proposal import (
@@ -307,6 +307,16 @@ async def draft_setup(
     fields = [f for f in (body.fields or []) if isinstance(f, str) and f.strip()]
     if not dbtl_config.setup_draft_enabled or not body.text.strip() or not fields:
         return _serialize_draft(empty_draft(), enabled=dbtl_config.setup_draft_enabled)
+
+    # ``model:use`` is enforced for the drafting model like any other model
+    # invocation the caller triggers; a denial degrades to the blank form the
+    # setup step had before drafting existed rather than erroring.
+    if not await is_model_use_authorized(request, dbtl_config.setup_draft_model_name):
+        logger.warning(
+            "DBTL setup drafting model %r is not authorized for this caller; returning a blank form",
+            dbtl_config.setup_draft_model_name,
+        )
+        return _serialize_draft(empty_draft(), enabled=True)
 
     prompt = build_draft_prompt(
         request_text=body.text,

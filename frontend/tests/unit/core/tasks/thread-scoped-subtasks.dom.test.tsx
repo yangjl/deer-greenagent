@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import {
   ThreadScopedSubtasksProvider,
+  useReconcileSubtasks,
   useSubtaskContext,
 } from "@/core/tasks/context";
 
@@ -28,6 +29,48 @@ function TaskLedgerHarness() {
         }
       >
         Record meeting
+      </button>
+    </>
+  );
+}
+
+function DurableReconciliationHarness() {
+  const { tasks, setTasks } = useSubtaskContext();
+  const reconcile = useReconcileSubtasks();
+  const task = tasks.worker;
+  return (
+    <>
+      <output aria-label="worker status">{task?.status ?? "missing"}</output>
+      <button
+        type="button"
+        onClick={() =>
+          setTasks({
+            worker: {
+              id: "worker",
+              status: "in_progress",
+              subagent_type: "subagent",
+              description: "Build work",
+              prompt: "",
+              dbtlStage: "build",
+            },
+          })
+        }
+      >
+        Stream start
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          reconcile([
+            {
+              id: "worker",
+              status: "completed",
+              displaySummary: "Build finished.",
+            },
+          ])
+        }
+      >
+        Reconcile terminal
       </button>
     </>
   );
@@ -60,5 +103,24 @@ describe("ThreadScopedSubtasksProvider", () => {
     view.rerender(<ScopedHarness threadId="new" />);
 
     expect(screen.getByLabelText("task count").textContent).toBe("1");
+  });
+
+  it("publishes an async durable terminal transition immediately", () => {
+    render(
+      <ThreadScopedSubtasksProvider scopeKey="thread-build">
+        <DurableReconciliationHarness />
+      </ThreadScopedSubtasksProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Stream start" }));
+    expect(screen.getByLabelText("worker status").textContent).toBe(
+      "in_progress",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Reconcile terminal" }),
+    );
+    expect(screen.getByLabelText("worker status").textContent).toBe(
+      "completed",
+    );
   });
 });

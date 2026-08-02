@@ -2224,6 +2224,7 @@ def test_evidence_matching_uses_the_keys_the_repository_actually_returns() -> No
             id="cycle-1",
             project_id="project-1",
             parent_cycle_id=None,
+            originating_thread_id=None,
             title="Drought",
             cycle_class="computational",
             state="design",

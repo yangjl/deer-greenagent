@@ -265,7 +265,7 @@ class TestChangingThePlanIsASecondExchange:
 
         follow_up = change_plan_request(previous=previous).as_card()
 
-        assert follow_up["input_mode"] == "text"
+        assert follow_up["input_mode"] == "free_text"
         assert follow_up["options"] == []
         assert follow_up["dbtl_cycle_id"] == "cycle-1"
         assert follow_up["plan_digest"] == previous["plan_digest"]

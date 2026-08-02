@@ -216,6 +216,27 @@ def test_normalize_input_with_messages():
     result = normalize_input({"messages": [{"role": "user", "content": "hi"}]})
     assert len(result["messages"]) == 1
     assert result["messages"][0].content == "hi"
+    assert result["messages"][0].id.startswith("gateway-input__")
+
+
+def test_normalize_input_mints_distinct_ids_and_preserves_existing_ids():
+    from app.gateway.services import normalize_input
+
+    result = normalize_input(
+        {
+            "messages": [
+                {"role": "user", "content": "first"},
+                {"role": "user", "content": "second"},
+                {"role": "user", "content": "existing", "id": "client-message-1"},
+            ]
+        }
+    )
+
+    first, second, existing = result["messages"]
+    assert first.id.startswith("gateway-input__")
+    assert second.id.startswith("gateway-input__")
+    assert first.id != second.id
+    assert existing.id == "client-message-1"
 
 
 def test_normalize_input_passthrough():
@@ -2991,3 +3012,110 @@ async def test_start_run_rejects_invalid_thread_id_before_resolving_dependencies
 
     assert exc_info.value.status_code == 422
     assert "Invalid thread_id" in exc_info.value.detail
+
+
+@pytest.mark.anyio
+async def test_checkpoint_history_seed_race_writes_history_once():
+    """Two Gateway workers can both observe an empty feed before either has
+    written; the durable claim on the seed batch's first event (put_if_absent
+    under the store's writer lock) makes the loser stand down instead of
+    duplicating the transcript."""
+    from unittest.mock import AsyncMock, patch
+
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.gateway.services import ensure_checkpoint_history_seeded
+
+    event_store = MemoryRunEventStore()
+    checkpointer = SimpleNamespace(
+        aget_tuple=AsyncMock(return_value=SimpleNamespace(checkpoint={})),
+    )
+    snapshot = SimpleNamespace(
+        values={
+            "messages": [
+                HumanMessage(id="legacy-human", content="old question"),
+                AIMessage(id="legacy-ai", content="old answer"),
+            ]
+        }
+    )
+    accessor = SimpleNamespace(aget=AsyncMock(return_value=snapshot))
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=checkpointer,
+                run_event_store=event_store,
+            )
+        )
+    )
+
+    # Both callers read a stale empty feed, as two workers do when the second
+    # checks before the first worker's rows commit.
+    with (
+        patch.object(event_store, "list_messages", AsyncMock(return_value=[])),
+        patch(
+            "app.gateway.services.build_checkpoint_state_accessor",
+            return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}),
+        ),
+    ):
+        await ensure_checkpoint_history_seeded(request, thread_id="thread-1", assistant_id="lead_agent")
+        await ensure_checkpoint_history_seeded(request, thread_id="thread-1", assistant_id="lead_agent")
+
+    rows = await event_store.list_messages("thread-1", limit=10)
+    assert [row["content"]["id"] for row in rows] == ["legacy-human", "legacy-ai"]
+
+
+@pytest.mark.anyio
+async def test_a_crashed_seed_leaves_no_partial_history_to_lock_in():
+    """The seed must stay all-or-nothing. A claim committed separately from
+    the rest of the batch would leave one message behind after a crash, and
+    the empty-feed guard reads any message as 'already seeded' -- so the rest
+    of the inherited transcript could never be written, silently and
+    permanently truncating the thread."""
+    from unittest.mock import AsyncMock, patch
+
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.gateway.services import ensure_checkpoint_history_seeded
+
+    event_store = MemoryRunEventStore()
+    checkpointer = SimpleNamespace(
+        aget_tuple=AsyncMock(return_value=SimpleNamespace(checkpoint={})),
+    )
+    snapshot = SimpleNamespace(
+        values={
+            "messages": [
+                HumanMessage(id="legacy-human", content="old question"),
+                AIMessage(id="legacy-ai", content="old answer"),
+            ]
+        }
+    )
+    accessor = SimpleNamespace(aget=AsyncMock(return_value=snapshot))
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                checkpointer=checkpointer,
+                run_event_store=event_store,
+            )
+        )
+    )
+    patched_accessor = patch(
+        "app.gateway.services.build_checkpoint_state_accessor",
+        return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}),
+    )
+
+    # The process dies partway through committing the seed.
+    with (
+        patched_accessor,
+        patch.object(event_store, "put_batch_if_absent", AsyncMock(side_effect=RuntimeError("worker killed"))),
+        pytest.raises(RuntimeError),
+    ):
+        await ensure_checkpoint_history_seeded(request, thread_id="thread-1", assistant_id="lead_agent")
+
+    assert await event_store.list_messages("thread-1", limit=10) == []
+
+    # The next run must therefore still see an empty feed and seed it whole.
+    with patched_accessor:
+        await ensure_checkpoint_history_seeded(request, thread_id="thread-1", assistant_id="lead_agent")
+
+    rows = await event_store.list_messages("thread-1", limit=10)
+    assert [row["content"]["id"] for row in rows] == ["legacy-human", "legacy-ai"]

@@ -26,7 +26,7 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -218,9 +218,7 @@ class DesignFeedbackOpsMixin:
             # This lock covers MAX(revision), insert, and supersession below.
             # Without it, two different deck hashes can both allocate the same
             # revision and both remain live under PostgreSQL READ COMMITTED.
-            cycle = await session.scalar(
-                _locked_cycle_for_feedback_surface(cycle_id, project_id)
-            )
+            cycle = await session.scalar(_locked_cycle_for_feedback_surface(cycle_id, project_id))
             if cycle is None:
                 raise DbtlWorkflowRefused("That cycle does not belong to this project.")
 
@@ -543,20 +541,14 @@ class DesignFeedbackOpsMixin:
                 )
             )
             existing_receipt = dict(existing.receipt or {}) if existing is not None else {}
-            if (
-                existing is not None
-                and existing.status == "handoff_failed"
-                and existing_receipt.get("handoff_status") == "failed"
-            ):
+            if existing is not None and existing.status == "handoff_failed" and existing_receipt.get("handoff_status") == "failed":
                 # The review itself is already committed. Retrying this exact
                 # payload only redelivers its next-stage card; it must not rebind
                 # the verdict to a newer cycle revision or execute review_stage
                 # again. The original payload hash includes that reviewed
                 # revision, so any changed answer still fails closed.
                 if existing.payload_hash != payload_hash or existing.id != submission_id:
-                    raise DesignFeedbackConflict(
-                        "The recorded approval can retry its handoff only with the exact original payload."
-                    )
+                    raise DesignFeedbackConflict("The recorded approval can retry its handoff only with the exact original payload.")
                 existing.status = "pending"
                 existing.failure_code = None
                 existing.receipt = {
@@ -566,11 +558,7 @@ class DesignFeedbackOpsMixin:
                 }
                 await session.commit()
                 return self._surface_payload(surface), self._action_payload(existing), True
-            if (
-                existing is not None
-                and existing.status == "pending"
-                and existing_receipt.get("handoff_status") == "retrying"
-            ):
+            if existing is not None and existing.status == "pending" and existing_receipt.get("handoff_status") == "retrying":
                 raise DesignFeedbackConflict("The approval handoff retry is already in progress.")
 
             cycle = await session.scalar(
@@ -636,9 +624,7 @@ class DesignFeedbackOpsMixin:
                     surface.stage,
                 )
                 if artifact is None or artifact.id != surface.evidence_artifact_id or artifact.revision != surface.evidence_artifact_revision or artifact.content_hash != surface.evidence_content_hash:
-                    raise DesignFeedbackConflict(
-                        f"The {surface.stage.title()} evidence changed after this deck was rendered."
-                    )
+                    raise DesignFeedbackConflict(f"The {surface.stage.title()} evidence changed after this deck was rendered.")
                 if action_kind == "request_changes":
                     request_payload = surface.decision_request or {}
                     issue_ids = {str(value) for value in request_payload.get("review_issue_ids", []) if isinstance(value, str)}
@@ -739,6 +725,52 @@ class DesignFeedbackOpsMixin:
             row.failure_code = failure_code
             await session.commit()
             return self._action_payload(row)
+
+    async def transition_stage_feedback_handoff(
+        self,
+        action_id: str,
+        *,
+        project_id: str,
+        run_id: str,
+        status: str,
+        receipt: dict[str, Any],
+        failure_code: str | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically settle one admitted handoff exactly once.
+
+        Delivery verification and the detached failure watcher are concurrent
+        observers of the same run.  Both may read ``started`` before either
+        writes, so a Python check followed by ``update_stage_feedback_action``
+        permits the later writer to overwrite the earlier terminal result.
+        The JSON predicate keeps the compare-and-set in the database.
+        """
+        async with self._sf() as session:  # type: ignore[attr-defined]
+            result = await session.execute(
+                update(DbtlDesignFeedbackActionRow)
+                .where(
+                    DbtlDesignFeedbackActionRow.id == action_id,
+                    DbtlDesignFeedbackActionRow.project_id == project_id,
+                    DbtlDesignFeedbackActionRow.status == "review_recorded",
+                    DbtlDesignFeedbackActionRow.run_id == run_id,
+                    DbtlDesignFeedbackActionRow.receipt["handoff_status"].as_string() == "started",
+                )
+                .values(
+                    status=status,
+                    receipt=receipt,
+                    failure_code=failure_code,
+                )
+            )
+            changed = bool(result.rowcount)
+            await session.commit()
+            row = await session.scalar(
+                select(DbtlDesignFeedbackActionRow).where(
+                    DbtlDesignFeedbackActionRow.id == action_id,
+                    DbtlDesignFeedbackActionRow.project_id == project_id,
+                )
+            )
+            if row is None:
+                raise DesignFeedbackConflict("Design feedback action not found.")
+            return self._action_payload(row), changed
 
     async def update_design_feedback_action(self, action_id: str, **kwargs: Any) -> dict[str, Any]:
         """Compatibility wrapper for callers using the former Design name."""

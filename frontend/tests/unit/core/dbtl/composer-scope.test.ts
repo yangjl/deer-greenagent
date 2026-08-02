@@ -428,6 +428,37 @@ describe("humanInputRunContext", () => {
     });
   });
 
+  it.each(["dbtl_stage_handoff", "dbtl_build_control"])(
+    "returns a %s answer to the governed cycle",
+    (clarificationType) => {
+      expect(
+        humanInputRunContext(
+          {
+            source: "ask_clarification",
+            clarification_type: clarificationType,
+          },
+          "cyc-9",
+        ),
+      ).toEqual({
+        dbtl_supervisor_enabled: true,
+        dbtl_explicit_choice: "continue_cycle",
+        dbtl_selected_cycle_id: "cyc-9",
+      });
+    },
+  );
+
+  it("lets the supervisor recover a Build control's cycle when selection was lost", () => {
+    expect(
+      humanInputRunContext(
+        {
+          source: "ask_clarification",
+          clarification_type: "dbtl_build_control",
+        },
+        null,
+      ),
+    ).toEqual({ dbtl_supervisor_enabled: true });
+  });
+
   it("lets the supervisor route clarifications with no DBTL subtype", () => {
     expect(humanInputRunContext({ source: "ask_clarification" }, null)).toEqual(
       {

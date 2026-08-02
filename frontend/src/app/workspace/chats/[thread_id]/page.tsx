@@ -432,6 +432,7 @@ export default function ChatPage() {
           const cycle = await createFromNativeSetup(
             request.dbtl_cycle_setup,
             request.request_id,
+            threadId,
           );
           if (!cycle) {
             toast.error("Could not start the DBTL cycle.");

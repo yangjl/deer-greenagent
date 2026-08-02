@@ -49,7 +49,7 @@ from deerflow.dbtl.build_workflow import (
     resolve_build_workflow_by_key,
 )
 from deerflow.dbtl.stage_spec import StageSpecNotFound, resolve_stage_spec
-from deerflow.persistence.dbtl.collaboration_ops import ANSWERED, count_control_epochs
+from deerflow.persistence.dbtl.collaboration_ops import ANSWERED, OPEN, count_control_epochs
 from deerflow.persistence.dbtl.model import DbtlArtifactRow, DbtlBuildCollaborationRow, DbtlCycleRow, DbtlStageAttemptRow, DbtlStageStepRunRow
 from deerflow.utils.time import coerce_iso
 
@@ -552,6 +552,17 @@ class StepOpsMixin:
                 stage_run=stage_run,
                 workflow_spec_key=workflow_spec_key or (rows[0].workflow_spec_key if rows else None) or resolve_build_workflow().spec_key,
             )
+            waiting_result = await session.execute(
+                select(DbtlBuildCollaborationRow)
+                .where(
+                    DbtlBuildCollaborationRow.stage_attempt_id == stage_attempt_id,
+                    DbtlBuildCollaborationRow.project_id == project_id,
+                    DbtlBuildCollaborationRow.lifecycle == OPEN,
+                )
+                .order_by(DbtlBuildCollaborationRow.created_at.desc())
+                .limit(1)
+            )
+            waiting_row = waiting_result.scalar_one_or_none()
 
         spec_key = workflow_spec_key or (rows[0].workflow_spec_key if rows else None)
         spec = resolve_build_workflow_by_key(spec_key) if spec_key else resolve_build_workflow()
@@ -605,8 +616,25 @@ class StepOpsMixin:
             "steps": steps,
             "next_step": projection.next_step.value if projection.next_step else None,
             "is_complete": projection.is_complete,
+            "waiting_control": _waiting_control_payload(waiting_row),
             "phases": [_payload(by_id[row.id]) for row in rows if row.phase_index is not None],
         }
+
+
+def _waiting_control_payload(row: DbtlBuildCollaborationRow | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    labels = {
+        "plan_confirmation": "Waiting for you — confirm the Build plan.",
+        "worker_question": "Waiting for you — answer the Build question.",
+        "step_failure": "Waiting for you — choose how Build should recover.",
+    }
+    return {
+        "kind": row.kind,
+        "request_id": row.request_id,
+        "label": labels.get(row.kind, "Waiting for you — Build needs a decision."),
+        "originating_thread_id": row.originating_thread_id,
+    }
 
 
 def _observed_status(step: BuildStepKey, latest: DbtlStageStepRunRow | None, projection: Any) -> str:
