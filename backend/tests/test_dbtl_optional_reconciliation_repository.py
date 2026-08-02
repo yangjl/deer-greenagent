@@ -122,7 +122,10 @@ class TestDesignApprovalOpensBuild:
         assert statuses["reconciliation"] == "locked"
 
     @pytest.mark.asyncio
-    async def test_the_gate_still_holds_when_the_flag_is_left_alone(self, tmp_path: Path):
+    async def test_the_gate_still_holds_when_the_flag_is_left_alone(self, tmp_path: Path, strict_reconciliation):
+        # "Left alone" means the shipped default, which is pinned here rather
+        # than read from the ambient config: a developer who opted out locally
+        # would otherwise turn this into a second copy of the test above.
         repo = await _approved_design(tmp_path)
 
         cycle = await repo.get_cycle("cycle-1", project_id="project-1")

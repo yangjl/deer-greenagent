@@ -24,6 +24,13 @@ from deerflow.persistence.dbtl.model import (
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
 
+
+@pytest.fixture(autouse=True)
+def _shipped_dbtl_gates(strict_reconciliation, build_workflow_steps_off):
+    """Every case here asserts the shipped gate rules, so it states them rather
+    than inheriting whatever the developer's config.yaml happens to say."""
+
+
 pytestmark = pytest.mark.asyncio
 
 HASH_A = "a" * 64

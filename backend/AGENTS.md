@@ -1644,6 +1644,22 @@ passes `--force`. Tests live in
 - Tests must pass before a feature is considered complete
 - For lightweight config/utility modules, prefer pure unit tests with no external dependencies
 - If a module causes circular import issues in tests, add a `sys.modules` mock in `tests/conftest.py` (see existing example for `deerflow.subagents.executor`)
+- **A test states the deployment switch it exercises; it never inherits one.**
+  Some rules are read from the ambient `config.yaml` at call time rather than
+  passed as arguments — `reconciliation_required()` and
+  `build_workflow_steps_enabled()` in
+  `deerflow.dbtl.reconciliation_policy` are the current examples. A developer
+  who sets `dbtl.reconciliation_required: false` or
+  `dbtl.build_workflow_steps: true` locally then silently flips the rule under
+  every test that asserts the other path, so two dozen unrelated assertions
+  fail on their machine while CI, running the shipped defaults, stays green —
+  and the failures look like real regressions in whatever was last touched.
+  `tests/conftest.py` provides `strict_reconciliation` and
+  `build_workflow_steps_off` to pin the shipped defaults, and
+  `test_dbtl_optional_reconciliation_repository.py::no_reconciliation` pins the
+  opt-out; a file whose cases all assume one mode requests the matching fixture
+  from a module-level `autouse` fixture. When adding a config-read rule, add
+  its pinning fixture in the same change set.
 
 ```bash
 # Run all offline tests

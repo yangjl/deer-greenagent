@@ -20,6 +20,13 @@ from deerflow.persistence.dbtl.model import WorkItemRow
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
 
+
+@pytest.fixture(autouse=True)
+def _strict_reconciliation(strict_reconciliation):
+    """Every case here asserts the strict gate, so it states that rule rather
+    than inheriting whatever the developer's config.yaml happens to say."""
+
+
 pytestmark = pytest.mark.asyncio
 
 POLICY = "greenagent-dbtl-v2-draft"
@@ -611,9 +618,7 @@ class TestWorkerRuns:
 
         cycle = await repo.get_cycle("cycle-1", project_id=project_id)
         assert cycle is not None
-        meeting = next(
-            item for item in cycle["artifacts"] if item["artifact_type"] == "design_review_meeting"
-        )
+        meeting = next(item for item in cycle["artifacts"] if item["artifact_type"] == "design_review_meeting")
         assert meeting["reviewed_artifact_id"] == evidence["id"]
         assert meeting["reviewed_artifact_revision"] == evidence["revision"]
         assert meeting["reviewed_artifact_content_hash"] == evidence["content_hash"]
