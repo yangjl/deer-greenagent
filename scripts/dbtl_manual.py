@@ -215,6 +215,13 @@ def initialize_profile(
     # the progressive-gate read model (path strip) is on in the isolated
     # profile while the developer's normal config keeps the default.
     dbtl["progressive_gate"] = True
+    # Build's phased workflow and its human controls, for the same reason: this
+    # profile is where a new refusal — a Design that cannot be resolved through
+    # the project root, a plan nobody confirmed, a phase that stopped — has to
+    # be discovered, rather than mid-experiment in somebody's real project.
+    dbtl["build_workflow_steps"] = True
+    dbtl["build_plan_confirmation"] = True
+    dbtl["build_work_meetings"] = True
 
     memory = config.setdefault("memory", {})
     if not isinstance(memory, dict):

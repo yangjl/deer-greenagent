@@ -57,6 +57,19 @@ logger = logging.getLogger(__name__)
 #: The partial unique index that enforces "one running attempt per step".
 _RUNNING_INDEX = "uq_dbtl_stage_step_running"
 
+#: How long a `running` attempt from a **different** run may sit before a later
+#: run may reclaim it.
+#:
+#: The one-running-attempt rule is what stops two dispatches doing the same
+#: work, and it has no expiry — so a Gateway killed mid-phase leaves a row that
+#: blocks that step forever, and every later Build silently stops recording
+#: rather than colliding with a process that no longer exists. The window is
+#: deliberately far longer than any real step: reclaiming early would settle a
+#: live worker's row and let a second dispatch run beside it, which is worse
+#: than a stuck step somebody can see. A same-run row is never reclaimed, since
+#: that is this process's own work.
+_ORPHAN_RECLAIM_SECONDS = 6 * 60 * 60
+
 #: Free-text and metadata caps, applied at the **write** boundary.
 #:
 #: The read model is served through an authenticated endpoint whose contract is
@@ -373,6 +386,29 @@ class StepOpsMixin:
                 if committed:
                     # Newest wins, matching the projection's selection rule.
                     return _payload(max(committed, key=lambda row: row.attempt)), False
+
+                # A step left running by a process that is gone. Settled as
+                # `cancelled` rather than `failed`: work taken away and work
+                # gone wrong are different things to a reader, and nobody
+                # observed this one fail.
+                now = _utc_now()
+                for stale in rows:
+                    if stale.status != StepState.RUNNING.value:
+                        continue
+                    if parent_run_id and stale.parent_run_id == parent_run_id:
+                        continue
+                    started = stale.started_at
+                    if started is None:
+                        continue
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=UTC)
+                    if (now - started).total_seconds() < _ORPHAN_RECLAIM_SECONDS:
+                        continue
+                    stale.status = StepState.CANCELLED.value
+                    stale.error_code = BuildErrorCode.CANCELLED.value
+                    stale.error_summary = _bounded_summary("The run that owned this attempt ended without settling it, so a later run reclaimed the step.")
+                    stale.completed_at = now
+                await session.flush()
 
                 next_attempt = max((row.attempt for row in rows), default=0) + 1
                 superseded = max(rows, key=lambda row: row.attempt) if rows else None

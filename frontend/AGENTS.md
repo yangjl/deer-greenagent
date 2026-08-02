@@ -177,7 +177,7 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
   rail, and restores its prior state on close.
 - `src/components/workspace/project-rail/` owns the rail: a disclosure on the
   durable DBTL cycles (each expanding into its five stages with a status word),
-  the selected cycle's open blockers, an agents placeholder, and the project's
+  the selected cycle's **Build plan**, an agents placeholder, and the project's
   conversations. **The rail is read-only** — it holds no text inputs, and the
   Cycles header is disclosure-only with no creation or demo actions. New-cycle
   intent is classified from normal project chat and enters the native setup
@@ -581,6 +581,55 @@ When adding features:
 3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
 4. Run `pnpm check` before committing
 5. Update this `AGENTS.md` when architecture, commands, or conventions change
+
+## The Build plan in the project rail
+
+`src/core/dbtl/build-plan-view.ts` is the pure layer and
+`project-rail/build-plan-block.tsx` renders it. It replaced the rail's Blockers
+section, which was the only place a person could look while a Build ran and said
+nothing about the Build.
+
+**One source, two projections.** The rail and the transcript's workflow block
+read the same server view (`GET .../stages/{stage}/workflow`, via
+`useStageWorkflow`, shared through the query cache rather than fetched twice). A
+rail that derived its own notion of progress would eventually disagree with the
+transcript and the person would have no way to tell which was right, so nothing
+here recomputes a status — it only decides how to say one.
+
+**Read-only.** No retry, no hold, no answer, no confirm; selecting a phase opens
+the stage. Mutation stays in the chat card, where the decision becomes durable.
+
+The constraints are the rail's, not this feature's. `ProjectRailFrame` is
+`w-64` — about 224px of content — and scrolls as one column shared with Cycles,
+Agents, and Conversations, so a phase row is `StageRow`'s existing shape and
+nothing more: a `size-3.5` state icon, a truncated title, and a right-aligned
+`text-[11px]` state word. Titles **truncate, never wrap** (a wrapping title
+changes the rail's height as work moves; the full title lives in
+`title`/`aria-label` and in the transcript), capability rides in the accessible
+name because there is no room for a third column and the transcript already
+names it, and `MAX_RAIL_PHASES` (8) mirrors the backend's own bound so an
+uncollapsed list is safe in a shared scroll column.
+
+**Exactly one thing moves**, on the running phase only, with
+`motion-reduce:animate-none` — the same rule the Agents section directly below
+applies, and a property of the rail rather than of either feature. `movingRow`
+returns a single key rather than a per-row flag, so two spinners are
+unrepresentable rather than merely unlikely, and the icon is keyed by phase so a
+state change updates the row without remounting and restarting the rotation.
+Tone pairs are reused from `STATUS_MARK` (no new hue family); the *keys* differ
+because these are step states, not DBTL stage statuses.
+
+The plan supplies phases that have not started — a rail that could only show
+rows that exist would say a four-phase Build has one phase until the fourth
+finished — while a recorded row wins wherever both describe the same phase,
+since a row is what actually happened, and the newest attempt of a retried phase
+is the one shown.
+
+**Blockers do not disappear.** Open work items are how a person learns
+Reconciliation is unsettled, and deleting that surface to make room would trade
+one real signal for another. Reconciliation-kind rows ride as a count on the
+stage row they belong to (in words, never colour alone); the rest keep a
+collapsed line beneath the Build plan, which is the plan's own stated fallback.
 
 ## Runtime agent activity
 

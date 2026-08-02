@@ -75,8 +75,10 @@ class DbtlConfig(BaseModel):
             "planned work is not the build a person would be approving. Off keeps today's monolithic Build path exactly "
             "as it was, including not re-reading the Design — deliberately, because the resolution is a new refusal and "
             "a project whose approved package is not readable through the project root must discover that in the manual "
-            "profile rather than mid-experiment. Human collaboration on a paused step (including plan confirmation), and "
-            "targeted retry of one step from the UI, are not implemented yet."
+            "profile rather than mid-experiment. A paused Build raises a bound control in chat — confirm the plan, continue "
+            "past a phase boundary, or choose Retry / Replan / Restart / Hold after a failure — and every option states "
+            "what it costs. Retrying one step from a button in the read model is deliberately not offered: the card owns "
+            "that decision so it stays durable in the conversation."
         ),
     )
 

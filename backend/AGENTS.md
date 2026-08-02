@@ -3291,13 +3291,129 @@ no payload is a step that reports a replay and silently dispatches.
 whose phases all replayed arrives with the same unit ids and the unique index
 raised an unhandled `IntegrityError`.
 
-Not implemented: the plan-confirmation card, typed `needs_input` collaboration
-(a paused summarizer or planner is recorded and reported, but there is no card
-to answer it), and per-step retry from the UI. Tests:
-`tests/test_dbtl_build_workflow.py`, `tests/test_dbtl_build_step_runs.py`,
+**A paused Build is a decision waiting to be made, and somebody has to be able
+to make it.** A Build stops for four different reasons — the plan is drawn and
+nobody has agreed to it, a phase declared a boundary, a step failed, or a worker
+cannot continue without one answer — and every one of them used to end the same
+way: a paragraph in chat and no way to act. `pause_after` broke the loop and
+raised nothing; a failed phase kept its finished work and offered no retry.
+
+`deerflow.dbtl.build_control` is the typed shape all four share, and it owns no
+repository, message type, or rendering. Every option **states what choosing it
+costs** — Replan says plainly that finished phases are discarded, Retry says
+they are kept — because a card listing them side by side without that is
+offering a choice nobody can make well. Nothing is preselected, including
+`recommended_option_id`, which `resolve_answer` deliberately never consults: a
+default that becomes the answer is a decision nobody made. **Hold is a
+first-class action** rather than the absence of one, since "the person chose to
+stop" and "nobody has answered" lead to opposite behaviour. The four kinds share
+one action vocabulary on purpose — a retry card and a pause card both offer
+"change the plan", and two verbs for it would mean two code paths that must stay
+in agreement about what it does.
+
+`dbtl_build_collaborations` (migration `0027`) records the exchange, because the
+step row records *that* a step is waiting and the sentence it waits on but not
+which formats were offered, which option was chosen, by whom, or which attempt
+resumed — and "who decided to replan" is exactly the question asked when the
+phases beneath a plan are gone. Two rules are database constraints rather than
+calling-code checks: `uq_dbtl_build_collab_open` enforces one open control per
+stage attempt (a Build pauses in exactly one place, so a second open request is
+a stale card competing with a live one), and `uq_dbtl_build_collab_submission`
+makes a response idempotent by (request, client submission id) — a
+double-clicked button replays, while a genuinely different answer under the same
+id conflicts instead of overwriting the decision already recorded. A superseded
+control is kept, since it is the record of what somebody was actually shown.
+
+**That table is also what makes Restart and Replan mean anything.**
+`build_control_epochs` counts answered restart/replan decisions, and
+`build_step_material` folds them into `load_design` and `plan_build`. Without
+them a restart recomputes the same input digest as the run it is restarting,
+`open_step_attempt` replays the committed success, and the button does nothing
+at all. They satisfy the recomputability rule because the writer and the read
+model count the same durable rows — nothing in the running process is bound. A
+restart implies a replan (it begins again above it); a hold moves neither.
+
+The card id is **derived, not random**: a retried turn re-renders the same
+question, and a random id would open a second control for it with the record
+unable to say which was answered. It is computed from what the pause *is* —
+cycle, stage attempt, kind, whether it asks for a choice or for words, step, and
+digests. That "choice or words" component is load-bearing: a plan card and the
+free-text follow-up it raises are two questions about the same pause, and
+without it they derive one id, the second collapses onto the first's already
+answered row, and the words the person typed reach nothing.
+
+Answers are resolved against the request the **server** emitted
+(`answered_build_control`): a forged request id matches no card, an invented
+option id matches nothing on a real one, and either way the request falls
+through to ordinary routing rather than starting, replanning, or restarting a
+governed Build. While a control is unanswered, a request that would otherwise
+become ordinary work is answering *that control*, so `pending_build_control`
+fences it and the supervisor re-presents the card — the same escape the
+Start/Hold handoff needed ("go ahead and build it", with no cycle scope). Fence
+and handler share one predicate, because a fence that intercepts a request the
+handler then declines falls straight through to stage execution.
+
+"Change the plan" is a second exchange on purpose: the person's words travel
+verbatim into the replan rather than being paraphrased into a planner-owned
+decision. A free-text answer to a plan card is recorded as a **replan** rather
+than a generic reply, because that is what the decision is — recording it
+otherwise would leave the epoch unmoved. Continuing past an answered boundary
+does not re-present it (that is what Continue meant), while a boundary not yet
+reached still stops.
+
+Both workers that can pause a Build now raise a bound control. The planner's
+`needs_input` used to render as a Design clarification card whose answer went
+wherever the next request went; the summarizer's was recorded as a refusal,
+which reads as "fix something" when it means "decide something". `needs_input`
+stays out of the failure taxonomy — the summary step settles as waiting rather
+than failed, the execution behind it stays selected, and the answer resumes the
+write-up rather than the Build — and the paused step records which control holds
+its question.
+
+**The Build work meeting** (`live_stage/build_meeting.py`,
+`generic:build-work-meeting:v1`, behind `dbtl.build_work_meetings`) is the
+escalation for a question one exchange cannot settle. Three rules keep it from
+becoming an expensive replacement for a one-line answer. It is **convened, never
+self-started** — no model opens a meeting by labelling its own question complex,
+so the module builds seats and parses a result but never decides to run. It is
+**advisory**: three seats (implementation position, red team, chair), and the
+same question comes back with the briefing above it, because only the person's
+answer resumes anything; a meeting that could resume the work would be a second,
+unreviewed approval path. And it **reads without writing** — no workspace grant,
+since the later phase attempt remains the single writer. The briefing lists
+options before the recommendation (a reader already told what to pick reads the
+alternatives as objections), a recommendation naming nothing on the table costs
+the label rather than the meeting, and a provider outage costs the advice while
+leaving the question answerable directly.
+
+**A step left running by a dead process is reclaimed.** The one-running-attempt
+rule has no expiry, so a Gateway killed mid-phase left a row blocking that step
+forever and — recording being fail-soft — every later Build stopped recording
+rather than saying so. `open_step_attempt` settles a `running` row from a
+*different* run, older than `_ORPHAN_RECLAIM_SECONDS` (6 hours), as `cancelled`
+rather than `failed`: work taken away and work gone wrong are different things
+to a reader, and nobody observed this one fail. The window is deliberately far
+longer than any real step, because reclaiming early would settle a live worker's
+row and admit a second dispatch beside it. A same-run row is never reclaimed.
+
+The read model also carries the **recorded plan** (`plan`), flattened onto the
+`plan_build` row's bounded `execution` map by `_plan_execution` and read back by
+`_recorded_plan`. A queued phase has no row of its own, so without it the view
+can say a Build has four phases and name none of them — the difference between a
+plan a person can check and a progress bar. Each phase row also carries its own
+title, so a running phase reads the same way.
+
+Still not implemented: retrying one step from a button in the read model (the
+retry card owns mutation deliberately — §8.2), and the armed-composer reply chip
+(§7.2); a free-text control is a visible card instead, which §7.3 permits.
+Tests: `tests/test_dbtl_build_workflow.py`, `tests/test_dbtl_build_step_runs.py`,
 `tests/test_dbtl_build_input_bundle.py`, `tests/test_dbtl_build_plan.py`,
 `tests/test_dbtl_build_summary_and_deck.py`,
-`tests/test_dbtl_build_workflow_execution.py`, plus the workflow cases in
+`tests/test_dbtl_build_workflow_execution.py`,
+`tests/test_dbtl_build_control.py`, `tests/test_dbtl_build_collaborations.py`,
+`tests/test_dbtl_build_control_cards.py`,
+`tests/test_dbtl_build_control_flow.py`,
+`tests/test_dbtl_build_work_meeting.py`, plus the workflow cases in
 `tests/test_dbtl_cycles_router.py`.
 
 **Progressive-gate Phases 2-3:** migration

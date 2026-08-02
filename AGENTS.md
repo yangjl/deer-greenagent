@@ -677,6 +677,34 @@ artifact` is server-owned in full and is now stripped from external run input:
   [docs/plans/2026-07-29-progressive-dbtl-gate-plan.md](docs/plans/2026-07-29-progressive-dbtl-gate-plan.md)
   and [backend/AGENTS.md](backend/AGENTS.md) for the route-legality and
   transition-write contracts.
+- **A paused Build is a decision waiting to be made, and somebody has to be
+  able to make it.** Build stops for four different reasons — the plan is drawn
+  and nobody has agreed to it, a phase declared a boundary, a step failed, or a
+  worker cannot continue without one answer — and each raises one bound control
+  in chat. Every option states what choosing it costs (Replan says plainly that
+  finished phases are discarded; Retry says they are kept), nothing is
+  preselected including the recommendation, and Hold is a decision rather than
+  the absence of one. The exchange is durable: one control may be open per
+  Build, a response is idempotent by request plus submission id, and a
+  *different* answer under that id conflicts instead of overwriting the one
+  already recorded. Those records are also what make Restart and Replan mean
+  anything — both move the digest chain, so a restart discards the committed
+  work it exists to discard rather than replaying it. "Change the plan" is a
+  second exchange whose words travel verbatim into the replan. Answers resolve
+  against the card the server emitted, and while a control is unanswered a
+  request that would otherwise be ordinary work is answering *that control*.
+  A **Build work meeting** (`dbtl.build_work_meetings`) is the escalation for a
+  question one exchange cannot settle: three seats, convened only when a person
+  chooses it, advisory to the end — it returns options and a recommendation, and
+  the same question comes back with that briefing above it. The plan
+  confirmation card is behind `dbtl.build_plan_confirmation`; both default off
+  beside `dbtl.build_workflow_steps`, and all three are on in the isolated
+  manual DBTL profile. The project rail's **Build plan** section replaces
+  Blockers with a read-only projection of the same server view the transcript
+  uses; open work items keep their signal as a count on the stage they belong
+  to. See [backend/AGENTS.md](backend/AGENTS.md) and
+  [frontend/AGENTS.md](frontend/AGENTS.md) for the control transport and the
+  rail's one-moving-indicator rule.
 
 ## Commands: Root vs. Module
 

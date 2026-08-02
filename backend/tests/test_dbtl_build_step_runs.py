@@ -569,3 +569,51 @@ class TestTheReadModelStaysBounded:
 
 def _step(view: dict, key: BuildStepKey) -> dict:
     return next(step for step in view["steps"] if step["key"] == key.value)
+
+
+class TestAStepLeftRunningByADeadProcessIsReclaimed:
+    """The one-running-attempt rule has no expiry, so somebody must give it one.
+
+    Without this a Gateway killed mid-phase leaves a row that blocks its step
+    forever: every later Build collides with a process that no longer exists,
+    and — because recording is fail-soft — stops recording rather than saying so.
+    """
+
+    async def test_a_stale_attempt_from_another_run_is_cancelled_and_the_step_reopens(self, repo, stage_attempt_id) -> None:
+        first, _ = await _open(repo, stage_attempt_id, BuildStepKey.LOAD_DESIGN, parent_run_id="run-1")
+        await _age_step(repo, first["id"], hours=8)
+
+        second, dispatched = await _open(repo, stage_attempt_id, BuildStepKey.LOAD_DESIGN, parent_run_id="run-2")
+
+        assert dispatched is True
+        assert second["attempt"] == 2
+        rows = await repo.list_step_attempts(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        reclaimed = next(row for row in rows if row["id"] == first["id"])
+        assert reclaimed["status"] == StepState.CANCELLED.value
+        assert reclaimed["error_code"] == BuildErrorCode.CANCELLED.value
+
+    async def test_a_live_attempt_from_another_run_is_still_refused(self, repo, stage_attempt_id) -> None:
+        await _open(repo, stage_attempt_id, BuildStepKey.LOAD_DESIGN, parent_run_id="run-1")
+
+        with pytest.raises(DbtlStepConflict):
+            await _open(repo, stage_attempt_id, BuildStepKey.LOAD_DESIGN, parent_run_id="run-2")
+
+    async def test_this_runs_own_attempt_is_never_reclaimed_from_under_it(self, repo, stage_attempt_id) -> None:
+        first, _ = await _open(repo, stage_attempt_id, BuildStepKey.LOAD_DESIGN, parent_run_id="run-1")
+        await _age_step(repo, first["id"], hours=8)
+
+        with pytest.raises(DbtlStepConflict):
+            await _open(repo, stage_attempt_id, BuildStepKey.LOAD_DESIGN, parent_run_id="run-1")
+
+
+async def _age_step(repo, step_run_id: str, *, hours: int) -> None:
+    """Backdate an attempt's start, standing in for a process that died then."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+
+    async with repo._sf() as session:
+        async with session.begin():
+            await session.execute(
+                update(DbtlStageStepRunRow).where(DbtlStageStepRunRow.id == step_run_id).values(started_at=datetime.now(UTC) - timedelta(hours=hours)),
+            )
