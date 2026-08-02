@@ -1254,16 +1254,23 @@ dbtl:
   # opaque worker.
   #
   # On, Build hash-verifies the approved Design before dispatching anything,
-  # runs each planned phase as its own retryable attempt, and writes its review
-  # package through a read-only summarizer — so a summary that will not parse or
-  # a deck that will not render costs that step and leaves the sandbox work
-  # pinned and reusable. Off keeps today's monolithic path exactly as it was,
-  # including not re-reading the Design: that resolution is a new refusal, and a
-  # project whose approved package is unreadable through the project root should
-  # discover it in the manual profile rather than mid-experiment.
+  # runs each planned phase as its own attempt whose outputs are published and
+  # hashed before it counts as succeeded, replays a committed step instead of
+  # re-running it, and writes its review package through a read-only summarizer
+  # that describes the evidence without restating it — so a summary that will
+  # not parse or a deck that will not render costs that step and leaves the
+  # sandbox work pinned and reusable. A plan that stops at a failed phase or a
+  # pause boundary keeps its finished phases and writes no review package: a
+  # fraction of the planned work is not the build a person would approve.
   #
-  # Not implemented yet: human collaboration on a paused step, and retrying one
-  # step on its own from the UI.
+  # Off keeps today's monolithic path exactly as it was, including not
+  # re-reading the Design: that resolution is a new refusal, and a project whose
+  # approved package is unreadable through the project root should discover it
+  # in the manual profile rather than mid-experiment.
+  #
+  # Not implemented yet: human collaboration on a paused step (including
+  # confirming the plan before phases run), and retrying one step on its own
+  # from the UI.
   build_workflow_steps: false
   progressive_gate: false
   # One-shot model that assesses the remaining work as routine, standard, or

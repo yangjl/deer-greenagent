@@ -147,15 +147,76 @@ class TestTheSummarizerCannotCiteWhatDoesNotExist:
     def test_asking_for_input_without_a_question_is_refused(self) -> None:
         assert "without stating a question" in parse_build_summary(json.dumps({"status": "needs_input"}), bundle=_bundle()).refusal
 
-    def test_an_outcome_citing_an_unknown_figure_keeps_the_number(self) -> None:
-        """The value stands on its own; the citation is a convenience."""
+    def test_a_summarizer_supplied_number_never_reaches_the_package(self) -> None:
+        """A measured value is the execution's; describing it is the summarizer's.
+
+        Taking the model's list whenever it supplied one let a step whose entire
+        job is to describe restate a metric — different name, different number,
+        different unit — with nothing downstream comparing the two.
+        """
         parsed = parse_build_summary(
-            json.dumps({"headline": "Fitted.", "key_outcomes": [{"name": "r", "value": 0.62, "unit": "corr", "figure": "/nope.png"}]}),
+            json.dumps({"headline": "Fitted.", "key_outcomes": [{"name": "r", "value": 0.99, "unit": "corr", "figure": "/nope.png"}]}),
             bundle=_bundle(),
         )
 
-        (outcome,) = parsed.package.key_outcomes
-        assert (outcome.name, outcome.value, outcome.unit, outcome.figure) == ("r", "0.62", "corr", "")
+        assert parsed.package.key_outcomes == _bundle().key_outcomes
+        assert "0.99" not in json.dumps(parsed.package.as_dict())
+
+
+class TestTheSummarizerAddsToEvidenceAndNeverReplacesIt:
+    """It writes prose. Everything a reader takes as fact stays the execution's.
+
+    Each of these fields used to be `parsed or bundle.<field>`, so a summarizer
+    that supplied its own list replaced the recorded one outright — the single
+    edit that turns a deviation the work reported about itself into a deviation
+    nobody ever mentioned.
+    """
+
+    def test_a_recorded_deviation_survives_the_summarizer_supplying_its_own(self) -> None:
+        parsed = parse_build_summary(
+            json.dumps({"headline": "Fitted.", "deviations": ["Rounded the learning rate."]}),
+            bundle=_bundle(deviations=("Dropped site 4 after the sensor failed.",)),
+        )
+
+        assert parsed.package.deviations == ("Dropped site 4 after the sensor failed.", "Rounded the learning rate.")
+
+    def test_a_recorded_limitation_survives_the_same_way(self) -> None:
+        parsed = parse_build_summary(
+            json.dumps({"headline": "Fitted.", "limitations": ["Only one season."]}),
+            bundle=_bundle(limitations=("No independent population was held out.",)),
+        )
+
+        assert parsed.package.limitations == ("No independent population was held out.", "Only one season.")
+
+    def test_the_execution_leads_because_a_reader_stops_early(self) -> None:
+        parsed = parse_build_summary(json.dumps({"headline": "Fitted.", "deviations": ["Minor."]}), bundle=_bundle(deviations=("Major.",)))
+
+        assert parsed.package.deviations[0] == "Major."
+
+    def test_a_restated_caveat_is_not_recorded_twice(self) -> None:
+        parsed = parse_build_summary(
+            json.dumps({"headline": "Fitted.", "limitations": ["  only one season.  "]}),
+            bundle=_bundle(limitations=("Only one season.",)),
+        )
+
+        assert parsed.package.limitations == ("Only one season.",)
+
+    def test_the_recorded_rerun_procedure_wins_outright(self) -> None:
+        """Whether the work reproduces is Test's judgement, not a rewrite here."""
+        parsed = parse_build_summary(
+            json.dumps({"headline": "Fitted.", "rerun_procedure": "just run fit.py"}),
+            bundle=_bundle(rerun_procedure="uv run python fit.py --seed 7"),
+        )
+
+        assert parsed.package.rerun_procedure == "uv run python fit.py --seed 7"
+
+    def test_the_summarizer_may_supply_a_procedure_the_execution_never_recorded(self) -> None:
+        parsed = parse_build_summary(
+            json.dumps({"headline": "Fitted.", "rerun_procedure": "uv run python fit.py"}),
+            bundle=_bundle(rerun_procedure=""),
+        )
+
+        assert parsed.package.rerun_procedure == "uv run python fit.py"
 
 
 class TestTheReviewedDocumentLeadsWithTheResult:

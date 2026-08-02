@@ -335,22 +335,32 @@ async def project(tmp_path: Path) -> tuple[DbtlCycleRepository, Path]:
     return repo, root
 
 
-def _adapter(repo: DbtlCycleRepository, *, workflow: bool, dispatcher) -> LiveStageAdapter:
+#: What a real deployment looks like: one declared specialist plus the
+#: registered generalist. The generalist has to be here, because it is the only
+#: agent allowed to stand in for a capability nobody declared — the tests that
+#: leave it out are asserting what happens when nothing can cover a phase.
+CANDIDATES = (
+    AgentCandidate(name="builder", capabilities=frozenset({Capability.SOFTWARE_ENGINEERING})),
+    AgentCandidate(name="general-purpose", capabilities=frozenset()),
+)
+
+
+def _adapter(repo: DbtlCycleRepository, *, workflow: bool, dispatcher, candidates=CANDIDATES) -> LiveStageAdapter:
     return LiveStageAdapter(
         repo=repo,
         app_config=SimpleNamespace(dbtl=SimpleNamespace(build_workflow_steps=workflow)),
-        candidate_provider=lambda: (AgentCandidate(name="builder", capabilities=frozenset({Capability.SOFTWARE_ENGINEERING})),),
+        candidate_provider=lambda: candidates,
         dispatcher=dispatcher,
     )
 
 
-def _runtime(root: Path) -> dict:
+def _runtime(root: Path, *, run_id: str = "run-1") -> dict:
     return {
         "context": {
             "project_id": "project-1",
             "project_root": str(root),
             "thread_id": "thread-1",
-            "run_id": "run-1",
+            "run_id": run_id,
             "user_id": "user-1",
         },
         "configurable": {"thread_id": "thread-1"},
@@ -364,14 +374,21 @@ async def _build_stage_attempt_id(repo: DbtlCycleRepository) -> str:
     return str(next(stage for stage in cycle["stages"] if stage["stage"] == "build")["id"])
 
 
-async def _run_build(repo: DbtlCycleRepository, root: Path, *, workflow: bool = True, dispatcher=None):
+async def _run_build(repo: DbtlCycleRepository, root: Path, *, workflow: bool = True, dispatcher=None, candidates=CANDIDATES, run_id: str = "run-1"):
+    """One Build request.
+
+    `run_id` matters whenever a test runs Build twice: the stage-execution
+    idempotency key is bound to the run, so a second request under the same id
+    replays the whole recorded stage and never reaches the workflow at all.
+    A test about step-level resume that reuses `run-1` proves nothing.
+    """
     dispatcher = dispatcher or _WritingDispatcher()
-    result = await _adapter(repo, workflow=workflow, dispatcher=dispatcher).execute(
+    result = await _adapter(repo, workflow=workflow, dispatcher=dispatcher, candidates=candidates).execute(
         project_id="project-1",
         cycle_id="cycle-1",
         request_text="Build the approved design.",
         state={},
-        config=_runtime(root),
+        config=_runtime(root, run_id=run_id),
     )
     return result, dispatcher
 
@@ -570,12 +587,37 @@ class TestABuildStopsBeingOneOpaqueWorker:
 
         phases = (await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id))["phases"]
         by_key = {entry["phase_key"]: entry for entry in phases}
-        # The fixture registers one engineering specialist and nothing else.
+        # The fixture registers one engineering specialist plus the generalist.
         assert by_key["simulate"]["capability"] == "software_and_workflow_engineering"
         assert by_key["simulate"]["via_generalist"] is False
+        assert by_key["simulate"]["agent_name"] == "builder"
+        # Nothing declares statistics, so the *registered generalist* covers it
+        # and the stand-in is recorded. Never `builder`: an engineering
+        # specialist is not a generalist, and handing it a statistics phase
+        # while recording "covered by a generalist" is the swap this names.
         assert by_key["fit"]["capability"] == "statistical_analysis"
         assert by_key["fit"]["via_generalist"] is True
-        assert by_key["fit"]["agent_name"] == "builder"
+        assert by_key["fit"]["agent_name"] == "general-purpose"
+
+    async def test_a_capability_nothing_can_cover_stops_the_plan_and_names_it(self, project) -> None:
+        """No registered generalist means no stand-in, not an arbitrary agent."""
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        result, dispatcher = await _run_build(
+            repo,
+            root,
+            dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN),
+            candidates=(AgentCandidate(name="builder", capabilities=frozenset({Capability.SOFTWARE_ENGINEERING})),),
+        )
+
+        assert [unit.capability for unit in dispatcher.phase_units] == ["software_and_workflow_engineering"]
+        assert "statistical_analysis" in result.note
+        # The engineering phase that did run stays committed and reusable.
+        phases = (await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id))["phases"]
+        assert [entry["status"] for entry in phases] == [StepState.SUCCEEDED.value]
+        assert not result.produced_usable_evidence
 
     async def test_a_later_phase_receives_the_outputs_of_the_ones_before_it(self, project) -> None:
         repo, root = project
@@ -641,9 +683,169 @@ class TestABuildStopsBeingOneOpaqueWorker:
         paused = json.loads(TWO_PHASE_PLAN)
         paused["phases"][0]["pause_after"] = True
 
-        _result, dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=json.dumps(paused)))
+        result, dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=json.dumps(paused)))
 
-        assert [unit.unit_id.endswith("simulate") for unit in dispatcher.phase_units] == [True]
+        assert [unit.capability for unit in dispatcher.phase_units] == ["software_and_workflow_engineering"]
+        # A plan that stopped halfway is not the build a person would approve,
+        # so nothing is written up — and the reply says how far it got.
+        assert not result.produced_usable_evidence
+        assert result.artifact_uri is None
+        assert "1 of 2 planned build phase(s)" in result.note
+
+
+class TestACommittedStepIsReplayedRatherThanReRun:
+    """The point of the whole chain, and the thing it did not actually do.
+
+    The recorder found a committed success and reported `replayed=True`; every
+    caller dispatched anyway. So a Build whose deck failed re-ran the planner
+    and every phase to recover a rendering bug — the resume was in the record
+    and the re-run was in reality.
+    """
+
+    async def test_a_second_run_dispatches_no_planner_and_no_phase(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+
+        await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
+        _result, second = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-2")
+
+        assert second.planner_units == [], "the plan was already committed"
+        assert second.phase_units == [], "both phases were already committed"
+        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        assert [entry["status"] for entry in view["phases"]] == [StepState.SUCCEEDED.value] * 2
+        # A replayed phase is already in the worker record; recording it again
+        # violates the one-run-per-unit index and used to raise out of the run.
+        workers = await repo.list_worker_runs("cycle-1", project_id="project-1", stage="build")
+        assert len(workers) == len({entry["unit_id"] for entry in workers}) == 2
+
+    async def test_the_replayed_evidence_is_the_evidence_the_first_run_published(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+
+        first, _ = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
+        monkeypatch.undo()
+        second, dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-2")
+
+        assert first.produced_usable_evidence and second.produced_usable_evidence
+        # No phase ran, and the deck still had real published figures to embed.
+        assert dispatcher.phase_units == []
+        assert second.deck_uri is not None
+
+    async def test_an_unreadable_payload_costs_a_re_run_and_never_a_wrong_result(self, project, monkeypatch) -> None:
+        """Fail-soft in the only safe direction."""
+        repo, root = project
+        await _ready_for_build(repo)
+        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
+
+        for kept in (root / "outputs" / ".dbtl-stage-work" / "steps").rglob("*.json"):
+            kept.write_text("{not json", encoding="utf-8")
+
+        _result, second = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-2")
+
+        assert len(second.phase_units) == 2, "an unreadable payload must dispatch, not resume"
+
+
+class TestAPhaseSucceedsOnlyOnceItsOutputsArePublished:
+    async def test_an_escaped_artifact_leaves_no_reusable_success(self, project) -> None:
+        """Recording success from the worker's own JSON was the ordering bug.
+
+        A phase naming a file outside its isolated workspace was settled as
+        succeeded, and the reference was only checked afterwards — so the chain
+        held a reusable success for work whose outputs the server had refused.
+        """
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+        escaped = root / "elsewhere.bin"
+        escaped.write_text("not in the grant", encoding="utf-8")
+
+        class _EscapesItsWorkspace(_WritingDispatcher):
+            async def __call__(self, units, *, budget):
+                if units[0].role == "phase":
+                    self.phase_units.append(units[0])
+                    return [DispatchOutcome(unit_id=units[0].unit_id, text=_build_result(artifact=_virtual(escaped), figure=_virtual(escaped)))]
+                return await super().__call__(units, budget=budget)
+
+        result, dispatcher = await _run_build(repo, root, dispatcher=_EscapesItsWorkspace(plan=TWO_PHASE_PLAN))
+
+        assert len(dispatcher.phase_units) == 1, "the second phase must not run on a refused first phase"
+        phases = (await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id))["phases"]
+        assert [entry["status"] for entry in phases] == [StepState.FAILED.value]
+        assert phases[0]["error_code"] == BuildErrorCode.EXECUTION_OUTPUT_MISSING.value
+        assert not result.produced_usable_evidence
+
+    async def test_a_refused_phase_is_re_run_rather_than_replayed(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        escaped = root / "elsewhere.bin"
+        escaped.write_text("not in the grant", encoding="utf-8")
+
+        class _EscapesOnce(_WritingDispatcher):
+            def __init__(self, **kwargs) -> None:
+                super().__init__(**kwargs)
+                self.escaped = False
+
+            async def __call__(self, units, *, budget):
+                if units[0].role == "phase" and not self.escaped:
+                    self.escaped = True
+                    self.phase_units.append(units[0])
+                    return [DispatchOutcome(unit_id=units[0].unit_id, text=_build_result(artifact=_virtual(escaped), figure=_virtual(escaped)))]
+                return await super().__call__(units, budget=budget)
+
+        await _run_build(repo, root, dispatcher=_EscapesOnce(plan=SINGLE_PHASE_PLAN), run_id="run-1")
+        result, second = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=SINGLE_PHASE_PLAN), run_id="run-2")
+
+        assert len(second.phase_units) == 1
+        assert result.produced_usable_evidence
+
+    async def test_a_retry_gets_a_workspace_of_its_own(self, project) -> None:
+        """A retry that inherits the failed attempt's directory inherits its files."""
+        repo, root = project
+        await _ready_for_build(repo)
+
+        class _FailsOnce(_WritingDispatcher):
+            def __init__(self, **kwargs) -> None:
+                super().__init__(**kwargs)
+                self.failed = False
+
+            async def __call__(self, units, *, budget):
+                if units[0].role == "phase" and not self.failed:
+                    self.failed = True
+                    self.phase_units.append(units[0])
+                    return [DispatchOutcome(unit_id=units[0].unit_id, text="it did not work")]
+                return await super().__call__(units, budget=budget)
+
+        _first, first_dispatcher = await _run_build(repo, root, dispatcher=_FailsOnce(plan=SINGLE_PHASE_PLAN), run_id="run-1")
+        _second, second_dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=SINGLE_PHASE_PLAN), run_id="run-2")
+
+        assert first_dispatcher.phase_units[0].unit_id != second_dispatcher.phase_units[0].unit_id
+        assert _grant_from_prompt(first_dispatcher.phase_units[0].prompt) != _grant_from_prompt(second_dispatcher.phase_units[0].prompt)
+
+
+class TestTheSeatsThatMayOnlyReadAreGivenNothingElse:
+    async def test_neither_the_planner_nor_the_summarizer_may_act(self, project) -> None:
+        """A contract promising "you write nothing, run nothing" is not a guarantee.
+
+        The planner's prompt said exactly that while it held the full Build tool
+        set, so the only thing stopping it from starting the build it was asked
+        to plan was the sentence asking it not to.
+        """
+        repo, root = project
+        await _ready_for_build(repo)
+
+        _result, dispatcher = await _run_build(repo, root)
+
+        assert dispatcher.planner_units and dispatcher.summarizer_units
+        for unit in (*dispatcher.planner_units, *dispatcher.summarizer_units):
+            assert adapter_module.STAGE_UNIT_WORKSPACE_PLACEHOLDER not in unit.prompt
+            assert "/mnt/user-data/outputs/.dbtl-stage-work/" not in unit.prompt
+
+    async def test_the_read_only_roles_are_named_from_the_modules_that_seat_them(self) -> None:
+        assert adapter_module._READ_ONLY_ROLES == {"summarizer", "planner"}
 
 
 class TestLoadDesignRefusesBeforeDispatch:

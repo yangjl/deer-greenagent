@@ -3184,7 +3184,19 @@ query; a fake repository computes both sides from the same stub and proves
 nothing, which is why `tests/test_dbtl_build_workflow_execution.py` drives the
 real schema through the real adapter.
 
-**`dbtl.build_workflow_steps` now drives Build.** With it on, four things change
+That rule also decides what may *not* be added. The **capability registry** is
+bound to `plan_build`, because registering or retiring a capability changes
+which plans are legal and which specialist a phase resolves to, and both sides
+can derive the fingerprint from the enum. The runtime environment and a code
+revision are deliberately absent: only the running process knows them, so
+binding them would make the two sides disagree by construction and report every
+step stale the moment it succeeded — they are bound where they are actually
+checkable, in Build lineage, which Test reads. Immutable inputs are absent for
+the opposite reason: they already reach a phase through `plan_build`'s
+input-bound output digest, and binding them twice would only make the reason a
+phase invalidated harder to read.
+
+**`dbtl.build_workflow_steps` now drives Build.** With it on, five things change
 and each is behind the same switch:
 
 * **`load_design` refuses before it dispatches.** `live_stage/design_input.py`
@@ -3196,35 +3208,88 @@ and each is behind the same switch:
   different people fix them. The worker is then handed a `BuildInputBundle`
   rather than asked to rediscover its own design, which is where a wrong guess
   used to produce plausible work against the wrong plan.
-* **`plan_build` proposes a decomposition, and every failure still runs.**
+* **`plan_build` proposes a decomposition, and most failures still run.**
   `deerflow/dbtl/build_plan.py` parses a typed `BuildPhasePlan`: `single_phase`
   is a real verdict (a short script is not four phases pretending to be a
-  project), shape problems degrade to one phase *with a recorded note* so a
-  reviewer can tell "it did not decompose" from "we could not read the planner",
-  and an unregistered capability collapses the plan and **names the capability**
-  rather than quietly becoming the generalist — that silent swap is the bug
-  capability selection exists to prevent. The plan is content-addressed, and its
-  digest excludes the rationale so rewording it cannot invalidate finished
-  phases.
-* **Each phase is its own attempt.** Phases run sequentially through
-  `live_stage/build_phases.py`, declaring a **capability** and receiving the best
-  registered agent with `via_generalist` recorded; a later phase receives the
-  preceding phases' outputs as read-only inputs. Phases sit on their own digest
-  chain *beneath* the container: phase N binds phase N−1, while
-  `execute_phases` still binds the plan. Sharing one cursor made the container
-  chain from the last phase, so a finished Build read as stale. A failed phase
-  stops the run rather than spending the remaining budget producing evidence
-  nobody planned, and `pause_after` stops at a committed, lease-free boundary.
-* **A read-only summarizer writes the reviewed document.** The `summarizer` role
-  is withheld execution and write tools and granted no writable path
-  (`_tools_for_unit`), so "read-only" is a property of the seat rather than an
-  instruction in a prompt. It may cite **only** figures the server published —
-  an invented one fails `summarize_results` alone — and selecting a few for the
-  deck never removes one from the record. `deerflow/dbtl/build_deck.py` then
+  project), and shape problems degrade to one phase *with a recorded note* so a
+  reviewer can tell "it did not decompose" from "we could not read the planner".
+  An **unregistered capability is the exception and stops the plan**
+  (`needs_input`, naming the capability and offering the ones that exist).
+  Collapsing it to one software-engineering phase was the silent swap wearing
+  the degradation rule's clothes: the work still ran, under a capability nobody
+  asked for, and the only trace was a note. The plan is content-addressed, and
+  its digest excludes the rationale so rewording it cannot invalidate finished
+  phases — but what `plan_build` *records* is `plan_output_digest`, the plan
+  folded together with the input digest it was drawn from, because two
+  different approved Designs can imply the same decomposition and a phase
+  chained to the plan's own content would survive a Design change that reshaped
+  the work.
+* **Each phase is its own attempt, and succeeds only once its outputs are
+  published.** Phases run sequentially through `live_stage/build_phases.py`,
+  declaring a **capability** and receiving the best registered agent with
+  `via_generalist` recorded; a later phase receives the preceding phases'
+  outputs as read-only inputs. Publication used to happen once, after every
+  phase had already been settled from the worker's own JSON, so a phase naming a
+  file that was missing, escaped its workspace, or changed underneath it left a
+  *reusable success* in the chain; each phase's bytes are now validated and
+  copied into the governed tree before its row is settled. A phase's unit id
+  carries its step attempt, so a retry gets a clean workspace instead of
+  inheriting the failed attempt's half-written files. "Generalist" means the
+  agent **registered** as one: falling back to whichever candidate sorted first
+  would have run a modelling phase on `bash` and recorded it as a stand-in, so a
+  capability nothing can cover refuses the phase and names it. Phases sit on
+  their own digest chain *beneath* the container: phase N binds phase N−1, while
+  `execute_phases` still binds the plan, and a phase's material includes the
+  selection outcome so a newly registered specialist invalidates the stand-in's
+  run rather than inheriting it. A failed phase stops the run rather than
+  spending the remaining budget producing evidence nobody planned, and
+  `pause_after` stops at a committed, lease-free boundary.
+* **A plan that did not finish is not a Build.** Every phase that ran ran
+  truthfully, so a plan whose second phase failed — or that stopped at a
+  `pause_after` boundary — looks exactly like a completed one to
+  `produced_usable_evidence`, and used to write a review package and a deck for
+  both: a fraction of the planned work presented as the completed thing a person
+  approves and Test measures. The container settles failed, `summarize_results`
+  is not opened at all (opening it would settle as a *presentational* code,
+  which the UI renders as "the build ran; the write-up broke"), and the reply
+  says how far it got. The committed phases stay committed and reusable, which
+  is the whole point of recording them separately.
+* **A read-only summarizer writes the reviewed document, and writes only prose.**
+  The `summarizer` and `planner` roles are withheld execution and write tools and
+  granted no writable path (`_tools_for_unit`), so "read-only" is a property of
+  the seat rather than an instruction in a prompt — the planner's contract
+  promised "you write nothing, run nothing, and dispatch nobody" while it held
+  the full Build tool set. The summarizer may cite **only** figures the server
+  published (an invented one fails `summarize_results` alone), and selecting a
+  few for the deck never removes one from the record. It also cannot restate
+  evidence: key outcomes and the rerun procedure come from the execution and
+  only from it, and its own deviations and limitations are **appended after** the
+  recorded ones rather than replacing them. Each of those was `parsed or
+  bundle.<field>`, the single edit that turns a caveat the work reported about
+  itself into a caveat nobody ever mentioned. `deerflow/dbtl/build_deck.py` then
   renders a self-contained deck with figures embedded as `data:` URIs under
   per-figure and per-deck byte caps; a format it cannot inline is named and
   skipped, and a build with no figures says so rather than rendering an empty
   gallery.
+
+**A committed step is replayed, not re-run** (`live_stage/step_store.py`). The
+step table records that a step succeeded and what its output digest was, which
+is enough to judge a later step still valid and nowhere near enough to skip
+re-running it: a digest is not a plan and not a worker's structured result. So
+the recorder reported `replayed=True` and every caller dispatched anyway — the
+resume was in the record and the re-run was in reality. `succeed` now keeps the
+step's own output beside its digest under the stage work root (scratch, never
+evidence, already excluded from the manifest and from Build's input snapshot),
+and `replay` hands it back. Three rules: a payload is only accepted against the
+digest it was recorded under, so a truncated write or a payload from a different
+plan costs one re-run rather than filing work nobody did; **both directions fail
+soft**, because this is an accelerator bolted to a governance record and an
+accelerator must not be able to fail a Build; and the payload is written *before*
+the row is settled, since a payload with no row is unreachable while a row with
+no payload is a step that reports a replay and silently dispatches.
+`record_worker_runs` skips a unit already recorded on the stage attempt — a run
+whose phases all replayed arrives with the same unit ids and the unique index
+raised an unhandled `IntegrityError`.
 
 Not implemented: the plan-confirmation card, typed `needs_input` collaboration
 (a paused summarizer or planner is recorded and reported, but there is no card

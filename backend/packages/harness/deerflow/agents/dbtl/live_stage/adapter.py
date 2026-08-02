@@ -29,6 +29,8 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.dbtl.live_stage.build_phases import (
     GENERALIST,
+    PLANNER_ROLE,
+    PhaseAssignment,
     assign_phase,
     phase_unit,
     plan_notes,
@@ -42,6 +44,7 @@ from deerflow.agents.dbtl.live_stage.build_recorder import (
     make_build_step_recorder,
 )
 from deerflow.agents.dbtl.live_stage.build_review import (
+    SUMMARIZER_ROLE,
     execution_bundle,
     parse_summary,
     summarizer_unit,
@@ -76,9 +79,9 @@ from deerflow.agents.middlewares.finalization_deadline_middleware import (
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.dbtl.agent_selector import AgentCandidate, Assignment, SelectionResult, build_candidates, select_agents
 from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError
-from deerflow.dbtl.build_plan import BuildPhasePlan, parse_build_plan, single_phase_plan
+from deerflow.dbtl.build_plan import BuildPhasePlan, parse_build_plan, restore_build_plan, single_phase_plan
 from deerflow.dbtl.build_summary import BuildReviewPackage
-from deerflow.dbtl.build_workflow import BuildErrorCode, BuildStepKey, StepState
+from deerflow.dbtl.build_workflow import BuildErrorCode, BuildStepKey, StepState, plan_output_digest
 from deerflow.dbtl.consensus import CONSENSUS_CONTRACT
 from deerflow.dbtl.council import (
     ROLE_BRIEFS,
@@ -211,7 +214,13 @@ _LIGHT_PILOT_TOOL_NAMES = frozenset({"read_file"})
 #: Seats that may inspect and must not act. `role` carries this rather than a
 #: capability name because the rule is about what the seat is *for*, and a
 #: capability can be covered by an agent with any tool set.
-_READ_ONLY_ROLES = frozenset({"summarizer"})
+#:
+#: The planner belongs here for the same reason the summarizer does, and its
+#: absence was the gap between a contract and a guarantee: its prompt promised
+#: "you write nothing, run nothing, and dispatch nobody" while it held the full
+#: Build tool set, so the only thing stopping a planner from starting the build
+#: it was asked to plan was the sentence asking it not to.
+_READ_ONLY_ROLES = frozenset({SUMMARIZER_ROLE, PLANNER_ROLE})
 _READ_ONLY_TOOL_NAMES = frozenset({"read_file", "ls", "glob", "grep"})
 
 
@@ -2115,12 +2124,90 @@ def _publish_build_worker_artifacts(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _PhaseRun:
+    """What running a Build plan produced, and whether it produced all of it.
+
+    `complete` is the field the caller must consult before treating any of this
+    as reviewable Build evidence: earlier phases commit legitimately even when a
+    later one fails or the plan asks to pause, so a truthful outcome full of
+    trustworthy results is exactly what a half-finished plan looks like.
+    """
+
+    outcome: StageExecutionOutcome
+    published: list[dict[str, Any]]
+    complete: bool
+    stopped_because: str = ""
+
+
+def _phase_note(assignment: PhaseAssignment, result: StageWorkerResult) -> dict[str, Any]:
+    """What a later phase is told about an earlier one."""
+    return {
+        "phase_key": assignment.phase.phase_key,
+        "title": assignment.phase.title,
+        "outputs": list(result.artifact_refs),
+        "summary": result.summary,
+    }
+
+
+def _pause_note(assignment: PhaseAssignment) -> str:
+    return f"Paused after {assignment.phase.title!r} because the plan asked for a look before the next phase."
+
+
+def _restore_phase(
+    payload: Any,
+    *,
+    assignment: PhaseAssignment,
+    index: int,
+    spec: StageSpec,
+) -> tuple[WorkUnit, StageWorkerResult, list[dict[str, Any]]] | None:
+    """Rebuild a phase that already committed, or `None` to run it again.
+
+    A phase's committed row proves the work happened and its outputs are in the
+    governed tree; this is what turns that proof into something the run can use
+    instead of dispatching a second time. Everything about it is fail-soft — a
+    payload that is missing, malformed, or no longer trustworthy costs one
+    re-run, while accepting a damaged one would file work nobody did.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    unit_id = str(payload.get("unit_id") or "")
+    raw_result = payload.get("result")
+    if not unit_id or not isinstance(raw_result, Mapping):
+        return None
+    try:
+        result = parse_worker_result(
+            raw_result,
+            capability=assignment.phase.capability.value,
+            agent_name=assignment.agent_name,
+        )
+    except Exception:  # noqa: BLE001 - a payload this server wrote is still untrusted on the way back
+        logger.warning("A recorded Build phase payload could not be read back; the phase will run again.", exc_info=True)
+        return None
+    if not result.is_trustworthy:
+        return None
+    published = [dict(item) for item in payload.get("published") or () if isinstance(item, Mapping)]
+    if not published:
+        return None
+    unit = phase_unit(
+        assignment,
+        index=index,
+        attempt_id="",
+        attempt_token="",
+        spec=spec,
+        context="",
+        result_contract="",
+    )
+    return replace(unit, unit_id=unit_id), result, published
+
+
 async def _settle_execution_step(
     recorder: BuildStepRecorder,
     handle: StepHandle,
     *,
     published: Sequence[Mapping[str, Any]],
     outcome: StageExecutionOutcome,
+    incomplete_because: str = "",
 ) -> None:
     """Close the execution step against the artifacts actually published.
 
@@ -2128,8 +2215,18 @@ async def _settle_execution_step(
     of them: the copies under the governed output tree are what a later step
     reads, and hashing what the worker claimed would let a step be reported
     valid against files that were never written.
+
+    `incomplete_because` is how a half-run plan settles. The container answers
+    "did the build run", and a plan that stopped at a failed phase or a
+    `pause_after` boundary did not — succeeding it because the phases that *did*
+    run published something would tell the next step, and the reader, that the
+    build is finished. Its own phase rows stay succeeded and reusable, which is
+    the whole point of recording them separately.
     """
     if not handle.recorded:
+        return
+    if incomplete_because:
+        await recorder.fail(handle, BuildErrorCode.EXECUTION_CONTRACT_REJECTED, incomplete_because)
         return
     if not outcome.trustworthy_results:
         await recorder.fail(
@@ -2928,7 +3025,10 @@ class LiveStageAdapter:
         attempt_id: str,
         context: str,
         candidates: Sequence[AgentCandidate],
-    ) -> StageExecutionOutcome:
+        project_root: str,
+        cycle: Mapping[str, Any],
+        stage_workspace: str,
+    ) -> _PhaseRun:
         """Run the plan's phases in order, each as its own attempt.
 
         Sequential by design: one sandbox writer at a time is what makes the
@@ -2936,28 +3036,43 @@ class LiveStageAdapter:
         A phase that fails stops the run — later phases depend on outputs that
         do not exist, and dispatching them anyway would spend budget producing
         evidence nobody planned.
+
+        **A phase succeeds only once its outputs are in the governed tree.**
+        Publication used to happen once, after every phase had already been
+        recorded as succeeded from the worker's own JSON, so a phase naming a
+        file that was missing, escaped its workspace, or changed underneath it
+        left a *reusable success* in the chain — and a later resume would replay
+        it as work that had produced evidence. Validating and copying each
+        phase's bytes before settling its row makes the record say what actually
+        happened.
+
+        **Completion is reported, not inferred.** A failed phase, an uncovered
+        capability, and a `pause_after` boundary all stop the loop with earlier
+        phases legitimately committed, and the caller has to be able to tell
+        "the plan finished" from "some of it did".
         """
         assignments = [assign_phase(phase, candidates) for phase in plan.phases]
         selection = SelectionResult(
-            assignments=tuple(Assignment(capability=item.phase.capability, agent_name=item.agent_name, via_generalist=item.via_generalist) for item in assignments),
+            assignments=tuple(Assignment(capability=item.phase.capability, agent_name=item.agent_name, via_generalist=item.via_generalist or not item.covered) for item in assignments),
             notes=plan_notes(plan, assignments),
         )
         units: list[WorkUnit] = []
         results: list[StageWorkerResult] = []
         rejected: list[str] = []
         completed: list[Mapping[str, Any]] = []
+        published: list[dict[str, Any]] = []
+        stopped = ""
 
         for index, assignment in enumerate(assignments, start=1):
-            unit = phase_unit(
-                assignment,
-                index=index,
-                attempt_id=attempt_id,
-                spec=spec,
-                context=context,
-                completed=completed,
-                result_contract=RESULT_CONTRACT,
-            )
-            units.append(unit)
+            if not assignment.covered:
+                # Nothing registered can do this work. Refusing names the
+                # capability; the alternative — handing it to whichever agent
+                # sorted first — is the silent swap capability selection exists
+                # to prevent.
+                stopped = f"No registered agent can cover {assignment.phase.capability.value!r}, which phase {assignment.phase.title!r} asks for."
+                rejected.append(stopped)
+                break
+
             handle = await recorder.begin(
                 BuildStepKey.EXECUTE_PHASES,
                 phase_index=index,
@@ -2967,6 +3082,34 @@ class LiveStageAdapter:
                 agent_name=assignment.agent_name,
                 via_generalist=assignment.via_generalist,
             )
+
+            restored = _restore_phase(recorder.replay(handle), assignment=assignment, index=index, spec=spec)
+            if restored is not None:
+                unit, result, phase_published = restored
+                units.append(unit)
+                results.append(result)
+                published.extend(phase_published)
+                completed.append(_phase_note(assignment, result))
+                if assignment.phase.pause_after:
+                    stopped = _pause_note(assignment)
+                    rejected.append(stopped)
+                    break
+                continue
+
+            # The unit id carries the step attempt, and the isolated workspace is
+            # derived from the unit id — so a retry gets a clean directory rather
+            # than the failed attempt's half-written files.
+            unit = phase_unit(
+                assignment,
+                index=index,
+                attempt_id=attempt_id,
+                attempt_token=safe_token(handle.step_run_id or f"{attempt_id}:{plan.digest}:{index}"),
+                spec=spec,
+                context=context,
+                completed=completed,
+                result_contract=RESULT_CONTRACT,
+            )
+            units.append(unit)
             phase_plan = StageExecutionPlan(spec=spec, selection=selection, units=(unit,))
             try:
                 dispatched = await dispatcher((unit,), budget=spec.budget)
@@ -2976,32 +3119,56 @@ class LiveStageAdapter:
                 rejected.append(f"{unit.unit_id}: {exc}")
             phase_outcome = collect_results(phase_plan, dispatched)
             result = phase_outcome.results[0] if phase_outcome.results else None
-            results.extend(phase_outcome.results)
             rejected.extend(phase_outcome.rejected)
             if result is None or not result.is_trustworthy:
-                await recorder.fail(
-                    handle,
-                    BuildErrorCode.EXECUTION_CONTRACT_REJECTED,
-                    "; ".join(phase_outcome.rejected) or f"Phase {assignment.phase.title!r} returned no usable result.",
-                )
+                results.extend(phase_outcome.results)
+                stopped = "; ".join(phase_outcome.rejected) or f"Phase {assignment.phase.title!r} returned no usable result."
+                await recorder.fail(handle, BuildErrorCode.EXECUTION_CONTRACT_REJECTED, stopped)
                 break
+
+            # Publish *this* phase before its row is settled, so a success in the
+            # chain always means "the bytes are in the governed tree and hashed".
+            phase_outcome, phase_published = await asyncio.to_thread(
+                _publish_build_worker_artifacts,
+                project_root=project_root,
+                cycle=cycle,
+                outcome=phase_outcome,
+                stage_workspace=stage_workspace,
+                attempt_id=attempt_id,
+            )
+            result = phase_outcome.results[0] if phase_outcome.results else None
+            results.extend(phase_outcome.results)
+            rejected.extend(entry for entry in phase_outcome.rejected if entry not in rejected)
+            if result is None or not result.is_trustworthy or not phase_published:
+                stopped = "; ".join(phase_outcome.rejected) or f"Phase {assignment.phase.title!r} produced no output the server could verify."
+                await recorder.fail(handle, BuildErrorCode.EXECUTION_OUTPUT_MISSING, stopped)
+                break
+
+            published.extend(phase_published)
             await recorder.succeed(
                 handle,
-                hashlib.sha256(json.dumps(result.as_dict(), sort_keys=True, default=str).encode("utf-8")).hexdigest(),
-                execution={"phase_key": assignment.phase.phase_key, "outputs": len(result.artifact_refs)},
+                hashlib.sha256(json.dumps({"result": result.as_dict(), "published": phase_published}, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+                execution={"phase_key": assignment.phase.phase_key, "outputs": len(phase_published)},
+                payload={"unit_id": unit.unit_id, "result": result.as_dict(), "published": phase_published},
             )
-            completed.append({"phase_key": assignment.phase.phase_key, "title": assignment.phase.title, "outputs": list(result.artifact_refs), "summary": result.summary})
+            completed.append(_phase_note(assignment, result))
             if assignment.phase.pause_after:
                 # A phase boundary is a committed, resumable state with no worker
                 # lease held, so honouring the plan's own request to stop here
                 # costs nothing and is the cheapest possible pause.
-                rejected.append(f"Paused after {assignment.phase.title!r} because the plan asked for a look before the next phase.")
+                stopped = _pause_note(assignment)
+                rejected.append(stopped)
                 break
 
-        return StageExecutionOutcome(
-            plan=StageExecutionPlan(spec=spec, selection=selection, units=tuple(units)),
-            results=tuple(results),
-            rejected=tuple(rejected),
+        return _PhaseRun(
+            outcome=StageExecutionOutcome(
+                plan=StageExecutionPlan(spec=spec, selection=selection, units=tuple(units)),
+                results=tuple(results),
+                rejected=tuple(rejected),
+            ),
+            published=published,
+            complete=len(completed) == len(plan.phases) and not stopped,
+            stopped_because=stopped,
         )
 
     async def _summarize_build(
@@ -3802,6 +3969,7 @@ class LiveStageAdapter:
                     cycle_id=cycle_id,
                     stage_attempt_id=str((attempt or {}).get("id") or ""),
                     parent_run_id=str(run_id),
+                    project_root=str(project_root),
                 ),
             )
             load_design = await build_recorder.begin(BuildStepKey.LOAD_DESIGN)
@@ -4036,35 +4204,49 @@ class LiveStageAdapter:
         # content-addressed plan every phase attempt binds to — so a replan
         # invalidates the phases beneath it rather than silently rebinding them.
         build_plan: BuildPhasePlan | None = None
+        phase_run: _PhaseRun | None = None
         if build_workflow_enabled and build_inputs is not None:
             plan_handle = await build_recorder.begin(BuildStepKey.PLAN_BUILD)
-            build_plan, plan_reasons = await self._plan_build(
-                dispatcher=dispatcher,
-                budget=spec.budget,
-                attempt_id=attempt_id,
-                inputs=build_inputs,
-                cycle=cycle,
-                candidates=self._candidates(),
-            )
-            if not build_plan.dispatchable:
-                # `needs_input`. The stage stays safely paused rather than
-                # guessing at what the Design left unresolved.
-                await build_recorder.settle(
+            # A committed plan is read back rather than redrawn. Replanning is
+            # cheap, but a *different* plan would give every phase beneath it a
+            # new identity and discard finished work — the planner is not
+            # deterministic, so re-running it on a resume is how a retry turns
+            # into a restart.
+            build_plan = restore_build_plan(build_recorder.replay(plan_handle))
+            if build_plan is None:
+                build_plan, plan_reasons = await self._plan_build(
+                    dispatcher=dispatcher,
+                    budget=spec.budget,
+                    attempt_id=attempt_id,
+                    inputs=build_inputs,
+                    cycle=cycle,
+                    candidates=self._candidates(),
+                )
+                if not build_plan.dispatchable:
+                    # `needs_input`. The stage stays safely paused rather than
+                    # guessing at what the Design left unresolved.
+                    await build_recorder.settle(
+                        plan_handle,
+                        state=StepState.NEEDS_INPUT,
+                        summary=build_plan.clarification_question,
+                    )
+                    return LiveStageResult(
+                        stage=stage,
+                        cycle_id=cycle_id,
+                        note="The build planner needs one decision before any work starts.",
+                        clarification_question=build_plan.clarification_question,
+                    )
+                await build_recorder.succeed(
                     plan_handle,
-                    state=StepState.NEEDS_INPUT,
-                    summary=build_plan.clarification_question,
+                    # Bound to what the plan was drawn *from*, not only to what
+                    # it says. Two different approved Designs can imply the same
+                    # decomposition, and a phase chained to the plan's own
+                    # content digest would then survive a Design change that
+                    # reshaped the work.
+                    plan_output_digest(plan_digest=build_plan.digest, input_digest_value=build_inputs.digest),
+                    execution={"feasibility": build_plan.feasibility.value, "phases": len(build_plan.phases), "degraded": bool(plan_reasons)},
+                    payload=build_plan.as_dict(),
                 )
-                return LiveStageResult(
-                    stage=stage,
-                    cycle_id=cycle_id,
-                    note="The build planner needs one decision before any work starts.",
-                    clarification_question=build_plan.clarification_question,
-                )
-            await build_recorder.succeed(
-                plan_handle,
-                build_plan.digest,
-                execution={"feasibility": build_plan.feasibility.value, "phases": len(build_plan.phases), "degraded": bool(plan_reasons)},
-            )
 
         proposal: CouncilProposal | None = None
         resumed_chair: WorkUnit | None = None
@@ -4167,7 +4349,7 @@ class LiveStageAdapter:
                 logger.info("dbtl stage %s not dispatchable: %s", spec.spec_key, "; ".join(plan.selection.notes) or "no work units")
                 outcome = StageExecutionOutcome(plan=plan)
         elif build_plan is not None:
-            outcome = await self._execute_build_phases(
+            phase_run = await self._execute_build_phases(
                 plan=build_plan,
                 spec=spec,
                 dispatcher=dispatcher,
@@ -4175,7 +4357,11 @@ class LiveStageAdapter:
                 attempt_id=attempt_id,
                 context=stage_context,
                 candidates=self._candidates(),
+                project_root=project_root,
+                cycle=cycle,
+                stage_workspace=stage_workspace,
             )
+            outcome = phase_run.outcome
         else:
             outcome = await arun_stage(
                 spec,
@@ -4260,7 +4446,13 @@ class LiveStageAdapter:
                 )
 
         published_build_artifacts: list[dict[str, Any]] = []
-        if stage == "build" and stage_workspace:
+        if phase_run is not None:
+            # Already published, one phase at a time, before each phase's own row
+            # was settled. Running the bulk publisher again here would resolve
+            # references that now point at the governed output tree rather than
+            # at a worker's isolated workspace, and reject every one of them.
+            published_build_artifacts = phase_run.published
+        elif stage == "build" and stage_workspace:
             outcome, published_build_artifacts = await asyncio.to_thread(
                 _publish_build_worker_artifacts,
                 project_root=project_root,
@@ -4282,6 +4474,7 @@ class LiveStageAdapter:
                 await build_recorder.begin(BuildStepKey.EXECUTE_PHASES),
                 published=published_build_artifacts,
                 outcome=outcome,
+                incomplete_because=(phase_run.stopped_because if phase_run is not None and not phase_run.complete else ""),
             )
 
         results = [
@@ -4324,8 +4517,21 @@ class LiveStageAdapter:
         )
         design_ready = stage != "design" or (design_debate_complete and chair_result is not None and chair_result.is_trustworthy and chair_result.status is WorkerStatus.COMPLETED)
         test_assessment = _validated_test_assessment(outcome.trustworthy_results, build_test=build_test) if stage == "test" else None
-        produced_usable_evidence = outcome.produced_usable_evidence and design_ready and (stage != "test" or test_assessment is not None)
-        summary_handle = await build_recorder.begin(BuildStepKey.SUMMARIZE_RESULTS) if build_workflow_enabled else StepHandle(step=BuildStepKey.SUMMARIZE_RESULTS)
+        # **A plan that did not finish is not a Build.** Every phase that ran
+        # ran truthfully, so `produced_usable_evidence` is true of a Build whose
+        # second phase failed and of one that stopped at a `pause_after`
+        # boundary — and it would have written a review package and a deck for
+        # both, presenting a fraction of the planned work as the completed
+        # thing a person approves and Test measures. The committed phases stay
+        # committed and reusable; what they do not do is become evidence.
+        build_plan_incomplete = phase_run is not None and not phase_run.complete
+        produced_usable_evidence = outcome.produced_usable_evidence and design_ready and (stage != "test" or test_assessment is not None) and not build_plan_incomplete
+        # Not opened at all when the plan did not finish. Opening it would
+        # settle as `summary_contract_rejected` — a *presentational* code, which
+        # the UI renders as "the build ran; the write-up broke". The build did
+        # not run, and telling somebody to retry the write-up would send them to
+        # fix the one part that is fine.
+        summary_handle = await build_recorder.begin(BuildStepKey.SUMMARIZE_RESULTS) if build_workflow_enabled and not build_plan_incomplete else StepHandle(step=BuildStepKey.SUMMARIZE_RESULTS)
         # For Build under the workflow, the summarizer *replaces* the generic
         # package writer. The generic renderer answers "which work units ran",
         # and a Build reviewer needs "what did we get" — the numbers and the
@@ -4372,7 +4578,7 @@ class LiveStageAdapter:
                 # failed, and its code says so, so a person is not told to
                 # re-run an hour of sandbox work to recover a write-up.
                 produced_usable_evidence = False
-        if build_workflow_enabled:
+        if build_workflow_enabled and summary_handle.recorded:
             if artifact_hash and build_summary_owns_evidence:
                 await build_recorder.succeed(summary_handle, artifact_hash, execution={"artifact_uri": artifact_uri or ""})
             else:
@@ -4633,6 +4839,20 @@ class LiveStageAdapter:
             )
         elif clarification_question:
             note = f"Ran {independent_count} independent Design meeting position(s), one red team, and a chair synthesis. The meeting paused before creating a review package because one human decision is required."
+        elif build_plan_incomplete and phase_run is not None:
+            # The generic "none produced usable evidence" line is false here and
+            # sends the reader to the wrong place: the phases that ran did
+            # produce evidence, it is published and pinned, and the plan simply
+            # did not finish. Saying how far it got is what makes the next step
+            # obvious — resume, or fix the phase that stopped it.
+            done = sum(1 for item in phase_run.outcome.results if item.is_trustworthy)
+            note = "\n".join(
+                [
+                    f"Ran {done} of {len(build_plan.phases) if build_plan else done} planned build phase(s) and kept every finished phase's outputs, so a retry resumes rather than starting over.",
+                    f"It stopped there: {phase_run.stopped_because}" if phase_run.stopped_because else "",
+                    "No review package was written, because a plan that has not finished is not the build a person would be approving.",
+                ]
+            ).strip()
         elif artifact_uri:
             # The digest carries what the council concluded. A reply that is only
             # a file path makes the reader open a file to learn anything at all.

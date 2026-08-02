@@ -46,6 +46,11 @@ logger = logging.getLogger(__name__)
 #: worker's own caption and intent and nothing more.
 SUMMARIZER_CAPABILITY = "build_result_synthesis"
 
+#: The seat's role, named once. The adapter withholds execution and write tools
+#: by role, so a literal on either side would be a read-only guarantee that
+#: silently stops applying the day one of the two strings is renamed.
+SUMMARIZER_ROLE = "summarizer"
+
 SUMMARIZER_CONTRACT = """You are summarizing a Build that has already run. Its outputs are on disk and
 hash-verified by the server; you cannot change them, run anything, or write files.
 
@@ -53,12 +58,10 @@ Answer one question: **what did we get?** Return one JSON object and nothing els
 
 {
   "headline": "one or two sentences on what this build produced",
-  "key_outcomes": [{"name": "...", "value": "...", "unit": "...", "figure": "<a figure path, optional>"}],
   "figures": [{"path": "<exactly one of the paths listed below>", "reading": "one line on what it shows"}],
   "phases": [{"title": "...", "text": "a few lines on what this part of the build did"}],
-  "deviations": ["..."],
-  "limitations": ["..."],
-  "rerun_procedure": "the exact command, seed, and environment"
+  "deviations": ["anything you noticed that the execution did not already record"],
+  "limitations": ["anything you noticed that the execution did not already record"]
 }
 
 Rules:
@@ -68,8 +71,10 @@ Rules:
   sufficient — Test assesses compliance and the reviewer assesses meaning.
 - Select the figures a reviewer needs first. Choosing a few is expected; every figure stays
   in the record either way.
-- Report a deviation or limitation the execution recorded. Do not rewrite a failed check as
-  passed.
+- The measured outcomes and the rerun procedure are already recorded and are carried through
+  unchanged. Do not restate a number here; if one matters, say so in the headline.
+- Deviations and limitations you list are **added after** the ones the execution recorded.
+  Nothing you write removes or rewrites a recorded caveat, so do not repeat them.
 - If the bundle is valid but a human-owned interpretation is genuinely required before this
   can be written up, return {"status": "needs_input", "clarification_question": "..."} instead.
 """
@@ -137,7 +142,7 @@ def summarizer_unit(
         capability=SUMMARIZER_CAPABILITY,
         agent_name=agent_name,
         prompt=prompt,
-        role="summarizer",
+        role=SUMMARIZER_ROLE,
         model=model,
     )
 

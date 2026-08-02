@@ -255,16 +255,29 @@ def build_step_material(
     stale work as current.
 
     `load_design` binds the approved Design and the policy/contract it was
-    approved under; the later steps bind only their own contract version,
-    because everything else they depend on arrives through their predecessors'
-    output digests.
+    approved under; the later steps bind only their own contract version and the
+    registry they resolve names against, because everything else they depend on
+    arrives through their predecessors' output digests.
 
-    **The cycle's `db_revision` is deliberately not here.** It bumps on every
-    mutation, including recording this very Build's own workers, so a chain
-    keyed on it would invalidate itself the instant it committed anything —
-    every step reading as stale the moment the first one succeeded. The
-    approved dataset fingerprint is the value that actually answers "did the
-    material change?", and it moves only when the data does.
+    **Every value here must be recomputable by the read model.** The writer opens
+    a step against this material and the projection recomputes it from durable
+    state; anything only the running process knows — a git revision of the
+    sandbox, an interpreter version, a wall clock — would differ on the two
+    sides and report every step stale the moment it succeeded. That is why the
+    runtime environment is bound where it *is* checkable (Build lineage, which
+    Test reads) rather than smuggled into a digest one side cannot reproduce.
+
+    **The cycle's `db_revision` is deliberately not here** for the same reason
+    from the other direction: it bumps on every mutation, including recording
+    this very Build's own workers, so a chain keyed on it would invalidate
+    itself the instant it committed anything. The approved dataset fingerprint
+    is the value that actually answers "did the material change?", and it moves
+    only when the data does.
+
+    The **capability registry** is bound to `plan_build` because a plan names
+    capabilities: registering or retiring one changes which plans are legal and
+    which specialist a phase resolves to, and a plan drawn against a different
+    registry is not a plan for this deployment.
     """
     return {
         BuildStepKey.LOAD_DESIGN: {
@@ -276,10 +289,66 @@ def build_step_material(
             "stage_spec_key": stage_spec_key or "",
             "dataset_fingerprint": dataset_fingerprint or "",
         },
-        BuildStepKey.PLAN_BUILD: {"contract": CONTRACT_VERSIONS[BuildStepKey.PLAN_BUILD]},
+        BuildStepKey.PLAN_BUILD: {
+            "contract": CONTRACT_VERSIONS[BuildStepKey.PLAN_BUILD],
+            "capability_registry": capability_registry_fingerprint(),
+        },
         BuildStepKey.EXECUTE_PHASES: {},
         BuildStepKey.SUMMARIZE_RESULTS: {"contract": CONTRACT_VERSIONS[BuildStepKey.SUMMARIZE_RESULTS]},
         BuildStepKey.RENDER_REVIEW_DECK: {"contract": CONTRACT_VERSIONS[BuildStepKey.RENDER_REVIEW_DECK]},
+    }
+
+
+def capability_registry_fingerprint() -> str:
+    """A stable digest of the capability vocabulary a plan may draw from.
+
+    Computed from the registry itself rather than stored, so the writer and the
+    read model cannot disagree about it, and imported lazily because this module
+    deliberately sits below everything that can persist.
+    """
+    from deerflow.dbtl.capabilities import Capability
+
+    return _digest(sorted(item.value for item in Capability))
+
+
+def plan_output_digest(*, plan_digest: str, input_digest_value: str) -> str:
+    """What `plan_build` hands its phases: the plan **and** what it was drawn from.
+
+    A plan's own digest is content-derived, so two different approved Designs
+    that happen to imply the same decomposition produce identical plan digests.
+    Recording that as the step's output would leave every phase beneath it
+    binding a value the Design cannot move — a changed Design would reshape the
+    work and invalidate nothing. Folding the input digest in restores the
+    property the chain is supposed to have: the phases descend from the Design,
+    not merely from the sentence the planner wrote about it.
+    """
+    return _digest({"plan": plan_digest, "inputs": input_digest_value})
+
+
+def phase_step_material(
+    *,
+    phase_key: str,
+    plan_digest: str,
+    capability: str,
+    agent_name: str,
+    via_generalist: bool,
+) -> dict[str, str]:
+    """One phase's own material, beside the plan it sits in.
+
+    The **selection outcome** is part of a phase's identity, not merely a label
+    on it: registering a specialist for a capability that a generalist stood in
+    for changes who does the work, and reusing the old attempt would silently
+    keep the stand-in's result while the record claimed the specialist covered
+    it. Immutable inputs and the approved Design are deliberately absent — they
+    reach a phase through `plan_build`'s input-bound output digest, and binding
+    them twice would only make the reason a phase invalidated harder to read.
+    """
+    return {
+        "phase_key": phase_key,
+        "plan_digest": plan_digest,
+        "capability": capability,
+        "agent_name": agent_name,
+        "via_generalist": "true" if via_generalist else "false",
     }
 
 

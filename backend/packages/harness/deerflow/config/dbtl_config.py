@@ -67,12 +67,16 @@ class DbtlConfig(BaseModel):
         description=(
             "Execute Build as the versioned five-step workflow (read the approved Design, plan, run the phases, "
             "summarize, render the deck) instead of one opaque worker. On, Build resolves and hash-verifies the "
-            "approved Design before dispatching anything, runs each planned phase as its own retryable attempt, and "
-            "produces its review package through a read-only summarizer so a presentational failure cannot discard "
-            "sandbox work. Off keeps today's monolithic Build path exactly as it was, including not re-reading the "
-            "Design — deliberately, because the resolution is a new refusal and a project whose approved package is "
-            "not readable through the project root must discover that in the manual profile rather than mid-experiment. "
-            "Human collaboration on a paused step, and targeted retry of one step, are not implemented yet."
+            "approved Design before dispatching anything, runs each planned phase as its own attempt whose outputs are "
+            "published and hashed before it is recorded as succeeded, replays a committed step instead of re-running it, "
+            "and produces its review package through a read-only summarizer that may describe the evidence but never "
+            "restate it — so a presentational failure cannot discard sandbox work. A plan that stops at a failed phase "
+            "or a pause boundary keeps its finished phases and writes no review package, because a fraction of the "
+            "planned work is not the build a person would be approving. Off keeps today's monolithic Build path exactly "
+            "as it was, including not re-reading the Design — deliberately, because the resolution is a new refusal and "
+            "a project whose approved package is not readable through the project root must discover that in the manual "
+            "profile rather than mid-experiment. Human collaboration on a paused step (including plan confirmation), and "
+            "targeted retry of one step from the UI, are not implemented yet."
         ),
     )
 

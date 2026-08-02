@@ -216,6 +216,52 @@ def single_phase_plan(
     )
 
 
+def restore_build_plan(payload: Any) -> BuildPhasePlan | None:
+    """Rebuild a plan this server previously recorded, or return `None`.
+
+    Deliberately strict where `parse_build_plan` is forgiving, because the two
+    read different things: a planner's answer is a model's prose and degrading
+    it is kinder than failing, while this reads a payload the server itself
+    wrote and any deviation means the file is not what it claims to be.
+    Returning `None` costs one replanning call; accepting a mangled plan would
+    let a replay run phases nobody planned.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    try:
+        feasibility = PlanFeasibility(_text(payload.get("feasibility"), limit=32))
+        raw_phases = payload.get("phases")
+        if not isinstance(raw_phases, Sequence) or isinstance(raw_phases, (str, bytes)):
+            return None
+        phases = tuple(
+            BuildPhase(
+                phase_key=str(entry["phase_key"]),
+                title=str(entry["title"]),
+                objective=str(entry["objective"]),
+                capability=Capability(str(entry["capability"])),
+                inputs=tuple(str(item) for item in entry.get("inputs") or ()),
+                outputs=tuple(str(item) for item in entry.get("outputs") or ()),
+                done_condition=str(entry.get("done_condition") or ""),
+                pause_after=entry.get("pause_after") is True,
+            )
+            for entry in raw_phases
+            if isinstance(entry, Mapping)
+        )
+        if len(phases) != len(list(raw_phases)):
+            return None
+        return BuildPhasePlan(
+            feasibility=feasibility,
+            phases=phases,
+            rationale=str(payload.get("rationale") or ""),
+            assumptions=tuple(str(item) for item in payload.get("assumptions") or ()),
+            open_questions=tuple(str(item) for item in payload.get("open_questions") or ()),
+            clarification_question=str(payload.get("clarification_question") or ""),
+            note=str(payload.get("note") or ""),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _load(raw: str) -> Mapping[str, Any] | None:
     """Two deterministic repairs, then give up.
 
@@ -301,13 +347,22 @@ def parse_build_plan(raw: str, *, objective: str) -> PlanParse:
         try:
             capability = Capability(raw_capability)
         except ValueError:
-            # Never the generalist by default. A silent swap here is the bug
-            # capability selection exists to prevent, so the plan collapses and
-            # says which capability it could not honour.
+            # Never the generalist, and never quietly something else either.
+            # Collapsing to a single software-engineering phase was the same
+            # silent-swap bug wearing the degradation rule's clothes: the work
+            # still ran, under a capability nobody asked for, and the only trace
+            # was a note. An unregistered capability is a plan this deployment
+            # cannot honour, so it stops and says so.
             return PlanParse(
-                plan=single_phase_plan(
-                    objective=objective,
-                    note=f"The plan asked for an unregistered capability {raw_capability or '(unnamed)'!r}, so it was not used and the build runs as one piece.",
+                plan=BuildPhasePlan(
+                    feasibility=PlanFeasibility.NEEDS_INPUT,
+                    rationale=_text(payload.get("rationale")),
+                    assumptions=_lines(payload.get("assumptions")),
+                    open_questions=_lines(payload.get("open_questions")),
+                    clarification_question=(
+                        f"The build plan asks for {raw_capability or '(an unnamed capability)'!r}, which is not a capability this deployment has registered. "
+                        f"Should this phase run as one of {_CAPABILITY_LIST}, or should the design be revised first?"
+                    ),
                 ),
                 degraded=True,
                 reasons=("unknown_capability",),

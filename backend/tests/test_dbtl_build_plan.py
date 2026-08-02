@@ -128,19 +128,32 @@ class TestShapeProblemsDegradeRatherThanFail:
 
 
 class TestAnUnknownCapabilityIsNeverQuietlyTheGeneralist:
-    def test_the_plan_is_discarded_and_names_the_capability(self) -> None:
+    def test_the_plan_stops_and_names_the_capability(self) -> None:
+        """Not a degradation — a question.
+
+        Collapsing to one software-engineering phase still *ran* the work, under
+        a capability nobody asked for, leaving a note as the only trace. That is
+        the silent swap wearing the degradation rule's clothes.
+        """
         parsed = parse_build_plan(_plan(_phase(1), _phase(2, capability="telepathy")), objective="x")
 
-        assert parsed.plan.feasibility is PlanFeasibility.SINGLE_PHASE
+        assert parsed.plan.feasibility is PlanFeasibility.NEEDS_INPUT
         assert parsed.reasons == ("unknown_capability",)
-        assert "telepathy" in parsed.plan.note
-        # Nobody is left believing a specialist covered that phase.
-        assert len(parsed.plan.phases) == 1
+        assert "telepathy" in parsed.plan.clarification_question
+        # Nothing is dispatchable, so nobody is left believing a phase ran.
+        assert not parsed.plan.dispatchable
+        assert parsed.plan.phases == ()
+
+    def test_the_question_offers_the_capabilities_that_do_exist(self) -> None:
+        parsed = parse_build_plan(_plan(_phase(1), _phase(2, capability="telepathy")), objective="x")
+
+        assert Capability.SOFTWARE_ENGINEERING.value in parsed.plan.clarification_question
 
     def test_an_unnamed_capability_is_treated_the_same_way(self) -> None:
         parsed = parse_build_plan(_plan(_phase(1), {"title": "T", "objective": "O"}), objective="x")
 
         assert parsed.reasons == ("unknown_capability",)
+        assert parsed.plan.feasibility is PlanFeasibility.NEEDS_INPUT
 
 
 class TestNeedsInputIsExplicit:

@@ -41,26 +41,43 @@ GENERALIST = "general-purpose"
 
 @dataclass(frozen=True, slots=True)
 class PhaseAssignment:
-    """Which agent covered one phase's capability, and whether it specialises."""
+    """Which agent covered one phase's capability, and whether it specialises.
+
+    `agent_name` is empty exactly when nothing can cover the phase. `covered`
+    is the property callers ask, because "no agent" and "the generalist" must
+    never be the same branch.
+    """
 
     phase: BuildPhase
     agent_name: str
     via_generalist: bool
 
+    @property
+    def covered(self) -> bool:
+        return bool(self.agent_name)
+
 
 def assign_phase(phase: BuildPhase, candidates: Sequence[AgentCandidate]) -> PhaseAssignment:
     """Resolve one phase's capability against the registered agents.
 
-    A specialist wins; otherwise an available generalist covers it and the
-    stand-in is **recorded** rather than hidden. Recording it is the whole point:
-    a reviewer reading nothing cannot tell a specialist from a stand-in.
+    A specialist wins; otherwise the **registered generalist** covers it and the
+    stand-in is recorded rather than hidden. Recording it is the whole point: a
+    reviewer reading nothing cannot tell a specialist from a stand-in.
+
+    "Generalist" means the agent registered as one, not whichever agent happens
+    to sort first. Falling back to an arbitrary candidate is the same silent
+    swap capability selection exists to prevent, and worse than the version it
+    replaced: `bash` is a real registered subagent, so a deployment that
+    registered no generalist would have run a modelling phase on a command
+    runner and recorded it as a generalist stand-in. With nothing able to cover
+    it the phase is refused, which is a sentence a person can act on.
     """
     available = [item for item in candidates if getattr(item, "available", True)]
     specialist = next((item for item in available if phase.capability in item.capabilities), None)
     if specialist is not None:
         return PhaseAssignment(phase=phase, agent_name=specialist.name, via_generalist=False)
-    generalist = next((item for item in available if item.name == GENERALIST), None) or (available[0] if available else None)
-    return PhaseAssignment(phase=phase, agent_name=generalist.name if generalist else GENERALIST, via_generalist=True)
+    generalist = next((item for item in available if item.name == GENERALIST), None)
+    return PhaseAssignment(phase=phase, agent_name=generalist.name if generalist else "", via_generalist=bool(generalist))
 
 
 def planner_unit(
@@ -92,12 +109,21 @@ def phase_unit(
     *,
     index: int,
     attempt_id: str,
+    attempt_token: str,
     spec: StageSpec,
     context: str,
     completed: Sequence[Mapping[str, object]] = (),
     result_contract: str = "",
 ) -> WorkUnit:
-    """One phase's work unit, carrying what the phases before it produced."""
+    """One phase's work unit, carrying what the phases before it produced.
+
+    `attempt_token` is the step attempt this unit belongs to, and it is in the
+    unit id because the unit id is what the isolated workspace is derived from.
+    Without it a retry inherited the failed attempt's directory: half-written
+    files, a stale log, and an output the previous run had already declared —
+    which the publisher would then copy into the governed tree as this attempt's
+    evidence.
+    """
     phase = assignment.phase
     preceding = (
         [
@@ -132,7 +158,7 @@ def phase_unit(
         result_contract,
     ]
     return WorkUnit(
-        unit_id=f"{attempt_id}-{index}-{phase.phase_key}",
+        unit_id=f"{attempt_id}-{index}-{phase.phase_key}-{attempt_token}",
         capability=phase.capability.value,
         agent_name=assignment.agent_name,
         prompt="\n".join(line for line in lines if line is not None),
@@ -151,6 +177,8 @@ def plan_notes(plan: BuildPhasePlan, assignments: Sequence[PhaseAssignment]) -> 
     if plan.note:
         notes.append(plan.note)
     for assignment in assignments:
-        if assignment.via_generalist:
+        if not assignment.covered:
+            notes.append(f"{assignment.phase.capability.value}: no registered agent could cover it, so the phase was not run.")
+        elif assignment.via_generalist:
             notes.append(f"{assignment.phase.capability.value}: covered by {assignment.agent_name} (no registered specialist).")
     return tuple(notes)

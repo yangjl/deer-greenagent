@@ -683,8 +683,29 @@ class ReconciliationOpsMixin:
                     )
 
             attempt.stage_spec_key = stage_spec_key
+            # A unit is recorded once per stage attempt — that is what the unique
+            # index says, and the Build workflow made it reachable: a run whose
+            # phases all replayed from the durable chain arrives here with the
+            # same unit ids the earlier run already recorded, and the insert
+            # raised an unhandled IntegrityError. Skipping a unit already on this
+            # attempt keeps the record truthful (the worker ran once, and once is
+            # what is stored) and lets the run go on to attach the artifact it
+            # came here to attach.
+            already_recorded = set(
+                (
+                    await session.scalars(
+                        select(DbtlStageWorkerRunRow.unit_id).where(
+                            DbtlStageWorkerRunRow.stage_attempt_id == attempt.id,
+                            DbtlStageWorkerRunRow.project_id == project_id,
+                        )
+                    )
+                ).all()
+            )
             for index, result in enumerate(results):
                 unit_id = str(result.get("unit_id") or f"{attempt.id}-{index + 1}")
+                if unit_id in already_recorded:
+                    continue
+                already_recorded.add(unit_id)
                 session.add(
                     DbtlStageWorkerRunRow(
                         id=f"worker-{uuid4()}",

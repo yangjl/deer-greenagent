@@ -18,7 +18,11 @@ runs whether or not the recorder does, and its refusal stops the dispatch.
 
 **A replayed step does not re-run.** `open_step_attempt` returns a committed
 success against the same input digest instead of opening a new attempt, so a
-retried turn resumes the chain rather than spending the work again.
+retried turn resumes the chain rather than spending the work again — and
+`succeed` keeps that step's own output beside the digest, because a caller that
+cannot rebuild the result has no choice but to dispatch again. A recorded
+`replayed=True` with nothing to hand back is the shape that let the whole
+mechanism report a resume while re-running an hour of sandbox work.
 """
 
 from __future__ import annotations
@@ -27,12 +31,14 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from deerflow.agents.dbtl.live_stage.step_store import StepOutputStore
 from deerflow.dbtl.build_workflow import (
     BuildErrorCode,
     BuildStepKey,
     BuildWorkflowSpec,
     StepState,
     input_digest,
+    phase_step_material,
     resolve_build_workflow,
 )
 
@@ -91,8 +97,10 @@ class BuildStepRecorder:
         parent_run_id: str = "",
         spec: BuildWorkflowSpec | None = None,
         material: dict[str, dict[str, str]] | None = None,
+        store: StepOutputStore | None = None,
     ) -> None:
         self._repo = repo
+        self._store = store
         self._project_id = project_id
         self._cycle_id = cycle_id
         self._stage_attempt_id = stage_attempt_id
@@ -145,10 +153,19 @@ class BuildStepRecorder:
         predecessor_ids = self._phase_ids if phase_key else self._previous_ids
         material = dict(self._material.get(step.value, {}))
         if phase_key:
-            # A phase's identity includes which phase it is and the plan it sat
-            # in: a phase attempt whose plan changed is a different phase, not a
-            # retry of this one.
-            material.update({"phase_key": phase_key, "plan_digest": str(overrides.get("plan_digest") or "")})
+            # A phase's identity includes which phase it is, the plan it sat in,
+            # and who was selected to do it: a phase attempt whose plan changed
+            # is a different phase, and one a newly registered specialist would
+            # now cover is not a retry of the generalist's run.
+            material.update(
+                phase_step_material(
+                    phase_key=phase_key,
+                    plan_digest=str(overrides.get("plan_digest") or ""),
+                    capability=str(overrides.get("capability") or ""),
+                    agent_name=str(overrides.get("agent_name") or ""),
+                    via_generalist=bool(overrides.get("via_generalist")),
+                )
+            )
         digest = input_digest(step, predecessors=predecessors_digests, material=material)
         try:
             payload, dispatched = await self._repo.open_step_attempt(
@@ -180,12 +197,32 @@ class BuildStepRecorder:
         self._previous_outputs = (output_digest,)
         self._previous_ids = [step_run_id]
 
-    async def succeed(self, handle: StepHandle, output_digest: str, *, execution: dict[str, Any] | None = None) -> None:
-        """Settle an attempt as succeeded and hand its output to the next step."""
+    def replay(self, handle: StepHandle) -> Any | None:
+        """The output of a step that was already committed, or `None`.
+
+        `None` means "dispatch": either this is not a replay, or the payload
+        behind the digest cannot be produced. A caller must never treat a bare
+        `replayed=True` as permission to skip work — that reports a resume and
+        performs a re-run, which is worse than either.
+        """
+        if not handle.replayed or self._store is None or not handle.output_digest:
+            return None
+        return self._store.load(handle.step, handle.output_digest)
+
+    async def succeed(self, handle: StepHandle, output_digest: str, *, execution: dict[str, Any] | None = None, payload: Any | None = None) -> None:
+        """Settle an attempt as succeeded and hand its output to the next step.
+
+        `payload` is what a later replay hands back in place of re-running.
+        It is written **before** the row is settled: a payload with no committed
+        row is unreachable and harmless, while a committed row whose payload
+        never landed is a step that reports a replay and silently dispatches.
+        """
         if handle.replayed:
             return
         if not handle.recorded or self._repo is None or not self._enabled:
             return
+        if payload is not None and self._store is not None:
+            self._store.save(handle.step, output_digest, payload)
         try:
             await self._repo.settle_step_attempt(
                 step_run_id=str(handle.step_run_id),
@@ -248,6 +285,9 @@ class RecorderRequest:
     stage_attempt_id: str
     parent_run_id: str = ""
     spec: BuildWorkflowSpec | None = field(default=None)
+    #: Where committed step outputs are kept. Empty disables replay: the chain
+    #: still records, and every step dispatches.
+    project_root: str = ""
 
 
 async def make_build_step_recorder(repo: _StepRepository | None, request: RecorderRequest) -> BuildStepRecorder:
@@ -270,6 +310,7 @@ async def make_build_step_recorder(repo: _StepRepository | None, request: Record
     except Exception:  # noqa: BLE001 - see the module docstring
         logger.warning("Could not read Build workflow step material for stage attempt %s; steps will not be recorded.", request.stage_attempt_id, exc_info=True)
         return DISABLED_RECORDER
+    store = StepOutputStore(project_root=request.project_root, stage_attempt_id=request.stage_attempt_id) if request.project_root else None
     return BuildStepRecorder(
         repo,
         enabled=True,
@@ -279,4 +320,5 @@ async def make_build_step_recorder(repo: _StepRepository | None, request: Record
         parent_run_id=request.parent_run_id,
         spec=spec,
         material=material,
+        store=store if store is not None and store.available else None,
     )

@@ -17,6 +17,13 @@ failure and withhold it.
 Build declared and separately records the few chosen for the deck, so a reviewer
 can always ask what was not shown to them.
 
+**It writes prose, never evidence.** Key outcomes come from the execution and
+only from it, and recorded deviations, limitations, and the rerun procedure
+survive whatever the summarizer says — its own caveats are appended after them.
+Every one of those fields is read downstream as something the work reported
+about itself, so a step whose entire job is to describe must not be able to
+restate a number, drop a caveat, or claim a procedure that was never run.
+
 Parsing is fail-closed for *this step only*: a malformed summary fails
 `summarize_results` and leaves every successful phase pinned and reusable. Two
 deterministic normalization passes run first, because the common failure is a
@@ -206,53 +213,49 @@ def parse_build_summary(raw: str, *, bundle: BuildExecutionBundle) -> SummaryPar
         if len(selected) >= MAX_SUMMARY_FIGURES:
             break
 
-    outcomes = _outcomes(payload.get("key_outcomes"), bundle=bundle)
     notes = tuple(PhaseNote(title=_text(item.get("title"), limit=160), text=_text(item.get("text") or item.get("summary"))) for item in (payload.get("phases") or []) if isinstance(item, Mapping) and _text(item.get("title"), limit=160))[
         :MAX_PHASE_NOTES
     ]
 
     package = BuildReviewPackage(
         headline=headline,
-        key_outcomes=outcomes or bundle.key_outcomes,
+        # **The numbers are the execution's, not the summarizer's.** A key
+        # outcome is a measured value that Test will weigh and a reviewer will
+        # read as fact; taking the model's list whenever it supplied one let it
+        # restate a metric with a different number, a different unit, or a
+        # figure that supports something else, and nothing downstream compares
+        # the two. Highlighting belongs in the headline, where it reads as
+        # commentary.
+        key_outcomes=bundle.key_outcomes,
         selected_figures=tuple(selected),
         # Every declared figure, always. Choosing a subset for the deck must
         # never remove one from the record a reviewer can ask about.
         all_figures=bundle.figures,
         phase_notes=notes,
-        deviations=_lines(payload.get("deviations"), limit=MAX_PHASE_NOTES) or bundle.deviations,
-        limitations=_lines(payload.get("limitations"), limit=MAX_PHASE_NOTES) or bundle.limitations,
-        rerun_procedure=_text(payload.get("rerun_procedure"), limit=1200) or bundle.rerun_procedure,
+        # Additive, in that order. The execution's own caveats lead because a
+        # reviewer must see what the work recorded about itself before what a
+        # later reader made of it, and a summarizer that supplied its own list
+        # used to replace them outright — the one edit that turns a recorded
+        # deviation into a deviation nobody mentioned.
+        deviations=_merge(bundle.deviations, _lines(payload.get("deviations"), limit=MAX_PHASE_NOTES)),
+        limitations=_merge(bundle.limitations, _lines(payload.get("limitations"), limit=MAX_PHASE_NOTES)),
+        # The recorded procedure wins outright: it is what was actually run, and
+        # a rewrite is a claim about reproducibility that only Test may make.
+        rerun_procedure=bundle.rerun_procedure or _text(payload.get("rerun_procedure"), limit=1200),
     )
     return SummaryParse(package=package, repaired=repaired)
 
 
-def _outcomes(value: Any, *, bundle: BuildExecutionBundle) -> tuple[KeyOutcome, ...]:
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        return ()
-    resolved: list[KeyOutcome] = []
-    known = {figure.path for figure in bundle.figures}
-    for item in value:
-        if not isinstance(item, Mapping):
-            continue
-        name = _text(item.get("name"), limit=160)
-        number = item.get("value")
-        text_value = str(number) if isinstance(number, (int, float)) and not isinstance(number, bool) else _text(number, limit=160)
-        if not name or not text_value:
-            continue
-        figure = _text(item.get("figure"), limit=1024)
-        resolved.append(
-            KeyOutcome(
-                name=name,
-                value=text_value,
-                unit=_text(item.get("unit"), limit=48),
-                phase_key=_text(item.get("phase_key"), limit=96),
-                # A supporting figure has to be one that exists; an unknown one
-                # is dropped rather than refused, since the number stands on its
-                # own and the citation is a convenience.
-                figure=figure if figure in known else "",
-            )
-        )
-    return tuple(resolved)
+def _merge(recorded: Sequence[str], added: Sequence[str]) -> tuple[str, ...]:
+    """Recorded entries first, then anything new the summarizer added."""
+    merged = list(recorded)
+    seen = {item.strip().casefold() for item in merged}
+    for item in added:
+        key = item.strip().casefold()
+        if key and key not in seen:
+            seen.add(key)
+            merged.append(item)
+    return tuple(merged[: MAX_PHASE_NOTES * 2])
 
 
 def render_summary_markdown(package: BuildReviewPackage, *, title: str) -> str:
