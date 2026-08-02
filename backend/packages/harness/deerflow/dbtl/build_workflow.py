@@ -34,6 +34,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
+from typing import Any
 
 #: A plan longer than this is a project, not a Build. A planner that wants more
 #: says so as an open question rather than emitting one.
@@ -335,6 +336,19 @@ def plan_output_digest(*, plan_digest: str, input_digest_value: str) -> str:
     not merely from the sentence the planner wrote about it.
     """
     return _digest({"plan": plan_digest, "inputs": input_digest_value})
+
+
+def phase_output_digest(*, result: Mapping[str, Any], published: Sequence[Mapping[str, Any]]) -> str:
+    """What one phase hands the next: its structured result and its published bytes.
+
+    Defined here rather than inline at the two call sites because the writer and
+    the *restorer* have to agree exactly. A replayed phase is only usable if the
+    payload read back from scratch recomputes the digest the row was committed
+    under; two copies of this arithmetic would eventually disagree, and the
+    symptom would be either a phase re-running forever or — far worse — an
+    edited payload accepted as work that happened.
+    """
+    return hashlib.sha256(json.dumps({"result": dict(result), "published": [dict(item) for item in published]}, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
 def phase_step_material(

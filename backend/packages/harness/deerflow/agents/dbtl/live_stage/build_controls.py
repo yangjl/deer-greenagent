@@ -169,6 +169,29 @@ class BuildControlGate:
             return False
         return any(row.get("plan_digest") == plan_digest and row.get("lifecycle") == "answered" and str(row.get("action") or "") in _CONFIRMING for row in rows)
 
+    async def boundary_released(self, plan_digest: str) -> bool:
+        """Has a person already told *this* plan to carry on past a boundary?
+
+        A `pause_after` boundary is answered once, and the answer is durable —
+        but the only thing consulted was the control riding on the current
+        request, so a plan continued in one turn and stopped by a later failure
+        paused again at the finished phase on every retry, with no way through.
+        The record is what a boundary was crossed *in*, so the record is what
+        this reads.
+
+        Scoped to the plan digest for the same reason `plan_is_confirmed` is: a
+        replan draws different work, and agreeing to run the previous plan says
+        nothing about it. `hold` is excluded — it is the opposite decision.
+        """
+        if not self.available or not plan_digest:
+            return False
+        try:
+            rows = await self.repo.list_build_collaborations(project_id=self.project_id, stage_attempt_id=self.stage_attempt_id)  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001 - see the module docstring
+            logger.warning("Could not read Build controls for stage attempt %s.", self.stage_attempt_id, exc_info=True)
+            return False
+        return any(row.get("plan_digest") == plan_digest and row.get("lifecycle") == "answered" and str(row.get("action") or "") in _RESUMING for row in rows)
+
     async def reopen_card(self) -> dict[str, Any] | None:
         """Rebuild the card for the control still open on this Build, if any.
 
@@ -221,6 +244,16 @@ class BuildControlGate:
 _CONFIRMING = frozenset(
     {
         BuildControlAction.START_BUILD.value,
+        BuildControlAction.CONTINUE_BUILD.value,
+        BuildControlAction.RETRY_STEP.value,
+    }
+)
+
+#: Answers that mean "keep going past where this stopped". `start_build` is
+#: deliberately absent: it agrees to run the plan, and the first boundary in
+#: that plan has not been reached, let alone shown to anybody.
+_RESUMING = frozenset(
+    {
         BuildControlAction.CONTINUE_BUILD.value,
         BuildControlAction.RETRY_STEP.value,
     }

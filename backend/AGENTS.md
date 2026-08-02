@@ -3291,6 +3291,63 @@ no payload is a step that reports a replay and silently dispatches.
 whose phases all replayed arrives with the same unit ids and the unique index
 raised an unhandled `IntegrityError`.
 
+**"Accepted against the digest it was recorded under" is the caller's job, and
+it was nobody's.** `StepOutputStore.load` returns any valid JSON at the
+digest-named path, and a shape check answers "is this a phase result?" rather
+than "is this *the* result this attempt committed?" — so scratch, which is an
+ordinary file inside a folder the person can open, could become review evidence
+by being edited into a plausible shape. `phase_output_digest` is now one
+function both the writer and `_restore_phase` use (two copies of that
+arithmetic would eventually disagree, and the symptom is either a phase that
+re-runs forever or an edited payload accepted as work that happened),
+`_published_bytes_intact` re-hashes every published output before the phase
+counts as replayed, and `_restored_build_plan` recomputes `plan_output_digest`
+against **the chain's** `load_design` output rather than the one this run
+recomputed — the project manifest rides in the input bundle, so a Build that
+wrote outputs moves its own recomputed digest and would invalidate the plan and
+every phase beneath it by their own success.
+
+**A re-run that settles nothing is worse than either outcome available.** When
+the payload behind a committed digest cannot be produced, the phase (or plan, or
+write-up) ran again on a handle that said `replayed`, so `succeed` no-opped: the
+work happened, the record still described the previous attempt, and every later
+step stayed computed from a digest that no longer described anything on disk.
+`BuildStepRecorder.reopen` appends a fresh attempt at the same identity —
+`open_step_attempt(force_new_attempt=True)`, the one caller that legitimately
+declines the replay — and rewinds the chain cursor to what `begin` bound the
+attempt against, so a re-run that then fails leaves the chain where the failure
+left it.
+
+**A deck retry must not re-run the summarizer.** A replayed `summarize_results`
+still dispatched, and the review document embeds the cycle revision, so the
+rewrite hashed differently while the replayed step could no longer record it —
+the deck rendered one write-up and the chain named another. The step now keeps
+the summarizer's own answer beside its digest and `_restore_build_summary`
+re-parses it against the same execution bundle, accepting it only when the
+package digest recomputes and the review document on disk still hashes to what
+the attempt committed.
+
+**A deck nobody can answer is not a review surface.** `render_review_deck`
+succeeded on rendered bytes alone, so a surface plan that returned `None` left a
+finished-looking Build whose deck could never carry a verdict — and a
+registration that *raised* did so before the step opened, so
+`deck_registration_failed` could never be recorded at all. Registration failure
+is now recorded against that step first and then re-raised (evidence is already
+durable, so the retry is safe), and an unregistered deck fails the step rather
+than completing the workflow.
+
+**A boundary somebody already crossed is not a boundary.** Only the control
+riding on the *current* request released a replayed `pause_after` phase, so a
+plan continued in one turn and stopped later by a presentational failure paused
+again at the finished phase on every retry — the same question re-asked forever
+with the cheap summary/deck retry unreachable behind it.
+`BuildControlGate.boundary_released` reads the durable record instead: an
+answered `continue`/`retry` against *this plan digest* (a replan draws different
+work, and `hold` is the opposite decision). `start_build` is deliberately not in
+that set — it agrees to run the plan, whose first boundary has not been reached,
+let alone shown to anybody — and a freshly run phase still stops at its own
+boundary, because that one has never been shown.
+
 **A paused Build is a decision waiting to be made, and somebody has to be able
 to make it.** A Build stops for four different reasons — the plan is drawn and
 nobody has agreed to it, a phase declared a boundary, a step failed, or a worker

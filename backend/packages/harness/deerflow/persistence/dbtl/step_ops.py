@@ -327,6 +327,7 @@ class StepOpsMixin:
         parent_run_id: str | None = None,
         task_id: str | None = None,
         execution: dict[str, Any] | None = None,
+        force_new_attempt: bool = False,
     ) -> tuple[dict[str, Any], bool]:
         """Start an attempt, or replay a committed one.
 
@@ -337,6 +338,13 @@ class StepOpsMixin:
         same step is already running; that refusal comes from the database's
         partial unique index rather than from a check here, because two
         concurrent dispatches can both pass a check.
+
+        `force_new_attempt` is the one caller that legitimately declines the
+        replay: a committed success whose output cannot be produced any more.
+        The work has to run again, and a re-run that settles nothing leaves the
+        record describing an attempt whose result no longer exists — so a fresh
+        row is appended against the same identity rather than the old one being
+        handed back a second time. Attempts append; nothing is overwritten.
         """
         # Resolving the workflow validates the key before anything is written;
         # an attempt that cannot name its contract is unreviewable later.
@@ -385,7 +393,7 @@ class StepOpsMixin:
                         raise LookupError(f"Unknown or unusable predecessor step attempts for stage run {stage_attempt_id}: {missing}.")
 
                 committed = [row for row in rows if row.status == StepState.SUCCEEDED.value and row.input_digest == input_digest]
-                if committed:
+                if committed and not force_new_attempt:
                     # Newest wins, matching the projection's selection rule.
                     return _payload(max(committed, key=lambda row: row.attempt)), False
 

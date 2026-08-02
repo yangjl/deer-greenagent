@@ -940,3 +940,143 @@ class TestTheReadModelCanNameThePhases:
         stage_attempt_id = await _build_stage_attempt_id(repo)
 
         assert (await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id))["plan"] is None
+
+
+class TestADeckRetryDoesNotReRunTheSummarizer:
+    """The step boundary has to hold in both directions.
+
+    A failed deck kept the execution selected, which was half the promise. The
+    other half is that the write-up it retries against is the *same* write-up:
+    re-running the summarizer produced a differently-hashed document (the review
+    embeds the cycle revision), and the replayed step could no longer record it —
+    so the deck rendered one package while the chain named another.
+    """
+
+    async def test_the_summarizer_is_not_dispatched_a_second_time(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
+        monkeypatch.undo()
+
+        _result, second = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-2")
+
+        assert second.summarizer_units == [], "the committed write-up was re-synthesized instead of replayed"
+
+    async def test_the_deck_is_retried_against_the_document_the_chain_names(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        first, _ = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
+        monkeypatch.undo()
+
+        second, _ = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-2")
+
+        assert second.artifact_uri == first.artifact_uri
+        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        summary = _step(view, BuildStepKey.SUMMARIZE_RESULTS)
+        deck = _step(view, BuildStepKey.RENDER_REVIEW_DECK)
+        assert deck["status"] == StepState.SUCCEEDED.value
+        assert len(summary["attempts"]) == 1, "the write-up was recorded twice for one execution"
+        # The deck descends from the write-up that is actually on disk.
+        assert deck["attempts"][-1]["predecessor_step_run_ids"] == [summary["selected_step_run_id"]]
+
+    async def test_an_unreadable_write_up_is_re_run_and_recorded(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
+        monkeypatch.undo()
+        for kept in (root / "outputs" / ".dbtl-stage-work" / "steps").rglob("summarize_results-*.json"):
+            kept.write_text("{not json", encoding="utf-8")
+
+        _result, second = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-2")
+
+        assert second.summarizer_units, "an unreadable write-up must be produced again"
+        summary = _step(await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id), BuildStepKey.SUMMARIZE_RESULTS)
+        assert len(summary["attempts"]) == 2, "the second synthesis was performed and never recorded"
+
+
+class TestARestoredPayloadIsCheckedAgainstItsRecord:
+    """Scratch is an ordinary file inside a folder the person can open.
+
+    A shape check answers "is this a phase result?"; only the recomputed digest
+    answers "is this *the* result that attempt committed?". Accepting the first
+    for the second is how edited or half-written scratch becomes review evidence.
+    """
+
+    async def test_an_edited_payload_is_refused_and_the_phase_runs_again(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
+
+        edited = 0
+        for kept in (root / "outputs" / ".dbtl-stage-work" / "steps").rglob("execute_phases-*.json"):
+            payload = json.loads(kept.read_text(encoding="utf-8"))
+            payload["result"]["summary"] = "Something nobody's worker said."
+            kept.write_text(json.dumps(payload), encoding="utf-8")
+            edited += 1
+        assert edited, "no phase payload was kept to edit"
+
+        _result, second = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-2")
+
+        assert len(second.phase_units) == edited, "an edited payload was replayed as work that happened"
+
+    async def test_a_published_output_that_is_gone_is_refused(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        first, _ = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
+        assert first.produced_usable_evidence, first.note
+
+        artifacts = sorted((root / "outputs" / "dbtl").rglob("*/artifacts/**/*.bin"))
+        assert artifacts, "the phase published nothing to remove"
+        artifacts[0].unlink()
+
+        _result, second = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-2")
+
+        assert second.phase_units, "a phase whose published bytes are gone was replayed as evidence"
+
+
+class TestADeckNobodyCanAnswerIsNotASuccess:
+    """A rendered file is not a review surface.
+
+    The step used to succeed on the bytes alone, so a registration that returned
+    no plan left a finished-looking Build whose deck could never carry a verdict
+    — and a registration that *raised* did so before this step opened, so the
+    error code that names the failure could never be recorded at all.
+    """
+
+    async def test_a_registration_failure_is_recorded_before_it_is_raised(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        async def _refuse(**_kwargs):
+            raise RuntimeError("the surface store is unavailable")
+
+        monkeypatch.setattr(repo, "register_stage_feedback_surface", _refuse)
+
+        with pytest.raises(RuntimeError):
+            await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN))
+
+        deck = _step(await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id), BuildStepKey.RENDER_REVIEW_DECK)
+        assert deck["status"] == StepState.FAILED.value
+        assert deck["error_code"] == BuildErrorCode.DECK_REGISTRATION_FAILED.value
+
+    async def test_a_deck_bound_to_nothing_does_not_succeed(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        async def _no_surface(**_kwargs):
+            return None
+
+        monkeypatch.setattr(LiveStageAdapter, "_plan_feedback_surface", staticmethod(_no_surface))
+
+        await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN))
+
+        deck = _step(await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id), BuildStepKey.RENDER_REVIEW_DECK)
+        assert deck["status"] == StepState.FAILED.value
+        assert deck["error_code"] == BuildErrorCode.DECK_REGISTRATION_FAILED.value

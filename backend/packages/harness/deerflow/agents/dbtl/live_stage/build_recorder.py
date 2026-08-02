@@ -16,6 +16,12 @@ on — a half-recorded chain is a gap in a read model, while a raised exception 
 a lost experiment. What this does *not* soften is the `load_design` gate: that
 runs whether or not the recorder does, and its refusal stops the dispatch.
 
+**A step that cannot be replayed is re-opened, not silently re-run.** When the
+payload behind a committed digest cannot be produced, the work has to happen
+again — and `reopen` appends a fresh attempt for it, because a re-run settled
+against nothing leaves the record describing a result that no longer exists
+while every later step is still computed from its digest.
+
 **A replayed step does not re-run.** `open_step_attempt` returns a committed
 success against the same input digest instead of opening a new attempt, so a
 retried turn resumes the chain rather than spending the work again — and
@@ -28,6 +34,7 @@ mechanism report a resume while re-running an hour of sandbox work.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -73,6 +80,12 @@ class StepHandle:
     #: beneath the container, so a phase must not advance the step chain the
     #: container's own identity is computed from.
     phase_key: str = ""
+    #: Exactly what `begin` opened this attempt against, kept so `reopen` can
+    #: open a second attempt at the *same* identity — and put the chain cursor
+    #: back where it was — without the caller having to hand it all in again.
+    predecessor_digests: tuple[str, ...] = ()
+    predecessor_ids: tuple[str, ...] = ()
+    open_overrides: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def recorded(self) -> bool:
@@ -182,12 +195,61 @@ class BuildStepRecorder:
         except Exception as exc:  # noqa: BLE001 - instrumentation must not fail a Build
             self._disable(step, exc)
             return StepHandle(step=step, input_digest=digest, phase_key=phase_key)
+        bindings = {
+            "predecessor_digests": tuple(predecessors_digests),
+            "predecessor_ids": tuple(predecessor_ids),
+            "open_overrides": dict(overrides),
+        }
         if not dispatched:
             # Already committed against this exact material. Advance the chain
             # from the recorded row rather than opening a second attempt.
             self._advance(str(payload["id"]), str(payload.get("output_digest") or ""), phase=bool(phase_key))
-            return StepHandle(step=step, input_digest=digest, replayed=True, output_digest=str(payload.get("output_digest") or ""), phase_key=phase_key)
-        return StepHandle(step=step, step_run_id=str(payload["id"]), input_digest=digest, phase_key=phase_key)
+            return StepHandle(step=step, input_digest=digest, replayed=True, output_digest=str(payload.get("output_digest") or ""), phase_key=phase_key, **bindings)
+        return StepHandle(step=step, step_run_id=str(payload["id"]), input_digest=digest, phase_key=phase_key, **bindings)
+
+    async def reopen(self, handle: StepHandle) -> StepHandle:
+        """Open a fresh attempt at a step whose committed output cannot be used.
+
+        A replay that cannot produce its payload has to run again, and this is
+        what stops that re-run from being invisible. Without it the work
+        happened, `succeed` no-opped because the handle said "replayed", and
+        every later step stayed computed from a digest describing a result
+        nobody could read — the record and reality disagreeing in the one place
+        the chain exists to keep them together.
+
+        The chain cursor is put back to what `begin` bound this attempt against
+        first, so a re-run that then *fails* leaves the chain where the failure
+        left it rather than descending from an output this run rejected.
+        """
+        if not handle.replayed or not self._enabled or self._repo is None:
+            return handle
+        self._rewind(handle)
+        try:
+            payload, _dispatched = await self._repo.open_step_attempt(
+                project_id=self._project_id,
+                cycle_id=self._cycle_id,
+                stage_attempt_id=self._stage_attempt_id,
+                workflow_spec_key=self._spec.spec_key,
+                step_key=handle.step.value,
+                input_digest=handle.input_digest,
+                predecessor_step_run_ids=list(handle.predecessor_ids),
+                parent_run_id=self._parent_run_id or None,
+                force_new_attempt=True,
+                **dict(handle.open_overrides),
+            )
+        except Exception as exc:  # noqa: BLE001 - instrumentation must not fail a Build
+            self._disable(handle.step, exc)
+            return StepHandle(step=handle.step, input_digest=handle.input_digest, phase_key=handle.phase_key)
+        return StepHandle(step=handle.step, step_run_id=str(payload["id"]), input_digest=handle.input_digest, phase_key=handle.phase_key)
+
+    def _rewind(self, handle: StepHandle) -> None:
+        """Undo the advance a replay performed, back to what `begin` saw."""
+        if handle.is_phase:
+            self._phase_outputs = handle.predecessor_digests
+            self._phase_ids = list(handle.predecessor_ids)
+            return
+        self._previous_outputs = handle.predecessor_digests
+        self._previous_ids = list(handle.predecessor_ids)
 
     def _advance(self, step_run_id: str, output_digest: str, *, phase: bool = False) -> None:
         if phase:

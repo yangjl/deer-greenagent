@@ -629,3 +629,47 @@ class TestAChainMovingDecisionIsNeverSilentlyLost:
         # down and the "try again" the message asks for is unreachable.
         assert result.control_request is not None
         assert result.control_request["request_id"] == failed.control_request["request_id"]
+
+
+class TestABoundaryAlreadyCrossedIsNotAskedAgain:
+    """ "Continue" is answered once, and the answer is durable.
+
+    Only the control riding on the *current* request was consulted, so a plan
+    continued in one turn and stopped later by a presentational failure paused
+    again at the finished phase on every retry afterwards — the same question
+    re-asked forever, with the cheap deck retry unreachable behind it.
+    """
+
+    async def test_a_later_retry_does_not_stop_at_the_finished_phase(self, project, monkeypatch) -> None:
+        from deerflow.agents.dbtl.live_stage import adapter as adapter_module
+
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+        paused = await _run(repo, root, dispatcher=_WritingDispatcher(plan=PAUSING_PLAN))
+
+        # Continue, and let the deck alone fail: the build is finished, and the
+        # only thing left to retry is the render.
+        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        await _run(repo, root, dispatcher=_WritingDispatcher(plan=PAUSING_PLAN), run_id="run-2", build_control=_answer(paused.control_request, "continue"))
+        monkeypatch.undo()
+
+        dispatcher = _WritingDispatcher(plan=PAUSING_PLAN)
+        retry = await _run(repo, root, dispatcher=dispatcher, run_id="run-3")
+
+        assert retry.control_request is None, "the finished boundary was put back in front of the owner"
+        assert dispatcher.phase_units == [], "a replayed boundary re-ran the phases behind it"
+        assert retry.produced_usable_evidence, retry.note
+        deck = _step(await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id), BuildStepKey.RENDER_REVIEW_DECK)
+        assert deck["status"] == StepState.SUCCEEDED.value
+
+    async def test_a_boundary_nobody_has_answered_still_stops(self, project) -> None:
+        """The durable release is per plan, not per stage attempt."""
+        repo, root = project
+        await _ready_for_build(repo)
+        await _run(repo, root, dispatcher=_WritingDispatcher(plan=PAUSING_PLAN))
+
+        again = await _run(repo, root, dispatcher=_WritingDispatcher(plan=PAUSING_PLAN), run_id="run-2")
+
+        assert again.control_request is not None
+        assert again.control_request["build_control_kind"] == BuildControlKind.PHASE_PAUSE.value

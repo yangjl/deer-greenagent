@@ -90,10 +90,11 @@ from deerflow.dbtl.build_control import (
     step_failure_request,
     worker_question_request,
 )
+from deerflow.dbtl.build_execution import BuildExecutionBundle
 from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError
 from deerflow.dbtl.build_plan import BuildPhasePlan, parse_build_plan, restore_build_plan, single_phase_plan
 from deerflow.dbtl.build_summary import BuildReviewPackage
-from deerflow.dbtl.build_workflow import BuildErrorCode, BuildStepKey, StepState, plan_output_digest, resolve_build_workflow
+from deerflow.dbtl.build_workflow import BuildErrorCode, BuildStepKey, StepState, phase_output_digest, plan_output_digest, resolve_build_workflow
 from deerflow.dbtl.consensus import CONSENSUS_CONTRACT
 from deerflow.dbtl.council import (
     ROLE_BRIEFS,
@@ -2227,12 +2228,115 @@ def _pause_note(assignment: PhaseAssignment) -> str:
     return f"Paused after {assignment.phase.title!r} because the plan asked for a look before the next phase."
 
 
+@dataclass(frozen=True, slots=True)
+class _BuildSummary:
+    """What one `summarize_results` attempt produced.
+
+    `text` is the summarizer's own answer, kept only so a later run can rebuild
+    this package without paying for a second synthesis. It is scratch, never
+    evidence: the document a person reviews is the Markdown written from the
+    parsed package, and that is what the approval binds to.
+    """
+
+    package: BuildReviewPackage | None = None
+    refusal: str = ""
+    question: str = ""
+    text: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _RestoredSummary:
+    """A committed write-up, proven to be the one the record describes."""
+
+    package: BuildReviewPackage
+    uri: str
+    content_hash: str
+
+
+def _restore_build_summary(payload: Any, *, bundle: BuildExecutionBundle, expected_digest: str, project_root: str) -> _RestoredSummary | None:
+    """Rebuild a committed write-up, or `None` to run the summarizer again.
+
+    A deck that failed to render must be retryable on its own — that is the
+    whole reason the write-up is a separate step. Re-running the summarizer
+    instead produced a *different* package (the review document embeds the cycle
+    revision, so its hash moves), which the replayed step could no longer record:
+    the deck then rendered one write-up while the chain named another.
+
+    Two things are checked, because the payload is an ordinary file inside the
+    project: the re-parsed package must recompute the digest recorded beside it,
+    and the review document must still hash to what the attempt committed.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    uri = str(payload.get("artifact_uri") or "")
+    recorded = str(payload.get("package_digest") or "")
+    if not uri or not recorded or not expected_digest:
+        return None
+    parsed = parse_summary(str(payload.get("text") or ""), bundle=bundle)
+    if not parsed.ok or parsed.package is None or parsed.package.digest != recorded:
+        logger.warning("A recorded Build write-up did not match the package its attempt committed; the summarizer will run again.")
+        return None
+    resolved = workspace_relative_path(uri, project_root=project_root)
+    if resolved is None:
+        return None
+    _relative, host = resolved
+    try:
+        if not host.is_file() or host.is_symlink() or _sha256_file(host) != expected_digest:
+            logger.warning("The recorded Build review document is no longer the one its attempt committed; the summarizer will run again.")
+            return None
+    except OSError:
+        return None
+    return _RestoredSummary(package=parsed.package, uri=uri, content_hash=expected_digest)
+
+
+def _restored_build_plan(payload: Any, *, expected_digest: str, input_digest_value: str) -> BuildPhasePlan | None:
+    """A committed plan read back, or `None` to draw it again.
+
+    `restore_build_plan` answers "is this a plan?"; the recomputed digest
+    answers "is this *the* plan this attempt committed, drawn from the Design
+    this run resolved?". Scratch is an ordinary file inside the project, so a
+    plan that merely parses is not evidence that these phases were the ones
+    approved — and a swapped one would silently rebind every phase beneath it.
+    """
+    plan = restore_build_plan(payload)
+    if plan is None:
+        return None
+    if not expected_digest or plan_output_digest(plan_digest=plan.digest, input_digest_value=input_digest_value) != expected_digest:
+        logger.warning("A recorded Build plan did not match the digest its attempt committed; the plan will be drawn again.")
+        return None
+    return plan
+
+
+def _published_bytes_intact(published: Sequence[Mapping[str, Any]], *, project_root: str) -> bool:
+    """Are the outputs this phase published still exactly what it published?
+
+    A payload that parses proves what the worker *said*; it proves nothing about
+    the governed tree the next phase, the summarizer, and the deck all read
+    from. A file deleted, truncated, or edited since the phase committed would
+    otherwise be replayed as evidence under the hash it no longer has.
+    """
+    for entry in published:
+        expected = str(entry.get("content_hash") or "")
+        resolved = workspace_relative_path(str(entry.get("uri") or ""), project_root=project_root)
+        if not expected or resolved is None:
+            return False
+        _relative, host = resolved
+        try:
+            if not host.is_file() or host.is_symlink() or _sha256_file(host) != expected:
+                return False
+        except OSError:
+            return False
+    return True
+
+
 def _restore_phase(
     payload: Any,
     *,
     assignment: PhaseAssignment,
     index: int,
     spec: StageSpec,
+    expected_digest: str,
+    project_root: str,
 ) -> tuple[WorkUnit, StageWorkerResult, list[dict[str, Any]]] | None:
     """Rebuild a phase that already committed, or `None` to run it again.
 
@@ -2241,12 +2345,27 @@ def _restore_phase(
     instead of dispatching a second time. Everything about it is fail-soft — a
     payload that is missing, malformed, or no longer trustworthy costs one
     re-run, while accepting a damaged one would file work nobody did.
+
+    **The payload is only ever accepted against the digest it was recorded
+    under.** Scratch is an ordinary file in the project the person can edit, and
+    a shape check answers "is this a phase result?" rather than "is this *the*
+    phase result this row committed?" — so the digest is recomputed and the
+    published bytes are re-hashed before any of it counts as work that happened.
     """
     if not isinstance(payload, Mapping):
         return None
     unit_id = str(payload.get("unit_id") or "")
     raw_result = payload.get("result")
     if not unit_id or not isinstance(raw_result, Mapping):
+        return None
+    published = [dict(item) for item in payload.get("published") or () if isinstance(item, Mapping)]
+    if not published:
+        return None
+    if not expected_digest or phase_output_digest(result=raw_result, published=published) != expected_digest:
+        logger.warning("A recorded Build phase payload did not match the digest its attempt committed; the phase will run again.")
+        return None
+    if not _published_bytes_intact(published, project_root=project_root):
+        logger.warning("A recorded Build phase's published outputs are no longer what it published; the phase will run again.")
         return None
     try:
         result = parse_worker_result(
@@ -2258,9 +2377,6 @@ def _restore_phase(
         logger.warning("A recorded Build phase payload could not be read back; the phase will run again.", exc_info=True)
         return None
     if not result.is_trustworthy:
-        return None
-    published = [dict(item) for item in payload.get("published") or () if isinstance(item, Mapping)]
-    if not published:
         return None
     unit = phase_unit(
         assignment,
@@ -3112,7 +3228,7 @@ class LiveStageAdapter:
         project_root: str,
         cycle: Mapping[str, Any],
         stage_workspace: str,
-        continue_past_boundary: bool = False,
+        boundaries_released: bool = False,
     ) -> _PhaseRun:
         """Run the plan's phases in order, each as its own attempt.
 
@@ -3135,6 +3251,14 @@ class LiveStageAdapter:
         capability, and a `pause_after` boundary all stop the loop with earlier
         phases legitimately committed, and the caller has to be able to tell
         "the plan finished" from "some of it did".
+
+        **A boundary somebody already crossed is not a boundary.**
+        `boundaries_released` is durable, not request-scoped: it used to mean
+        only "this exact request carries a Continue", so a plan continued in one
+        turn and stopped by a later failure paused at the same finished phase on
+        every retry afterwards — the question re-asked forever and the cheap
+        summary/deck retry unreachable. A freshly run phase still stops at its
+        own boundary regardless, because that one has never been shown.
         """
         assignments = [assign_phase(phase, candidates) for phase in plan.phases]
         selection = SelectionResult(
@@ -3173,7 +3297,25 @@ class LiveStageAdapter:
                 execution={"title": assignment.phase.title},
             )
 
-            restored = _restore_phase(recorder.replay(handle), assignment=assignment, index=index, spec=spec)
+            restored = (
+                await asyncio.to_thread(
+                    _restore_phase,
+                    recorder.replay(handle),
+                    assignment=assignment,
+                    index=index,
+                    spec=spec,
+                    expected_digest=str(handle.output_digest or ""),
+                    project_root=project_root,
+                )
+                if handle.replayed
+                else None
+            )
+            if restored is None and handle.replayed:
+                # A committed success whose output cannot be produced. The work
+                # has to happen again, and it has to be *recorded* as happening
+                # again: settling nothing would leave the chain descending from
+                # a digest that no longer describes anything on disk.
+                handle = await recorder.reopen(handle)
             if restored is not None:
                 unit, result, phase_published = restored
                 units.append(unit)
@@ -3183,7 +3325,7 @@ class LiveStageAdapter:
                 # A replayed phase's boundary was already shown and answered —
                 # that is what "Continue" meant. Stopping at it again would ask
                 # the same question forever and make the plan unfinishable.
-                if assignment.phase.pause_after and not continue_past_boundary:
+                if assignment.phase.pause_after and not boundaries_released:
                     stopped = _pause_note(assignment)
                     rejected.append(stopped)
                     paused, paused_title = True, assignment.phase.title
@@ -3243,7 +3385,10 @@ class LiveStageAdapter:
             published.extend(phase_published)
             await recorder.succeed(
                 handle,
-                hashlib.sha256(json.dumps({"result": result.as_dict(), "published": phase_published}, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+                # The same function the restorer recomputes with, so a replay
+                # cannot be refused — or accepted — on a difference in how the
+                # two sides happened to serialize the same result.
+                phase_output_digest(result=result.as_dict(), published=phase_published),
                 execution={"phase_key": assignment.phase.phase_key, "outputs": len(phase_published)},
                 payload={"unit_id": unit.unit_id, "result": result.as_dict(), "published": phase_published},
             )
@@ -3389,18 +3534,22 @@ class LiveStageAdapter:
         budget: WorkerBudget,
         attempt_id: str,
         outcome: StageExecutionOutcome,
-        published: Sequence[Mapping[str, Any]],
         inputs: BuildInputBundle | None,
         cycle: Mapping[str, Any],
+        bundle: BuildExecutionBundle,
         answer: str = "",
-    ) -> tuple[BuildReviewPackage | None, str, str]:
+    ) -> _BuildSummary:
         """Run the read-only summarizer over the verified execution bundle.
 
-        Returns ``(package, refusal, question)``. Never raises: the execution behind this
-        is already committed and hash-bound, so a provider outage or an
-        unparseable answer must cost the write-up rather than the Build.
+        Never raises: the execution behind this is already committed and
+        hash-bound, so a provider outage or an unparseable answer must cost the
+        write-up rather than the Build.
+
+        The worker's raw answer travels back with the parsed package because it
+        is what a replay is rebuilt from — a later run re-parses it against the
+        same bundle rather than paying for a second synthesis, and the
+        recomputed package digest is what proves the two are the same write-up.
         """
-        bundle = execution_bundle(outcome.trustworthy_results, published=published)
         agent = next((assignment.agent_name for assignment in outcome.plan.selection.assignments), "general-purpose")
         unit = summarizer_unit(
             attempt_id=attempt_id,
@@ -3417,7 +3566,7 @@ class LiveStageAdapter:
             dispatched = await dispatcher((unit,), budget=budget)
         except Exception:  # noqa: BLE001 - see the docstring
             logger.warning("The Build summarizer could not be dispatched.", exc_info=True)
-            return None, "The Build summarizer could not be run.", ""
+            return _BuildSummary(refusal="The Build summarizer could not be run.")
         text = str(getattr(dispatched[0], "text", "") or "") if dispatched else ""
         parsed = parse_summary(text, bundle=bundle)
         if parsed.needs_input:
@@ -3425,10 +3574,10 @@ class LiveStageAdapter:
             # person is shown: one asks them to fix something, the other asks
             # them to decide something. The caller turns this into a control
             # they can answer.
-            return None, "", parsed.clarification_question
+            return _BuildSummary(question=parsed.clarification_question)
         if not parsed.ok:
-            return None, parsed.refusal, ""
-        return parsed.package, "", ""
+            return _BuildSummary(refusal=parsed.refusal)
+        return _BuildSummary(package=parsed.package, text=text)
 
     async def _record_human_authored_design(
         self,
@@ -4552,13 +4701,29 @@ class LiveStageAdapter:
         phase_run: _PhaseRun | None = None
         if build_workflow_enabled and build_inputs is not None:
             plan_handle = await build_recorder.begin(BuildStepKey.PLAN_BUILD)
+            # What the chain says `load_design` produced — which on a resume is
+            # the digest that step *committed*, not the one this run recomputed.
+            # The project manifest rides in the input bundle, so a Build that
+            # wrote outputs changes its own recomputed digest; binding the plan
+            # to that would leave the plan and every phase beneath it
+            # invalidated by their own success.
+            design_output_digest = plan_handle.predecessor_digests[0] if plan_handle.predecessor_digests else build_inputs.digest
             # A committed plan is read back rather than redrawn. Replanning is
             # cheap, but a *different* plan would give every phase beneath it a
             # new identity and discard finished work — the planner is not
             # deterministic, so re-running it on a resume is how a retry turns
             # into a restart.
-            build_plan = restore_build_plan(build_recorder.replay(plan_handle))
+            build_plan = _restored_build_plan(
+                build_recorder.replay(plan_handle),
+                expected_digest=str(plan_handle.output_digest or ""),
+                input_digest_value=design_output_digest,
+            )
             if build_plan is None:
+                if plan_handle.replayed:
+                    # The committed plan cannot be produced, so it is redrawn —
+                    # and the redraw is recorded. Settling nothing would leave
+                    # every phase beneath this bound to a plan nobody can read.
+                    plan_handle = await build_recorder.reopen(plan_handle)
                 build_plan, plan_reasons = await self._plan_build(
                     dispatcher=dispatcher,
                     budget=spec.budget,
@@ -4606,8 +4771,9 @@ class LiveStageAdapter:
                     # it says. Two different approved Designs can imply the same
                     # decomposition, and a phase chained to the plan's own
                     # content digest would then survive a Design change that
-                    # reshaped the work.
-                    plan_output_digest(plan_digest=build_plan.digest, input_digest_value=build_inputs.digest),
+                    # reshaped the work. The value is the chain's, so what a
+                    # later run recomputes to check this is what was recorded.
+                    plan_output_digest(plan_digest=build_plan.digest, input_digest_value=design_output_digest),
                     execution=_plan_execution(build_plan, degraded=bool(plan_reasons)),
                     payload=build_plan.as_dict(),
                 )
@@ -4745,10 +4911,16 @@ class LiveStageAdapter:
                 project_root=project_root,
                 cycle=cycle,
                 stage_workspace=stage_workspace,
-                # The same scope guard every other use of the answer carries.
-                # This is the one place a cross-attempt answer could influence
-                # dispatch, and it should not be the exception.
-                continue_past_boundary=(build_control is not None and build_control.stage_attempt_id == str((attempt or {}).get("id") or "") and build_control.action is BuildControlAction.CONTINUE_BUILD),
+                # The answer on this request, or one already recorded against
+                # this plan. The request-scoped half carries the same scope
+                # guard every other use of the answer carries — this is the one
+                # place a cross-attempt answer could influence dispatch, and it
+                # should not be the exception — while the durable half is what
+                # keeps an answered boundary answered on every later retry.
+                boundaries_released=(
+                    (build_control is not None and build_control.stage_attempt_id == str((attempt or {}).get("id") or "") and build_control.action in {BuildControlAction.CONTINUE_BUILD, BuildControlAction.RETRY_STEP})
+                    or await control_gate.boundary_released(build_plan.digest)
+                ),
             )
             outcome = phase_run.outcome
         else:
@@ -4929,6 +5101,9 @@ class LiveStageAdapter:
         build_package = None
         summary_refusal = ""
         summary_question = ""
+        #: What a later run rebuilds this write-up from instead of paying for a
+        #: second synthesis. `None` for a replay, which wrote nothing new.
+        summary_payload: dict[str, Any] | None = None
         if produced_usable_evidence and not build_summary_owns_evidence:
             artifact_uri, artifact_hash, artifact_digest = await asyncio.to_thread(
                 _write_stage_package,
@@ -4939,40 +5114,66 @@ class LiveStageAdapter:
                 council=council_plan,
             )
             artifact_type = spec.required_artifact_types[0]
-        elif build_summary_owns_evidence:
-            build_package, summary_refusal, summary_question = await self._summarize_build(
-                dispatcher=dispatcher,
-                budget=spec.budget,
-                attempt_id=attempt_id,
-                outcome=outcome,
-                published=published_build_artifacts,
-                inputs=build_inputs,
-                cycle=cycle,
-                answer=worker_answer if worker_answer_step == BuildStepKey.SUMMARIZE_RESULTS.value else "",
-            )
-            written = (
+        if build_summary_owns_evidence:
+            bundle = execution_bundle(outcome.trustworthy_results, published=published_build_artifacts)
+            # The whole reason the write-up is its own step: a deck that failed
+            # to render is retried against *this* package rather than against a
+            # second, differently-hashed one nobody reviewed.
+            restored_summary = (
                 await asyncio.to_thread(
-                    write_build_review,
+                    _restore_build_summary,
+                    build_recorder.replay(summary_handle),
+                    bundle=bundle,
+                    expected_digest=str(summary_handle.output_digest or ""),
                     project_root=project_root,
-                    cycle=cycle,
-                    package=build_package,
-                    execution=execution_bundle(outcome.trustworthy_results, published=published_build_artifacts),
                 )
-                if build_package is not None
+                if summary_handle.replayed
                 else None
             )
-            if written is not None:
-                artifact_uri, artifact_hash, artifact_digest = written.uri, written.content_hash, written.digest
+            if restored_summary is not None:
+                build_package = restored_summary.package
+                artifact_uri, artifact_hash, artifact_digest = restored_summary.uri, restored_summary.content_hash, restored_summary.package.headline
                 artifact_type = spec.required_artifact_types[0]
             else:
-                # The execution stays selected and reusable; only this step
-                # failed, and its code says so, so a person is not told to
-                # re-run an hour of sandbox work to recover a write-up.
-                produced_usable_evidence = False
+                if summary_handle.replayed:
+                    # Committed, but unusable. Re-running is right; re-running
+                    # invisibly is not, so the second synthesis gets its own row.
+                    summary_handle = await build_recorder.reopen(summary_handle)
+                summary = await self._summarize_build(
+                    dispatcher=dispatcher,
+                    budget=spec.budget,
+                    attempt_id=attempt_id,
+                    outcome=outcome,
+                    inputs=build_inputs,
+                    cycle=cycle,
+                    bundle=bundle,
+                    answer=worker_answer if worker_answer_step == BuildStepKey.SUMMARIZE_RESULTS.value else "",
+                )
+                build_package, summary_refusal, summary_question = summary.package, summary.refusal, summary.question
+                written = (
+                    await asyncio.to_thread(
+                        write_build_review,
+                        project_root=project_root,
+                        cycle=cycle,
+                        package=build_package,
+                        execution=bundle,
+                    )
+                    if build_package is not None
+                    else None
+                )
+                if written is not None:
+                    artifact_uri, artifact_hash, artifact_digest = written.uri, written.content_hash, written.digest
+                    artifact_type = spec.required_artifact_types[0]
+                    summary_payload = {"text": summary.text, "package_digest": build_package.digest, "artifact_uri": written.uri}
+                else:
+                    # The execution stays selected and reusable; only this step
+                    # failed, and its code says so, so a person is not told to
+                    # re-run an hour of sandbox work to recover a write-up.
+                    produced_usable_evidence = False
         summary_control: dict[str, Any] | None = None
         if build_workflow_enabled and summary_handle.recorded:
             if artifact_hash and build_summary_owns_evidence:
-                await build_recorder.succeed(summary_handle, artifact_hash, execution={"artifact_uri": artifact_uri or ""})
+                await build_recorder.succeed(summary_handle, artifact_hash, execution={"artifact_uri": artifact_uri or ""}, payload=summary_payload)
             elif summary_question:
                 # `needs_input` is deliberately not a failure code: it renders
                 # as **Waiting for you**, must not count against worker failure
@@ -5108,6 +5309,8 @@ class LiveStageAdapter:
         deck_uri = None
         deck = None
         surface_plan = None
+        deck_registered = False
+        registration_error: Exception | None = None
         # Build, Test, and Learn each get a *pre-meeting* decision surface,
         # rendered from the stage's own evidence rather than from a chair result
         # — no meeting has happened when it is written. None of them carries a
@@ -5214,25 +5417,46 @@ class LiveStageAdapter:
             if deck is not None:
                 deck_uri = deck.uri
                 if surface_plan is not None:
-                    await self._register_feedback_surface(
-                        surface_plan,
-                        deck,
-                        cycle_id=cycle_id,
-                        project_id=project_id,
-                    )
+                    try:
+                        await self._register_feedback_surface(
+                            surface_plan,
+                            deck,
+                            cycle_id=cycle_id,
+                            project_id=project_id,
+                        )
+                        deck_registered = True
+                    except Exception as exc:  # noqa: BLE001 - recorded below, then re-raised
+                        registration_error = exc
         if build_workflow_enabled:
             # Opened here rather than around the render call: with the summary
             # missing there is nothing to render, and an attempt whose
             # predecessor never succeeded would be refused by the chain anyway.
             deck_handle = await build_recorder.begin(BuildStepKey.RENDER_REVIEW_DECK)
-            if deck is not None and deck.content_hash:
-                await build_recorder.succeed(deck_handle, deck.content_hash, execution={"deck_uri": deck.uri})
-            else:
+            if deck is None or not deck.content_hash:
                 await build_recorder.fail(
                     deck_handle,
                     BuildErrorCode.DECK_RENDER_FAILED,
                     "The Build review deck could not be rendered from the recorded review package.",
                 )
+            elif not deck_registered:
+                # **A deck nobody can answer is not a review surface.** The step
+                # used to succeed on a rendered file alone, so a registration
+                # that returned no plan left the workflow reporting a finished
+                # Build whose deck could never carry a verdict — and one that
+                # raised did so *before* this step opened, so the code that
+                # names this failure could never be recorded at all.
+                await build_recorder.fail(
+                    deck_handle,
+                    BuildErrorCode.DECK_REGISTRATION_FAILED,
+                    (str(registration_error) if registration_error is not None else "The Build review deck was rendered but could not be bound to a stage attempt, so it cannot carry a decision."),
+                )
+            else:
+                await build_recorder.succeed(deck_handle, deck.content_hash, execution={"deck_uri": deck.uri})
+        if registration_error is not None:
+            # Fail-visible, and now recorded first. Stage evidence is durable by
+            # this point, so a retry is safe; returning success would hand
+            # somebody a deck that can never answer its gate.
+            raise registration_error
 
         # A revision round has to say which route it took and why. The failure
         # this replaces was silence: four workers ran, three of them died, and
