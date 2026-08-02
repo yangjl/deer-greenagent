@@ -48,7 +48,7 @@ from deerflow.dbtl.build_workflow import (
     resolve_build_workflow_by_key,
 )
 from deerflow.dbtl.stage_spec import StageSpecNotFound, resolve_stage_spec
-from deerflow.persistence.dbtl.model import DbtlArtifactRow, DbtlCycleRow, DbtlStageAttemptRow, DbtlStageStepRunRow
+from deerflow.persistence.dbtl.model import DbtlArtifactRow, DbtlBuildCollaborationRow, DbtlCycleRow, DbtlStageAttemptRow, DbtlStageStepRunRow
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -241,6 +241,21 @@ class StepOpsMixin:
         except StageSpecNotFound:
             stage_spec_key = stage_run.stage_spec_key
 
+        # Counted here, in the same session and from the same rows the read
+        # model uses, because a restart or a replan a person asked for has to
+        # move the chain: a restart that recomputed the same digest would replay
+        # the committed success it exists to discard.
+        answered = await session.execute(
+            select(DbtlBuildCollaborationRow.action).where(
+                DbtlBuildCollaborationRow.stage_attempt_id == stage_run.id,
+                DbtlBuildCollaborationRow.project_id == stage_run.project_id,
+                DbtlBuildCollaborationRow.lifecycle == "answered",
+            )
+        )
+        actions = [str(value or "") for value in answered.scalars().all()]
+        restart_epoch = sum(1 for value in actions if value == "restart_build")
+        replan_epoch = restart_epoch + sum(1 for value in actions if value == "replan_build")
+
         return build_step_material(
             workflow_spec_key=workflow_spec_key,
             design_artifact_id=design_artifact.id if design_artifact else None,
@@ -249,6 +264,8 @@ class StepOpsMixin:
             policy_version=stage_run.approved_policy_version or (cycle.policy_version if cycle else None),
             stage_spec_key=stage_spec_key,
             dataset_fingerprint=stage_run.approved_dataset_fingerprint,
+            restart_epoch=restart_epoch,
+            replan_epoch=replan_epoch,
         )
 
     async def build_step_material_for(

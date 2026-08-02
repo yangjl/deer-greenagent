@@ -101,6 +101,7 @@ from deerflow.agents.dbtl.supervisor_support.card_history import (
     wants_roster_adjustment as _wants_roster_adjustment,
 )
 from deerflow.agents.dbtl.supervisor_support.continuation import (
+    handle_build_control,
     handle_stage_handoff,
     handle_test_cards,
     represent_pending_stage_handoff,
@@ -467,6 +468,73 @@ def _setup_clarification_message(
         },
         request=request,
         fallback_content=f"{note}\n\n{question}",
+    )
+
+
+_BUILD_CONTROL_TITLES = {
+    "plan_confirmation": "Build plan",
+    "phase_pause": "Build paused",
+    "step_failure": "Build stopped",
+    "worker_question": "Build needs your answer",
+}
+
+
+def _build_control_message(
+    decision: BranchDecision,
+    request: Mapping[str, Any],
+    *,
+    request_nonce: str,
+) -> tuple[AIMessage, ToolMessage]:
+    """Render a paused Build as a Human Input Card.
+
+    The request id is the adapter's, not this function's: it is derived from
+    what the pause *is* and was already written to the durable collaboration
+    record before the card was built. Minting a fresh one here would leave the
+    card and the record naming different exchanges, and an answer could bind to
+    neither.
+
+    ``request_nonce`` is deliberately unused for that reason. It stays in the
+    signature so this builder is interchangeable with the other card builders
+    the continuation handlers call.
+    """
+    del request_nonce
+    payload = dict(request)
+    request_id = str(payload.get("request_id") or "")
+    kind = str(payload.get("build_control_kind") or "")
+    question = str(payload.get("question") or "What should happen next?")
+    rows = [row for row in payload.get("build_plan_rows") or [] if isinstance(row, Mapping)]
+    lines = [str(payload.get("rationale") or "")]
+    if rows:
+        lines.append("")
+        lines.extend(f"{index}. {row.get('title') or row.get('phase_key')} — {row.get('objective') or ''}".rstrip(" —") for index, row in enumerate(rows, start=1))
+    for label, key in (("Assumptions", "assumptions"), ("Open questions", "open_questions")):
+        items = [str(item) for item in payload.get(key) or [] if str(item).strip()]
+        if items:
+            lines.extend(["", f"{label}:", *(f"- {item}" for item in items)])
+    context = "\n".join(line for line in lines if line is not None).strip()
+    options = [dict(option) for option in payload.get("options") or [] if isinstance(option, Mapping)]
+    payload.update(
+        {
+            "version": 1,
+            "kind": "human_input_request",
+            "source": "ask_clarification",
+            "title": _BUILD_CONTROL_TITLES.get(kind, "Build"),
+            "context": context,
+            "dbtl_cycle_id": payload.get("dbtl_cycle_id") or decision.cycle_id or "",
+        }
+    )
+    tool_args: dict[str, Any] = {
+        "question": question,
+        "context": context,
+        "clarification_type": "dbtl_build_control",
+    }
+    if options:
+        tool_args["options"] = options
+    return build_human_input_messages(
+        request_id=request_id,
+        tool_args=tool_args,
+        request=payload,
+        fallback_content="\n\n".join(part for part in (context, question) if part),
     )
 
 
@@ -1303,6 +1371,20 @@ def build_supervisor_graph(
             return handoff.update or {}
         handoff_answer = handoff.handoff_answer
 
+        # Before the Test cards and before anything else that could dispatch: a
+        # Build control the server raised is answered by this request, or it is
+        # still waiting and this request is trying to talk past it.
+        build_control_result = await handle_build_control(
+            state=state,
+            decision=decision,
+            context=context,
+            request_nonce=request_nonce,
+            build_card=_build_control_message,
+        )
+        if build_control_result.handled:
+            return build_control_result.update or {}
+        build_control_answer = build_control_result.control_answer
+
         test_cards = await handle_test_cards(
             state=state,
             config=config,
@@ -1445,6 +1527,8 @@ def build_supervisor_graph(
             "state": state,
             "config": config,
         }
+        if build_control_answer is not None:
+            execute_kwargs["build_control"] = build_control_answer
         if handoff_answer is not None and handoff_answer[0] == "start_next_stage":
             execute_kwargs["expected_stage"] = str(handoff_answer[1].get("next_stage") or "")
             execute_kwargs["expected_cycle_revision"] = int(handoff_answer[1].get("cycle_revision") or 0)
@@ -1526,6 +1610,19 @@ def build_supervisor_graph(
         result = stage_adapter.execute(**execute_kwargs)
         if isawaitable(result):
             result = await result
+        # A paused Build is checked before every other shape a result can take.
+        # It is not an artifact, not a clarification the Design council raised,
+        # and not a failure — it is a decision the server already recorded and
+        # is now asking for, and the only thing that can carry it back is the
+        # card bound to that record.
+        control_request = getattr(result, "control_request", None)
+        if isinstance(control_request, Mapping) and control_request.get("request_id"):
+            return {
+                "messages": [
+                    *([receipt_message(result.note)] if getattr(result, "note", "") else []),
+                    *_build_control_message(decision, control_request, request_nonce=str(raw_context.get("run_id") or "")),
+                ]
+            }
         authoring_request = getattr(result, "authoring_request", None)
         if isinstance(authoring_request, str) and authoring_request:
             return {

@@ -13,6 +13,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.dbtl.build_control import BuildControlAnswer, resolve_answer
 from deerflow.dbtl.council import CouncilDepth
 from deerflow.dbtl.council_proposal import CouncilProposal, proposal_from_dict
 from deerflow.dbtl.council_settings import ParticipantSettings, parse_participant_settings
@@ -20,6 +21,7 @@ from deerflow.dbtl.routing import ExplicitChoice
 from deerflow.utils.messages import message_content_to_text
 
 from .human_input_protocol import (
+    BUILD_CONTROL_PREFIX,
     COUNCIL_ADJUST_PREFIX,
     COUNCIL_PREFLIGHT_PREFIX,
     DESIGN_AUTHORING_PREFIX,
@@ -446,3 +448,74 @@ def resumed_council_setup(state: dict, known_models: Sequence[str]) -> tuple[Cou
         return None, {}
     request, raw = answered
     return proposal_from_dict(request.get("council_proposal")), parse_participant_settings(raw.get("participants"), known_models=known_models)
+
+
+def answered_build_control(state: dict) -> BuildControlAnswer | None:
+    """Resolve a Build-control reply through the card the server emitted.
+
+    The reply is the one part of this exchange a client authors, so the option
+    it names is matched against the options that card actually offered. A forged
+    request id resolves to no card and selects nothing; an invented option id
+    matches nothing on a real one. Either way the request falls through to
+    ordinary routing rather than starting, replanning, or restarting a governed
+    Build.
+    """
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if not response or response.get("source") != "ask_clarification":
+            return None
+        request_id = str(response.get("request_id") or "")
+        if not request_id.startswith(BUILD_CONTROL_PREFIX):
+            return None
+        return resolve_answer(emitted_card_request(state, request_id), response)
+    return None
+
+
+def unanswered_build_control_card(state: dict) -> dict[str, Any] | None:
+    """The newest Build control the server emitted that nobody has answered.
+
+    Same shape as the Start/Hold fence and for the same reason: while a control
+    the server raised is still waiting, a free-text follow-up is *answering it*,
+    and letting that reach ordinary chat is how a paused Build silently becomes
+    a conversation with the lead agent about a build it cannot start.
+    """
+    answered: set[str] = set()
+    for message in state.get("messages") or []:
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if not response or response.get("source") != "ask_clarification":
+            continue
+        request_id = str(response.get("request_id") or "")
+        if request_id.startswith(BUILD_CONTROL_PREFIX) and resolve_answer(emitted_card_request(state, request_id), response) is not None:
+            answered.add(request_id)
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, ToolMessage):
+            continue
+        artifact = getattr(message, "artifact", None)
+        request = artifact.get("human_input") if isinstance(artifact, dict) else None
+        if not isinstance(request, dict) or request.get("clarification_type") != "dbtl_build_control":
+            continue
+        request_id = str(request.get("request_id") or "")
+        return None if not request_id or request_id in answered else request
+    return None
+
+
+def pending_build_control(state: dict, *, selected_cycle_id: str | None = None) -> dict[str, Any] | None:
+    """The one Build control this request should be answering, if any.
+
+    Shared by the routing fence and the handler that re-presents the card, so
+    the two cannot disagree — a fence that intercepts a request the handler then
+    declines would fall straight through to dispatching stage work, which is the
+    opposite of what the fence is for.
+    """
+    if answers_a_server_card(state):
+        return None
+    request = unanswered_build_control_card(state)
+    if request is None:
+        return None
+    if selected_cycle_id and str(request.get("dbtl_cycle_id") or "") != str(selected_cycle_id):
+        return None
+    return request

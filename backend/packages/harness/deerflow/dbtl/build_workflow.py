@@ -246,6 +246,8 @@ def build_step_material(
     policy_version: str | None,
     stage_spec_key: str | None,
     dataset_fingerprint: str | None,
+    restart_epoch: int = 0,
+    replan_epoch: int = 0,
 ) -> dict[BuildStepKey, dict[str, str]]:
     """The server-owned material each step's identity is computed from.
 
@@ -278,6 +280,14 @@ def build_step_material(
     capabilities: registering or retiring one changes which plans are legal and
     which specialist a phase resolves to, and a plan drawn against a different
     registry is not a plan for this deployment.
+
+    The two **epochs** are the one thing here a person moves directly, and they
+    are what make Restart and Replan mean anything. Without them a restart
+    recomputes the same input digest as the run it is restarting, the committed
+    success replays, and the button does nothing at all. They satisfy the
+    recomputability rule because they are counted from durable collaboration
+    rows, not held in the running process: the writer opens its steps against
+    the same count the projection reads back.
     """
     return {
         BuildStepKey.LOAD_DESIGN: {
@@ -288,10 +298,12 @@ def build_step_material(
             "policy_version": policy_version or "",
             "stage_spec_key": stage_spec_key or "",
             "dataset_fingerprint": dataset_fingerprint or "",
+            "restart_epoch": str(int(restart_epoch or 0)),
         },
         BuildStepKey.PLAN_BUILD: {
             "contract": CONTRACT_VERSIONS[BuildStepKey.PLAN_BUILD],
             "capability_registry": capability_registry_fingerprint(),
+            "replan_epoch": str(int(replan_epoch or 0)),
         },
         BuildStepKey.EXECUTE_PHASES: {},
         BuildStepKey.SUMMARIZE_RESULTS: {"contract": CONTRACT_VERSIONS[BuildStepKey.SUMMARIZE_RESULTS]},

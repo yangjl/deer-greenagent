@@ -28,6 +28,10 @@ TEST_OUTCOME_PREFIX = "dbtl-test-outcome__"
 STAGE_HANDOFF_PREFIX = "dbtl-stage-handoff__"
 COUNCIL_PREFLIGHT_PREFIX = "dbtl-council__"
 COUNCIL_ADJUST_PREFIX = "dbtl-council-edit__"
+#: A paused Build: confirm the plan, continue past a boundary, or choose what to
+#: do after a failure. One prefix for all four kinds, because they share one
+#: answer vocabulary and one recovery path.
+BUILD_CONTROL_PREFIX = "dbtl-build__"
 
 # Not a card: the id prefix of the ``present_files`` pair that delivers a
 # finished package.  It shares the same provider constraints.

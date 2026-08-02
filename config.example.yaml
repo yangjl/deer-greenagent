@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 39
+config_version: 40
 
 # ============================================================================
 # Logging
@@ -1268,10 +1268,23 @@ dbtl:
   # approved package is unreadable through the project root should discover it
   # in the manual profile rather than mid-experiment.
   #
-  # Not implemented yet: human collaboration on a paused step (including
-  # confirming the plan before phases run), and retrying one step on its own
-  # from the UI.
+  # A paused Build raises a bound control in chat — confirm the plan, continue
+  # past a phase boundary, or choose Retry / Replan / Restart / Hold after a
+  # failure. Every option states what it costs, nothing is preselected, and the
+  # answer is recorded with who gave it.
   build_workflow_steps: false
+  # Show the recorded plan before any phase runs: Start the build, Change the
+  # plan, Hold here. Redirecting a build here costs a sentence; redirecting it
+  # afterwards costs the run. "Change the plan" carries your words verbatim into
+  # a replan rather than paraphrasing them into a planner-owned decision.
+  #
+  # Off runs the recorded plan immediately. Requires build_workflow_steps, since
+  # a Build with no recorded plan has nothing to confirm.
+  build_plan_confirmation: false
+  # Offer a bounded Build work meeting when a step pauses on a question one
+  # exchange cannot settle. The meeting reads the recorded evidence and proposes
+  # options; it is advisory and can never resume the Build by itself.
+  build_work_meetings: false
   progressive_gate: false
   # One-shot model that assesses the remaining work as routine, standard, or
   # high_stakes after a Design meeting produces bound evidence. null, provider

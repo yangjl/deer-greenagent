@@ -82,7 +82,7 @@ async def test_upgrade_survives_a_database_whose_schema_ran_ahead_of_its_ledger(
 
         async with engine.connect() as connection:
             version = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
-        assert version == "0026_dbtl_stage_step_runs"
+        assert version == "0027_dbtl_build_collaborations"
         assert TABLE in await _tables(engine)
     finally:
         await engine.dispose()

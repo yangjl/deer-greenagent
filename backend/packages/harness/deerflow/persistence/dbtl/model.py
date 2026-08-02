@@ -986,3 +986,113 @@ class KnowledgeEventRow(Base):
             name="uq_knowledge_event_idempotency",
         ),
     )
+
+
+class DbtlBuildCollaborationRow(Base):
+    """One pause in a Build, and the human answer that released it.
+
+    A paused step already records *that* it is waiting (`needs_input`) and the
+    sentence it is waiting on. What it cannot record is the exchange: which
+    formats were offered, which option the person chose, in whose name, against
+    which cycle revision, and which attempt resumed as a result. Without that a
+    resumed Build cannot be reconstructed — and "who decided to replan" is
+    exactly the question a reviewer asks when the phases beneath a plan are
+    gone.
+
+    Two rules live in the schema rather than in calling code.
+
+    **One control may be open per stage attempt.** A Build pauses at exactly one
+    place, so a second open request means a stale card is competing with a live
+    one for the same answer. The partial unique index is the arbiter, because
+    two concurrent dispatches can both pass a check-then-write.
+
+    **A response is idempotent by request plus client submission id, and a
+    changed answer under the same id is a conflict rather than a silent
+    overwrite.** A double-clicked button and a genuinely different decision look
+    identical at the HTTP boundary; only the payload tells them apart.
+    """
+
+    __tablename__ = "dbtl_build_collaborations"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    cycle_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dbtl_cycles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    stage_attempt_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("dbtl_stage_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    workflow_spec_key: Mapped[str] = mapped_column(String(96), nullable=False)
+
+    #: Which pause this is, and what it is bound to. The digests are what make a
+    #: replayed answer detectable: an answer to a plan that has since been
+    #: redrawn names a `plan_digest` nothing selects any more.
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    step_key: Mapped[str] = mapped_column(String(48), nullable=False)
+    step_run_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    plan_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    input_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    bound_cycle_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+
+    #: The card as it was shown. Retained because a review of a resumed Build
+    #: has to be able to see the choice as it was offered, not as it would be
+    #: rendered today.
+    request_id: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    response_format: Mapped[str] = mapped_column(String(24), nullable=False, default="single_choice", server_default="single_choice")
+    question: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    rationale: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    options: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    recommended_option_id: Mapped[str | None] = mapped_column(String(48), nullable=True)
+
+    #: `open`, `answered`, `held`, `superseded`, `stale`, or `cancelled`.
+    lifecycle: Mapped[str] = mapped_column(String(24), nullable=False, default="open", server_default="open", index=True)
+
+    #: The answer, verbatim. Never a paraphrase, and never attributed to an
+    #: agent: `responder_user_id` is taken from the authenticated run, not from
+    #: the reply.
+    action: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    response_text: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    responder_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    client_submission_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    #: Where the exchange happened, and what it started.
+    originating_thread_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parent_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    resumed_step_run_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    meeting_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now, onupdate=_utc_now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "request_id",
+            "client_submission_id",
+            name="uq_dbtl_build_collab_submission",
+        ),
+        Index(
+            "ix_dbtl_build_collab_attempt",
+            "stage_attempt_id",
+            "lifecycle",
+        ),
+        # "Only one collaboration request may be open for one step attempt."
+        Index(
+            "uq_dbtl_build_collab_open",
+            "stage_attempt_id",
+            unique=True,
+            sqlite_where=text("lifecycle = 'open'"),
+            postgresql_where=text("lifecycle = 'open'"),
+        ),
+    )

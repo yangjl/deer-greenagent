@@ -12,10 +12,13 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.dbtl.branches import BranchDecision, SupervisorContext
+from deerflow.dbtl.build_control import BuildControlAnswer
 
 from .card_history import (
+    answered_build_control,
     answered_stage_handoff,
     answered_test_card,
+    pending_build_control,
     pending_stage_handoff,
     pending_stage_handoff_control,
     stage_handoff_marker,
@@ -34,6 +37,7 @@ class HandlerResult:
 
     update: StateUpdate | None = None
     handoff_answer: tuple[str, dict[str, Any]] | None = None
+    control_answer: BuildControlAnswer | None = None
 
     @property
     def handled(self) -> bool:
@@ -222,3 +226,37 @@ async def handle_test_cards(
             **({"artifacts": artifacts} if artifacts else {}),
         }
     )
+
+
+async def handle_build_control(
+    *,
+    state: dict,
+    decision: BranchDecision,
+    context: SupervisorContext,
+    request_nonce: str,
+    build_card: Callable[..., tuple[BaseMessage, BaseMessage]],
+) -> HandlerResult:
+    """Consume a Build-control answer, or re-present the control still waiting.
+
+    Two directions, one handler, because they are the same question asked from
+    opposite sides. A valid answer carries the card's own bindings forward to
+    the adapter, which re-validates them. Anything else, while a control the
+    server raised is still unanswered, *is* an attempt to answer it — the
+    observed shape is a free-text follow-up with no cycle scope — and letting
+    that reach ordinary chat turns a paused Build into a conversation with the
+    lead agent about a build it has no authority to start.
+
+    A control naming a different cycle is not this request's to answer: a
+    project runs several builds at once, and the card names the one it belongs
+    to.
+    """
+    answer = answered_build_control(state)
+    if answer is not None:
+        if answer.cycle_id and decision.cycle_id and answer.cycle_id != str(decision.cycle_id):
+            return HandlerResult(update={"messages": [receipt_message("That build control belongs to a different cycle, so nothing was started.")]})
+        return HandlerResult(control_answer=answer)
+
+    pending = pending_build_control(state, selected_cycle_id=context.selected_cycle_id or decision.cycle_id)
+    if pending is None:
+        return HandlerResult()
+    return HandlerResult(update={"messages": list(build_card(decision, pending, request_nonce=request_nonce))})

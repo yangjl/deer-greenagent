@@ -27,6 +27,11 @@ class LiveStageResult:
     feedback_surface_id: str | None = None
     test_assessment: Mapping[str, Any] | None = None
     review_meeting_requirement: str | None = None
+    #: A bound Build control the supervisor should render as a Human Input Card.
+    #: Present means the Build is paused on a decision, not that it failed: the
+    #: two lead to different words and different next steps, so the caller must
+    #: be able to tell them apart without parsing `note`.
+    control_request: Mapping[str, Any] | None = None
 
     @property
     def satisfies_gate(self) -> bool:

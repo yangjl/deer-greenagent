@@ -43,6 +43,7 @@ from deerflow.dbtl.cycle_state import (
 from deerflow.dbtl.reconciliation_policy import reconciliation_required
 from deerflow.dbtl.stage_routes import GRAPH_STAGES
 from deerflow.persistence.dbtl.build_test_ops import BuildTestOpsMixin
+from deerflow.persistence.dbtl.collaboration_ops import CollaborationOpsMixin
 from deerflow.persistence.dbtl.design_feedback_ops import DesignFeedbackOpsMixin
 from deerflow.persistence.dbtl.knowledge_ops import KnowledgeOpsMixin
 from deerflow.persistence.dbtl.model import (
@@ -94,7 +95,7 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOpsMixin, ReconciliationOpsMixin, StepOpsMixin, TransitionOpsMixin):
+class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOpsMixin, DesignFeedbackOpsMixin, ReconciliationOpsMixin, StepOpsMixin, TransitionOpsMixin):
     """Read and mutate durable DBTL cycles for one deployment.
 
     Phase 6's data-readiness operations live in

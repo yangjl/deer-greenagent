@@ -24,7 +24,7 @@ async def test_upgrade_adds_action_ledger_and_review_provenance(tmp_path: Path) 
             review_columns = await connection.run_sync(lambda sync: {item["name"] for item in sa.inspect(sync).get_columns("dbtl_reviews")})
             version = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
 
-        assert version == "0026_dbtl_stage_step_runs"
+        assert version == "0027_dbtl_build_collaborations"
         assert "dbtl_design_feedback_actions" in tables
         assert {"surface_id", "payload_hash", "status", "receipt"} <= action_columns
         assert {

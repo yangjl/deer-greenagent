@@ -80,6 +80,27 @@ class DbtlConfig(BaseModel):
         ),
     )
 
+    build_plan_confirmation: bool = Field(
+        default=False,
+        description=(
+            "Show the recorded Build plan as a card — Start the build, Change the plan, Hold here — before any phase is "
+            "dispatched. Redirecting a build here costs a sentence; redirecting it afterwards costs the run. 'Change the "
+            "plan' carries the person's words verbatim into a replan rather than paraphrasing them into a planner-owned "
+            "decision, and nothing is preselected. Off runs the recorded plan immediately, which is the behaviour before "
+            "this existed. Requires dbtl.build_workflow_steps, since a Build with no recorded plan has nothing to confirm."
+        ),
+    )
+
+    build_work_meetings: bool = Field(
+        default=False,
+        description=(
+            "Offer a bounded Build work meeting when a Build step pauses on a question one exchange cannot settle. The "
+            "meeting reads the recorded evidence and proposes options; it is advisory and can never resume the Build by "
+            "itself — only the person's bound answer does that. Off leaves the pause answerable directly, which is the "
+            "cheaper interaction and the right one for most questions."
+        ),
+    )
+
     progressive_gate: bool = Field(
         default=False,
         description=(

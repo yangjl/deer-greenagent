@@ -27,6 +27,7 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.dbtl.live_stage.build_controls import DISABLED_GATE, BuildControlGate
 from deerflow.agents.dbtl.live_stage.build_phases import (
     GENERALIST,
     PLANNER_ROLE,
@@ -78,6 +79,15 @@ from deerflow.agents.middlewares.finalization_deadline_middleware import (
 )
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.dbtl.agent_selector import AgentCandidate, Assignment, SelectionResult, build_candidates, select_agents
+from deerflow.dbtl.build_control import (
+    BuildControlAction,
+    BuildControlAnswer,
+    BuildControlKind,
+    change_plan_request,
+    phase_pause_request,
+    plan_confirmation_request,
+    step_failure_request,
+)
 from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError
 from deerflow.dbtl.build_plan import BuildPhasePlan, parse_build_plan, restore_build_plan, single_phase_plan
 from deerflow.dbtl.build_summary import BuildReviewPackage
@@ -2124,6 +2134,34 @@ def _publish_build_worker_artifacts(
     )
 
 
+def _settled_control(answer: BuildControlAnswer) -> BuildControlAnswer:
+    """Read a free-text answer to a plan card as what it actually is: a replan.
+
+    The person typed what they wanted changed, so the *decision* is "draw the
+    plan again", and recording it as a generic direct answer would leave the
+    replan epoch unmoved — the committed plan would replay and their words would
+    reach nothing. Their comment travels unchanged; only the verb is named
+    honestly.
+    """
+    if answer.action is BuildControlAction.ANSWER_DIRECTLY and answer.kind in {BuildControlKind.PLAN_CONFIRMATION, BuildControlKind.PHASE_PAUSE}:
+        return replace(answer, action=BuildControlAction.REPLAN_BUILD)
+    return answer
+
+
+def _control_context(answer: BuildControlAnswer) -> dict[str, Any]:
+    """The bindings a follow-up control inherits from the one being answered."""
+    return {
+        "build_control_kind": answer.kind.value,
+        "dbtl_cycle_id": answer.cycle_id,
+        "stage_attempt_id": answer.stage_attempt_id,
+        "workflow_spec_key": "",
+        "step_key": answer.step_key,
+        "cycle_revision": answer.cycle_revision,
+        "plan_digest": answer.plan_digest,
+        "input_digest": answer.input_digest,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class _PhaseRun:
     """What running a Build plan produced, and whether it produced all of it.
@@ -2138,6 +2176,14 @@ class _PhaseRun:
     published: list[dict[str, Any]]
     complete: bool
     stopped_because: str = ""
+    #: A plan that stopped at its own boundary and one that stopped on a failure
+    #: are both incomplete, and they are not the same thing to a person: one
+    #: asks "carry on?", the other asks "what now?". Kept apart here so the
+    #: caller does not have to read `stopped_because` to tell them apart.
+    paused: bool = False
+    paused_phase_title: str = ""
+    completed_count: int = 0
+    failure_code: BuildErrorCode | None = None
 
 
 def _phase_note(assignment: PhaseAssignment, result: StageWorkerResult) -> dict[str, Any]:
@@ -2984,6 +3030,7 @@ class LiveStageAdapter:
         inputs: BuildInputBundle,
         cycle: Mapping[str, Any],
         candidates: Sequence[AgentCandidate],
+        adjustment: str = "",
     ) -> tuple[BuildPhasePlan, tuple[str, ...]]:
         """Ask for a decomposition; accept a single phase; never fail here.
 
@@ -2999,6 +3046,10 @@ class LiveStageAdapter:
             {
                 "cycle": {key: cycle.get(key) for key in ("id", "title", "research_question", "objective", "success_criteria")},
                 "build_input_bundle": inputs.as_dict(),
+                # The owner's words, verbatim. Paraphrasing them into a planner-owned
+                # instruction is the failure this second exchange exists to avoid:
+                # the point of asking was to hear what *they* wanted changed.
+                **({"owner_requested_changes": adjustment} if adjustment else {}),
             },
             sort_keys=True,
             ensure_ascii=False,
@@ -3028,6 +3079,7 @@ class LiveStageAdapter:
         project_root: str,
         cycle: Mapping[str, Any],
         stage_workspace: str,
+        continue_past_boundary: bool = False,
     ) -> _PhaseRun:
         """Run the plan's phases in order, each as its own attempt.
 
@@ -3062,6 +3114,9 @@ class LiveStageAdapter:
         completed: list[Mapping[str, Any]] = []
         published: list[dict[str, Any]] = []
         stopped = ""
+        paused = False
+        paused_title = ""
+        failure_code: BuildErrorCode | None = None
 
         for index, assignment in enumerate(assignments, start=1):
             if not assignment.covered:
@@ -3071,6 +3126,7 @@ class LiveStageAdapter:
                 # to prevent.
                 stopped = f"No registered agent can cover {assignment.phase.capability.value!r}, which phase {assignment.phase.title!r} asks for."
                 rejected.append(stopped)
+                failure_code = BuildErrorCode.PLAN_CAPABILITY_UNKNOWN
                 break
 
             handle = await recorder.begin(
@@ -3090,9 +3146,13 @@ class LiveStageAdapter:
                 results.append(result)
                 published.extend(phase_published)
                 completed.append(_phase_note(assignment, result))
-                if assignment.phase.pause_after:
+                # A replayed phase's boundary was already shown and answered —
+                # that is what "Continue" meant. Stopping at it again would ask
+                # the same question forever and make the plan unfinishable.
+                if assignment.phase.pause_after and not continue_past_boundary:
                     stopped = _pause_note(assignment)
                     rejected.append(stopped)
+                    paused, paused_title = True, assignment.phase.title
                     break
                 continue
 
@@ -3123,7 +3183,8 @@ class LiveStageAdapter:
             if result is None or not result.is_trustworthy:
                 results.extend(phase_outcome.results)
                 stopped = "; ".join(phase_outcome.rejected) or f"Phase {assignment.phase.title!r} returned no usable result."
-                await recorder.fail(handle, BuildErrorCode.EXECUTION_CONTRACT_REJECTED, stopped)
+                failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
+                await recorder.fail(handle, failure_code, stopped)
                 break
 
             # Publish *this* phase before its row is settled, so a success in the
@@ -3141,7 +3202,8 @@ class LiveStageAdapter:
             rejected.extend(entry for entry in phase_outcome.rejected if entry not in rejected)
             if result is None or not result.is_trustworthy or not phase_published:
                 stopped = "; ".join(phase_outcome.rejected) or f"Phase {assignment.phase.title!r} produced no output the server could verify."
-                await recorder.fail(handle, BuildErrorCode.EXECUTION_OUTPUT_MISSING, stopped)
+                failure_code = BuildErrorCode.EXECUTION_OUTPUT_MISSING
+                await recorder.fail(handle, failure_code, stopped)
                 break
 
             published.extend(phase_published)
@@ -3158,6 +3220,7 @@ class LiveStageAdapter:
                 # costs nothing and is the cheapest possible pause.
                 stopped = _pause_note(assignment)
                 rejected.append(stopped)
+                paused, paused_title = True, assignment.phase.title
                 break
 
         return _PhaseRun(
@@ -3169,7 +3232,81 @@ class LiveStageAdapter:
             published=published,
             complete=len(completed) == len(plan.phases) and not stopped,
             stopped_because=stopped,
+            paused=paused,
+            paused_phase_title=paused_title,
+            completed_count=len(completed),
+            failure_code=failure_code,
         )
+
+    async def _build_pause_control(
+        self,
+        phase_run: _PhaseRun | None,
+        *,
+        gate: BuildControlGate,
+        cycle: Mapping[str, Any],
+        plan: BuildPhasePlan | None,
+        attempt: Mapping[str, Any] | None,
+        workflow_spec_key: str,
+        summary_refusal: str,
+    ) -> dict[str, Any] | None:
+        """The control this Build's stopping point calls for, if any.
+
+        Three states, three different questions. A plan that stopped at its own
+        boundary asks whether to carry on. A plan that stopped on a failure asks
+        what to do about it. And a write-up that could not be produced asks the
+        same thing about a much cheaper step — which matters, because a person
+        told only "the summary failed" has no way to know their sandbox work is
+        still pinned and reusable.
+
+        Returns ``None`` when the Build finished, when it was never running this
+        workflow, or when the plan is still whole. Raising a control for a
+        successful Build would put a question in front of somebody who has an
+        answer already.
+        """
+        common = {
+            "cycle_id": str(cycle.get("id") or ""),
+            "stage_attempt_id": str((attempt or {}).get("id") or ""),
+            "workflow_spec_key": workflow_spec_key,
+            "cycle_revision": int(cycle.get("db_revision") or 0),
+        }
+        if phase_run is not None and not phase_run.complete:
+            if phase_run.paused and plan is not None:
+                return await gate.raise_control(
+                    phase_pause_request(
+                        plan=plan,
+                        completed_phases=phase_run.completed_count,
+                        paused_phase_title=phase_run.paused_phase_title,
+                        **common,
+                    )
+                )
+            return await gate.raise_control(
+                step_failure_request(
+                    step_key=BuildStepKey.EXECUTE_PHASES.value,
+                    step_label="Run the build",
+                    error_code=(phase_run.failure_code.value if phase_run.failure_code else BuildErrorCode.INTERNAL_ERROR.value),
+                    error_summary=phase_run.stopped_because,
+                    completed_phases=phase_run.completed_count,
+                    plan_digest=str(getattr(plan, "digest", "") or ""),
+                    plan=plan,
+                    **common,
+                )
+            )
+        if summary_refusal:
+            # Presentational, and the card says so through its options: retrying
+            # the write-up reuses the execution rather than re-running it.
+            return await gate.raise_control(
+                step_failure_request(
+                    step_key=BuildStepKey.SUMMARIZE_RESULTS.value,
+                    step_label="Summarize results",
+                    error_code=BuildErrorCode.SUMMARY_CONTRACT_REJECTED.value,
+                    error_summary=summary_refusal,
+                    completed_phases=(phase_run.completed_count if phase_run is not None else 0),
+                    plan_digest=str(getattr(plan, "digest", "") or ""),
+                    plan=plan,
+                    **common,
+                )
+            )
+        return None
 
     async def _summarize_build(
         self,
@@ -3715,6 +3852,7 @@ class LiveStageAdapter:
         review_meeting_stage: str | None = None,
         expected_stage: str | None = None,
         expected_cycle_revision: int | None = None,
+        build_control: BuildControlAnswer | None = None,
     ) -> LiveStageResult:
         """Run the cycle's currently executable stage and record what it produced.
 
@@ -3740,6 +3878,7 @@ class LiveStageAdapter:
                 review_meeting_stage=review_meeting_stage,
                 expected_stage=expected_stage,
                 expected_cycle_revision=expected_cycle_revision,
+                build_control=build_control,
             )
 
     async def _execute_stage(
@@ -3759,6 +3898,7 @@ class LiveStageAdapter:
         review_meeting_stage: str | None = None,
         expected_stage: str | None = None,
         expected_cycle_revision: int | None = None,
+        build_control: BuildControlAnswer | None = None,
     ) -> LiveStageResult:
         if not project_id or not cycle_id:
             return LiveStageResult(
@@ -3957,17 +4097,58 @@ class LiveStageAdapter:
         # what makes that discoverable in the manual profile first rather than
         # in somebody's experiment. With the flag off, Build behaves exactly as
         # it did.
-        build_workflow_enabled = stage == "build" and bool(getattr(getattr(self._app_config, "dbtl", None), "build_workflow_steps", False))
+        dbtl_config = getattr(self._app_config, "dbtl", None)
+        build_workflow_enabled = stage == "build" and bool(getattr(dbtl_config, "build_workflow_steps", False))
         build_recorder = DISABLED_RECORDER
         build_inputs: BuildInputBundle | None = None
+        control_gate = DISABLED_GATE
+        plan_adjustment = ""
         if build_workflow_enabled:
+            stage_attempt_row_id = str((attempt or {}).get("id") or "")
+            control_gate = BuildControlGate(
+                repo=self._repo,
+                project_id=project_id,
+                cycle_id=cycle_id,
+                stage_attempt_id=stage_attempt_row_id,
+                thread_id=str(runtime.get("thread_id") or ""),
+                run_id=str(run_id or ""),
+                responder_user_id=str(user_id or ""),
+            )
+            # The answer is recorded **before** the recorder loads its material,
+            # because a restart or a replan moves the digest chain: recording it
+            # afterwards would open every step against the material of the run
+            # the person just asked to abandon, replay its committed success,
+            # and leave the button doing nothing.
+            if build_control is not None and build_control.stage_attempt_id == stage_attempt_row_id:
+                settled = _settled_control(build_control)
+                await control_gate.record_answer(settled)
+                if settled.action is BuildControlAction.HOLD:
+                    return LiveStageResult(
+                        stage=stage,
+                        cycle_id=cycle_id,
+                        note="Holding here. Nothing was dispatched, and every finished part of this build stays recorded.",
+                    )
+                if settled.action is BuildControlAction.CHANGE_PLAN:
+                    return LiveStageResult(
+                        stage=stage,
+                        cycle_id=cycle_id,
+                        note="Tell me what to change and I will draw the plan again from your words.",
+                        control_request=await control_gate.raise_control(
+                            change_plan_request(
+                                previous=_control_context(build_control),
+                                remaining_only=settled.kind is BuildControlKind.PHASE_PAUSE,
+                            )
+                        ),
+                    )
+                if settled.action is BuildControlAction.REPLAN_BUILD:
+                    plan_adjustment = settled.comment
             build_recorder = await make_build_step_recorder(
                 self._repo,
                 RecorderRequest(
                     enabled=True,
                     project_id=project_id,
                     cycle_id=cycle_id,
-                    stage_attempt_id=str((attempt or {}).get("id") or ""),
+                    stage_attempt_id=stage_attempt_row_id,
                     parent_run_id=str(run_id),
                     project_root=str(project_root),
                 ),
@@ -4221,6 +4402,7 @@ class LiveStageAdapter:
                     inputs=build_inputs,
                     cycle=cycle,
                     candidates=self._candidates(),
+                    adjustment=plan_adjustment,
                 )
                 if not build_plan.dispatchable:
                     # `needs_input`. The stage stays safely paused rather than
@@ -4246,6 +4428,27 @@ class LiveStageAdapter:
                     plan_output_digest(plan_digest=build_plan.digest, input_digest_value=build_inputs.digest),
                     execution={"feasibility": build_plan.feasibility.value, "phases": len(build_plan.phases), "degraded": bool(plan_reasons)},
                     payload=build_plan.as_dict(),
+                )
+
+            # The cheapest intervention there is: the plan exists, nothing has
+            # run, and redirecting it costs a sentence. Behind its own switch
+            # because it interrupts every Build, and a deployment that trusts
+            # its planner should not be asked four times a day.
+            if bool(getattr(dbtl_config, "build_plan_confirmation", False)) and build_plan.dispatchable and not await control_gate.plan_is_confirmed(build_plan.digest):
+                return LiveStageResult(
+                    stage=stage,
+                    cycle_id=cycle_id,
+                    note="Here is the plan for this build. Nothing has run yet.",
+                    control_request=await control_gate.raise_control(
+                        plan_confirmation_request(
+                            plan=build_plan,
+                            cycle_id=cycle_id,
+                            stage_attempt_id=str((attempt or {}).get("id") or ""),
+                            workflow_spec_key=build_recorder.spec_key,
+                            cycle_revision=int(cycle.get("db_revision") or 0),
+                            input_digest=build_inputs.digest,
+                        )
+                    ),
                 )
 
         proposal: CouncilProposal | None = None
@@ -4360,6 +4563,7 @@ class LiveStageAdapter:
                 project_root=project_root,
                 cycle=cycle,
                 stage_workspace=stage_workspace,
+                continue_past_boundary=(build_control is not None and build_control.action is BuildControlAction.CONTINUE_BUILD),
             )
             outcome = phase_run.outcome
         else:
@@ -4870,6 +5074,24 @@ class LiveStageAdapter:
                     *(["", "Why each worker did not count:", *_failure_reasons(results)] if results else []),
                 ]
             )
+        # A Build that stopped is a decision waiting to be made, not a dead end.
+        # The control is raised last, from state already committed: every phase
+        # that ran is recorded, no worker lease is held, and the person's answer
+        # starts a new attempt rather than resuming a process.
+        control_request = (
+            await self._build_pause_control(
+                phase_run,
+                gate=control_gate,
+                cycle=cycle,
+                plan=build_plan,
+                attempt=attempt,
+                workflow_spec_key=build_recorder.spec_key,
+                summary_refusal=summary_refusal if build_workflow_enabled else "",
+            )
+            if build_workflow_enabled
+            else None
+        )
+
         return LiveStageResult(
             stage=stage,
             cycle_id=cycle_id,
@@ -4882,4 +5104,5 @@ class LiveStageAdapter:
             feedback_surface_id=(surface_plan.surface_id if surface_plan is not None and deck is not None else None),
             test_assessment=test_assessment,
             review_meeting_requirement=review_meeting_requirement,
+            control_request=control_request,
         )
