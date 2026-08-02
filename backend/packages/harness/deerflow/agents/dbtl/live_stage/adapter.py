@@ -2134,6 +2134,26 @@ def _publish_build_worker_artifacts(
     )
 
 
+def _plan_execution(plan: BuildPhasePlan, *, degraded: bool) -> dict[str, Any]:
+    """The recorded plan, flattened into the step row's bounded execution map.
+
+    A queued phase has no row of its own yet, so without this the read model can
+    say a Build has four phases and name none of them — which is the difference
+    between a plan a person can check and a progress bar. Flat scalar keys are
+    what `execution` accepts, and `MAX_BUILD_PHASES` (8) keeps the count inside
+    its key cap by construction rather than by hoping.
+    """
+    execution: dict[str, Any] = {
+        "feasibility": plan.feasibility.value,
+        "phases": len(plan.phases),
+        "degraded": degraded,
+    }
+    for index, phase in enumerate(plan.phases, start=1):
+        execution[f"phase_{index}_key"] = phase.phase_key
+        execution[f"phase_{index}_title"] = phase.title
+    return execution
+
+
 def _settled_control(answer: BuildControlAnswer) -> BuildControlAnswer:
     """Read a free-text answer to a plan card as what it actually is: a replan.
 
@@ -3137,6 +3157,7 @@ class LiveStageAdapter:
                 capability=assignment.phase.capability.value,
                 agent_name=assignment.agent_name,
                 via_generalist=assignment.via_generalist,
+                execution={"title": assignment.phase.title},
             )
 
             restored = _restore_phase(recorder.replay(handle), assignment=assignment, index=index, spec=spec)
@@ -4426,7 +4447,7 @@ class LiveStageAdapter:
                     # content digest would then survive a Design change that
                     # reshaped the work.
                     plan_output_digest(plan_digest=build_plan.digest, input_digest_value=build_inputs.digest),
-                    execution={"feasibility": build_plan.feasibility.value, "phases": len(build_plan.phases), "degraded": bool(plan_reasons)},
+                    execution=_plan_execution(build_plan, degraded=bool(plan_reasons)),
                     payload=build_plan.as_dict(),
                 )
 

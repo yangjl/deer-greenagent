@@ -1,5 +1,6 @@
 export * from "./api";
 export * from "./artifact-path";
+export * from "./build-plan-view";
 export * from "./composer-scope";
 export * from "./controls";
 export * from "./cycle-hooks";

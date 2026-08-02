@@ -662,7 +662,13 @@ class TestABuildStopsBeingOneOpaqueWorker:
         assert len(dispatcher.phase_units) == 1
         plan_step = _step(await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id), BuildStepKey.PLAN_BUILD)
         assert plan_step["status"] == StepState.SUCCEEDED.value
-        assert plan_step["attempts"][0]["execution"] == {"feasibility": "single_phase", "phases": 1, "degraded": True}
+        assert plan_step["attempts"][0]["execution"] == {
+            "feasibility": "single_phase",
+            "phases": 1,
+            "degraded": True,
+            "phase_1_key": "build",
+            "phase_1_title": "Implement the approved design",
+        }
 
     async def test_a_planner_that_needs_a_decision_pauses_before_any_phase(self, project) -> None:
         repo, root = project
@@ -896,3 +902,36 @@ class TestTheRolloutSwitchIsReal:
 
         assert dispatcher.calls, "the Build was refused on the path the flag is supposed to leave alone"
         assert await repo.list_step_attempts(project_id="project-1", stage_attempt_id=stage_attempt_id) == []
+
+
+class TestTheReadModelCanNameThePhases:
+    """A plan a reader can check, rather than a count they cannot."""
+
+    async def test_the_recorded_plan_travels_with_its_phase_titles(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN))
+
+        plan = (await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id))["plan"]
+        assert plan is not None
+        assert plan["feasibility"] == "planned"
+        assert [(entry["phase_key"], entry["title"]) for entry in plan["phases"]] == [("simulate", "Simulate"), ("fit", "Fit")]
+
+    async def test_a_running_phase_carries_its_own_title(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN))
+
+        phases = (await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id))["phases"]
+        assert [row["execution"]["title"] for row in phases] == ["Simulate", "Fit"]
+
+    async def test_a_build_that_never_planned_reports_no_plan(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        assert (await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id))["plan"] is None

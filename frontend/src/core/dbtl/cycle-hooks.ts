@@ -11,6 +11,7 @@ import {
   resolveWorkItem,
   reviewStage,
   submitStage,
+  fetchStageWorkflow,
 } from "./cycles-api";
 
 const ROOT = "dbtl-cycles";
@@ -134,5 +135,28 @@ export function useResolveWorkItem(projectId: string | null | undefined) {
       input: Omit<Parameters<typeof resolveWorkItem>[0], "projectId">,
     ) => resolveWorkItem({ projectId: projectId!, ...input }),
     onSuccess: invalidate,
+  });
+}
+
+/**
+ * One Build's workflow view, for the rail and the transcript alike.
+ *
+ * Polled while the stage is live rather than pushed: the rail has no stream of
+ * its own, and a plan that only moved when something else happened to refetch
+ * would report finished phases as queued for minutes.
+ */
+export function useStageWorkflow(
+  projectId: string | null | undefined,
+  cycleId: string | null | undefined,
+  stage: string,
+  options?: { live?: boolean },
+) {
+  return useQuery({
+    queryKey: [ROOT, "workflow", projectId, cycleId, stage],
+    queryFn: () => fetchStageWorkflow(projectId!, cycleId!, stage),
+    enabled: Boolean(projectId && cycleId),
+    staleTime: 0,
+    retry: false,
+    refetchInterval: options?.live ? 5000 : false,
   });
 }

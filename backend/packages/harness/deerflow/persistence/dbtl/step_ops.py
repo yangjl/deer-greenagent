@@ -38,6 +38,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.dbtl.build_workflow import (
+    MAX_BUILD_PHASES,
     BuildErrorCode,
     BuildStepKey,
     StepAttempt,
@@ -545,6 +546,11 @@ class StepOpsMixin:
         return {
             "workflow_spec_key": spec.spec_key,
             "stage_attempt_id": stage_attempt_id,
+            # The recorded plan, so a reader can name the phases that have not
+            # started. Derived from the plan step's own row rather than stored
+            # twice: a second copy is a second thing that can be stale, and the
+            # symptom would be a rail describing work the Build never planned.
+            "plan": _recorded_plan(_selected_plan_row(rows, projection)),
             # Whether the digests above were compared against current durable
             # state. False means the stage run could not be resolved, so the
             # view reports what was attempted without claiming any of it is
@@ -582,3 +588,41 @@ def _observed_status(step: BuildStepKey, latest: DbtlStageStepRunRow | None, pro
         return StepState.QUEUED.value
     order = projection.spec.step_order
     return "waiting" if order.index(step) > order.index(projection.next_step) else StepState.QUEUED.value
+
+
+def _selected_plan_row(rows: list[DbtlStageStepRunRow], projection: Any) -> DbtlStageStepRunRow | None:
+    """The `plan_build` attempt the projection selected, or the newest one.
+
+    Falls back to the newest attempt because a plan that is running, or that
+    failed, is still the plan a reader is looking at — reporting no phases at
+    all while one is visibly executing would be worse than reporting a plan the
+    chain has since invalidated, which the step's own status already says.
+    """
+    selected = projection.selected.get(BuildStepKey.PLAN_BUILD)
+    candidates = [row for row in rows if row.step_key == BuildStepKey.PLAN_BUILD.value and not row.phase_slot]
+    if not candidates:
+        return None
+    if selected is not None:
+        for row in candidates:
+            if row.attempt == selected.attempt:
+                return row
+    return max(candidates, key=lambda row: row.attempt)
+
+
+def _recorded_plan(row: DbtlStageStepRunRow | None) -> dict[str, Any] | None:
+    """The plan's shape as the writer flattened it onto the step row."""
+    if row is None:
+        return None
+    execution = dict(row.execution or {})
+    phases: list[dict[str, Any]] = []
+    for index in range(1, MAX_BUILD_PHASES + 1):
+        key = execution.get(f"phase_{index}_key")
+        if not isinstance(key, str) or not key:
+            continue
+        phases.append({"index": index, "phase_key": key, "title": str(execution.get(f"phase_{index}_title") or key)})
+    return {
+        "feasibility": execution.get("feasibility"),
+        "degraded": bool(execution.get("degraded")),
+        "phase_count": int(execution.get("phases") or len(phases)),
+        "phases": phases,
+    }

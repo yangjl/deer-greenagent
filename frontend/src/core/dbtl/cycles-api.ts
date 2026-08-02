@@ -1,6 +1,7 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
+import type { BuildWorkflowView } from "./build-plan-view";
 import type {
   ActivityEvent,
   CycleClass,
@@ -398,4 +399,25 @@ export async function resolveWorkItem(input: {
     },
     "Could not resolve the blocker",
   );
+}
+
+/**
+ * The Build workflow's ordered steps, its recorded plan, and what is still
+ * valid. Served in every mode, including with the rollout switch off — the
+ * flag governs whether the workflow drives execution, and a read model that
+ * disappeared with it could not tell an owner why their Build looks the way it
+ * does.
+ */
+export async function fetchStageWorkflow(
+  projectId: string,
+  cycleId: string,
+  stage: string,
+): Promise<BuildWorkflowView> {
+  const response = await fetch(
+    `${base(projectId)}/cycles/${encodeURIComponent(cycleId)}/stages/${encodeURIComponent(stage)}/workflow`,
+  );
+  if (!response.ok) {
+    throw new Error(await parseError(response, "Failed to load the build plan"));
+  }
+  return (await response.json()) as BuildWorkflowView;
 }

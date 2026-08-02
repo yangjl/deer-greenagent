@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleDashed,
+  ListChecks,
   Lock,
   MessageSquarePlus,
   MessagesSquare,
@@ -47,6 +48,8 @@ import {
   dbtlControlState,
   defaultSelectedCycle,
   isLive,
+  blockerBadge,
+  buildPlanProjection,
   openWorkItems,
   shouldShowReadinessNotice,
   toggleCycleDisclosure,
@@ -54,6 +57,7 @@ import {
   useCycleDetail,
   useDbtlFeature,
   useProjectCycles,
+  useStageWorkflow,
 } from "@/core/dbtl";
 import { useDeleteThread } from "@/core/threads/hooks";
 import {
@@ -70,6 +74,7 @@ import {
   useActivityCollapsedItem,
   useActivityHeaderWord,
 } from "./agent-activity-block";
+import { BuildPlanBlock } from "./build-plan-block";
 import { CycleStageSheet } from "./cycle-stage-sheet";
 import { ProjectRailFrame } from "./project-rail-frame";
 
@@ -80,7 +85,7 @@ const PLACEHOLDER_AGENTS = [
 
 const RAIL_SECTION_IDS = {
   agents: "project-rail-agents",
-  blockers: "project-rail-blockers",
+  buildPlan: "project-rail-build-plan",
   conversations: "project-rail-conversations",
   cycles: "project-rail-cycles",
 } as const;
@@ -138,27 +143,39 @@ function StageRow({
   stage,
   onOpen,
   designDeckFeedback,
+  openWorkCount = 0,
 }: {
   cycle: CycleRecord;
   stage: DbtlStage;
   onOpen: (stage: DbtlStage) => void;
   designDeckFeedback: boolean;
+  openWorkCount?: number;
 }) {
   const record = cycle.stages.find((item) => item.stage === stage);
   const mark = STATUS_MARK[record?.status ?? "locked"] ?? LOCKED_MARK;
   const Icon = mark.icon;
+  const badge = blockerBadge(openWorkCount);
+  const label =
+    stage === "design" && designDeckFeedback
+      ? "Open feedback deck"
+      : STAGE_LABELS[stage];
   return (
     <button
       type="button"
       onClick={() => onOpen(stage)}
+      title={badge ? `${label} · ${badge}` : label}
+      aria-label={badge ? `${label}, ${badge} work items` : undefined}
       className="hover:bg-muted/60 group flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors"
     >
       <Icon className={cn("size-3.5 shrink-0", mark.tone)} />
-      <span className="min-w-0 flex-1 truncate">
-        {stage === "design" && designDeckFeedback
-          ? "Open feedback deck"
-          : STAGE_LABELS[stage]}
-      </span>
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {/* The open-work count sits on the stage it belongs to, in words rather
+          than colour alone, so the status word beside it still reads. */}
+      {badge && (
+        <span className="shrink-0 text-[11px] text-amber-700 dark:text-amber-400">
+          {badge}
+        </span>
+      )}
       <span className="text-muted-foreground shrink-0 text-[11px]">
         {STATUS_LABELS[record?.status ?? "locked"]}
       </span>
@@ -225,7 +242,25 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const disclosedCycleId =
     expandedCycleId === undefined ? (selected?.id ?? null) : expandedCycleId;
   const detail = useCycleDetail(project?.id, selected?.id);
+  // Open work items keep their signal, folded onto the stage they belong to
+  // rather than deleted to make room. The full list stays in the stage sheet
+  // that already renders it.
   const blockers = openWorkItems(detail.data);
+  // Only reconciliation rows name the stage they belong to, so only they can
+  // ride as a badge on it. The rest keep a collapsed line beneath the Build
+  // plan rather than being dropped: a work item nobody can see is a signal
+  // traded away, which is the one thing replacing this section must not do.
+  const reconciliationBlockers = blockers.filter(
+    (item) => item.payload?.kind === "reconciliation",
+  ).length;
+  const unattributedBlockers = blockers.length - reconciliationBlockers;
+  // The same query the block below reads, shared through the cache rather than
+  // fetched twice — a header count derived separately is a second source of
+  // truth about the same plan.
+  const buildWorkflow = useStageWorkflow(project?.id, selected?.id, "build", {
+    live: Boolean(selected && isLive(selected)),
+  });
+  const buildProgress = buildPlanProjection(buildWorkflow.data).progress;
 
   // Cycles minimize themselves once nothing is running; an explicit click
   // always wins over that default.
@@ -295,9 +330,9 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           onSelect: () => scrollToRailSection(RAIL_SECTION_IDS.cycles),
         },
         {
-          label: "Blockers",
-          icon: AlertTriangle,
-          onSelect: () => scrollToRailSection(RAIL_SECTION_IDS.blockers),
+          label: "Build plan",
+          icon: ListChecks,
+          onSelect: () => scrollToRailSection(RAIL_SECTION_IDS.buildPlan),
         },
         {
           label: activityFeature.enabled ? activityCollapsed.label : "Agents",
@@ -450,6 +485,11 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                           designDeckFeedback={
                             dbtl.feature?.design_deck_feedback === true
                           }
+                          openWorkCount={
+                            entry.id === selected?.id && stage === "reconciliation"
+                              ? reconciliationBlockers
+                              : 0
+                          }
                         />
                       ))}
                     </div>
@@ -461,25 +501,37 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
         </div>
       )}
 
-      <SectionLabel id={RAIL_SECTION_IDS.blockers}>
-        Blockers{selected ? ` · ${selected.title}` : ""}
+      <SectionLabel
+        id={RAIL_SECTION_IDS.buildPlan}
+        action={
+          buildProgress ? (
+            <span className="text-muted-foreground/70 text-[11px]">
+              {buildProgress}
+            </span>
+          ) : undefined
+        }
+      >
+        Build plan{selected ? ` · ${selected.title}` : ""}
       </SectionLabel>
       <div className="px-2">
-        {blockers.map((item) => (
+        <BuildPlanBlock
+          projectId={project?.id}
+          cycleId={selected?.id ?? null}
+          live={Boolean(selected && isLive(selected))}
+          onOpenPhase={() => setOpenStage("build")}
+        />
+        {unattributedBlockers > 0 && (
           <button
-            key={item.id}
             type="button"
             onClick={() => setOpenStage(DBTL_STAGES[0])}
-            className="hover:bg-muted/60 flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm transition-colors"
+            className="hover:bg-muted/60 flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors"
           >
             <AlertTriangle className="size-3.5 shrink-0 text-amber-700 dark:text-amber-400" />
-            <span className="min-w-0 flex-1 truncate">{item.title}</span>
+            <span className="text-muted-foreground min-w-0 flex-1 truncate text-xs">
+              {unattributedBlockers} open work item
+              {unattributedBlockers === 1 ? "" : "s"}
+            </span>
           </button>
-        ))}
-        {selected && blockers.length === 0 && (
-          <div className="text-muted-foreground px-2 py-1.5 text-xs">
-            Nothing is blocking this cycle.
-          </div>
         )}
       </div>
 
