@@ -164,6 +164,36 @@ describe("what the row says", () => {
     expect(screen.getByText(/via Build stage/)).toBeTruthy();
   });
 
+  it("keeps dispatcher lineage when the parent has already settled", () => {
+    renderBlock(
+      [
+        event({
+          activity_id: "act_supervisor",
+          display_name: "DBTL supervisor",
+          state: "routing",
+        }),
+        event({
+          activity_id: "act_supervisor",
+          display_name: "DBTL supervisor",
+          transition: "completed",
+          state: "completed",
+        }),
+        event({
+          activity_id: "act_stage",
+          display_name: "Build stage",
+          parent_activity_id: "act_supervisor",
+          state: "preparing",
+        }),
+      ],
+      { renderSheet: true },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Activity/ }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("Build stage");
+    expect(dialog.textContent).toContain("Dispatched by DBTL supervisor");
+  });
+
   it("adds the cycle when the activity carries one", () => {
     renderBlock(
       [

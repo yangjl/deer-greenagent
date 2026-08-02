@@ -42,7 +42,7 @@ export interface AgentActivitySheetProps {
 interface TreeNode {
   row: ActivityRow;
   depth: number;
-  /** Set when depth was capped, so the row states its parent in words. */
+  /** Immediate dispatcher, stated even when its settled row is filtered out. */
   dispatchedBy?: string;
 }
 
@@ -67,12 +67,15 @@ function buildTree(projection: ActivityProjection): TreeNode[] {
     if (seen.has(row.activityId)) return;
     seen.add(row.activityId);
     const capped = depth >= MAX_DEPTH;
+    const parent = projection.rows[row.parentActivityId ?? ""];
     nodes.push({
       row,
       depth: capped ? MAX_DEPTH : depth,
-      dispatchedBy: capped
-        ? projection.rows[row.parentActivityId ?? ""]?.displayName
-        : undefined,
+      // Current actors excludes settled ancestors. Indentation alone therefore
+      // cannot communicate lineage: an active worker would otherwise sit under
+      // blank space with no indication who dispatched it. Naming the immediate
+      // parent on every child also keeps capped and uncapped depths consistent.
+      dispatchedBy: parent?.displayName,
     });
     for (const child of children.get(row.activityId) ?? []) {
       walk(child, depth + 1);

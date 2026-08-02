@@ -143,6 +143,55 @@ class BuildInputBundle:
         }
 
 
+def restore_build_input_bundle(payload: object) -> BuildInputBundle | None:
+    """Rebuild a bundle written by :meth:`BuildInputBundle.as_dict`.
+
+    Step scratch is ordinary workspace data, so every field is parsed back
+    through the typed constructors and the content digest is recomputed before
+    a replay may use it.  A malformed or edited payload simply costs a fresh
+    ``load_design`` attempt; it never becomes Build context.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    design_payload = payload.get("design")
+    inputs_payload = payload.get("inputs")
+    manifest_payload = payload.get("manifest")
+    policy_payload = payload.get("policy")
+    if not isinstance(design_payload, Mapping):
+        return None
+    if not isinstance(inputs_payload, Sequence) or isinstance(inputs_payload, (str, bytes)):
+        return None
+    if not isinstance(manifest_payload, Sequence) or isinstance(manifest_payload, (str, bytes)):
+        return None
+    if not isinstance(policy_payload, Mapping):
+        return None
+
+    def restore_input(item: Mapping[str, Any]) -> BundleInput:
+        return BundleInput(
+            kind=BundleInputKind(str(item.get("kind") or "")),
+            reference=str(item.get("reference") or ""),
+            content_hash=str(item.get("content_hash") or ""),
+            description=str(item.get("description") or ""),
+        )
+
+    try:
+        bundle = BuildInputBundle(
+            design=restore_input(design_payload),
+            design_revision=int(payload.get("design_revision") or 0),
+            design_text=str(payload.get("design_text") or ""),
+            design_truncated=bool(payload.get("design_truncated")),
+            inputs=tuple(restore_input(item) for item in inputs_payload if isinstance(item, Mapping)),
+            manifest=tuple(dict(item) for item in manifest_payload if isinstance(item, Mapping)),
+            policy=dict(policy_payload),
+        )
+    except (TypeError, ValueError):
+        return None
+    recorded_digest = payload.get("digest")
+    if not isinstance(recorded_digest, str) or recorded_digest != bundle.digest:
+        return None
+    return bundle
+
+
 def bounded_excerpt(text: str, *, limit: int = MAX_DESIGN_EXCERPT_CHARS) -> tuple[str, bool]:
     """Return the excerpt and whether anything was dropped.
 

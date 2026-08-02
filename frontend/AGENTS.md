@@ -715,8 +715,10 @@ reading it, not being read to.
 `agent-activity-sheet.tsx` is the expanded surface, following
 `cycle-stage-sheet`'s convention rather than growing in the rail (which would
 push Cycles/Blockers/Conversations out of view and nest a second scroll region).
-Tree indentation caps at three levels; deeper rows render flat with an explicit
-`Dispatched by …` line.
+Tree indentation caps at three levels. Every child row explicitly names its
+immediate dispatcher with `Dispatched by …`, not only rows beyond the depth cap:
+settled parents are filtered from the live view, so indentation alone can make
+an active worker appear to have been dispatched by the wrong visible ancestor.
 
 Gated by `useAgentActivityFeature()` → `/api/features -> agent_activity`, which
 carries `enabled` (rollout) and `durable` (false on the in-memory run-event

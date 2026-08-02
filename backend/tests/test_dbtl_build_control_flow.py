@@ -75,6 +75,35 @@ class _RefusingSecondPhase(_WritingDispatcher):
         return await super().__call__(units, budget=budget)
 
 
+class _QuestioningPhase(_WritingDispatcher):
+    """A real phase pause: structured, valid, and waiting on one decision."""
+
+    async def __call__(self, units, *, budget):
+        unit = units[0]
+        if unit.role == "phase":
+            self.phase_units.append(unit)
+            return [
+                DispatchOutcome(
+                    unit_id=unit.unit_id,
+                    text=json.dumps(
+                        {
+                            "status": "needs_input",
+                            "summary": "The design permits either family or year holdout.",
+                            "artifact_refs": [],
+                            "claims": [],
+                            "evidence_refs": [],
+                            "limitations": [],
+                            "quality_checks": [],
+                            "recommended_next_actions": [],
+                            "clarification_question": "Should this phase hold out families or years?",
+                            "provenance": {"inputs_examined": ["/mnt/user-data/yield.csv"], "tools_used": []},
+                        }
+                    ),
+                )
+            ]
+        return await super().__call__(units, budget=budget)
+
+
 def _adapter(
     repo: DbtlCycleRepository,
     *,
@@ -552,6 +581,38 @@ class TestARecurringPauseCanStillBeAnswered:
 
 
 class TestAWorkersQuestionReachesTheWorker:
+    async def test_a_phase_question_is_recorded_and_the_answer_reaches_the_retry(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        paused = await _run(repo, root, dispatcher=_QuestioningPhase(plan=TWO_PHASE_PLAN), meetings=True)
+
+        assert paused.control_request is not None
+        assert paused.control_request["question"] == "Should this phase hold out families or years?"
+        assert paused.control_request["step_key"] == BuildStepKey.EXECUTE_PHASES.value
+        assert [option["value"] for option in paused.control_request["options"]] == [
+            BuildControlAction.START_MEETING.value,
+            BuildControlAction.HOLD.value,
+        ]
+        phases = (await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id))["phases"]
+        assert phases[0]["status"] == StepState.NEEDS_INPUT.value
+        assert phases[0]["human_input_request_id"] == paused.control_request["request_id"]
+
+        dispatcher = _WritingDispatcher(plan=TWO_PHASE_PLAN)
+        completed = await _run(
+            repo,
+            root,
+            dispatcher=dispatcher,
+            meetings=True,
+            run_id="run-2",
+            build_control=_answer(paused.control_request, value="Hold out families."),
+        )
+
+        assert completed.produced_usable_evidence, completed.note
+        assert dispatcher.phase_units
+        assert "Hold out families." in dispatcher.phase_units[0].prompt
+
     async def test_the_summarizers_question_is_shown_rather_than_only_recorded(self, project) -> None:
         repo, root = project
         await _ready_for_build(repo)
@@ -629,6 +690,32 @@ class TestAChainMovingDecisionIsNeverSilentlyLost:
         # down and the "try again" the message asks for is unreachable.
         assert result.control_request is not None
         assert result.control_request["request_id"] == failed.control_request["request_id"]
+
+    async def test_a_continue_that_cannot_be_recorded_dispatches_nothing(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        paused = await _run(repo, root, dispatcher=_WritingDispatcher(plan=PAUSING_PLAN))
+
+        class _RefusingRepo:
+            def __getattr__(self, name):
+                return getattr(repo, name)
+
+            async def answer_build_collaboration(self, **kwargs):
+                raise RuntimeError("the database is unavailable")
+
+        dispatcher = _WritingDispatcher(plan=PAUSING_PLAN)
+        result = await _adapter(_RefusingRepo(), dispatcher=dispatcher).execute(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            request_text="Build the approved design.",
+            state={},
+            config=_runtime(root, run_id="run-2"),
+            build_control=_answer(paused.control_request, "continue"),
+        )
+
+        assert "could not be recorded" in result.note
+        assert dispatcher.calls == []
+        assert result.control_request is not None
 
 
 class TestABoundaryAlreadyCrossedIsNotAskedAgain:

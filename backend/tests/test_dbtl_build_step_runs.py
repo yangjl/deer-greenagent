@@ -575,8 +575,9 @@ class TestAStepLeftRunningByADeadProcessIsReclaimed:
     """The one-running-attempt rule has no expiry, so somebody must give it one.
 
     Without this a Gateway killed mid-phase leaves a row that blocks its step
-    forever: every later Build collides with a process that no longer exists,
-    and — because recording is fail-soft — stops recording rather than saying so.
+    forever: every later Build collides with a process that no longer exists.
+    Reclamation prevents that stale row from triggering the recorder's visible,
+    fail-closed refusal on every later Build.
     """
 
     async def test_a_stale_attempt_from_another_run_is_cancelled_and_the_step_reopens(self, repo, stage_attempt_id) -> None:

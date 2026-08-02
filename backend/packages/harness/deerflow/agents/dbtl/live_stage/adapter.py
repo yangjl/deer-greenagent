@@ -41,6 +41,7 @@ from deerflow.agents.dbtl.live_stage.build_phases import (
 from deerflow.agents.dbtl.live_stage.build_recorder import (
     DISABLED_RECORDER,
     BuildStepRecorder,
+    BuildStepRecordingError,
     RecorderRequest,
     StepHandle,
     make_build_step_recorder,
@@ -91,7 +92,7 @@ from deerflow.dbtl.build_control import (
     worker_question_request,
 )
 from deerflow.dbtl.build_execution import BuildExecutionBundle
-from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError
+from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError, restore_build_input_bundle
 from deerflow.dbtl.build_plan import BuildPhasePlan, parse_build_plan, restore_build_plan, single_phase_plan
 from deerflow.dbtl.build_summary import BuildReviewPackage
 from deerflow.dbtl.build_workflow import BuildErrorCode, BuildStepKey, StepState, phase_output_digest, plan_output_digest, resolve_build_workflow
@@ -1262,6 +1263,7 @@ def _build_input_artifacts(
     results: Sequence[StageWorkerResult],
     project_root: str,
     pre_run_files: Mapping[str, tuple[int, int]],
+    strict_workspace_inputs: bool = False,
 ) -> list[str]:
     """Bind Build's actual inputs without a separate declaration ceremony.
 
@@ -1277,30 +1279,72 @@ def _build_input_artifacts(
         if source_key and re.fullmatch(r"[0-9a-f]{64}", content_hash):
             artifacts.append(f"dataset:{source_key}:{content_hash}")
 
-    references: list[str] = []
+    references: list[tuple[str, bool]] = []
     for result in results:
         inputs_examined = result.provenance.get("inputs_examined", ())
         if isinstance(inputs_examined, Sequence) and not isinstance(inputs_examined, (str, bytes)):
-            references.extend(str(item) for item in inputs_examined if isinstance(item, str))
-        references.extend(ref.reference for ref in result.evidence_refs if ref.kind in {"workspace_file", "dataset"})
+            references.extend((str(item), strict_workspace_inputs) for item in inputs_examined if isinstance(item, str))
+        # Evidence may describe a produced output as a workspace file. Keep the
+        # legacy discovery fallback, but only provenance-declared inputs are
+        # strict: a new output was not present in the pre-run snapshot by design.
+        references.extend((ref.reference, False) for ref in result.evidence_refs if ref.kind in {"workspace_file", "dataset"})
 
-    for reference in references:
+    for reference, required in references:
+        if reference.startswith("dataset:"):
+            continue
+        # Workers sometimes name non-file context (for example "cycle
+        # metadata") beside actual paths. It is not a hashable workspace input
+        # and is ignored; anything path-shaped is required to resolve and bind.
+        if required and not (reference.startswith("/") or "/" in reference or reference in pre_run_files):
+            continue
         resolved = _workspace_relative_path(reference, project_root=project_root)
         if resolved is None:
+            if required:
+                raise ValueError(f"Build input {reference!r} is not a contained workspace file.")
             continue
         relative, path = resolved
         before = pre_run_files.get(relative)
         if before is None:
+            if required:
+                raise ValueError(f"Build input {relative!r} was not present when this Build run started.")
             continue
         try:
             stat = path.stat()
         except OSError:
+            if required:
+                raise ValueError(f"Build input {relative!r} is no longer readable.") from None
             continue
         if (stat.st_size, stat.st_mtime_ns) != before:
             raise ValueError(f"Build input {relative!r} changed during execution; rerun Build from an unchanged source file.")
         artifacts.append(f"workspace_file:{relative}:sha256:{_sha256_file(path)}")
 
     return list(dict.fromkeys(artifacts))
+
+
+_WORKSPACE_INPUT_BINDING = re.compile(r"^workspace_file:(.+):sha256:([0-9a-f]{64})$")
+
+
+def _input_artifacts_intact(input_artifacts: Sequence[str], *, project_root: str) -> bool:
+    """Verify that replayed phase inputs still have the bytes it actually read."""
+    for binding in input_artifacts:
+        if binding.startswith("dataset:"):
+            # Dataset hashes are durable cycle material and already flow through
+            # load_design -> plan_build. Workspace files need a live byte check.
+            continue
+        match = _WORKSPACE_INPUT_BINDING.fullmatch(binding)
+        if match is None:
+            return False
+        relative, expected = match.groups()
+        resolved = _workspace_relative_path(relative, project_root=project_root)
+        if resolved is None:
+            return False
+        _normalized, path = resolved
+        try:
+            if not path.is_file() or path.is_symlink() or _sha256_file(path) != expected:
+                return False
+        except OSError:
+            return False
+    return True
 
 
 def _design_chair_unit(
@@ -2212,6 +2256,10 @@ class _PhaseRun:
     paused_phase_title: str = ""
     completed_count: int = 0
     failure_code: BuildErrorCode | None = None
+    #: A phase may pause on its own focused question. The card is recorded and
+    #: carried out with the partial run rather than being rewritten as a generic
+    #: execution failure after the worker has already stated what it needs.
+    control_request: dict[str, Any] | None = None
 
 
 def _phase_note(assignment: PhaseAssignment, result: StageWorkerResult) -> dict[str, Any]:
@@ -2361,8 +2409,17 @@ def _restore_phase(
     published = [dict(item) for item in payload.get("published") or () if isinstance(item, Mapping)]
     if not published:
         return None
-    if not expected_digest or phase_output_digest(result=raw_result, published=published) != expected_digest:
+    # Older scratch payloads did not bind inputs. They cannot prove which bytes
+    # a replayed phase read, so they are deliberately re-opened once rather than
+    # being grandfathered into a provenance guarantee they never made.
+    if "input_artifacts" not in payload:
+        return None
+    input_artifacts = [str(item) for item in payload.get("input_artifacts") or () if isinstance(item, str)]
+    if not expected_digest or phase_output_digest(result=raw_result, published=published, input_artifacts=input_artifacts) != expected_digest:
         logger.warning("A recorded Build phase payload did not match the digest its attempt committed; the phase will run again.")
+        return None
+    if not _input_artifacts_intact(input_artifacts, project_root=project_root):
+        logger.warning("A recorded Build phase's inputs changed after it ran; the phase will run again.")
         return None
     if not _published_bytes_intact(published, project_root=project_root):
         logger.warning("A recorded Build phase's published outputs are no longer what it published; the phase will run again.")
@@ -3222,12 +3279,18 @@ class LiveStageAdapter:
         spec: StageSpec,
         dispatcher: Callable[..., Any],
         recorder: BuildStepRecorder,
+        control_gate: BuildControlGate,
         attempt_id: str,
+        stage_attempt_id: str,
         context: str,
         candidates: Sequence[AgentCandidate],
         project_root: str,
         cycle: Mapping[str, Any],
+        datasets: Sequence[Mapping[str, Any]],
+        pre_run_files: Mapping[str, tuple[int, int]],
         stage_workspace: str,
+        answer: str = "",
+        meeting_available: bool = False,
         boundaries_released: bool = False,
     ) -> _PhaseRun:
         """Run the plan's phases in order, each as its own attempt.
@@ -3274,6 +3337,7 @@ class LiveStageAdapter:
         paused = False
         paused_title = ""
         failure_code: BuildErrorCode | None = None
+        control_request: dict[str, Any] | None = None
 
         for index, assignment in enumerate(assignments, start=1):
             if not assignment.covered:
@@ -3335,13 +3399,21 @@ class LiveStageAdapter:
             # The unit id carries the step attempt, and the isolated workspace is
             # derived from the unit id — so a retry gets a clean directory rather
             # than the failed attempt's half-written files.
+            phase_context = context
+            if answer:
+                phase_context = "\n\n".join(
+                    (
+                        context,
+                        "The previous attempt at this phase asked for human input. Carry this exchange verbatim into the retry:\n" + answer,
+                    )
+                )
             unit = phase_unit(
                 assignment,
                 index=index,
                 attempt_id=attempt_id,
                 attempt_token=safe_token(handle.step_run_id or f"{attempt_id}:{plan.digest}:{index}"),
                 spec=spec,
-                context=context,
+                context=phase_context,
                 completed=completed,
                 result_contract=RESULT_CONTRACT,
             )
@@ -3356,6 +3428,34 @@ class LiveStageAdapter:
             phase_outcome = collect_results(phase_plan, dispatched)
             result = phase_outcome.results[0] if phase_outcome.results else None
             rejected.extend(phase_outcome.rejected)
+            if result is not None and result.status is WorkerStatus.NEEDS_INPUT:
+                question = str(result.clarification_question or "").strip()
+                request = worker_question_request(
+                    question=question,
+                    rationale=result.summary,
+                    step_key=BuildStepKey.EXECUTE_PHASES.value,
+                    cycle_id=str(cycle.get("id") or ""),
+                    stage_attempt_id=stage_attempt_id,
+                    workflow_spec_key=recorder.spec_key,
+                    cycle_revision=int(cycle.get("db_revision") or 0),
+                    plan_digest=plan.digest,
+                    input_digest=handle.input_digest,
+                    step_run_id=str(handle.step_run_id or ""),
+                    meeting_available=meeting_available,
+                )
+                request_id = control_gate.request_id_for(request)
+                await recorder.settle(
+                    handle,
+                    state=StepState.NEEDS_INPUT,
+                    summary=question,
+                    human_input_request_id=request_id,
+                    execution={"phase_key": assignment.phase.phase_key},
+                )
+                control_request = await control_gate.raise_control(request)
+                results.append(result)
+                stopped = question
+                paused, paused_title = True, assignment.phase.title
+                break
             if result is None or not result.is_trustworthy:
                 results.extend(phase_outcome.results)
                 stopped = "; ".join(phase_outcome.rejected) or f"Phase {assignment.phase.title!r} returned no usable result."
@@ -3382,15 +3482,38 @@ class LiveStageAdapter:
                 await recorder.fail(handle, failure_code, stopped)
                 break
 
+            try:
+                phase_input_artifacts = _build_input_artifacts(
+                    datasets=datasets,
+                    results=(result,),
+                    project_root=project_root,
+                    pre_run_files=pre_run_files,
+                    strict_workspace_inputs=True,
+                )
+            except ValueError as exc:
+                stopped = str(exc)
+                failure_code = BuildErrorCode.INPUT_CHANGED_DURING_EXECUTION
+                await recorder.fail(handle, failure_code, stopped)
+                break
+
             published.extend(phase_published)
             await recorder.succeed(
                 handle,
                 # The same function the restorer recomputes with, so a replay
                 # cannot be refused — or accepted — on a difference in how the
                 # two sides happened to serialize the same result.
-                phase_output_digest(result=result.as_dict(), published=phase_published),
+                phase_output_digest(
+                    result=result.as_dict(),
+                    published=phase_published,
+                    input_artifacts=phase_input_artifacts,
+                ),
                 execution={"phase_key": assignment.phase.phase_key, "outputs": len(phase_published)},
-                payload={"unit_id": unit.unit_id, "result": result.as_dict(), "published": phase_published},
+                payload={
+                    "unit_id": unit.unit_id,
+                    "result": result.as_dict(),
+                    "published": phase_published,
+                    "input_artifacts": phase_input_artifacts,
+                },
             )
             completed.append(_phase_note(assignment, result))
             if assignment.phase.pause_after:
@@ -3415,6 +3538,7 @@ class LiveStageAdapter:
             paused_phase_title=paused_title,
             completed_count=len(completed),
             failure_code=failure_code,
+            control_request=control_request,
         )
 
     async def _run_build_work_meeting(
@@ -3489,6 +3613,8 @@ class LiveStageAdapter:
             "cycle_revision": int(cycle.get("db_revision") or 0),
         }
         if phase_run is not None and not phase_run.complete:
+            if phase_run.control_request is not None:
+                return phase_run.control_request
             if phase_run.paused and plan is not None:
                 return await gate.raise_control(
                     phase_pause_request(
@@ -4091,23 +4217,33 @@ class LiveStageAdapter:
         leaving it spinning. Opening it here instead would have to name a stage
         nobody has resolved yet.
         """
-        async with AsyncExitStack() as activity:
-            return await self._execute_stage(
-                activity=activity,
-                project_id=project_id,
-                cycle_id=cycle_id,
-                request_text=request_text,
-                state=state,
-                config=config,
-                authored_design=authored_design,
-                council_adjustment=council_adjustment,
-                participant_settings=participant_settings,
-                approved_council_proposal=approved_council_proposal,
-                clarification_answer=clarification_answer,
-                review_meeting_stage=review_meeting_stage,
-                expected_stage=expected_stage,
-                expected_cycle_revision=expected_cycle_revision,
-                build_control=build_control,
+        try:
+            async with AsyncExitStack() as activity:
+                return await self._execute_stage(
+                    activity=activity,
+                    project_id=project_id,
+                    cycle_id=cycle_id,
+                    request_text=request_text,
+                    state=state,
+                    config=config,
+                    authored_design=authored_design,
+                    council_adjustment=council_adjustment,
+                    participant_settings=participant_settings,
+                    approved_council_proposal=approved_council_proposal,
+                    clarification_answer=clarification_answer,
+                    review_meeting_stage=review_meeting_stage,
+                    expected_stage=expected_stage,
+                    expected_cycle_revision=expected_cycle_revision,
+                    build_control=build_control,
+                )
+        except (BuildStepRecordingError, BuildControlNotRecorded) as refusal:
+            # Persistence is part of the enabled Build workflow's authority.
+            # Return a visible, retryable pause instead of attaching evidence
+            # from an execution whose step chain or human decision is missing.
+            return LiveStageResult(
+                stage=expected_stage or "build",
+                cycle_id=cycle_id or "",
+                note=str(refusal),
             )
 
     async def _execute_stage(
@@ -4468,7 +4604,7 @@ class LiveStageAdapter:
             )
             load_design = await build_recorder.begin(BuildStepKey.LOAD_DESIGN)
             try:
-                build_inputs = await asyncio.to_thread(
+                current_build_inputs = await asyncio.to_thread(
                     resolve_build_inputs,
                     cycle,
                     project_root=project_root,
@@ -4486,10 +4622,24 @@ class LiveStageAdapter:
                     cycle_id=cycle_id,
                     note=f"{refusal.summary} No Build worker was dispatched and nothing was recorded as Build evidence.",
                 )
+            if load_design.replayed:
+                restored_inputs = restore_build_input_bundle(build_recorder.replay(load_design))
+                if restored_inputs is not None and restored_inputs.digest == str(load_design.output_digest or ""):
+                    # A retry uses the exact manifest/policy bundle the committed
+                    # plan and finished phases saw. Recomputing it here mixed an
+                    # old digest chain with today's workspace and later claimed
+                    # the old phases had read today's files.
+                    build_inputs = restored_inputs
+                else:
+                    load_design = await build_recorder.reopen(load_design)
+                    build_inputs = current_build_inputs
+            else:
+                build_inputs = current_build_inputs
             await build_recorder.succeed(
                 load_design,
                 build_inputs.digest,
                 execution={"design_revision": build_inputs.design_revision, "design_truncated": build_inputs.design_truncated},
+                payload=build_inputs.as_dict(),
             )
 
         stage_context_payload = {
@@ -4905,12 +5055,18 @@ class LiveStageAdapter:
                 spec=spec,
                 dispatcher=dispatcher,
                 recorder=build_recorder,
+                control_gate=control_gate,
                 attempt_id=attempt_id,
+                stage_attempt_id=str((attempt or {}).get("id") or ""),
                 context=stage_context,
                 candidates=self._candidates(),
                 project_root=project_root,
                 cycle=cycle,
+                datasets=datasets,
+                pre_run_files=pre_run_files,
                 stage_workspace=stage_workspace,
+                answer=worker_answer if worker_answer_step == BuildStepKey.EXECUTE_PHASES.value else "",
+                meeting_available=bool(getattr(dbtl_config, "build_work_meetings", False)),
                 # The answer on this request, or one already recorded against
                 # this plan. The request-scoped half carries the same scope
                 # guard every other use of the answer carries — this is the one

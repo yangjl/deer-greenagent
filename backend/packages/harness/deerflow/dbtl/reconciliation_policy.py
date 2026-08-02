@@ -1,4 +1,4 @@
-"""Whether this deployment gates Build on a settled reconciliation matrix.
+"""Deployment switches that change DBTL gate prerequisites.
 
 One reader, so the state machine, the route menu, and the Build lineage writer
 cannot disagree about the rule. Kept out of ``cycle_state`` and ``stage_routes``
@@ -28,3 +28,20 @@ def reconciliation_required() -> bool:
         return True
     value = getattr(getattr(app_config, "dbtl", None), "reconciliation_required", True)
     return True if value is None else bool(value)
+
+
+def build_workflow_steps_enabled() -> bool:
+    """True when Build review requires the durable phased workflow chain.
+
+    An unreadable configuration fails closed. Once a Build is being submitted,
+    accepting an artifact without knowing whether its workflow was required is
+    less safe than asking the owner to retry after configuration is available.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        app_config = get_app_config()
+    except Exception:  # noqa: BLE001 - an unreadable config keeps the stricter gate
+        logger.warning("Could not read the DBTL Build workflow rule; requiring a complete workflow chain.", exc_info=True)
+        return True
+    return bool(getattr(getattr(app_config, "dbtl", None), "build_workflow_steps", False))

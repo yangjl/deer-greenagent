@@ -699,7 +699,12 @@ artifact` is server-owned in full and is now stripped from external run input:
   the same question comes back with that briefing above it. The plan
   confirmation card is behind `dbtl.build_plan_confirmation`; both default off
   beside `dbtl.build_workflow_steps`, and all three are on in the isolated
-  manual DBTL profile. The project rail's **Build plan** section replaces
+  manual DBTL profile. A phase that asks for input surfaces its exact question
+  through the same durable control and resumes with the recorded answer. Phase
+  replay binds and re-hashes the workspace inputs it actually read, while any
+  failed step/control write stops dispatch; an incomplete durable workflow or
+  unregistered review deck cannot be submitted for review. The project rail's
+  **Build plan** section replaces
   Blockers with a read-only projection of the same server view the transcript
   uses; open work items keep their signal as a count on the stage they belong
   to. See [backend/AGENTS.md](backend/AGENTS.md) and

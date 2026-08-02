@@ -33,7 +33,7 @@ from deerflow.dbtl.build_workflow import BUILD_WORKFLOW_V1, BuildErrorCode, Buil
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.reconciliation_policy import reconciliation_required
 from deerflow.dbtl.stage_runner import DispatchOutcome
-from deerflow.persistence.dbtl import DbtlCycleRepository
+from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlWorkflowRefused
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
 
@@ -745,6 +745,18 @@ class TestACommittedStepIsReplayedRatherThanReRun:
         assert dispatcher.phase_units == []
         assert second.deck_uri is not None
 
+    async def test_a_changed_phase_input_reopens_the_phase_instead_of_relabelling_old_work(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+
+        await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
+        (root / "yield.csv").write_text("id,yield\n1,9.9\n", encoding="utf-8")
+
+        _result, second = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-2")
+
+        assert len(second.phase_units) == 2, "phases that read the old bytes were replayed under the new input hash"
+
     async def test_an_unreadable_payload_costs_a_re_run_and_never_a_wrong_result(self, project, monkeypatch) -> None:
         """Fail-soft in the only safe direction."""
         repo, root = project
@@ -758,6 +770,65 @@ class TestACommittedStepIsReplayedRatherThanReRun:
         _result, second = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-2")
 
         assert len(second.phase_units) == 2, "an unreadable payload must dispatch, not resume"
+
+
+class TestWorkflowPersistenceIsAuthoritative:
+    async def test_a_recorder_initialization_failure_dispatches_no_worker(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        class _UnavailableRecorderRepo:
+            def __getattr__(self, name):
+                return getattr(repo, name)
+
+            async def build_step_material_for(self, **kwargs):
+                raise RuntimeError("step storage is unavailable")
+
+        dispatcher = _WritingDispatcher(plan=TWO_PHASE_PLAN)
+        result = await _adapter(
+            _UnavailableRecorderRepo(),
+            workflow=True,
+            dispatcher=dispatcher,
+        ).execute(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            request_text="Build the approved design.",
+            state={},
+            config=_runtime(root, run_id="run-recorder-down"),
+        )
+
+        assert "durable workflow could not be initialized" in result.note
+        assert dispatcher.calls == []
+        assert result.artifact_uri is None
+
+    async def test_an_incomplete_workflow_cannot_be_submitted_even_with_artifact_and_lineage(self, project, monkeypatch) -> None:
+        from deerflow.config import app_config as app_config_module
+
+        repo, root = project
+        await _ready_for_build(repo)
+        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        result, _dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN))
+        assert result.artifact_uri is not None, "the test needs a package whose deck step alone failed"
+        monkeypatch.setattr(
+            app_config_module,
+            "get_app_config",
+            lambda: SimpleNamespace(
+                dbtl=SimpleNamespace(
+                    build_workflow_steps=True,
+                    reconciliation_required=False,
+                )
+            ),
+        )
+
+        with pytest.raises(DbtlWorkflowRefused, match="durable workflow is incomplete"):
+            await repo.submit_stage_for_review(
+                cycle_id="cycle-1",
+                project_id="project-1",
+                stage="build",
+                expected_db_revision=await _revision(repo),
+                actor_user_id="user-1",
+                idempotency_key="submit-incomplete-build",
+            )
 
 
 class TestAPhaseSucceedsOnlyOnceItsOutputsArePublished:

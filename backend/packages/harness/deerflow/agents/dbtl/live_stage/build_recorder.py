@@ -9,12 +9,12 @@ rendering bug.
 
 Two rules keep the recorder safe to switch on:
 
-**Recording never fails a Build.** This is instrumentation attached to a
-governance record, behind a rollout switch. If the repository refuses a write,
-the recorder logs, disables itself for the rest of the run, and the Build carries
-on — a half-recorded chain is a gap in a read model, while a raised exception is
-a lost experiment. What this does *not* soften is the `load_design` gate: that
-runs whether or not the recorder does, and its refusal stops the dispatch.
+**Recording failure stops governed progression.** Once the rollout switch is
+on, this chain is not optional instrumentation: it is what proves every selected
+phase succeeded before the review gate is offered. If the repository or replay
+store refuses a write, the current run stops visibly. Worker files already
+written remain on disk and a later retry may recover them, but no evidence or
+review surface may be attached without the durable chain.
 
 **A step that cannot be replayed is re-opened, not silently re-run.** When the
 payload behind a committed digest cannot be produced, the work has to happen
@@ -50,6 +50,10 @@ from deerflow.dbtl.build_workflow import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class BuildStepRecordingError(RuntimeError):
+    """The enabled Build workflow could not persist its authoritative chain."""
 
 
 class _StepRepository(Protocol):
@@ -140,14 +144,17 @@ class BuildStepRecorder:
     def spec_key(self) -> str:
         return self._spec.spec_key
 
-    def _disable(self, step: BuildStepKey, exc: BaseException) -> None:
-        logger.warning(
-            "Could not record Build workflow step %s for stage attempt %s; the Build continues without a step record.",
+    def _raise_recording_error(self, step: BuildStepKey, exc: BaseException) -> None:
+        logger.error(
+            "Could not record Build workflow step %s for stage attempt %s; governed Build progression stopped.",
             step.value,
             self._stage_attempt_id,
             exc_info=exc,
         )
         self._enabled = False
+        raise BuildStepRecordingError(
+            f"Build paused because its durable {step.value!r} step could not be recorded. No review evidence was attached; retry after persistence is available."
+        ) from exc
 
     async def begin(self, step: BuildStepKey, **overrides: Any) -> StepHandle:
         """Open an attempt at `step`, or replay the one already committed.
@@ -192,9 +199,8 @@ class BuildStepRecorder:
                 parent_run_id=self._parent_run_id or None,
                 **overrides,
             )
-        except Exception as exc:  # noqa: BLE001 - instrumentation must not fail a Build
-            self._disable(step, exc)
-            return StepHandle(step=step, input_digest=digest, phase_key=phase_key)
+        except Exception as exc:  # noqa: BLE001 - translated to a bounded workflow refusal
+            self._raise_recording_error(step, exc)
         bindings = {
             "predecessor_digests": tuple(predecessors_digests),
             "predecessor_ids": tuple(predecessor_ids),
@@ -237,9 +243,8 @@ class BuildStepRecorder:
                 force_new_attempt=True,
                 **dict(handle.open_overrides),
             )
-        except Exception as exc:  # noqa: BLE001 - instrumentation must not fail a Build
-            self._disable(handle.step, exc)
-            return StepHandle(step=handle.step, input_digest=handle.input_digest, phase_key=handle.phase_key)
+        except Exception as exc:  # noqa: BLE001 - translated to a bounded workflow refusal
+            self._raise_recording_error(handle.step, exc)
         return StepHandle(step=handle.step, step_run_id=str(payload["id"]), input_digest=handle.input_digest, phase_key=handle.phase_key)
 
     def _rewind(self, handle: StepHandle) -> None:
@@ -283,9 +288,9 @@ class BuildStepRecorder:
             return
         if not handle.recorded or self._repo is None or not self._enabled:
             return
-        if payload is not None and self._store is not None:
-            self._store.save(handle.step, output_digest, payload)
         try:
+            if payload is not None and self._store is not None:
+                self._store.save(handle.step, output_digest, payload)
             await self._repo.settle_step_attempt(
                 step_run_id=str(handle.step_run_id),
                 project_id=self._project_id,
@@ -293,9 +298,8 @@ class BuildStepRecorder:
                 output_digest=output_digest,
                 execution=execution,
             )
-        except Exception as exc:  # noqa: BLE001 - see the module docstring
-            self._disable(handle.step, exc)
-            return
+        except Exception as exc:  # noqa: BLE001 - translated to a bounded workflow refusal
+            self._raise_recording_error(handle.step, exc)
         self._advance(str(handle.step_run_id), output_digest, phase=handle.is_phase)
 
     async def settle(
@@ -329,8 +333,8 @@ class BuildStepRecorder:
                 human_input_request_id=human_input_request_id or None,
                 execution=execution,
             )
-        except Exception as exc:  # noqa: BLE001 - see the module docstring
-            self._disable(handle.step, exc)
+        except Exception as exc:  # noqa: BLE001 - translated to a bounded workflow refusal
+            self._raise_recording_error(handle.step, exc)
 
     async def fail(self, handle: StepHandle, code: BuildErrorCode, summary: str, *, execution: dict[str, Any] | None = None) -> None:
         await self.settle(handle, state=StepState.FAILED, code=code, summary=summary, execution=execution)
@@ -366,17 +370,23 @@ async def make_build_step_recorder(repo: _StepRepository | None, request: Record
     succeeds.
     """
     spec = request.spec or resolve_build_workflow()
-    if not request.enabled or repo is None or not (request.project_id and request.cycle_id and request.stage_attempt_id):
+    if not request.enabled:
         return DISABLED_RECORDER
+    if repo is None or not (request.project_id and request.cycle_id and request.stage_attempt_id):
+        raise BuildStepRecordingError(
+            "Build paused because its durable workflow could not be initialized. No worker was dispatched; retry after persistence is available."
+        )
     try:
         material = await repo.build_step_material_for(
             project_id=request.project_id,
             stage_attempt_id=request.stage_attempt_id,
             workflow_spec_key=spec.spec_key,
         )
-    except Exception:  # noqa: BLE001 - see the module docstring
-        logger.warning("Could not read Build workflow step material for stage attempt %s; steps will not be recorded.", request.stage_attempt_id, exc_info=True)
-        return DISABLED_RECORDER
+    except Exception as exc:  # noqa: BLE001 - translated to a bounded workflow refusal
+        logger.error("Could not read Build workflow step material for stage attempt %s; governed Build progression stopped.", request.stage_attempt_id, exc_info=True)
+        raise BuildStepRecordingError(
+            "Build paused because its durable workflow could not be initialized. No worker was dispatched; retry after persistence is available."
+        ) from exc
     store = StepOutputStore(project_root=request.project_root, stage_attempt_id=request.stage_attempt_id) if request.project_root else None
     return BuildStepRecorder(
         repo,

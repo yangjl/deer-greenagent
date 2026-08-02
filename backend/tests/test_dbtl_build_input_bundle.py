@@ -16,7 +16,15 @@ from typing import Any
 import pytest
 
 from deerflow.agents.dbtl.live_stage.design_input import approved_design_artifact, resolve_build_inputs
-from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError, BundleInput, BundleInputKind, bounded_excerpt, dataset_inputs
+from deerflow.dbtl.build_input import (
+    BuildInputBundle,
+    BuildInputError,
+    BundleInput,
+    BundleInputKind,
+    bounded_excerpt,
+    dataset_inputs,
+    restore_build_input_bundle,
+)
 from deerflow.dbtl.build_workflow import BuildErrorCode
 
 DESIGN_BODY = "# Approved design\n\nFit a genomic prediction model on the 2024 trial.\n"
@@ -95,6 +103,49 @@ class TestTheBundleIsCheckableByConstruction:
         text, truncated = bounded_excerpt("abcdef", limit=3)
         assert (text, truncated) == ("abc", True)
         assert bounded_excerpt("ab", limit=3) == ("ab", False)
+
+    def test_a_persisted_bundle_restores_with_the_same_identity(self) -> None:
+        bundle = BuildInputBundle(
+            design=BundleInput(
+                kind=BundleInputKind.APPROVED_ARTIFACT,
+                reference="/mnt/user-data/design.md",
+                content_hash=_hash(DESIGN_BODY),
+            ),
+            design_revision=3,
+            design_text=DESIGN_BODY,
+            inputs=(
+                BundleInput(
+                    kind=BundleInputKind.DATASET,
+                    reference="dataset:trial",
+                    content_hash=_hash("trial"),
+                ),
+            ),
+            manifest=({"path": "/mnt/user-data/trial.csv", "size_bytes": 12},),
+            policy={"reconciliation_required": True},
+        )
+
+        restored = restore_build_input_bundle(bundle.as_dict())
+
+        assert restored is not None
+        assert restored.digest == bundle.digest
+        assert restored.design == bundle.design
+        assert restored.inputs == bundle.inputs
+        assert restored.manifest == bundle.manifest
+        assert dict(restored.policy) == dict(bundle.policy)
+
+    def test_an_edited_persisted_bundle_is_not_restored(self) -> None:
+        bundle = BuildInputBundle(
+            design=BundleInput(
+                kind=BundleInputKind.APPROVED_ARTIFACT,
+                reference="/mnt/user-data/design.md",
+                content_hash=_hash(DESIGN_BODY),
+            ),
+            design_revision=1,
+        )
+        payload = bundle.as_dict()
+        payload["design_revision"] = 2
+
+        assert restore_build_input_bundle(payload) is None
 
 
 class TestResolutionSucceeds:

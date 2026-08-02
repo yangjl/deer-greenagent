@@ -3,8 +3,8 @@
 The pure shape lives in `deerflow.dbtl.build_control`; the durable record lives
 in the repository. This is the thin seam between them, and it exists so the
 adapter does not have to remember three things at every pause: mint the card id
-deterministically, write the record *before* the card is shown, and never let
-either failure take the Build down with it.
+deterministically, write the record *before* the card is shown, and stop before
+dispatch if that authoritative write fails.
 
 **The id is derived, not random.** A retried turn re-renders the same question,
 and a random id would open a second control for it — two cards competing for
@@ -17,10 +17,10 @@ pauses cannot collide; the same pause twice cannot fork.
 question nobody can later prove was asked, and worse, an answer to it has
 nothing to bind against. A record with no card is inert.
 
-**Neither failure ends the Build.** This is a control surface attached to a
-governance record. If the repository refuses, the person loses the card and
-sees the reason in chat — they do not lose an hour of sandbox work, and they do
-not get a crash.
+**Persistence failure pauses the Build.** A control that can dispatch work is a
+governance decision, not optional telemetry. If either the question or its
+answer cannot be recorded, the adapter returns a bounded refusal and keeps all
+finished work pinned; it never acts from an unaudited card reply.
 """
 
 from __future__ import annotations
@@ -88,14 +88,17 @@ class BuildControlGate:
     async def raise_control(self, request: BuildControlRequest) -> dict[str, Any]:
         """Record the control and return the card payload to render.
 
-        Returns the card even when the record could not be written: the person
-        can still answer, and the answer is still resolved against the emitted
-        card, which is the security boundary. What is lost is the audit row, and
-        losing that is better than losing the ability to act.
+        The durable row is created before the card is emitted. A card without a
+        row could collect an answer that no retry can bind or audit, so a write
+        failure is returned as a visible Build pause instead.
         """
         card = request.bound_to(self.request_id_for(request)).as_card()
-        if not self.available:
+        if not self.enabled:
             return card
+        if not self.available:
+            raise BuildControlNotRecorded(
+                "Build paused because its human-input request could not be recorded. Nothing was dispatched; try again after persistence is available."
+            )
         try:
             recorded = await self.repo.open_build_collaboration(  # type: ignore[union-attr]
                 project_id=self.project_id,
@@ -105,9 +108,11 @@ class BuildControlGate:
                 originating_thread_id=self.thread_id or None,
                 parent_run_id=self.run_id or None,
             )
-        except Exception:  # noqa: BLE001 - see the module docstring
+        except Exception as exc:  # noqa: BLE001 - translated to a bounded workflow refusal
             logger.warning("Could not record the Build control for stage attempt %s.", self.stage_attempt_id, exc_info=True)
-            return card
+            raise BuildControlNotRecorded(
+                "Build paused because its human-input request could not be recorded. Nothing was dispatched; try again after persistence is available."
+            ) from exc
         # The card names the row it came from. Without it a redelivered answer
         # to an *earlier* emission would settle the control now open — and for
         # Replan and Restart that moves the digest chain a second time, silently
@@ -128,8 +133,12 @@ class BuildControlGate:
         the person was answering: the reply carries their words and the option
         they chose, never the sentence that was put to them.
         """
-        if not self.available or not answer.request_id:
+        if not self.enabled or not answer.request_id:
             return None
+        if not self.available:
+            raise BuildControlNotRecorded(
+                f"The decision to {answer.action.value.replace('_', ' ')} could not be recorded, so nothing was changed or dispatched. Try again."
+            )
         try:
             return await self.repo.answer_build_collaboration(  # type: ignore[union-attr]
                 project_id=self.project_id,
@@ -141,15 +150,11 @@ class BuildControlGate:
                 resumed_step_run_id=resumed_step_run_id,
                 meeting_id=meeting_id,
             )
-        except Exception:  # noqa: BLE001 - see the module docstring
+        except Exception as exc:  # noqa: BLE001 - translated to a bounded workflow refusal
             logger.warning("Could not record the answer to Build control %s.", answer.request_id, exc_info=True)
-            if answer.action.discards_work:
-                # Fail-soft is right for a lost audit row and wrong here: Replan
-                # and Restart move the digest chain *through* this record, so a
-                # swallowed write is not a missing note, it is a button that did
-                # nothing while reporting that it worked.
-                raise BuildControlNotRecorded(f"The decision to {answer.action.value.replace('_', ' ')} could not be recorded, so nothing was changed. Try again.") from None
-            return None
+            raise BuildControlNotRecorded(
+                f"The decision to {answer.action.value.replace('_', ' ')} could not be recorded, so nothing was changed or dispatched. Try again."
+            ) from exc
 
     async def plan_is_confirmed(self, plan_digest: str) -> bool:
         """Has a person already agreed to run *this* plan?

@@ -338,8 +338,13 @@ def plan_output_digest(*, plan_digest: str, input_digest_value: str) -> str:
     return _digest({"plan": plan_digest, "inputs": input_digest_value})
 
 
-def phase_output_digest(*, result: Mapping[str, Any], published: Sequence[Mapping[str, Any]]) -> str:
-    """What one phase hands the next: its structured result and its published bytes.
+def phase_output_digest(
+    *,
+    result: Mapping[str, Any],
+    published: Sequence[Mapping[str, Any]],
+    input_artifacts: Sequence[str],
+) -> str:
+    """What one phase hands the next: inputs, result, and published bytes.
 
     Defined here rather than inline at the two call sites because the writer and
     the *restorer* have to agree exactly. A replayed phase is only usable if the
@@ -348,7 +353,17 @@ def phase_output_digest(*, result: Mapping[str, Any], published: Sequence[Mappin
     symptom would be either a phase re-running forever or — far worse — an
     edited payload accepted as work that happened.
     """
-    return hashlib.sha256(json.dumps({"result": dict(result), "published": [dict(item) for item in published]}, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "input_artifacts": list(input_artifacts),
+                "result": dict(result),
+                "published": [dict(item) for item in published],
+            },
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def phase_step_material(

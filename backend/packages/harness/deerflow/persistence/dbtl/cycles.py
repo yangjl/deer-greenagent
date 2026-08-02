@@ -40,7 +40,7 @@ from deerflow.dbtl.cycle_state import (
     stage_for_state,
     validate_cycle_class,
 )
-from deerflow.dbtl.reconciliation_policy import reconciliation_required
+from deerflow.dbtl.reconciliation_policy import build_workflow_steps_enabled, reconciliation_required
 from deerflow.dbtl.stage_routes import GRAPH_STAGES
 from deerflow.persistence.dbtl.build_test_ops import BuildTestOpsMixin
 from deerflow.persistence.dbtl.collaboration_ops import CollaborationOpsMixin
@@ -737,6 +737,15 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
                     raise DbtlWorkflowRefused(f"Data reconciliation is not ready for review ({gate.outcome.value}): {reasons}")
             if stage == "build" and await self._latest_build_lineage(session, cycle_id) is None:
                 raise DbtlWorkflowRefused("Build has no reproducibility lineage to review.")
+            if stage == "build" and build_workflow_steps_enabled():
+                workflow = await self.build_workflow_view(
+                    project_id=project_id,
+                    stage_attempt_id=row.id,
+                )
+                if not workflow.get("is_complete"):
+                    raise DbtlWorkflowRefused(
+                        "Build's durable workflow is incomplete; every selected step and the registered review deck must succeed before submission."
+                    )
             if stage == "test" and await self._latest_build_lineage(session, cycle_id) is None:
                 raise DbtlWorkflowRefused("Test cannot be reviewed without Build lineage.")
             row.status = str(StageStatus.AWAITING_REVIEW)

@@ -78,6 +78,11 @@ Design–Build–Test–Learn (DBTL) governance.
   participant’s complete recorded report. When synthesis finishes, the review
   Markdown and registered approval/request-changes/reject deck are delivered as
   normal chat artifacts.
+  Observable Build runs are fail-closed at their durable boundaries: each phase
+  binds the exact workspace-input hashes it read, worker questions return as
+  answerable chat controls (or an optional Build meeting), and persistence
+  failures stop dispatch visibly. A Build cannot enter review until every
+  required workflow step and its registered review deck are complete.
   Registered feedback surfaces are stage-aware while retaining compatibility
   with captured Design decks: the artifact parent labels the owning stage,
   lifecycle (`open`, `consumed`, or `superseded`), and surface revision, and a

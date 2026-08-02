@@ -3196,8 +3196,9 @@ the opposite reason: they already reach a phase through `plan_build`'s
 input-bound output digest, and binding them twice would only make the reason a
 phase invalidated harder to read.
 
-**`dbtl.build_workflow_steps` now drives Build.** With it on, five things change
-and each is behind the same switch:
+**`dbtl.build_workflow_steps` now drives Build.** With it on, the governed
+workflow, its provenance checks, and its review gate move together behind the
+same switch:
 
 * **`load_design` refuses before it dispatches.** `live_stage/design_input.py`
   resolves the approved Design attempt, reads it through the project mapping,
@@ -3241,9 +3242,15 @@ and each is behind the same switch:
   their own digest chain *beneath* the container: phase N binds phase N−1, while
   `execute_phases` still binds the plan, and a phase's material includes the
   selection outcome so a newly registered specialist invalidates the stand-in's
-  run rather than inheriting it. A failed phase stops the run rather than
-  spending the remaining budget producing evidence nobody planned, and
-  `pause_after` stops at a committed, lease-free boundary.
+  run rather than inheriting it. Every phase success also binds the exact
+  workspace-input hashes it read. Replay re-hashes those bytes, so editing an
+  input between attempts reopens that phase and every dependent phase instead
+  of attributing old work to new data. A failed phase stops the run rather than
+  spending the remaining budget producing evidence nobody planned. A worker's
+  typed `needs_input` result raises its exact question through a durable Build
+  control (with the optional meeting route) and resumes the same phase with the
+  human exchange verbatim; `pause_after` stops at a committed, lease-free
+  boundary.
 * **A plan that did not finish is not a Build.** Every phase that ran ran
   truthfully, so a plan whose second phase failed — or that stopped at a
   `pause_after` boundary — looks exactly like a completed one to
@@ -3253,7 +3260,10 @@ and each is behind the same switch:
   is not opened at all (opening it would settle as a *presentational* code,
   which the UI renders as "the build ran; the write-up broke"), and the reply
   says how far it got. The committed phases stay committed and reusable, which
-  is the whole point of recording them separately.
+  is the whole point of recording them separately. The submission boundary
+  checks the durable workflow projection too: a Build whose required steps or
+  registered review deck are incomplete cannot enter human review merely
+  because an artifact row exists.
 * **A read-only summarizer writes the reviewed document, and writes only prose.**
   The `summarizer` and `planner` roles are withheld execution and write tools and
   granted no writable path (`_tools_for_unit`), so "read-only" is a property of
@@ -3282,11 +3292,12 @@ step's own output beside its digest under the stage work root (scratch, never
 evidence, already excluded from the manifest and from Build's input snapshot),
 and `replay` hands it back. Three rules: a payload is only accepted against the
 digest it was recorded under, so a truncated write or a payload from a different
-plan costs one re-run rather than filing work nobody did; **both directions fail
-soft**, because this is an accelerator bolted to a governance record and an
-accelerator must not be able to fail a Build; and the payload is written *before*
-the row is settled, since a payload with no row is unreachable while a row with
-no payload is a step that reports a replay and silently dispatches.
+plan costs one re-run rather than filing work nobody did; **writes fail closed**
+— an unreadable replay payload costs one fresh attempt, but failing to persist a
+new payload or step transition stops the Build with a bounded visible refusal;
+and the payload is written *before* the row is settled, since a payload with no
+row is unreachable while a row with no payload is a step that reports a replay
+and silently dispatches.
 `record_worker_runs` skips a unit already recorded on the stage attempt — a run
 whose phases all replayed arrives with the same unit ids and the unique index
 raised an unhandled `IntegrityError`.
@@ -3395,16 +3406,16 @@ answer naming no emission still settles the open control, and a caller that
 supplies no submission id gets payload idempotency: the same action and the same
 words replay, anything else conflicts.
 
-**A chain-moving decision is never silently lost.** Fail-soft is right for
-`raise_control` (losing an audit row beats losing the ability to act) and wrong
-for Replan and Restart, where the durable row *is* the mechanism: a swallowed
-write there is a button that did nothing while reporting that it worked. Those
-two raise `BuildControlNotRecorded`, and the adapter turns it into a receipt that
-says so **and re-presents the control** rather than proceeding on a decision
-nobody recorded. Re-presenting is not decoration: a reply counts as answered the
+**A Build decision is never silently lost.** Raising a control, recording its
+answer, and moving a Restart/Replan epoch are all authoritative writes. Any one
+that fails raises `BuildControlNotRecorded`; the adapter stops before dispatch,
+returns a bounded receipt, and re-presents an existing control when one can be
+recovered. Re-presenting is not decoration: a reply counts as answered the
 moment it resolves, not when the write lands, so without it the routing fence
 has already stood down and the "try again" the message asks for reaches ordinary
-chat.
+chat. Step-attempt recording follows the same rule through
+`BuildStepRecordingError`: no recorder means no governed Build and therefore no
+review artifact.
 
 **That table is also what makes Restart and Replan mean anything.**
 `build_control_epochs` counts answered restart/replan decisions, and
