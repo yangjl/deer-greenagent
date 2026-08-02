@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0027_dbtl_build_collaborations"
+HEAD = "0028_repair_dbtl_step_phase_slot"
 BASELINE = "0001_baseline"
 
 

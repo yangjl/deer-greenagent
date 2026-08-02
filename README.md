@@ -82,7 +82,9 @@ Design–Build–Test–Learn (DBTL) governance.
   binds the exact workspace-input hashes it read, worker questions return as
   answerable chat controls (or an optional Build meeting), and persistence
   failures stop dispatch visibly. A Build cannot enter review until every
-  required workflow step and its registered review deck are complete.
+  required workflow step and its registered review deck are complete. Migration
+  `0028` forward-repairs older databases whose step table was already stamped
+  but lacked the non-null phase identity required by this workflow.
   Registered feedback surfaces are stage-aware while retaining compatibility
   with captured Design decks: the artifact parent labels the owning stage,
   lifecycle (`open`, `consumed`, or `superseded`), and surface revision, and a

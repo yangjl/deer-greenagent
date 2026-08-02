@@ -703,7 +703,9 @@ artifact` is server-owned in full and is now stripped from external run input:
   through the same durable control and resumes with the recorded answer. Phase
   replay binds and re-hashes the workspace inputs it actually read, while any
   failed step/control write stops dispatch; an incomplete durable workflow or
-  unregistered review deck cannot be submitted for review. The project rail's
+  unregistered review deck cannot be submitted for review. Migration `0028`
+  forward-repairs stamped legacy step tables that lack `phase_slot`, preserving
+  their audit rows while restoring the phase/attempt uniqueness guarantees. The project rail's
   **Build plan** section replaces
   Blockers with a read-only projection of the same server view the transcript
   uses; open work items keep their signal as a count on the stage they belong

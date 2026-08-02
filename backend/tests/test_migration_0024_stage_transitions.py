@@ -119,7 +119,7 @@ async def test_a_drifted_schema_is_not_backfilled(tmp_path: Path) -> None:
         async with engine.connect() as connection:
             version = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
             count = await connection.scalar(sa.text(f"SELECT COUNT(*) FROM {TABLE}"))
-        assert version == "0027_dbtl_build_collaborations"
+        assert version == "0028_repair_dbtl_step_phase_slot"
         assert count == 0
     finally:
         await engine.dispose()

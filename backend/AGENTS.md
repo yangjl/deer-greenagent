@@ -3302,6 +3302,17 @@ and silently dispatches.
 whose phases all replayed arrives with the same unit ids and the unique index
 raised an unhandled `IntegrityError`.
 
+**An Alembic stamp is not proof of the physical step-table shape.** Some manual
+databases reached `0027` after applying an early `0026` layout whose uniqueness
+still used nullable `phase_key` and which lacked `phase_slot`; Alembic therefore
+had nothing left to run while every ORM read failed on the missing column.
+`0028_repair_dbtl_step_phase_slot` is the forward repair: it adds/backfills the
+non-null slot, preserves every legacy attempt, deterministically renumbers only
+NULL-enabled duplicate attempts, cancels only older duplicate running leases,
+and rebuilds both uniqueness definitions against `phase_slot`. Downgrade keeps
+the repair because this is the schema `0026` already promises, not a new domain
+feature.
+
 **"Accepted against the digest it was recorded under" is the caller's job, and
 it was nobody's.** `StepOutputStore.load` returns any valid JSON at the
 digest-named path, and a shape check answers "is this a phase result?" rather
