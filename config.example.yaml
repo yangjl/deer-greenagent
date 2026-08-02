@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 37
+config_version: 38
 
 # ============================================================================
 # Logging
@@ -2094,6 +2094,19 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+  # Show the project rail's live runtime-activity block (who is working now, and
+  # under whose authority). Off by default: activity rows are recorded either
+  # way, so this gates only whether a person is shown them and can be turned
+  # back off without losing the history it produced.
+  #
+  # On `backend: memory` the rows do not survive a restart, and the rail says
+  # "Status unavailable" rather than claiming an idle agent.
+  agent_activity_visibility: false
+  # Maximum activity rows served in one page of GET /api/threads/{id}/activity.
+  # There is no run-event retention policy — nothing prunes these rows, exactly
+  # like every other run event — so this bounds what a reader is *served* rather
+  # than deleting anything.
+  activity_page_limit: 200
 
 # ============================================================================
 # Agent Storage Configuration

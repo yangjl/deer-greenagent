@@ -9,7 +9,8 @@ so any blocking IO here stalls the event loop on the hot path.
 #3084 added a mock-based offload assertion in
 ``tests/test_jsonl_event_store_async_io.py`` that covers ``put`` only. This
 anchor complements it by driving the **full** async surface (``put``,
-``put_batch``, ``list_messages``, ``list_events``, ``list_messages_by_run``,
+``put_batch``, ``list_messages``, ``list_events``, ``list_thread_events``,
+``list_messages_by_run``,
 ``get_last_visible_ai_seq_by_run``, ``count_messages``, ``delete_by_run``,
 ``delete_by_thread``) under the strict
 Blockbuster runtime gate, so any blocking IO reintroduced on the event loop in
@@ -73,6 +74,10 @@ async def test_jsonl_run_event_store_async_api_does_not_block_event_loop(tmp_pat
     assert isinstance(await store.list_events("t1", "r1"), list)
     assert isinstance(await store.list_events("t1", "r1", event_types=["message"]), list)
     assert isinstance(await store.list_messages_by_run("t1", "r2"), list)
+    # The cross-run conversation read is a whole-thread scan, so it is the most
+    # expensive read here and the easiest one to add without an offload.
+    assert isinstance(await store.list_thread_events("t1"), list)
+    assert isinstance(await store.list_thread_events("t1", event_types=["message"], limit=1, before_seq=99), list)
     assert isinstance(await store.get_last_visible_ai_seq_by_run("t1", {"r1", "r2"}, user_id="user-1"), dict)
     assert await store.count_messages("t1") >= 1
 

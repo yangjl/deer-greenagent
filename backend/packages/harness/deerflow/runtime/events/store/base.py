@@ -113,6 +113,30 @@ class RunEventStore(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def list_thread_events(
+        self,
+        thread_id: str,
+        *,
+        event_types: list[str] | None = None,
+        limit: int = 200,
+        before_seq: int | None = None,
+    ) -> list[dict]:
+        """Return one page of a thread's events across **all** its runs, seq ascending.
+
+        ``list_events`` is run-scoped, and a conversation's activity spans every
+        run in it — including hidden ones a browser never subscribed to. Reading
+        it therefore needs a genuinely different query rather than a filter on
+        the existing one, which is why this is a new method on the base and all
+        three implementations: a ``db``-only signature would raise ``TypeError``
+        on the other two at runtime rather than at import.
+
+        ``before_seq`` pages **backwards** — the reader starts at the live edge
+        and walks into the past — so a page is the last ``limit`` records with
+        seq < before_seq, returned ascending. The oldest returned ``seq`` is the
+        next cursor.
+        """
+
+    @abc.abstractmethod
     async def list_messages_by_run(
         self,
         thread_id: str,

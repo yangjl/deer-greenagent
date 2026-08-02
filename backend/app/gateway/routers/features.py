@@ -29,6 +29,17 @@ class BrowserControlFeature(BaseModel):
     enabled: bool = Field(..., description="Whether the live browser routes and UI are available")
 
 
+class AgentActivityFeature(BaseModel):
+    """Whether the project rail shows the live runtime-activity block.
+
+    Gates the *view*, not the recording: rows are written either way, so turning
+    this off during a rollout costs visibility rather than history.
+    """
+
+    enabled: bool = Field(..., description="Whether the rail renders the runtime agent-activity block")
+    durable: bool = Field(..., description="Whether activity survives a restart; false on the in-memory run-event backend, where the UI must say Status unavailable rather than guessing idle")
+
+
 class DbtlFeature(BaseModel):
     """Current project-scoped DBTL operating mode."""
 
@@ -50,6 +61,7 @@ class FeaturesResponse(BaseModel):
 
     agents_api: AgentsApiFeature
     browser_control: BrowserControlFeature
+    agent_activity: AgentActivityFeature
     dbtl: DbtlFeature
 
 
@@ -62,11 +74,22 @@ class FeaturesResponse(BaseModel):
 async def list_features(config: AppConfig = Depends(get_config)) -> FeaturesResponse:
     """Return availability of optional, config-gated frontend features."""
     browser = browser_capability(config)
+    # Read defensively like ``stage_meetings`` below: this endpoint is the
+    # frontend's bootstrap, so a partial or stubbed config must degrade to the
+    # safe answer rather than 500 the whole page.
+    run_events = getattr(config, "run_events", None)
     stage_meetings = getattr(config.dbtl, "stage_meetings", None)
     stage_meeting_flags = stage_meetings.model_dump() if hasattr(stage_meetings, "model_dump") else {"build": False, "test": False, "learn": False}
     return FeaturesResponse(
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         browser_control=BrowserControlFeature(enabled=browser.available),
+        agent_activity=AgentActivityFeature(
+            enabled=bool(getattr(run_events, "agent_activity_visibility", False)),
+            # ``memory`` is the default development backend and loses everything
+            # on restart. The rail must render that as "Status unavailable"
+            # rather than as an idle agent, which is a claim it cannot support.
+            durable=getattr(run_events, "backend", "memory") != "memory",
+        ),
         dbtl=DbtlFeature(
             mode=config.dbtl.mode,
             mutations_enabled=config.dbtl.mutations_enabled,

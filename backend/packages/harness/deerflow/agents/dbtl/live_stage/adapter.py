@@ -17,7 +17,8 @@ import platform
 import re
 import sys
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, replace
 from inspect import isawaitable
 from pathlib import Path, PurePosixPath
@@ -122,6 +123,11 @@ from deerflow.dbtl.worker_result import (
     parse_worker_result,
 )
 from deerflow.projects.storage import ensure_project_dirs, project_outputs_dir
+from deerflow.runtime.activity.emitter import ActivityHandle, current_activity, current_activity_id, make_activity_handle
+from deerflow.runtime.activity.envelope import ActivityScope
+from deerflow.runtime.activity.lineage import supervisor_activity_id
+from deerflow.runtime.activity.spans import optional_activity_span
+from deerflow.runtime.activity.vocabulary import ActivityState, ActorKind
 from deerflow.trace_context import (
     DEERFLOW_TRACE_METADATA_KEY,
     get_current_trace_id,
@@ -445,9 +451,13 @@ def _terminal_seat_event(
     *,
     model: str,
     meeting_stage: str | None = "design",
+    lineage: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Report contract-valid evidence progress, not child-graph termination."""
     base = {
+        # Lineage first, so the unit's own identity below always wins: these
+        # keys are additive context, never a channel for renaming the worker.
+        **(dict(lineage) if lineage else {}),
         "task_id": unit.unit_id,
         **({"council_seat": _seat_identity(unit, model=model, stage=meeting_stage)} if meeting_stage else {}),
         **({"dbtl_stage": meeting_stage} if meeting_stage else {}),
@@ -2040,12 +2050,15 @@ def _atomic_copy(source: Path, destination: Path, *, expected_hash: str) -> None
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp_path: str | None = None
     try:
-        with source.open("rb") as reader, tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=destination.parent,
-            prefix=f".{destination.name}.",
-            delete=False,
-        ) as writer:
+        with (
+            source.open("rb") as reader,
+            tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=destination.parent,
+                prefix=f".{destination.name}.",
+                delete=False,
+            ) as writer,
+        ):
             temp_path = writer.name
             digest = hashlib.sha256()
             for chunk in iter(lambda: reader.read(1024 * 1024), b""):
@@ -2137,13 +2150,7 @@ def _publish_build_worker_artifacts(
                     break
                 content_hash = _sha256_file(source)
                 safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", source.name).strip("-.") or "artifact"
-                destination_relative = (
-                    stage_dir
-                    / "artifacts"
-                    / attempt_id
-                    / _safe_token(unit.unit_id)
-                    / f"{content_hash[:16]}-{safe_name[:96]}"
-                )
+                destination_relative = stage_dir / "artifacts" / attempt_id / _safe_token(unit.unit_id) / f"{content_hash[:16]}-{safe_name[:96]}"
                 destination = outputs_root / destination_relative
                 try:
                     _atomic_copy(source, destination, expected_hash=content_hash)
@@ -2593,6 +2600,7 @@ class LiveStageAdapter:
         state: dict[str, Any],
         project_id: str,
         project_root: str,
+        cycle_id: str | None = None,
         stage: str = "design",
         meeting: bool = True,
         stage_workspace: str | None = None,
@@ -2605,21 +2613,72 @@ class LiveStageAdapter:
             *,
             budget: WorkerBudget,
         ) -> Sequence[DispatchOutcome]:
-            return await self._dispatch_units(
-                units,
-                budget=budget,
-                config=config,
-                state=state,
-                runtime=runtime,
-                metadata=metadata,
-                project_id=project_id,
-                project_root=project_root,
-                stage=stage,
-                meeting=meeting,
-                stage_workspace=stage_workspace,
-            )
+            # A dispatch round reports on the stage's own row rather than
+            # opening one of its own. A Design meeting calls this closure
+            # several times — positions, red team, chair — so a row per round
+            # made the coordinator appear to finish and restart between waves,
+            # and a shared deterministic id would have reopened a terminal row
+            # outright. One row per ``execute`` describes the actor that is
+            # genuinely present for the whole stage; the rounds are what it is
+            # *doing*, which is a state change.
+            handle = current_activity()
+            if handle is not None:
+                await handle.update(state=ActivityState.DISPATCHING, operation="stage.coordinate")
+            try:
+                return await self._dispatch_units(
+                    units,
+                    budget=budget,
+                    config=config,
+                    state=state,
+                    runtime=runtime,
+                    metadata=metadata,
+                    project_id=project_id,
+                    project_root=project_root,
+                    cycle_id=cycle_id,
+                    stage=stage,
+                    meeting=meeting,
+                    stage_workspace=stage_workspace,
+                )
+            finally:
+                if handle is not None:
+                    # Back to coordinating whether the round returned results or
+                    # raised: leaving the row reading "dispatching" after the
+                    # workers are gone is the stale state this projection exists
+                    # to remove.
+                    await handle.update(state=ActivityState.COORDINATING, operation="stage.coordinate")
 
         return dispatch
+
+    @asynccontextmanager
+    async def _stage_activity(
+        self,
+        *,
+        config: RunnableConfig,
+        stage: str,
+        cycle_id: str,
+    ) -> AsyncIterator[ActivityHandle | None]:
+        """Open the one activity row that describes this stage's whole execution.
+
+        Scoped to ``execute`` rather than to a dispatch round so that
+        preparation, repository reads, roster planning, waiting on workers,
+        evidence recording, and an early failure are all visible as one actor
+        being present — and so a stage that fails before dispatching anything
+        still closes a row rather than never opening one.
+        """
+        run_id = self._runtime(config).get("run_id")
+        supervisor_id = supervisor_activity_id(run_id) if isinstance(run_id, str) and run_id else None
+        async with optional_activity_span(
+            run_id,
+            actor_kind=ActorKind.STAGE_ADAPTER,
+            actor_id=f"{stage}-stage",
+            operation="stage.prepare",
+            state=ActivityState.PREPARING,
+            stage=stage,
+            parent_activity_id=supervisor_id,
+            dispatcher_activity_id=supervisor_id,
+            scope=ActivityScope(cycle_id=cycle_id, stage=stage),
+        ) as handle:
+            yield handle
 
     async def _dispatch_units(
         self,
@@ -2632,6 +2691,7 @@ class LiveStageAdapter:
         metadata: dict[str, Any],
         project_id: str,
         project_root: str,
+        cycle_id: str | None = None,
         stage: str,
         meeting: bool,
         stage_workspace: str | None,
@@ -2653,7 +2713,13 @@ class LiveStageAdapter:
             if writer is not None:
                 await aemit_custom_event(payload, writer=writer)
 
-        async def run_one(unit: WorkUnit) -> DispatchOutcome:
+        run_id = runtime.get("run_id")
+        # The adapter's own row is open in this coroutine, and ``asyncio.gather``
+        # copies the context into each worker task, so every worker names the
+        # coordinator that dispatched it without being handed an id.
+        adapter_activity_id = current_activity_id()
+
+        async def run_one(unit: WorkUnit, index: int) -> DispatchOutcome:
             unit_workspace = _unit_stage_workspace(stage_workspace, unit.unit_id) if stage_workspace else None
             if unit_workspace:
                 resolved_workspace = _workspace_relative_path(unit_workspace, project_root=project_root)
@@ -2739,6 +2805,32 @@ class LiveStageAdapter:
                 thinking_enabled=unit.reasoning == REASONING_EXTENDED,
                 extra_middlewares=[deadline],
             )
+            # One activity row per real work unit, opened after the guards above
+            # so a worker that never ran does not appear to have started. A
+            # meeting seat keeps its validated role label; ordinary stage work
+            # is numbered, because "Build worker 2" is what a reader can match
+            # against the two rows running beside each other.
+            worker_activity = (
+                make_activity_handle(
+                    run_id=str(run_id),
+                    actor_kind=ActorKind.STAGE_WORKER,
+                    actor_id=unit.unit_id,
+                    operation="meeting.participate" if meeting else "worker.run",
+                    state=ActivityState.COMPUTING,
+                    stage=stage,
+                    index=index,
+                    display_name=(_SEAT_ROLE_LABELS.get(unit.role) if meeting else None),
+                    parent_activity_id=adapter_activity_id,
+                    scope=ActivityScope(cycle_id=cycle_id, stage=stage, task_id=unit.unit_id),
+                    writer=writer,
+                )
+                if isinstance(run_id, str) and run_id
+                else None
+            )
+            worker_lineage = worker_activity.lineage_fields() if worker_activity is not None else {}
+            if worker_activity is not None:
+                await worker_activity.open()
+
             await emit(
                 {
                     "type": "task_started",
@@ -2747,6 +2839,7 @@ class LiveStageAdapter:
                     "model_name": effective_model,
                     "dbtl_stage": stage,
                     **({"council_seat": _seat_identity(unit, model=effective_model, stage=stage)} if meeting else {}),
+                    **worker_lineage,
                 }
             )
             holder = SubagentResult(
@@ -2769,8 +2862,11 @@ class LiveStageAdapter:
                         "error": "DBTL stage run cancelled.",
                         "dbtl_stage": stage,
                         **({"council_seat": _seat_identity(unit, model=effective_model, stage=stage)} if meeting else {}),
+                        **worker_lineage,
                     }
                 )
+                if worker_activity is not None:
+                    await worker_activity.settle(ActivityState.CANCELLED)
                 raise
 
             _report_subagent_token_usage(config, result)
@@ -2789,8 +2885,15 @@ class LiveStageAdapter:
                         dispatch_outcome,
                         model=effective_model,
                         meeting_stage=stage if meeting else None,
+                        lineage=worker_lineage,
                     )
                 )
+                if worker_activity is not None:
+                    # The row's outcome follows the *contract*, not the child
+                    # graph: a worker that stopped cleanly but returned prose is
+                    # a failed piece of evidence, and reporting it as completed
+                    # would disagree with its own terminal event.
+                    await worker_activity.settle(ActivityState.FAILED if dispatch_outcome.error else ActivityState.COMPLETED)
                 return dispatch_outcome
 
             error = result.error or f"Subagent ended with status {result.status.value}."
@@ -2807,11 +2910,14 @@ class LiveStageAdapter:
                     dispatch_outcome,
                     model=effective_model,
                     meeting_stage=stage if meeting else None,
+                    lineage=worker_lineage,
                 )
             )
+            if worker_activity is not None:
+                await worker_activity.settle(ActivityState.FAILED)
             return dispatch_outcome
 
-        return await asyncio.gather(*(run_one(unit) for unit in units))
+        return await asyncio.gather(*(run_one(unit, index) for index, unit in enumerate(units, start=1)))
 
     async def _record_human_authored_design(
         self,
@@ -3036,6 +3142,7 @@ class LiveStageAdapter:
     async def _execute_review_meeting(
         self,
         *,
+        activity: AsyncExitStack,
         stage: str,
         project_id: str,
         cycle_id: str,
@@ -3061,6 +3168,11 @@ class LiveStageAdapter:
                 cycle_id=cycle_id,
                 note=f"The {normalized or 'requested'} stage has no review meeting, so nothing was convened.",
             )
+        # A convened meeting knows its stage from the server-registered deck, so
+        # its row can open here rather than waiting on cycle state.
+        meeting_activity = await activity.enter_async_context(
+            self._stage_activity(config=config, stage=normalized, cycle_id=cycle_id),
+        )
         attempt = _stage_attempt(cycle, normalized)
         attempt_id = str((attempt or {}).get("id") or "")
         evidence = max(
@@ -3139,6 +3251,7 @@ class LiveStageAdapter:
             state=state,
             project_id=project_id,
             project_root=project_root,
+            cycle_id=cycle_id,
             stage=normalized,
             meeting=True,
         )
@@ -3181,6 +3294,8 @@ class LiveStageAdapter:
                 idempotency_key=execution_key,
                 council=None,
             )
+        if meeting_activity is not None:
+            await meeting_activity.update(state=ActivityState.RECORDING, operation="stage.record")
         await self._repo.record_worker_runs(
             cycle_id=cycle_id,
             project_id=project_id,
@@ -3307,6 +3422,50 @@ class LiveStageAdapter:
         expected_stage: str | None = None,
         expected_cycle_revision: int | None = None,
     ) -> LiveStageResult:
+        """Run the cycle's currently executable stage and record what it produced.
+
+        The activity row this stage reports on is opened from inside, once the
+        stage is actually known, and closed by this stack however the work ends
+        — including an exception, which settles the row ``failed`` rather than
+        leaving it spinning. Opening it here instead would have to name a stage
+        nobody has resolved yet.
+        """
+        async with AsyncExitStack() as activity:
+            return await self._execute_stage(
+                activity=activity,
+                project_id=project_id,
+                cycle_id=cycle_id,
+                request_text=request_text,
+                state=state,
+                config=config,
+                authored_design=authored_design,
+                council_adjustment=council_adjustment,
+                participant_settings=participant_settings,
+                approved_council_proposal=approved_council_proposal,
+                clarification_answer=clarification_answer,
+                review_meeting_stage=review_meeting_stage,
+                expected_stage=expected_stage,
+                expected_cycle_revision=expected_cycle_revision,
+            )
+
+    async def _execute_stage(
+        self,
+        *,
+        activity: AsyncExitStack,
+        project_id: str | None,
+        cycle_id: str | None,
+        request_text: str,
+        state: dict[str, Any],
+        config: RunnableConfig,
+        authored_design: str | None = None,
+        council_adjustment: str | None = None,
+        participant_settings: Mapping[str, ParticipantSettings] | None = None,
+        approved_council_proposal: CouncilProposal | None = None,
+        clarification_answer: str | None = None,
+        review_meeting_stage: str | None = None,
+        expected_stage: str | None = None,
+        expected_cycle_revision: int | None = None,
+    ) -> LiveStageResult:
         if not project_id or not cycle_id:
             return LiveStageResult(
                 stage="unknown",
@@ -3365,6 +3524,7 @@ class LiveStageAdapter:
             # deriving a stage from cycle state, so it deliberately skips the
             # status checks below — ``awaiting_review`` is exactly when it runs.
             return await self._execute_review_meeting(
+                activity=activity,
                 stage=review_meeting_stage,
                 project_id=project_id,
                 cycle_id=cycle_id,
@@ -3378,6 +3538,9 @@ class LiveStageAdapter:
             )
 
         stage = _executable_stage(cycle)
+        stage_activity = await activity.enter_async_context(
+            self._stage_activity(config=config, stage=stage or "", cycle_id=cycle_id),
+        )
         if stage not in {"design", "reconciliation", "build", "test", "learn"}:
             return LiveStageResult(
                 stage=stage or "checkpoint",
@@ -3668,6 +3831,7 @@ class LiveStageAdapter:
             state=state,
             project_id=project_id,
             project_root=project_root,
+            cycle_id=cycle_id,
             stage=stage,
             meeting=stage == "design",
             stage_workspace=stage_workspace,
@@ -3930,6 +4094,8 @@ class LiveStageAdapter:
             )
             artifact_type = spec.required_artifact_types[0]
 
+        if stage_activity is not None:
+            await stage_activity.update(state=ActivityState.RECORDING, operation="stage.record")
         recorded_worker_runs = await self._repo.record_worker_runs(
             cycle_id=cycle_id,
             project_id=project_id,

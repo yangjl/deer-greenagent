@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from deerflow.constants import (
+    AGENT_ACTIVITY_EVENT_CATEGORY,
+    AGENT_ACTIVITY_EVENT_TYPE,
     RUN_EVENT_CATEGORY_MAX_LENGTH,
     RUN_EVENT_TYPE_MAX_LENGTH,
     WORKSPACE_CHANGES_EVENT_CATEGORY,
@@ -70,6 +72,8 @@ SUBAGENT_END_EVENT = RunEventDefinition("subagent.end", "subagent")
 
 WORKSPACE_CHANGES_EVENT = RunEventDefinition(WORKSPACE_CHANGES_EVENT_TYPE, WORKSPACE_CHANGES_EVENT_CATEGORY)
 
+AGENT_ACTIVITY_EVENT = RunEventDefinition(AGENT_ACTIVITY_EVENT_TYPE, AGENT_ACTIVITY_EVENT_CATEGORY)
+
 MIDDLEWARE_EVENT_PATTERN = RunEventPattern(
     pattern="middleware:{tag}",
     prefix="middleware:",
@@ -106,8 +110,15 @@ SUBAGENT_RUN_EVENT_DEFINITIONS = (
 
 WORKSPACE_RUN_EVENT_DEFINITIONS = (WORKSPACE_CHANGES_EVENT,)
 
+#: One event type carries every activity transition. The lifecycle edge rides in
+#: the payload's ``transition`` field rather than in the event name, because the
+#: rail reads the whole ordered stream and splitting it across three names would
+#: buy nothing but three contract entries.
+ACTIVITY_RUN_EVENT_DEFINITIONS = (AGENT_ACTIVITY_EVENT,)
+
 FIXED_RUN_EVENT_DEFINITIONS = (
     *JOURNAL_RUN_EVENT_DEFINITIONS,
     *SUBAGENT_RUN_EVENT_DEFINITIONS,
     *WORKSPACE_RUN_EVENT_DEFINITIONS,
+    *ACTIVITY_RUN_EVENT_DEFINITIONS,
 )

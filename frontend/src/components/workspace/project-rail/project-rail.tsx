@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { resetThreadChatAfterDelete } from "@/components/workspace/chats/use-thread-chat";
 import { useProjectCycleSelection } from "@/components/workspace/dbtl";
 import { SettingsDialog } from "@/components/workspace/settings";
+import { useAgentActivityFeature } from "@/core/activity";
 import {
   CYCLE_STATE_LABELS,
   DBTL_STAGES,
@@ -64,6 +65,11 @@ import {
 } from "@/core/workspaces";
 import { cn } from "@/lib/utils";
 
+import {
+  AgentActivityBlock,
+  useActivityCollapsedItem,
+  useActivityHeaderWord,
+} from "./agent-activity-block";
 import { CycleStageSheet } from "./cycle-stage-sheet";
 import { ProjectRailFrame } from "./project-rail-frame";
 
@@ -178,6 +184,21 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const dbtl = useDbtlFeature();
   const controls = dbtlControlState(dbtl.feature, dbtl.isLoading);
   const cycleQuery = useProjectCycles(project?.id);
+  const activityFeature = useAgentActivityFeature();
+  const activityHeaderWord = useActivityHeaderWord(activityFeature.durable);
+  const activityCollapsed = useActivityCollapsedItem(activityFeature.durable);
+  // Numbered from the *full* ordered list so the activity block and the Cycles
+  // section agree about which cycle is "Cycle 02".
+  const cycleLabelFor = useCallback(
+    (cycleId: string) => {
+      const cycles = cycleQuery.data?.cycles ?? [];
+      const index = cycles.findIndex((candidate) => candidate.id === cycleId);
+      return index < 0
+        ? undefined
+        : `Cycle ${String(index + 1).padStart(2, "0")}`;
+    },
+    [cycleQuery.data],
+  );
 
   const { selectedCycleId, selectCycle } = useProjectCycleSelection();
   const [cyclesOverride, setCyclesOverride] = useState<boolean | null>(null);
@@ -279,8 +300,8 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           onSelect: () => scrollToRailSection(RAIL_SECTION_IDS.blockers),
         },
         {
-          label: "Agents",
-          icon: Bot,
+          label: activityFeature.enabled ? activityCollapsed.label : "Agents",
+          icon: activityFeature.enabled ? activityCollapsed.icon : Bot,
           onSelect: () => scrollToRailSection(RAIL_SECTION_IDS.agents),
         },
         {
@@ -462,25 +483,43 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
         )}
       </div>
 
-      <SectionLabel id={RAIL_SECTION_IDS.agents}>Agents</SectionLabel>
-      <div className="px-2">
-        {PLACEHOLDER_AGENTS.map((agent) => (
-          <div
-            key={agent.name}
-            className="flex items-center gap-2 rounded px-2 py-1.5 text-sm"
-          >
-            <Bot className="text-muted-foreground size-3.5 shrink-0" />
-            <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-            <span
-              className="size-1.5 shrink-0 rounded-full bg-emerald-600 dark:bg-emerald-400"
-              title={agent.role}
-            />
+      <SectionLabel
+        id={RAIL_SECTION_IDS.agents}
+        action={
+          activityFeature.enabled ? (
+            <span className="text-muted-foreground/70 text-[11px]">
+              {activityHeaderWord}
+            </span>
+          ) : undefined
+        }
+      >
+        Agents
+      </SectionLabel>
+      {activityFeature.enabled ? (
+        <AgentActivityBlock
+          available={activityFeature.durable}
+          cycleLabel={cycleLabelFor}
+        />
+      ) : (
+        <div className="px-2">
+          {PLACEHOLDER_AGENTS.map((agent) => (
+            <div
+              key={agent.name}
+              className="flex items-center gap-2 rounded px-2 py-1.5 text-sm"
+            >
+              <Bot className="text-muted-foreground size-3.5 shrink-0" />
+              <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+              <span
+                className="size-1.5 shrink-0 rounded-full bg-emerald-600 dark:bg-emerald-400"
+                title={agent.role}
+              />
+            </div>
+          ))}
+          <div className="text-muted-foreground/70 px-2 py-1 text-xs">
+            Breeding agents are assigned per project in a later cycle.
           </div>
-        ))}
-        <div className="text-muted-foreground/70 px-2 py-1 text-xs">
-          Breeding agents are assigned per project in a later cycle.
         </div>
-      </div>
+      )}
 
       <SectionLabel
         id={RAIL_SECTION_IDS.conversations}

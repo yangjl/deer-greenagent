@@ -319,6 +319,15 @@ def build_middlewares(
         runtime_middleware_kwargs["deferred_setup"] = deferred_setup
     middlewares = build_lead_runtime_middlewares(**runtime_middleware_kwargs)
 
+    # Report the agent's own presence as runtime activity. First among the
+    # lead-only middlewares so its row opens before the rest of the chain's
+    # setup and closes after their teardown; the shared base's positions are
+    # deliberately left alone, since ``InputSanitizationMiddleware`` must stay
+    # the outermost model-call wrapper.
+    from deerflow.agents.middlewares.agent_activity_middleware import AgentActivityMiddleware
+
+    middlewares.append(AgentActivityMiddleware())
+
     # Always inject current date (and optionally memory) as <system-reminder> into the
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware

@@ -67,6 +67,7 @@ from deerflow.runtime.goal import (
     visible_conversation_signature,
     write_thread_goal,
 )
+from deerflow.runtime.runs.activity_buffer import ActivityEventBuffer
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
@@ -399,7 +400,15 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
-        existing_context.setdefault("run_id", runtime_context["run_id"])
+        # ``run_id`` is overwritten, not defaulted: this run's identity is the
+        # server's to state. ``config["context"]`` carries the caller's own
+        # ``body.context`` here, so a defaulted key let a client name the run —
+        # and consumers read it as proof of which run they are in. The
+        # per-run delegation cap counts current-run ledger entries by it, and
+        # the activity projection keys every row on it, so a supplied value
+        # both resets that budget every request and files this run's activity
+        # under another. No legitimate caller sends one.
+        existing_context["run_id"] = runtime_context["run_id"]
         if DEERFLOW_TRACE_METADATA_KEY in runtime_context:
             existing_context.setdefault(DEERFLOW_TRACE_METADATA_KEY, runtime_context[DEERFLOW_TRACE_METADATA_KEY])
         if "app_config" in runtime_context:
@@ -549,6 +558,7 @@ async def run_agent(
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
+    activity_events: ActivityEventBuffer | None = None
     started = False
 
     async def _finish_cancellation(
@@ -867,6 +877,10 @@ async def run_agent(
         # of one low-frequency put() per step on the hot stream loop. Flushed in
         # the finally block so buffered steps survive abort/exception paths too.
         subagent_events = _SubagentEventBuffer(event_store, thread_id, run_id)
+        # Captured in this loop rather than inside _publish_stream_item, which
+        # returns early for namespaced frames: persistence must not depend on
+        # whether a client asked to stream subgraphs.
+        activity_events = ActivityEventBuffer(event_store, thread_id, run_id)
 
         goal_evaluator_model: Any | None = None
 
@@ -896,6 +910,7 @@ async def run_agent(
                             await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
                             if single_mode == "custom":
                                 await subagent_events.add(chunk)
+                                await activity_events.add(chunk)
                         return
                     # Multiple modes or subgraphs: astream yields tuples
                     async for item in agent.astream(
@@ -917,6 +932,11 @@ async def run_agent(
                             # fallback: a delegated subagent's marked fallback is the
                             # executor's to map (task_failed), not this run's.
                             llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                        if mode == "custom":
+                            # Before the namespace branch below, deliberately: a
+                            # subgraph-streaming client must not be the reason a
+                            # rail cannot recover its state after a refresh.
+                            await activity_events.add(chunk)
                         await _publish_stream_item(
                             bridge=bridge,
                             run_id=run_id,
@@ -1077,6 +1097,16 @@ async def run_agent(
         # abort/exception paths, where the stream loop broke before its own flush.
         if not record.ownership_lost and subagent_events is not None:
             await subagent_events.flush()
+
+        if not record.ownership_lost and activity_events is not None:
+            # An actor normally closes its own activity row. A cancelled run, a
+            # graph that raised past an ``aafter_agent``, or a middleware whose
+            # closing hook never fires leaves rows that nothing later will ever
+            # close, and a durable projection exists precisely so a reader is
+            # not left watching finished work spin. The run's end is the last
+            # moment anything can settle them.
+            await activity_events.close_open_activities()
+            await activity_events.flush()
 
         if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
             try:

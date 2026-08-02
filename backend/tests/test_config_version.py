@@ -201,7 +201,9 @@ def test_version_36_upgrade_removes_retired_deck_theme_setting(tmp_path):
 
     assert result.returncode == 0, result.stderr
     upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert upgraded["config_version"] == 37
+    # The upgrade always lands on the example's current version; this test is
+    # about the retired *field*, not the version number it was retired at.
+    assert upgraded["config_version"] == _load_repo_example()["config_version"]
     assert "council_deck_theme_skill" not in upgraded["dbtl"]
     assert "Removed 1 retired field" in result.stdout
 

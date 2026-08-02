@@ -14,6 +14,10 @@ from langgraph.types import Command
 
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
+from deerflow.runtime.activity.emitter import make_activity_handle
+from deerflow.runtime.activity.envelope import ActivityScope
+from deerflow.runtime.activity.lineage import deterministic_activity_id, lead_activity_id
+from deerflow.runtime.activity.vocabulary import ActivityState, ActorKind, subagent_label
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
@@ -109,6 +113,18 @@ def _schedule_deferred_subagent_cleanup(task_id: str, trace_id: str, max_polls: 
     logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for cancelled task {task_id}")
     cleanup_task = asyncio.create_task(_deferred_cleanup_subagent_task(task_id, trace_id, max_polls))
     cleanup_task.add_done_callback(lambda task: _log_cleanup_failure(task, trace_id=trace_id, task_id=task_id))
+
+
+async def _settle_delegation(handle: Any | None, state: ActivityState) -> None:
+    """Close the delegation's activity row alongside its terminal task event.
+
+    Every exit from the polling loop is terminal for the subagent, so each one
+    closes the row here rather than relying on the run's end sweep — a row that
+    stays open until the whole run finishes would show a finished worker as
+    still working for the rest of the turn.
+    """
+    if handle is not None:
+        await handle.settle(state)
 
 
 def _find_usage_recorder(runtime: Any) -> Any | None:
@@ -431,6 +447,32 @@ async def task_tool(
     logger.info(f"[trace={trace_id}] Started background task {task_id} (subagent={subagent_type}, timeout={config.timeout_seconds}s, polling_limit={max_poll_count} polls)")
 
     writer = get_stream_writer()
+
+    # One activity row for the delegation, opened before the first task event so
+    # a reader never sees a worker start with no actor behind it. The dispatcher
+    # is derived rather than carried: the lead agent's row was opened several
+    # graph nodes ago by ``AgentActivityMiddleware``, and nothing hands a parent
+    # id down to the tools node.
+    delegation = (
+        make_activity_handle(
+            run_id=run_id,
+            actor_kind=ActorKind.SUBAGENT,
+            actor_id=str(subagent_type),
+            operation="subagent.run",
+            state=ActivityState.COMPUTING,
+            display_name=subagent_label(subagent_type),
+            parent_activity_id=lead_activity_id(run_id),
+            scope=ActivityScope(task_id=task_id),
+            activity_id=deterministic_activity_id(run_id, f"subagent:{task_id}"),
+            writer=writer,
+        )
+        if isinstance(run_id, str) and run_id
+        else None
+    )
+    lineage = delegation.lineage_fields() if delegation is not None else {}
+    if delegation is not None:
+        await delegation.open()
+
     # Send Task Started message'
     await aemit_custom_event(
         {
@@ -438,6 +480,7 @@ async def task_tool(
             "task_id": task_id,
             "description": description,
             "model_name": effective_model,
+            **lineage,
         },
         writer=writer,
     )
@@ -449,9 +492,10 @@ async def task_tool(
             if result is None:
                 logger.error(f"[trace={trace_id}] Task {task_id} not found in background tasks")
                 await aemit_custom_event(
-                    {"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks"},
+                    {"type": "task_failed", "task_id": task_id, "error": "Task disappeared from background tasks", **lineage},
                     writer=writer,
                 )
+                await _settle_delegation(delegation, ActivityState.FAILED)
                 cleanup_background_task(task_id)
                 error = f"Task {task_id} disappeared from background tasks"
                 return _task_result_command(
@@ -480,6 +524,7 @@ async def task_tool(
                     await aemit_custom_event(
                         {
                             "type": "task_running",
+                            **lineage,
                             "task_id": task_id,
                             "message": message,
                             "message_index": i + 1,  # 1-based index for display
@@ -503,9 +548,11 @@ async def task_tool(
                         "result": result.result,
                         "usage": usage,
                         "model_name": effective_model,
+                        **lineage,
                     },
                     writer=writer,
                 )
+                await _settle_delegation(delegation, ActivityState.COMPLETED)
                 logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
                 cleanup_background_task(task_id)
                 # stop_reason carries a guardrail cap (token_capped / turn_capped)
@@ -529,9 +576,11 @@ async def task_tool(
                         "error": result.error,
                         "usage": usage,
                         "model_name": effective_model,
+                        **lineage,
                     },
                     writer=writer,
                 )
+                await _settle_delegation(delegation, ActivityState.FAILED)
                 logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
                 cleanup_background_task(task_id)
                 # A turn-capped run with no usable output surfaces as failed +
@@ -555,9 +604,11 @@ async def task_tool(
                         "error": result.error,
                         "usage": usage,
                         "model_name": effective_model,
+                        **lineage,
                     },
                     writer=writer,
                 )
+                await _settle_delegation(delegation, ActivityState.CANCELLED)
                 logger.info(f"[trace={trace_id}] Task {task_id} cancelled: {result.error}")
                 cleanup_background_task(task_id)
                 return _task_result_command(
@@ -577,9 +628,11 @@ async def task_tool(
                         "error": result.error,
                         "usage": usage,
                         "model_name": effective_model,
+                        **lineage,
                     },
                     writer=writer,
                 )
+                await _settle_delegation(delegation, ActivityState.FAILED)
                 logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
                 cleanup_background_task(task_id)
                 return _task_result_command(
@@ -609,9 +662,11 @@ async def task_tool(
                         "task_id": task_id,
                         "usage": usage,
                         "model_name": effective_model,
+                        **lineage,
                     },
                     writer=writer,
                 )
+                await _settle_delegation(delegation, ActivityState.INTERRUPTED)
                 # The task may still be running in the background. Signal cooperative
                 # cancellation and schedule deferred cleanup to remove the entry from
                 # _background_tasks once the background thread reaches a terminal state.
@@ -626,6 +681,7 @@ async def task_tool(
                     usage=usage,
                 )
     except asyncio.CancelledError:
+        await _settle_delegation(delegation, ActivityState.CANCELLED)
         # Signal the background subagent thread to stop cooperatively.
         request_cancel_background_task(task_id)
 

@@ -59,6 +59,7 @@ through run-event or specialized APIs:
 | `context` | Effective hidden-context identity. |
 | `subagent` | Subagent lifecycle and step history. |
 | `workspace` | Workspace/output file-change evidence. |
+| `activity` | Runtime actor presence and dispatch lineage. |
 
 ## Producers
 
@@ -117,6 +118,42 @@ string `task_id`; `task_running` additionally requires a non-negative integer
 category `workspace` when a run changed files. Its string content is a summary;
 the structured versioned summary, file list, and limits live in
 `metadata.workspace_changes`.
+
+`runtime/activity/` writes `runtime.agent.activity` in category `activity`: one
+row per runtime-actor lifecycle transition, so a reader can tell who is working
+and under whose authority. The live custom-event stream name is
+`agent_activity` and this is its persisted catalog name — the same two-name
+split `task_started` / `subagent.start` already uses.
+
+One event type carries every transition; the lifecycle edge rides in the
+payload's `transition` field (`started`, `updated`, or one terminal edge from
+`completed`, `failed`, `cancelled`, `interrupted`). `activity_run_event()`
+converts a live frame to a record and returns `None` for anything malformed.
+
+It **rebuilds** that record through `parse_activity_event` rather than copying
+the frame. A durable row outlives the process that wrote it and is served back
+to clients, so persisting the inbound mapping would move the closed-field-set
+guarantee below to whoever emitted the frame — a field attached by any future
+emitter edit would be stored and served. The parse boundary re-validates every
+field against the same vocabulary and keeps exactly `ACTIVITY_EVENT_FIELDS`; the
+contract states the same rule as `additionalProperties: false`.
+
+A run can end with rows still open — cancellation, a lost lease, or a graph that
+raised past a closing hook. `ActivityEventBuffer.close_open_activities()`, called
+from the run worker's `finally`, settles those as `interrupted`, so a reload
+never shows finished work still in progress.
+
+The category is dedicated on purpose. `list_messages` filters by category, so
+activity sharing `message` or `trace` would surface every routing transition
+inside a conversation.
+
+Every field is a bounded, server-owned value drawn from a closed vocabulary
+(`ActorKind`, `ActivityState`, and the `OPERATION_LABELS` template table), and
+`build_activity_event` refuses anything outside it. The envelope therefore has
+no channel through which a prompt, chain-of-thought, tool argument, shell
+output, secret, or host path could reach a screen. Visible names are plain
+words — the supervisor renders as **Cycle supervisor**, the stage adapter as
+**`<Stage>` stage** — never a class name or an `actor_kind`.
 
 The JSON contract defines required and optional payload fields using JSON
 Schema. It is the authoritative field-level reference.

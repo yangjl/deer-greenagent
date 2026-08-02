@@ -582,6 +582,104 @@ When adding features:
 4. Run `pnpm check` before committing
 5. Update this `AGENTS.md` when architecture, commands, or conventions change
 
+## Runtime agent activity
+
+`src/core/activity/` owns the rail's live presence-and-lineage projection, and
+it is **pure and React-free** except for `context.tsx`. `reducer.ts` restates
+the three rules the backend reducer enforces rather than trusting them from
+upstream, because the browser sees a *different* stream — one that reconnects,
+replays, and joins mid-flight: replay is not new information (folding twice, or
+a prefix then the whole thing, gives the same rows), a settled row is closed for
+good (later frames including another `started` are refused), and a row must be
+opened before it can be updated (an `updated` for an unknown id is dropped;
+backfill supplies the opening, and a synthesised row would misreport lineage the
+reader never saw).
+
+**Coalescing lives in the reducer, not the view.** An update that changes
+neither actor, state, operation, nor lineage returns the **same state object**,
+so React bails out of the render entirely. That is not only a wasted-work
+concern: a remounted `animate-spin` restarts its rotation, so a token-rate
+stream would make the one moving thing on screen stutter. Two rules follow — the
+leaf selector is memoized on that object (`view.ts`, a `WeakMap`), and the
+spinner is keyed by `activity_id` alone so a state change on the same actor
+updates the row without remounting the icon.
+
+`view.ts::activityView` is the single derived value the block reads: the active
+leaf (deepest actor genuinely working, ties broken by highest sequence), its
+dispatcher chain, its siblings, and one of five modes. `live` / `waiting` /
+`settled` / `idle` / `unavailable` replace the old static green dot, which
+looked like proof the Lead Agent was active. `waiting` is only honest when
+*nothing* is working — one actor waiting on a person while another computes is
+still a live run — and `unavailable` is never guessed as active: the in-memory
+run-event backend loses rows on restart, which the rail states rather than
+papering over.
+
+Display names come from the **server's** registry (`Cycle supervisor`,
+`Build stage`, `Build worker 2`, a seat's validated role label); the frontend
+keeps only `ACTIVITY_STATE_LABELS` for the state words, and an unknown state
+degrades to its raw value rather than blanking the row. `labels.ts` lives in
+`core/activity` rather than `core/dbtl` because activity describes every
+conversation, including projectless ones with no cycle near them.
+
+`ThreadScopedActivityProvider` is mounted beside `ThreadScopedSubtasksProvider`
+in `ChatProviders`, keyed the same way. Two keys, and conflating them is a bug:
+the *provider* is scoped to the conversation, which is what gets torn down,
+while an activity's identity is `(run_id, activity_id)`, which dedupes rows
+inside it. On mount, replay gaps, stream errors, and terminal runs, the provider
+reconciles the live tail with `GET /api/threads/{thread_id}/activity`. Live
+frames are buffered while that read is in flight; persisted rows are folded in
+server `seq` order and reject stale overlaps. A failed authoritative read makes
+the rail say **Unavailable**, never **Idle**. The sheet pages backward through
+the same endpoint as the reader reaches the end of its scroll (with an explicit
+Load earlier control as the keyboard-accessible equivalent); older pages are
+merged and the projection rebuilt in sequence order rather than appended in
+arrival order.
+
+`project-rail/agent-activity-block.tsx` is **fixed height with no internal
+scrolling and every line truncated**: at ~224px of content width a wrapped actor
+name changes the block's height, and a block whose height changes as work moves
+is the flicker this design exists to avoid. Banned outright, because each
+reintroduces a constraint the rail already has: an internal scroll container,
+any grow-in-place disclosure (`Collapsible`/`Accordion`), a virtualized list, and
+a height that varies with sibling count. If it needs more room, that is the
+signal to put content in the sheet.
+
+**Exactly one thing moves** — one `Loader2` with `animate-spin`, on the active
+leaf. Ancestors are static, `dispatching` uses a static glyph, and every
+animated indicator carries `motion-reduce:animate-none`. Colour is never the
+only signal: each state has a distinct icon shape and its word is always
+present, and the tone pairs are reused from `STATUS_MARK` (no new hue family) —
+but those keys are DBTL *stage statuses* and these are *activity states*, so
+reuse the tones, not the key names. This applies to the expanded sheet as well
+as the compact block: every active row is visible there, but only the leaf
+selected by `activityView` animates.
+
+**The block is not an `aria-live` region and no ancestor of it may be one.** Its
+DOM churns on every transition; announcing that would flood a screen reader
+during a governed run, for a surface the reader did not ask to monitor.
+Announcements come from one `sr-only role="status" aria-live="polite"` sibling
+the provider writes to, kept **outside** the block's subtree, carrying only
+actor-level changes coalesced to at most one every few seconds. The expanded
+timeline is `role="log"` with `aria-live="off"` — a reader who opened it is
+reading it, not being read to.
+
+`agent-activity-sheet.tsx` is the expanded surface, following
+`cycle-stage-sheet`'s convention rather than growing in the rail (which would
+push Cycles/Blockers/Conversations out of view and nest a second scroll region).
+Tree indentation caps at three levels; deeper rows render flat with an explicit
+`Dispatched by …` line.
+
+Gated by `useAgentActivityFeature()` → `/api/features -> agent_activity`, which
+carries `enabled` (rollout) and `durable` (false on the in-memory run-event
+backend). Both fail closed on a missing or failed read, so an older backend
+shows today's placeholder rather than an empty block that never fills. Scoped to
+`md` and above, because `ProjectRailFrame` does not render below it — a mobile
+entry point is follow-up work, not a sheet with no host.
+
+Note for tests that mock `react`: `core/threads/hooks.ts` imports
+`useActivityContext` from `@/core/activity/context`, so a node test mocking
+React must mock that module the same way it already mocks `@/core/tasks/context`.
+
 ## Design council debate view
 
 `src/core/tasks/council-seat.ts` is the pure layer for the live Design meeting

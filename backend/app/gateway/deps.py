@@ -31,6 +31,7 @@ from deerflow.community.browser_automation.session import browser_multi_worker_e
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
+from deerflow.runtime.activity.recovery import close_open_run_activity
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
 
@@ -292,14 +293,41 @@ async def _mark_latest_startup_recovered_threads_error(
             logger.warning("Failed to mark thread %s as error during run reconciliation", thread_id, exc_info=True)
 
 
+async def _close_recovered_run_activity(event_store: RunEventStore | None, recovered_runs: list[RunRecord]) -> None:
+    """Settle activity rows the fenced worker could not close itself.
+
+    A worker that loses its lease is fenced and performs no further writes —
+    the peer recovery path owns its terminal receipt. That is precisely the
+    multi-worker case a permanent spinner comes from: the run is durably
+    ``error`` with ``stop_reason=orphan_recovered`` while its activity rows sit
+    open forever, and the durable projection exists to remove exactly that.
+
+    Best-effort by design. A run marked recovered must not fail to be recovered
+    because its instrumentation could not be tidied up.
+    """
+    if event_store is None:
+        return
+    for record in recovered_runs:
+        try:
+            await close_open_run_activity(event_store, thread_id=record.thread_id, run_id=record.run_id)
+        except Exception:  # noqa: BLE001 - instrumentation must never block recovery
+            logger.warning(
+                "Run %s: could not settle agent activity during orphan recovery",
+                record.run_id,
+                exc_info=True,
+            )
+
+
 async def _terminalize_recovered_runs(
     bridge: StreamBridge,
     recovered_runs: list[RunRecord],
     *,
     cleanup_delay: float,
     on_cleanup_scheduled: Callable[[str, asyncio.Task[None]], None] | None = None,
+    event_store: RunEventStore | None = None,
 ) -> list[tuple[str, asyncio.Task[None]]]:
-    """Publish terminal markers and schedule retained-stream cleanup."""
+    """Publish terminal markers, settle open activity, and schedule cleanup."""
+    await _close_recovered_run_activity(event_store, recovered_runs)
     return await _publish_recovered_run_stream_end(
         bridge,
         recovered_runs,
@@ -467,6 +495,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 recovered_runs,
                 cleanup_delay=cleanup_delay,
                 on_cleanup_scheduled=track_recovered_stream_cleanup,
+                event_store=app.state.run_event_store,
             )
 
         app.state.run_manager = RunManager(
@@ -492,6 +521,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             recovered_runs,
             cleanup_delay=cleanup_delay,
             on_cleanup_scheduled=track_recovered_stream_cleanup,
+            event_store=app.state.run_event_store,
         )
         await _mark_latest_startup_recovered_threads_error(
             app.state.run_manager,

@@ -12,7 +12,11 @@ from jsonschema import Draft202012Validator, FormatChecker
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
+from deerflow.runtime.activity.emitter import activity_span
+from deerflow.runtime.activity.run_event import activity_run_event
+from deerflow.runtime.activity.vocabulary import ActivityState, ActorKind
 from deerflow.runtime.events.catalog import (
+    ACTIVITY_RUN_EVENT_DEFINITIONS,
     FIXED_RUN_EVENT_DEFINITIONS,
     JOURNAL_RUN_EVENT_DEFINITIONS,
     MIDDLEWARE_EVENT_PATTERN,
@@ -538,6 +542,46 @@ async def test_workspace_change_producer_matches_catalog_and_payload(monkeypatch
     assert record is not None
     assert {record["event_type"]} == {definition.event_type for definition in WORKSPACE_RUN_EVENT_DEFINITIONS}
     _assert_fixed_event_valid(record, persisted=True)
+
+
+@pytest.mark.anyio
+async def test_agent_activity_producer_matches_catalog_and_payload():
+    """Drive a real span and persist what it actually emits.
+
+    Exact set equality in both directions: a definition nothing emits, and an
+    emission nothing declares, are equally a contract break.
+    """
+    emitted: list[dict] = []
+
+    async with activity_span(
+        writer=emitted.append,
+        run_id="run-1",
+        actor_kind=ActorKind.STAGE_ADAPTER,
+        actor_id="build-stage",
+        operation="stage.prepare",
+        state=ActivityState.PREPARING,
+        stage="build",
+    ) as handle:
+        await handle.update(state=ActivityState.COORDINATING, operation="stage.coordinate")
+
+    assert [payload["transition"] for payload in emitted] == ["started", "updated", "completed"]
+
+    store = MemoryRunEventStore()
+    records = []
+    for payload in emitted:
+        record = activity_run_event(payload)
+        assert record is not None
+        records.append(await store.put(thread_id="thread-1", run_id="run-1", **record))
+
+    assert {record["event_type"] for record in records} == {definition.event_type for definition in ACTIVITY_RUN_EVENT_DEFINITIONS}
+    for record in records:
+        _assert_fixed_event_valid(record, persisted=True)
+
+
+def test_agent_activity_producer_drops_frames_from_other_streams():
+    assert activity_run_event({"type": "task_started", "task_id": "t1"}) is None
+    assert activity_run_event({"type": "agent_activity", "run_id": "run-1"}) is None
+    assert activity_run_event("not a frame") is None
 
 
 def test_known_gaps_do_not_reclassify_current_events_as_missing():

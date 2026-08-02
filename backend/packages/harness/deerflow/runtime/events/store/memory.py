@@ -151,6 +151,16 @@ class MemoryRunEventStore(RunEventStore):
             run_events = [e for e in run_events if e.get("seq", 0) > after_seq]
         return run_events[:limit]
 
+    async def list_thread_events(self, thread_id, *, event_types=None, limit=200, before_seq=None):
+        events = self._events.get(thread_id, [])
+        if event_types is not None:
+            events = [e for e in events if e["event_type"] in event_types]
+        if before_seq is not None:
+            events = [e for e in events if e.get("seq", 0) < before_seq]
+        # Paging backwards from the live edge: the last ``limit`` records, still
+        # returned ascending so a caller folds them in stream order.
+        return events[-limit:]
+
     async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         # Per-run, messages-only, seq-sorted: the seq window is a contiguous
         # slice located with bisect (O(log m_run)) over only this run's

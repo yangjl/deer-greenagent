@@ -310,6 +310,33 @@ class DbRunEventStore(RunEventStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
+    async def list_thread_events(
+        self,
+        thread_id,
+        *,
+        event_types=None,
+        limit=200,
+        before_seq=None,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        """One page of a thread's events across every run in it, seq ascending."""
+        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_thread_events")
+        stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id)
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        if event_types:
+            stmt = stmt.where(RunEventRow.event_type.in_(event_types))
+        if before_seq is not None:
+            stmt = stmt.where(RunEventRow.seq < before_seq)
+        # Ordered descending so ``limit`` takes the newest page, then reversed:
+        # the reader starts at the live edge and pages into the past.
+        stmt = stmt.order_by(RunEventRow.seq.desc()).limit(limit)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            rows = [self._row_to_dict(r) for r in result.scalars()]
+        rows.reverse()
+        return rows
+
     async def list_messages_by_run(
         self,
         thread_id,

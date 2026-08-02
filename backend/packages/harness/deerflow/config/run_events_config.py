@@ -31,3 +31,23 @@ class RunEventsConfig(BaseModel):
         default=True,
         description="Whether RunJournal should accumulate token counts to RunRow.",
     )
+    agent_activity_visibility: bool = Field(
+        default=False,
+        description=(
+            "Whether the project rail shows the live runtime-activity block. Off by default: the rows are always "
+            "recorded, and this gates only whether a person is shown them, so a rollout can be reversed without "
+            "losing the history it produced."
+        ),
+    )
+    #: Activity rows are the highest-frequency event type in the system and, like
+    #: every other run event, nothing prunes them — ``run_events`` has no TTL and
+    #: no expiry, and this cap is the first one. Zero disables it. It bounds what
+    #: a *reader* is served rather than deleting rows, because a projection that
+    #: quietly discarded audit-adjacent history would be a larger claim than a
+    #: visibility feature should make.
+    activity_page_limit: int = Field(
+        default=200,
+        ge=1,
+        le=1000,
+        description="Maximum activity rows returned in one page of the conversation activity endpoint.",
+    )

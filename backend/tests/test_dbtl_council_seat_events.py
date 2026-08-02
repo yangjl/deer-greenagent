@@ -139,12 +139,7 @@ class TestTerminalSeatEvent:
             _unit(role="position"),
             DispatchOutcome(
                 unit_id="dbtl-build-1",
-                text=(
-                    '{"status":"completed","summary":"Built it.",'
-                    '"artifact_refs":[],"claims":[],"evidence_refs":[],'
-                    '"limitations":[],"quality_checks":[],'
-                    '"recommended_next_actions":[],"provenance":{}}'
-                ),
+                text=('{"status":"completed","summary":"Built it.","artifact_refs":[],"claims":[],"evidence_refs":[],"limitations":[],"quality_checks":[],"recommended_next_actions":[],"provenance":{}}'),
             ),
             model="gpt-5.6-sol",
             meeting_stage=None,
@@ -201,3 +196,50 @@ class TestTerminalSeatEvent:
         assert event["type"] == "task_failed"
         assert event["stop_reason"] == "turn_capped"
         assert "returned prose" in event["error"]
+
+
+class TestTerminalSeatEventCarriesItsActivityLineage:
+    """A `task_started` proves a worker started, never who dispatched it.
+
+    Without this, the rail would have to infer lineage from a display name, a
+    card type, or `dbtl_stage` — none of which are authoritative, and all of
+    which are one rename away from attributing a stage worker to the lead agent.
+    """
+
+    def _outcome(self) -> DispatchOutcome:
+        return DispatchOutcome(unit_id="dbtl-abc-1-experimental_design", text=None, error="The worker returned no output.")
+
+    def test_lineage_keys_ride_on_the_terminal_event(self):
+        event = _terminal_seat_event(
+            _unit(role="position"),
+            self._outcome(),
+            model="gpt-5.6-sol",
+            lineage={"activity_id": "act_worker", "parent_activity_id": "act_stage", "dispatcher_activity_id": "act_stage"},
+        )
+
+        assert event["activity_id"] == "act_worker"
+        assert event["parent_activity_id"] == "act_stage"
+        assert event["dispatcher_activity_id"] == "act_stage"
+
+    def test_an_event_without_lineage_is_byte_identical_to_the_old_one(self):
+        # The additions are optional during rollout: an older client must parse
+        # exactly the payload it parsed before.
+        unit = _unit(role="position")
+        with_none = _terminal_seat_event(unit, self._outcome(), model="gpt-5.6-sol", lineage=None)
+        legacy = _terminal_seat_event(unit, self._outcome(), model="gpt-5.6-sol")
+
+        assert with_none == legacy
+        assert "activity_id" not in legacy
+
+    def test_lineage_cannot_overwrite_the_seat_identity(self):
+        event = _terminal_seat_event(
+            _unit(role="chair"),
+            self._outcome(),
+            model="gpt-5.6-sol",
+            meeting_stage="design",
+            lineage={"activity_id": "act_worker"},
+        )
+
+        assert event["task_id"] == "dbtl-abc-1-experimental_design"
+        assert event["council_seat"]["role"] == "chair"
+        assert event["dbtl_stage"] == "design"

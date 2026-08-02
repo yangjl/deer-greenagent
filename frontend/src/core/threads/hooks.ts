@@ -14,6 +14,7 @@ import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
+import { useActivityContext } from "../activity/context";
 import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
@@ -1485,6 +1486,11 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
+  const {
+    push: pushActivity,
+    closeOpen: closeOpenActivity,
+    reload: reloadActivity,
+  } = useActivityContext();
   const taskViewThreadIdRef = useRef(currentViewThreadId);
 
   useEffect(() => {
@@ -1672,6 +1678,11 @@ export function useThreadStream({
           : undefined;
 
       if (eventType === "stream_replay_gap") {
+        // A gap invalidates optimistic activity wholesale: rows opened before
+        // it may already have closed inside the events nobody received, and
+        // showing them as running is the false spinner this projection exists
+        // to remove. Backfill is authoritative from here.
+        void reloadActivity();
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
@@ -1713,6 +1724,11 @@ export function useThreadStream({
         return;
       }
 
+      if (eventType === "agent_activity") {
+        pushActivity(event);
+        return;
+      }
+
       if (eventType === "llm_retry") {
         const e = event as { type: "llm_retry"; message?: unknown };
         if (typeof e.message === "string" && e.message.trim()) {
@@ -1721,6 +1737,8 @@ export function useThreadStream({
       }
     },
     onError(error) {
+      closeOpenActivity();
+      void reloadActivity();
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);
@@ -1743,6 +1761,11 @@ export function useThreadStream({
       }
     },
     onFinish(state) {
+      // The run is over whether or not each actor said so. Settling here is
+      // the browser's half of the same guarantee the run worker gives durable
+      // rows: a stream that ends mid-flight must not leave a spinner behind.
+      closeOpenActivity();
+      void reloadActivity();
       listeners.current.onFinish?.(state.values);
       pendingPreparedReplayRef.current = null;
       pendingUsageBaselineMessageIdsRef.current = new Set(

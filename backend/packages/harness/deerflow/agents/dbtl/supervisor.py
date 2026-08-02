@@ -154,6 +154,11 @@ from deerflow.dbtl.setup_questions import (
     parse_questions_response,
     render_questions,
 )
+from deerflow.runtime.activity.emitter import activity_parent_context, activity_span
+from deerflow.runtime.activity.envelope import ActivityScope
+from deerflow.runtime.activity.lineage import SUPERVISOR_ACTOR_KEY, supervisor_activity_id
+from deerflow.runtime.activity.spans import run_id_from_config
+from deerflow.runtime.activity.vocabulary import ActivityState, ActorKind
 
 logger = logging.getLogger(__name__)
 
@@ -358,11 +363,7 @@ def _render_stage_control_guidance(
 
     title = str(selected.get("title") or selected.get("cycle_id") or "the active cycle")
     stages = selected.get("stages") if isinstance(selected.get("stages"), Mapping) else {}
-    status_lines = [
-        f"{stage.title()} is {str(stages[stage]).replace('_', ' ')}."
-        for stage in ("design", "reconciliation", "build", "test", "learn")
-        if stage in stages
-    ]
+    status_lines = [f"{stage.title()} is {str(stages[stage]).replace('_', ' ')}." for stage in ("design", "reconciliation", "build", "test", "learn") if stage in stages]
     return "\n".join(
         [
             f"Your message asks to {action} {target_stage.title()} for {title}, but free text cannot start or advance a governed stage.",
@@ -1142,6 +1143,32 @@ def build_supervisor_graph(
         return resolve_branch(text, active)
 
     async def route(state: dict, config: RunnableConfig) -> str:
+        """Report the supervisor's presence, then resolve the branch.
+
+        The public label stays **Routing** even when ``_route_decision`` makes a
+        bounded interpretation model call: that call is ``nostream``, and
+        describing the supervisor as "thinking" would both mislabel a
+        deterministic router and imply its hidden prompt is somewhere visible.
+        """
+        run_id = run_id_from_config(config)
+        if not isinstance(run_id, str) or not run_id:
+            return await _route_decision(state, config)
+        async with activity_span(
+            run_id=run_id,
+            actor_kind=ActorKind.DBTL_SUPERVISOR,
+            actor_id=SUPERVISOR_ACTOR_KEY,
+            activity_id=supervisor_activity_id(run_id),
+            operation="supervisor.route",
+            state=ActivityState.ROUTING,
+            parent_activity_id=None,
+            dispatcher_activity_id=None,
+            scope=ActivityScope(cycle_id=context.selected_cycle_id),
+        ) as activity:
+            branch = await _route_decision(state, config)
+            await activity.update(state=ActivityState.DISPATCHING, operation="supervisor.dispatch")
+            return branch
+
+    async def _route_decision(state: dict, config: RunnableConfig) -> str:
         # A review sentence is a control action, not an open-ended prompt. The
         # one-shot cycle selector may already have cleared after the meeting,
         # in which case normal routing would send "I approve the design" to
@@ -1165,12 +1192,7 @@ def build_supervisor_graph(
             return SupervisorBranch.CLARIFICATION.value
 
         decision = decide(state)
-        if (
-            decision.branch is SupervisorBranch.ORDINARY
-            and context.project_id
-            and context.selected_cycle_id is None
-            and _stage_control_intent(_latest_user_text(state)) is not None
-        ):
+        if decision.branch is SupervisorBranch.ORDINARY and context.project_id and context.selected_cycle_id is None and _stage_control_intent(_latest_user_text(state)) is not None:
             return SupervisorBranch.CYCLE_CONTINUATION.value
         if decision.branch is SupervisorBranch.CYCLE_CONTINUATION:
             reader = getattr(stage_adapter, "parked_design_context", None)
@@ -1255,11 +1277,7 @@ def build_supervisor_graph(
     ) -> dict:
         decision = decide(state)
         latest_text = _latest_user_text(state)
-        unscoped_stage_intent = (
-            _stage_control_intent(latest_text)
-            if decision.branch is SupervisorBranch.ORDINARY and context.selected_cycle_id is None
-            else None
-        )
+        unscoped_stage_intent = _stage_control_intent(latest_text) if decision.branch is SupervisorBranch.ORDINARY and context.selected_cycle_id is None else None
         active_cycles: list[dict[str, Any]] = []
         if decision.cycle_id is None and (_review_intent(latest_text) is not None or unscoped_stage_intent is not None):
             active_cycles = [item for item in await _active_cycles(stage_adapter, project_id=context.project_id) if not item.get("parked")]
@@ -1654,15 +1672,21 @@ def build_supervisor_graph(
         status = await _dbtl_status_snapshot(stage_adapter, context, state)
         if status is not None:
             extra[DBTL_STATUS_CONTEXT_KEY] = status
-        if not extra:
-            return await lead_agent.ainvoke(state, config=config)
-        active_context = {**request_context(config), **extra}
-        ordinary_config = dict(config)
-        ordinary_config["context"] = active_context
-        configurable = dict(ordinary_config.get("configurable") or {})
-        configurable["context"] = active_context
-        ordinary_config["configurable"] = configurable
-        return await lead_agent.ainvoke(state, config=ordinary_config)
+        run_id = run_id_from_config(config)
+        # The lead graph owns its one authoritative Lead-agent row through its
+        # middleware. Give that row the supervisor's id as ambient lineage
+        # without wrapping it in a second, duplicate Lead-agent span.
+        parent_id = supervisor_activity_id(run_id) if isinstance(run_id, str) and run_id else None
+        with activity_parent_context(parent_id):
+            if not extra:
+                return await lead_agent.ainvoke(state, config=config)
+            active_context = {**request_context(config), **extra}
+            ordinary_config = dict(config)
+            ordinary_config["context"] = active_context
+            configurable = dict(ordinary_config.get("configurable") or {})
+            configurable["context"] = active_context
+            ordinary_config["configurable"] = configurable
+            return await lead_agent.ainvoke(state, config=ordinary_config)
 
     builder = StateGraph(state_schema)
     builder.add_node(SupervisorBranch.ORDINARY.value, ordinary)

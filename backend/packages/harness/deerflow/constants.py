@@ -19,3 +19,16 @@ RUN_EVENT_CATEGORY_MAX_LENGTH = 16
 # event identity also lives here rather than in the runtime event catalog.
 WORKSPACE_CHANGES_EVENT_TYPE = "workspace_changes"
 WORKSPACE_CHANGES_EVENT_CATEGORY = "workspace"
+
+# Agent activity has one concept and two names, matching the existing
+# task_started / subagent.start precedent: the stream name is what
+# emit_custom_event dispatches on and what astream_events consumers match, while
+# the event type is the persisted catalog name. Both live here so the envelope
+# builder can validate storage limits without importing deerflow.runtime.
+#
+# The category is dedicated on purpose. list_messages — the thread feed — filters
+# by category, so activity sharing "message" or "trace" would surface every
+# routing transition inside a conversation.
+AGENT_ACTIVITY_STREAM_NAME = "agent_activity"
+AGENT_ACTIVITY_EVENT_TYPE = "runtime.agent.activity"
+AGENT_ACTIVITY_EVENT_CATEGORY = "activity"

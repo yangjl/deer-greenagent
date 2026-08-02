@@ -48,6 +48,10 @@ def test_features_reports_agents_api_enabled() -> None:
     assert response.json() == {
         "agents_api": {"enabled": True},
         "browser_control": {"enabled": False},
+        # Off and non-durable by default: the rail must not claim a live view it
+        # has no rows for, and the in-memory run-event backend loses them on
+        # restart, which the UI renders as "Status unavailable" rather than idle.
+        "agent_activity": {"enabled": False, "durable": False},
         "dbtl": {
             "mode": "audit_only",
             "mutations_enabled": False,

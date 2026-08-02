@@ -4,6 +4,8 @@ import { getBackendBaseURL } from "@/core/config";
 export interface FeaturesResponse {
   agents_api: { enabled: boolean };
   browser_control?: { enabled: boolean };
+  /** Absent on a backend older than the runtime-activity projection. */
+  agent_activity?: { enabled: boolean; durable: boolean };
   dbtl?: DbtlFeature;
 }
 

@@ -19,6 +19,7 @@ from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.runtime import Runtime
 
 from deerflow.agents.dbtl.supervisor import build_supervisor_graph
 from deerflow.dbtl.branches import SupervisorContext
@@ -206,3 +207,32 @@ class TestTerminalBranchesStreamAtRoot:
         assert all(not ns for ns, _ in frames), "a terminal branch must not be namespaced"
         final = frames[-1][1]["messages"][-1]
         assert "cyc-1" in final.content
+
+
+class TestSupervisorActivityUsesTheRealNodeConfigShape:
+    @pytest.mark.asyncio
+    async def test_the_router_emits_activity_after_langgraph_relocates_context(self):
+        graph = supervisor()
+        runtime = Runtime(context={"run_id": "run-real-node"})
+        config = {
+            "context": {"run_id": "run-real-node"},
+            "configurable": {"__pregel_runtime": runtime},
+        }
+
+        frames = [
+            chunk
+            async for mode, chunk in graph.astream(
+                {"messages": [HumanMessage(content="list the files", id="h1")]},
+                config=config,
+                stream_mode=["custom"],
+            )
+            if mode == "custom" and chunk.get("type") == "agent_activity"
+        ]
+
+        assert [frame["transition"] for frame in frames] == [
+            "started",
+            "updated",
+            "completed",
+        ]
+        assert {frame["display_name"] for frame in frames} == {"Cycle supervisor"}
+        assert {frame["run_id"] for frame in frames} == {"run-real-node"}

@@ -56,6 +56,20 @@ async function captureThreadStreamOptions() {
       },
     }),
   }));
+  rs.doMock("@/core/activity/context", () => ({
+    useActivityContext: () => ({
+      projection: { rows: {}, order: [], timeline: [], seq: 0 },
+      push: rs.fn(),
+      reset: rs.fn(),
+      closeOpen: rs.fn(),
+      reload: rs.fn(async () => undefined),
+      loadOlder: rs.fn(async () => undefined),
+      hasOlder: false,
+      isLoadingOlder: false,
+      dataAvailable: true,
+      announcement: "",
+    }),
+  }));
   rs.doMock("@/core/tasks/context", () => ({
     useSubtaskContext: () => ({
       tasksRef: { current: {} },
@@ -85,6 +99,7 @@ afterEach(() => {
   rs.doUnmock("@langchain/langgraph-sdk/react");
   rs.doUnmock("@/core/api");
   rs.doUnmock("@/core/i18n/hooks");
+  rs.doUnmock("@/core/activity/context");
   rs.doUnmock("@/core/tasks/context");
   rs.resetModules();
 });

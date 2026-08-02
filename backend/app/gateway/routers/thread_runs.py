@@ -18,7 +18,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
@@ -33,12 +33,14 @@ from app.gateway.checkpoint_lineage import (
     find_checkpoint_before_message_chronologically,
     is_duration_only_checkpoint,
 )
-from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_config, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
+from deerflow.config.app_config import AppConfig
+from deerflow.constants import AGENT_ACTIVITY_EVENT_TYPE
 from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
@@ -1469,6 +1471,52 @@ async def list_run_events(
         else event
         for event in events
     ]
+
+
+@router.get("/{thread_id}/activity")
+@require_permission("runs", "read", owner_check=True)
+async def list_thread_activity(
+    thread_id: str,
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=1000),
+    before_seq: int | None = Query(default=None, ge=1),
+    config: AppConfig = Depends(get_config),
+) -> dict:
+    """Return one page of this conversation's runtime activity, newest page first.
+
+    Conversation-scoped rather than run-scoped on purpose: a conversation's
+    activity spans every run in it, including hidden deck-triggered runs that
+    no browser ever subscribed to. Reading only the live stream would leave
+    those invisible, and reading the current run would lose the history a
+    reader opened this surface for.
+
+    ``before_seq`` pages backwards from the live edge; the response's
+    ``next_before_seq`` is the oldest ``seq`` on this page, or ``null`` when the
+    beginning has been reached.
+    """
+    event_store = get_run_event_store(request)
+    page_limit = min(limit, int(getattr(getattr(config, "run_events", None), "activity_page_limit", 200) or 200))
+    events = await event_store.list_thread_events(
+        thread_id,
+        event_types=[AGENT_ACTIVITY_EVENT_TYPE],
+        limit=page_limit,
+        before_seq=before_seq,
+    )
+    # ``content`` is already a closed, server-owned field set — the parse
+    # boundary rebuilt it on the way in — so it is served as-is. Metadata still
+    # goes through the shared redaction every other event read uses.
+    return {
+        "events": [
+            {
+                **event,
+                "metadata": redact_metadata_secrets(event.get("metadata")),
+            }
+            if isinstance(event, dict) and "metadata" in event
+            else event
+            for event in events
+        ],
+        "next_before_seq": (events[0].get("seq") if events and len(events) >= page_limit else None),
+    }
 
 
 @router.get("/{thread_id}/runs/{run_id}/workspace-changes")

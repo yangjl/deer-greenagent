@@ -68,7 +68,8 @@
     "middleware": "Middleware state-change audit evidence.",
     "context": "Identity-only evidence about effective hidden context.",
     "subagent": "Subagent lifecycle and persisted step evidence.",
-    "workspace": "Run-scoped workspace and output file-change evidence."
+    "workspace": "Run-scoped workspace and output file-change evidence.",
+    "activity": "Runtime actor presence and dispatch lineage. Bounded state transitions only, never prompts, reasoning, tool payloads, or worker output."
   },
   "events": [
     {
@@ -387,6 +388,50 @@
             },
             "additionalProperties": true
           }
+        },
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "runtime.agent.activity",
+      "category": "activity",
+      "producer": "activity_run_event(agent_activity)",
+      "content_description": "One runtime actor lifecycle transition. The live custom-event stream name is 'agent_activity'; this is its persisted catalog name. Every field is a bounded, server-owned value drawn from a closed vocabulary, so the payload cannot carry model prose, tool arguments, or credentials.",
+      "content_schema": {
+        "type": "object",
+        "required": ["type", "version", "transition", "activity_id", "parent_activity_id", "dispatcher_activity_id", "run_id", "actor_kind", "actor_id", "display_name", "state", "operation", "scope"],
+        "properties": {
+          "type": {"const": "agent_activity"},
+          "version": {"type": "integer", "minimum": 1},
+          "transition": {"enum": ["started", "updated", "completed", "failed", "cancelled", "interrupted"]},
+          "activity_id": {"type": "string", "minLength": 1, "maxLength": 128},
+          "parent_activity_id": {"type": ["string", "null"], "maxLength": 128},
+          "dispatcher_activity_id": {"type": ["string", "null"], "maxLength": 128},
+          "run_id": {"type": "string", "minLength": 1, "maxLength": 128},
+          "actor_kind": {"enum": ["lead_agent", "dbtl_supervisor", "stage_adapter", "subagent", "stage_worker"]},
+          "actor_id": {"type": "string", "minLength": 1, "maxLength": 128},
+          "display_name": {"type": "string", "minLength": 1, "maxLength": 80},
+          "state": {"enum": ["routing", "preparing", "thinking", "computing", "dispatching", "coordinating", "recording", "waiting", "completed", "failed", "cancelled", "interrupted"]},
+          "operation": {"type": "string", "minLength": 1, "maxLength": 120},
+          "scope": {
+            "type": "object",
+            "properties": {
+              "cycle_id": {"type": ["string", "null"], "maxLength": 128},
+              "stage": {"type": ["string", "null"], "maxLength": 128},
+              "task_id": {"type": ["string", "null"], "maxLength": 128}
+            },
+            "required": ["cycle_id", "stage", "task_id"],
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["activity_id"],
+        "properties": {
+          "activity_id": {"type": "string", "minLength": 1},
+          "task_id": {"type": "string", "minLength": 1}
         },
         "additionalProperties": true
       }

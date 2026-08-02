@@ -465,33 +465,34 @@ Before changing a later authorization phase, read the [authorization RFC](../doc
 
 **Lead-only middlewares** (`build_middlewares`, appended after the base):
 
-14. **DynamicContextMiddleware** - Injects the current date (and optionally memory) as a `<system-reminder>` into the first HumanMessage, keeping the base system prompt fully static for prefix-cache reuse. Unfiled conversations read the authenticated user's global memory bucket; project conversations derive a stable bucket from `(user_id, project_id)`. On the next run of an older project thread, a frozen legacy/global snapshot is replaced with the selected project's snapshot.
-15. **SkillActivationMiddleware** - Detects strict `/skill-name task` syntax on the latest real user message, resolves only enabled and runtime-allowed skills, injects the `SKILL.md` body as hidden current-turn context, and records a `middleware:skill_activation` audit event
-16. **SkillToolPolicyMiddleware** - Applies `allowed-tools` only after real activation; passive enabled skills and a custom agent's configured skill allowlist do not clamp the lead toolset. A run-scoped slash activation is authoritative and suppresses `skill_context` as a policy source, so reading another skill cannot widen the explicit skill's tools; without slash activation, skills captured after configured `read_file` loads retain the existing union semantics. The middleware filters model-visible schemas and blocks unauthorized execution, resolving canonical paths against the live enabled/agent-allowed registry on every model call, then stores a versioned, JSON-safe, middleware-token-bound decision signed by policy source plus active paths in run context for the resulting tool calls to reuse. The next model call always refreshes it, and malformed, foreign, stale, or unmatched decisions fall back to live resolution. `tool_search` and `describe_skill` remain framework-safe discovery tools under a restrictive policy; they may reveal or promote metadata, but a deferred business tool must still be declared by the active policy before its schema or execution can survive the policy middleware. The decision's owner token is authorization-sensitive, so its reserved context key is owned by `runtime.secret_context` and included in `REDACTED_CONTEXT_KEYS` for observable and persisted context copies. Registry load failures and a non-empty active set with no authorized skill fail closed to framework-safe tools; an individual stale path is skipped only when at least one valid active skill remains. This is best-effort behavioral scoping rather than a hard security boundary: alternate loads such as `bash cat` are not captured, and bounded autonomous `skill_context` can evict old entries. `task` is not framework-exempt, so a restricted skill cannot delegate around its policy. The middleware must remain immediately after `SkillActivationMiddleware` (which publishes the slash source through `runtime.secret_context`'s public path helpers authenticated by a required token shared only within the assembled middleware chain) and immediately before `DurableContextMiddleware`; assembly and compiled-graph tests pin ordering, token sharing, schema filtering, and execution blocking.
-17. **DurableContextMiddleware** - Captures `task` delegations into `ThreadState.delegations` (including in-progress dispatches and terminal result summaries) and loaded skill-file references (name/path/description, parsed in-memory - not the body) into `ThreadState.skill_context` before summarization can compact the paired tool-call/result messages, then projects durable context into each model request. Static authority rules are injected as a `SystemMessage`; untrusted field values (`summary_text`, delegation results, skill descriptions) are injected separately as a hidden `HumanMessage` data block so compressed history, delegated work, and which skills are active stay visible without being stored as `messages` or promoted to system-role instructions. `build_subagent_runtime_middlewares` also attaches this middleware immediately before subagent summarization so a compacted `summary_text` is projected ahead of a preserved assistant/tool tail instead of leaving strict providers with an assistant-first request.
-18. **SummarizationMiddleware** - _(optional, if enabled)_ Context reduction when approaching token limits
-19. **TodoListMiddleware** - _(optional, if `is_plan_mode`)_ Task tracking with the `write_todos` tool
-20. **TokenUsageMiddleware** - _(optional, if `token_usage.enabled`)_ Records token usage metrics; subagent usage is merged back into the dispatching AIMessage by message position
-21. **TitleMiddleware** - Auto-generates the thread title after the first complete exchange and normalizes structured message content before prompting the title model. If a first-turn run is interrupted before this middleware can write a title, `runtime/runs/worker.py` keeps the run in a finalizing state, persists a local fallback title from the latest checkpoint or original run input, and then syncs it to `threads_meta.display_name`. Replacement runs admitted by `multitask_strategy="interrupt"` / `"rollback"` wait for older same-thread finalization before entering the graph; the interrupted run only skips the fallback title write once a later run has started and may have advanced the checkpoint.
-22. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses). Project runs write to the same `(user_id, project_id)`-derived bucket used by injection and, during migration, admit only messages created by the current run so legacy cross-project history cannot seed the new bucket.
-23. **ViewImageMiddleware** - _(optional, if the model supports vision)_ Injects a hidden HumanMessage with base64 image data, identified by a reserved ID prefix plus a server-owned metadata marker, before the LLM call. Because `before_model`, `model`, and `after_model` are separate graph nodes, the `before_model` and `model` node checkpoints for that call still contain the payload; `after_model` / `aafter_model` then emits `RemoveMessage`, so subsequent checkpoints do not retain it
-24. **McpRoutingMiddleware** - _(optional, if `tool_search.enabled` and PR1 MCP routing metadata produce a routing index)_ Auto-promotes matching deferred MCP tool schemas before the model call by writing a minimal `promoted` state update. It matches only the latest real `HumanMessage`, uses the global `tool_search.auto_promote_top_k` limit (default 3, clamped to 1..5), never executes tools, and must be installed before `DeferredToolFilterMiddleware`
-25. **DeferredToolFilterMiddleware** - _(optional, if `tool_search.enabled`)_ Hides deferred (MCP) tool schemas from the bound model until `tool_search` or `McpRoutingMiddleware` promotes them (reads per-thread promotions from `ThreadState.promoted`, hash-scoped)
+14. **AgentActivityMiddleware** - Opens the lead agent's runtime activity row in `abefore_agent` and closes it in `aafter_agent`, reporting Thinking on a model call, Computing on a tool call, and Waiting on `task` delegation. First among the lead-only middlewares so its row brackets the rest of the chain; the shared base's positions are deliberately untouched, since `InputSanitizationMiddleware` must stay the outermost `wrap_model_call` wrapper. It holds a handle across hooks rather than a span, so closing is best-effort and the run worker's `ActivityEventBuffer.close_open_activities` settles anything a cancelled or raising run left open. See the Runtime agent activity section.
+15. **DynamicContextMiddleware** - Injects the current date (and optionally memory) as a `<system-reminder>` into the first HumanMessage, keeping the base system prompt fully static for prefix-cache reuse. Unfiled conversations read the authenticated user's global memory bucket; project conversations derive a stable bucket from `(user_id, project_id)`. On the next run of an older project thread, a frozen legacy/global snapshot is replaced with the selected project's snapshot.
+16. **SkillActivationMiddleware** - Detects strict `/skill-name task` syntax on the latest real user message, resolves only enabled and runtime-allowed skills, injects the `SKILL.md` body as hidden current-turn context, and records a `middleware:skill_activation` audit event
+17. **SkillToolPolicyMiddleware** - Applies `allowed-tools` only after real activation; passive enabled skills and a custom agent's configured skill allowlist do not clamp the lead toolset. A run-scoped slash activation is authoritative and suppresses `skill_context` as a policy source, so reading another skill cannot widen the explicit skill's tools; without slash activation, skills captured after configured `read_file` loads retain the existing union semantics. The middleware filters model-visible schemas and blocks unauthorized execution, resolving canonical paths against the live enabled/agent-allowed registry on every model call, then stores a versioned, JSON-safe, middleware-token-bound decision signed by policy source plus active paths in run context for the resulting tool calls to reuse. The next model call always refreshes it, and malformed, foreign, stale, or unmatched decisions fall back to live resolution. `tool_search` and `describe_skill` remain framework-safe discovery tools under a restrictive policy; they may reveal or promote metadata, but a deferred business tool must still be declared by the active policy before its schema or execution can survive the policy middleware. The decision's owner token is authorization-sensitive, so its reserved context key is owned by `runtime.secret_context` and included in `REDACTED_CONTEXT_KEYS` for observable and persisted context copies. Registry load failures and a non-empty active set with no authorized skill fail closed to framework-safe tools; an individual stale path is skipped only when at least one valid active skill remains. This is best-effort behavioral scoping rather than a hard security boundary: alternate loads such as `bash cat` are not captured, and bounded autonomous `skill_context` can evict old entries. `task` is not framework-exempt, so a restricted skill cannot delegate around its policy. The middleware must remain immediately after `SkillActivationMiddleware` (which publishes the slash source through `runtime.secret_context`'s public path helpers authenticated by a required token shared only within the assembled middleware chain) and immediately before `DurableContextMiddleware`; assembly and compiled-graph tests pin ordering, token sharing, schema filtering, and execution blocking.
+18. **DurableContextMiddleware** - Captures `task` delegations into `ThreadState.delegations` (including in-progress dispatches and terminal result summaries) and loaded skill-file references (name/path/description, parsed in-memory - not the body) into `ThreadState.skill_context` before summarization can compact the paired tool-call/result messages, then projects durable context into each model request. Static authority rules are injected as a `SystemMessage`; untrusted field values (`summary_text`, delegation results, skill descriptions) are injected separately as a hidden `HumanMessage` data block so compressed history, delegated work, and which skills are active stay visible without being stored as `messages` or promoted to system-role instructions. `build_subagent_runtime_middlewares` also attaches this middleware immediately before subagent summarization so a compacted `summary_text` is projected ahead of a preserved assistant/tool tail instead of leaving strict providers with an assistant-first request.
+19. **SummarizationMiddleware** - _(optional, if enabled)_ Context reduction when approaching token limits
+20. **TodoListMiddleware** - _(optional, if `is_plan_mode`)_ Task tracking with the `write_todos` tool
+21. **TokenUsageMiddleware** - _(optional, if `token_usage.enabled`)_ Records token usage metrics; subagent usage is merged back into the dispatching AIMessage by message position
+22. **TitleMiddleware** - Auto-generates the thread title after the first complete exchange and normalizes structured message content before prompting the title model. If a first-turn run is interrupted before this middleware can write a title, `runtime/runs/worker.py` keeps the run in a finalizing state, persists a local fallback title from the latest checkpoint or original run input, and then syncs it to `threads_meta.display_name`. Replacement runs admitted by `multitask_strategy="interrupt"` / `"rollback"` wait for older same-thread finalization before entering the graph; the interrupted run only skips the fallback title write once a later run has started and may have advanced the checkpoint.
+23. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses). Project runs write to the same `(user_id, project_id)`-derived bucket used by injection and, during migration, admit only messages created by the current run so legacy cross-project history cannot seed the new bucket.
+24. **ViewImageMiddleware** - _(optional, if the model supports vision)_ Injects a hidden HumanMessage with base64 image data, identified by a reserved ID prefix plus a server-owned metadata marker, before the LLM call. Because `before_model`, `model`, and `after_model` are separate graph nodes, the `before_model` and `model` node checkpoints for that call still contain the payload; `after_model` / `aafter_model` then emits `RemoveMessage`, so subsequent checkpoints do not retain it
+25. **McpRoutingMiddleware** - _(optional, if `tool_search.enabled` and PR1 MCP routing metadata produce a routing index)_ Auto-promotes matching deferred MCP tool schemas before the model call by writing a minimal `promoted` state update. It matches only the latest real `HumanMessage`, uses the global `tool_search.auto_promote_top_k` limit (default 3, clamped to 1..5), never executes tools, and must be installed before `DeferredToolFilterMiddleware`
+26. **DeferredToolFilterMiddleware** - _(optional, if `tool_search.enabled`)_ Hides deferred (MCP) tool schemas from the bound model until `tool_search` or `McpRoutingMiddleware` promotes them (reads per-thread promotions from `ThreadState.promoted`, hash-scoped)
 
-22. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses); captures the runtime-resolved user so standalone LangGraph Server reads and writes stay in the same bucket
-23. **ViewImageMiddleware** - *(optional, if the model supports vision)* Injects a hidden HumanMessage with base64 image data, identified by a reserved ID prefix plus a server-owned metadata marker, before the LLM call. Because `before_model`, `model`, and `after_model` are separate graph nodes, the `before_model` and `model` node checkpoints for that call still contain the payload; `after_model` / `aafter_model` then emits `RemoveMessage`, so subsequent checkpoints do not retain it
-24. **McpRoutingMiddleware** - *(optional, if `tool_search.enabled` and PR1 MCP routing metadata produce a routing index)* Auto-promotes matching deferred MCP tool schemas before the model call by writing a minimal `promoted` state update. It matches only the latest real `HumanMessage`, uses the global `tool_search.auto_promote_top_k` limit (default 3, clamped to 1..5), never executes tools, and must be installed before `DeferredToolFilterMiddleware`
-25. **DeferredToolFilterMiddleware** - *(optional, if `tool_search.enabled`)* Hides deferred (MCP) tool schemas from the bound model until `tool_search` or `McpRoutingMiddleware` promotes them (reads per-thread promotions from `ThreadState.promoted`, hash-scoped)
-26. **SystemMessageCoalescingMiddleware** - Merges every SystemMessage into a single leading SystemMessage per request; provider-agnostic fix for strict backends (vLLM/SGLang/Qwen/Anthropic) that reject non-leading system messages. Touches the per-request payload only (checkpoint state unchanged); on midnight crossings only the latest `dynamic_context_reminder` SystemMessage survives
-27. **SubagentLimitMiddleware** - _(optional, if `subagent_enabled`)_ Truncates excess `task` tool calls to enforce both the per-response concurrency limit (`max_concurrent_subagents`, clamped to 1-4) and the per-run total delegation cap (`max_total_subagents` runtime override or `subagents.max_total_per_run`, default 6, clamped to 1-50). The total cap counts current-run entries in the durable delegation ledger (entries are tagged with `run_id` when captured), so repeated planning checkpoints in one run cannot keep launching legal-sized batches indefinitely, while later user turns in the same thread get a fresh run budget. If the cap is exhausted, the middleware strips remaining `task` calls, forces `finish_reason="stop"`, and appends a visible limit note so the run can synthesize existing results instead of ending with an empty tool-call response.
-28. **LoopDetectionMiddleware** - _(optional, if `loop_detection.enabled`)_ Detects repeated tool-call loops; hard-stop clears both structured `tool_calls` and raw provider tool-call metadata before forcing a final text answer; stamps `loop_capped` via `consume_stop_reason` (#3875 Phase 2), symmetric to `TokenBudgetMiddleware`
-29. **TokenBudgetMiddleware** - _(optional, if `token_budget.enabled`)_ Enforces per-run token limits
-30. **Custom middlewares** - _(optional)_ Any `custom_middlewares` passed to `build_middlewares` are injected here, before config-declared extensions and the terminal-response/safety/clarification tail
-31. **Configured extension middlewares** - _(optional, if `extensions.middlewares` is set in `config.yaml` or `extensions_config.json`)_ Zero-argument `AgentMiddleware` classes loaded from `module.path:ClassName` entries via `deerflow.reflection.resolve_class`. Missing packages, invalid classes, and broken modules fail loudly at agent creation. These run after built-ins/programmatic custom middleware and after the lead/subagent loop/token guards, but before the terminal-response/safety/clarification tail; subagents receive the same configured extension middleware class list before their safety tail. Treat these files as trusted operator config because middleware paths instantiate arbitrary code. Gateway skill/MCP toggle endpoints preserve this field through `to_file_dict()` but must not add a write path for `extensions.middlewares` without an explicit trust-boundary review. Lead-only vs subagent-only middleware lists and per-context constructor parameters are not expressible in this MVP.
-32. **TerminalResponseMiddleware** - When a provider returns an empty terminal `AIMessage` after tool execution, injects a hidden recovery prompt and retries the model once; a second empty response is replaced in checkpoint state by a visible error fallback marked for the run worker, so the run finishes as an error instead of a silent success
-33. **ModelLengthFinishReasonMiddleware** - Records `stop_reason=model_length_capped` when provider-specific length detectors match a terminal `AIMessage` without tool-call intent (`finish_reason=length` / `MAX_TOKENS`, or `stop_reason=max_tokens`), preserving the original assistant content and never reparsing textual tool-call-like envelopes
-34. **SafetyFinishReasonMiddleware** - _(optional, if `safety_finish_reason.enabled`)_ Suppresses tool execution when the provider safety-terminated the response (e.g. `finish_reason=content_filter`); registered after terminal-response/custom/configured middlewares so LangChain's reverse-order `after_model` dispatch runs it first
-35. **ClarificationMiddleware** - Intercepts `ask_clarification` tool calls, writes a readable `ToolMessage.content` fallback plus structured `ToolMessage.artifact.human_input` request payload, and interrupts via `Command(goto=END)` (must be last). A tool-provided `fields` list is normalized here rather than in the tool, because the middleware short-circuits before tool execution: types are whitelisted (unknown -> `text`, option-less select-likes -> `text`), and structurally broken entries (bad/duplicate/`Object.prototype`-reserved names, over-cap counts or text lengths) degrade the **whole** form back to the legacy modes instead of silently dropping a business field. A form payload is emitted as `version: 2` with `input_mode: "form"`; the reply stays the v1 text summary, so journal persistence and answered-card recovery are unchanged. Because this middleware can short-circuit tool execution before LangChain emits `on_tool_end`, `RunJournal` performs a root-run final reconciliation for allowlisted clarification `ToolMessage`s whose `tool_call_id` was produced by the current run, so human-input request cards remain recoverable from `run_events` after checkpoint compaction. Human Input Card replies are submitted as `hide_from_ui` `HumanMessage`s with `additional_kwargs.human_input_response`; `RunJournal` persists only allowlisted hidden response sources (currently `ask_clarification`) as `llm.human.input`, which preserves answered-card state after compaction without exposing generic internal hidden context. The worker records the actual graph input before callbacks begin, so a router's first hidden LLM call cannot replace the user's message in history. `RunJournal` honors LangGraph's `TAG_NOSTREAM` for human prompts, AI responses, tool results, and nested errors while still counting LLM usage.
+23. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses); captures the runtime-resolved user so standalone LangGraph Server reads and writes stay in the same bucket
+24. **ViewImageMiddleware** - *(optional, if the model supports vision)* Injects a hidden HumanMessage with base64 image data, identified by a reserved ID prefix plus a server-owned metadata marker, before the LLM call. Because `before_model`, `model`, and `after_model` are separate graph nodes, the `before_model` and `model` node checkpoints for that call still contain the payload; `after_model` / `aafter_model` then emits `RemoveMessage`, so subsequent checkpoints do not retain it
+25. **McpRoutingMiddleware** - *(optional, if `tool_search.enabled` and PR1 MCP routing metadata produce a routing index)* Auto-promotes matching deferred MCP tool schemas before the model call by writing a minimal `promoted` state update. It matches only the latest real `HumanMessage`, uses the global `tool_search.auto_promote_top_k` limit (default 3, clamped to 1..5), never executes tools, and must be installed before `DeferredToolFilterMiddleware`
+26. **DeferredToolFilterMiddleware** - *(optional, if `tool_search.enabled`)* Hides deferred (MCP) tool schemas from the bound model until `tool_search` or `McpRoutingMiddleware` promotes them (reads per-thread promotions from `ThreadState.promoted`, hash-scoped)
+27. **SystemMessageCoalescingMiddleware** - Merges every SystemMessage into a single leading SystemMessage per request; provider-agnostic fix for strict backends (vLLM/SGLang/Qwen/Anthropic) that reject non-leading system messages. Touches the per-request payload only (checkpoint state unchanged); on midnight crossings only the latest `dynamic_context_reminder` SystemMessage survives
+28. **SubagentLimitMiddleware** - _(optional, if `subagent_enabled`)_ Truncates excess `task` tool calls to enforce both the per-response concurrency limit (`max_concurrent_subagents`, clamped to 1-4) and the per-run total delegation cap (`max_total_subagents` runtime override or `subagents.max_total_per_run`, default 6, clamped to 1-50). The total cap counts current-run entries in the durable delegation ledger (entries are tagged with `run_id` when captured), so repeated planning checkpoints in one run cannot keep launching legal-sized batches indefinitely, while later user turns in the same thread get a fresh run budget. If the cap is exhausted, the middleware strips remaining `task` calls, forces `finish_reason="stop"`, and appends a visible limit note so the run can synthesize existing results instead of ending with an empty tool-call response.
+29. **LoopDetectionMiddleware** - _(optional, if `loop_detection.enabled`)_ Detects repeated tool-call loops; hard-stop clears both structured `tool_calls` and raw provider tool-call metadata before forcing a final text answer; stamps `loop_capped` via `consume_stop_reason` (#3875 Phase 2), symmetric to `TokenBudgetMiddleware`
+30. **TokenBudgetMiddleware** - _(optional, if `token_budget.enabled`)_ Enforces per-run token limits
+31. **Custom middlewares** - _(optional)_ Any `custom_middlewares` passed to `build_middlewares` are injected here, before config-declared extensions and the terminal-response/safety/clarification tail
+32. **Configured extension middlewares** - _(optional, if `extensions.middlewares` is set in `config.yaml` or `extensions_config.json`)_ Zero-argument `AgentMiddleware` classes loaded from `module.path:ClassName` entries via `deerflow.reflection.resolve_class`. Missing packages, invalid classes, and broken modules fail loudly at agent creation. These run after built-ins/programmatic custom middleware and after the lead/subagent loop/token guards, but before the terminal-response/safety/clarification tail; subagents receive the same configured extension middleware class list before their safety tail. Treat these files as trusted operator config because middleware paths instantiate arbitrary code. Gateway skill/MCP toggle endpoints preserve this field through `to_file_dict()` but must not add a write path for `extensions.middlewares` without an explicit trust-boundary review. Lead-only vs subagent-only middleware lists and per-context constructor parameters are not expressible in this MVP.
+33. **TerminalResponseMiddleware** - When a provider returns an empty terminal `AIMessage` after tool execution, injects a hidden recovery prompt and retries the model once; a second empty response is replaced in checkpoint state by a visible error fallback marked for the run worker, so the run finishes as an error instead of a silent success
+34. **ModelLengthFinishReasonMiddleware** - Records `stop_reason=model_length_capped` when provider-specific length detectors match a terminal `AIMessage` without tool-call intent (`finish_reason=length` / `MAX_TOKENS`, or `stop_reason=max_tokens`), preserving the original assistant content and never reparsing textual tool-call-like envelopes
+35. **SafetyFinishReasonMiddleware** - _(optional, if `safety_finish_reason.enabled`)_ Suppresses tool execution when the provider safety-terminated the response (e.g. `finish_reason=content_filter`); registered after terminal-response/custom/configured middlewares so LangChain's reverse-order `after_model` dispatch runs it first
+36. **ClarificationMiddleware** - Intercepts `ask_clarification` tool calls, writes a readable `ToolMessage.content` fallback plus structured `ToolMessage.artifact.human_input` request payload, and interrupts via `Command(goto=END)` (must be last). A tool-provided `fields` list is normalized here rather than in the tool, because the middleware short-circuits before tool execution: types are whitelisted (unknown -> `text`, option-less select-likes -> `text`), and structurally broken entries (bad/duplicate/`Object.prototype`-reserved names, over-cap counts or text lengths) degrade the **whole** form back to the legacy modes instead of silently dropping a business field. A form payload is emitted as `version: 2` with `input_mode: "form"`; the reply stays the v1 text summary, so journal persistence and answered-card recovery are unchanged. Because this middleware can short-circuit tool execution before LangChain emits `on_tool_end`, `RunJournal` performs a root-run final reconciliation for allowlisted clarification `ToolMessage`s whose `tool_call_id` was produced by the current run, so human-input request cards remain recoverable from `run_events` after checkpoint compaction. Human Input Card replies are submitted as `hide_from_ui` `HumanMessage`s with `additional_kwargs.human_input_response`; `RunJournal` persists only allowlisted hidden response sources (currently `ask_clarification`) as `llm.human.input`, which preserves answered-card state after compaction without exposing generic internal hidden context. The worker records the actual graph input before callbacks begin, so a router's first hidden LLM call cannot replace the user's message in history. `RunJournal` honors LangGraph's `TAG_NOSTREAM` for human prompts, AI responses, tool results, and nested errors while still counting LLM usage.
 
 ### Configuration System
 
@@ -621,6 +622,201 @@ metadata only.
 - Thread-scoped run creation accepts `checkpoint` / `checkpoint_id`; Gateway validates the checkpoint belongs to the request thread before writing `checkpoint_id` / `checkpoint_ns` into `config.configurable` for LangGraph branching. In `delta` checkpoint mode the worker rewrites that fork into a linear head write before the graph starts (see "A delta-mode run cannot fork" under Checkpoint Channel Modes), because delta state for a fork replays the abandoned sibling's writes.
 - Thread-scoped Gateway runs evaluate an active `ThreadState.goal` after the visible turn completes. `runtime/goal.py` asks a non-thinking evaluator model to judge only visible conversation evidence and return a typed blocker; the evaluator model is created once per run and reused across hidden continuation checks. The evaluator runs after the graph root's tracing scope has already closed, so `create_goal_evaluator_model`/`evaluate_goal_completion` attach their own model-level tracing callbacks (`attach_tracing=True`) and inject Langfuse trace metadata (`thread_id`/`user_id`/`deerflow_trace_id`) directly onto the `ainvoke` call — the same standalone-caller pattern as `oneshot_llm.run_oneshot_llm` and `MemoryUpdater` (see Tracing System below). Satisfied goals are cleared; every non-satisfied evaluation — continuable or stand-down — is persisted with `last_evaluation` (the blocker, reason, and evidence summary; outcomes that stop the loop additionally record a `stand_down_reason` for observability), but only `goal_not_met_yet` evaluations are streamed as hidden `HumanMessage` continuations, and only when a durable assistant end-of-turn checkpoint exists, the run has not been aborted, the thread did not change during evaluation, and the no-progress breaker has not fired. The continuation cap is 8 — a hard maximum in the `0`–`8` range; callers requesting more are clamped (`set_goal`/TUI) or rejected with 422 (`PUT /goal`). The no-progress breaker keys on the latest visible assistant evidence (not the evaluator's free-text reason, which an LLM rewords every turn), so two consecutive continuations that add no new visible assistant output stop the loop after 2 attempts. Model-response cleanup helpers such as think-block stripping and code-fence stripping live in `deerflow.utils.llm_text` so `runtime/goal.py` and Gateway suggestion parsing share the same JSON-prep behavior.
 - Run event stream changes must keep producer code, `deerflow/constants.py`, `runtime/events/catalog.py`, `contracts/run_event_stream_contract.json`, `backend/docs/RUN_EVENT_STREAM.md`, and `tests/test_run_event_stream_contract.py` in sync. The dependency-free constants module owns the persisted envelope limits (`event_type` 32 characters, `category` 16) and cross-layer workspace event identity; the catalog owns validated runtime definitions and categories. Dynamic middleware tags are limited to 21 characters after the `middleware:` prefix. The JSON contract owns payload schemas, backend-specific storage semantics, legacy aliases, and compatibility rules; conformance tests require both views and all producer groups to agree. `run.end.content` remains opaque and may retain nested Python values in memory while JSONL/database stores stringify non-JSON nested values, so consumers must not assume backend-identical nested output representations.
+
+### Runtime agent activity (`runtime/activity/`)
+
+**A presence-and-lineage projection, not a transcript.** `runtime/activity/`
+answers who is working now, what they are honestly doing, and which runtime
+actor authorized them — so an apparently-idle governed run is legible without
+opening a debug console. Live stream name `agent_activity`, persisted catalog
+name `runtime.agent.activity`, dedicated category `activity` (the thread feed
+filters by category, so sharing `message` or `trace` would put every routing
+transition inside a conversation).
+
+**Safety is a property of the constructor, not a rule to remember.**
+`build_activity_event` accepts a closed field set: `actor_kind`, `state`, and
+`transition` are enums, `operation` is a key into the server-owned
+`OPERATION_LABELS` table, and the six identifier fields are shape-constrained
+(`[A-Za-z0-9._:@-]`, ≤128) rather than merely length-bounded — 128 characters is
+ample room for a truncated credential or a host path to ride in a field nobody
+thinks of as a text field. `display_name` is the one field that legitimately
+carries human words and is length-bounded only. There is therefore no channel
+through which a prompt, chain-of-thought, tool argument, shell output, or secret
+could reach a screen. **No visible string is an internal identifier**: the
+supervisor renders as **Cycle supervisor** and the adapter as **`<Stage>`
+stage**, the same protocol-keeps-its-identifiers split that `council_*` uses
+under "meeting".
+
+**That guarantee holds only for payloads the constructor built, so anything
+crossing back in is rebuilt rather than copied.** `parse_activity_event` is the
+inbound boundary: it re-validates every field against the same closed vocabulary
+and returns a fresh dict containing exactly `ACTIVITY_EVENT_FIELDS`, dropping
+anything else. `activity_run_event` persists *that*, not the chunk it was handed
+— storing the inbound mapping would move the closed-field-set guarantee to
+whoever emitted the frame, so a field attached by any future emitter edit would
+be persisted and served to clients. It returns `None` rather than raising,
+because a boundary that raises turns a malformed frame into a failed run. The
+JSON contract states the same rule with `additionalProperties: false` on both
+the content and its `scope`. `parse_activity_event` also matches `operation`
+against the *rendered* label set (`OPERATION_VALUES`): the wire carries the
+label, not the key it resolved from.
+
+**Two rules govern `activity_span` and they pull against each other.** *A span
+always closes* — a row left open is a spinner that never stops, which is the
+failure this exists to remove — so the opening emit sits **inside** the
+try/finally, not before it: `aemit_custom_event` hands the payload to the writer
+synchronously and then awaits a best-effort dispatch, and a lease loss landing on
+that await raises `BaseException`, which the emitter's own `except Exception`
+does not catch. And *a span never raises*: instrumentation that can end a run is
+worse than none, so a missing writer, a rejected envelope, or a bridge outage
+costs the row and nothing else. Cancellation settles `cancelled`, not `failed` —
+work taken away and work gone wrong are different things to a reader. Those two
+rules together are why `ActivityHandle.update`/`settle` validate **before**
+touching the handle's last-known-good state: storing first and letting `_emit`
+reject the value cost two events rather than one, because the rejected value
+stuck to the handle and the span's own closing emit was then built from it and
+rejected too. One bad update left a row open forever, through the method meant
+to report progress.
+
+**An agent cannot use a span, so `AgentActivityMiddleware` owes the close.** A
+run begins in one graph node and ends in another, so the lead agent's row is
+opened by `make_activity_handle` + `handle.open()` in `abefore_agent` and closed
+in `aafter_agent`, with `awrap_model_call`/`awrap_tool_call` reporting Thinking,
+Computing, and — for `task` alone — Waiting. Delegation is the only tool the
+vocabulary distinguishes; a per-tool vocabulary would leak tool names into a
+projection whose whole safety argument is that it carries none. Handles are keyed
+by `run_id` rather than held on the instance, because the middleware is built
+once per agent and the agent is cached, so an instance attribute would let one
+run close another's row. A handle held across hooks also resolves the stream
+writer **per emit** rather than capturing one: a writer belongs to the node that
+asked for it, and a captured one is bound to a task that has already finished by
+the time `aafter_agent` runs. Only the async hooks exist — every surface this
+feeds is async, and a synchronous embedded caller emits nothing rather than
+something half-wired.
+
+**Closing from a hook is best-effort, so the run worker settles what is left.**
+`aafter_agent` does not run on cancellation, on lease loss, or when the graph
+raises past it, and nothing afterwards would ever close those rows — a reload
+would show work that finished weeks ago as still in progress.
+`ActivityEventBuffer.close_open_activities`, called in the worker's `finally`
+before the final flush, settles every row it saw opened and not closed as
+`interrupted`: not `completed`, which would claim an outcome nobody observed, and
+not `failed`, which would blame the work for the run being taken away.
+
+`runtime/activity/reducer.py` is the consumer half, written once so the durable
+projection, a reconnecting client, and the rail cannot each invent their own
+answer. Three rules: **replay is not new information** (folding a sequence twice,
+or a prefix then the whole thing, gives the same rows — a reconnect re-delivers
+and a backfill overlaps the live tail by design); **a settled row is closed for
+good** (later frames, including another `started`, are refused); and **a row must
+be opened before it can be updated** (an `updated` for an unknown id is dropped,
+because a late subscriber's synthesised row would misreport lineage the reader
+never saw). `active_leaves` answers "who is working now" with the innermost row —
+a supervisor that has dispatched a stage is waiting, and naming it describes the
+tree rather than the work. A reducer may also receive the persisted run-event
+wrapper (`seq` + `content`); it records the last server sequence per row and
+refuses an older or duplicate wrapper even when pages and live replay arrive out
+of order.
+
+**Lineage crosses a graph-node boundary by derivation, not by carrying.** A
+ContextVar carries the current activity down a call stack and across the isolated
+subagent loop (`_copy_isolated_subagent_context` copies ambient ContextVars while
+stripping `deerflow_loop_bound` handlers), but the routing edge and the branch
+node it selects are separate scheduled units. `lineage.supervisor_activity_id`
+derives the same id on both sides from the run id, so the branch node names its
+dispatcher without anything having been handed to it. The ordinary branch uses
+`activity_parent_context` rather than a second span: the Lead middleware owns the
+single Lead row, while the context-only boundary parents it to the already
+reported supervisor row without emitting a duplicate actor. The activity id is
+never written to `configurable` — that section is checkpointed, and a lineage
+accepted from there would keep asserting itself after the work it describes had
+ended.
+
+**`run_id` is the key every row hangs from, so the worker overwrites it rather
+than defaulting it.** `_install_runtime_context` writes `context["run_id"]`
+unconditionally: by that point the dict carries the client's own `body.context`,
+so a `setdefault` let a request name its own run. That is what makes
+`spans.run_id_from_config` safe to read from the request context — the overwrite,
+not an assumption about client behaviour. Outside a graph that context is
+top-level; before invoking a node LangGraph relocates it to
+`configurable["context"]` and also exposes the server-owned copy through
+`configurable["__pregel_runtime"].context`, so the accessor must understand all
+three shapes. A unit test that passes a convenient top-level dict is not enough;
+the supervisor stream contract pins the real node shape. The exposure was never activity-only:
+the per-run delegation cap counts current-run ledger entries by `run_id`, so a
+supplied value also reset that budget on every request.
+
+**One row per `execute`, not one per dispatch round, and a terminal row is never
+reopened.** `LiveStageAdapter.execute` is a thin wrapper holding an
+`AsyncExitStack`; `_execute_stage` enters `_stage_activity` from inside, once
+`_executable_stage` has resolved which stage this is (a row opened in the wrapper
+would have to name a stage nobody had worked out yet), and the stack closes it
+however the call ends — including an exception, which settles it `failed` rather
+than leaving it spinning. `_execute_review_meeting` opens its own the same way,
+from the stage the server registered its deck against. That single row moves
+through Preparing → Dispatching → Coordinating → Recording, so repository reads,
+roster planning, waiting on workers, evidence recording, and an early failure are
+all visible as one actor being present. A row per dispatch round made a Design
+meeting's coordinator appear to finish and restart between waves (positions, red
+team, chair), and a shared deterministic id across those rounds would have
+emitted `started → completed → started` for one row outright.
+
+`ActivityEventBuffer` persists through `put_batch` for the same reason
+`_SubagentEventBuffer` does — `put` is a documented low-frequency path taking a
+per-thread advisory lock — and is fed **before** `_publish_stream_item`'s
+namespace early-return: that function returns early for namespaced frames, so a
+client requesting subgraph streaming would otherwise make the durable projection
+disappear. Persistence must not depend on what a client asked to stream.
+
+Tests: `tests/test_agent_activity_vocabulary.py`,
+`tests/test_agent_activity_emitter.py`,
+`tests/test_agent_activity_persistence.py`,
+`tests/test_agent_activity_reducer.py`,
+`tests/test_agent_activity_lead_middleware.py`, plus the activity producer case
+in `tests/test_run_event_stream_contract.py`.
+
+**Delegation lineage rides on the events that already exist.** `task_started`,
+`task_running`, and the terminal task events gain optional `activity_id`,
+`parent_activity_id`, and `dispatcher_activity_id` keys, omitted rather than
+sent as null so an older consumer sees exactly the payload it saw before. They
+are needed because a `task_started` proves only that a worker started: whether
+it came from the lead agent or from a stage adapter is what a reader wants, and
+the frontend would otherwise have to infer it from display names, card types, or
+`dbtl_stage`, none of which are authoritative. `task_tool` opens a `subagent`
+row parented to `lead_activity_id(run_id)` — derived, because the delegation
+runs in the tools node several graph nodes from the hook that opened the lead's
+row — and `LiveStageAdapter._dispatch_units` opens one `stage_worker` row per
+work unit, parented to the adapter's own row through the ContextVar that
+`asyncio.gather` copies into each worker task. Meeting seats keep their
+validated role label; ordinary stage work is numbered (`Build worker 2`).
+A delegated subagent is named from its **registry** name (`subagent_label`),
+shape-checked first because the model chooses which registered agent to invoke.
+
+**The rail is behind `run_events.agent_activity_visibility`** (default off), and
+`/api/features` publishes it beside `durable`, which is false on the in-memory
+run-event backend — the rail renders that as **Status unavailable** rather than
+as an idle agent, a claim it has no rows to support. `GET
+/api/threads/{id}/activity` is the cursor-paginated conversation read: it is
+thread-scoped rather than run-scoped because a conversation's activity spans
+every run in it, including hidden deck-triggered runs no browser subscribed to.
+That needed a genuinely new store method (`list_thread_events`) on the base plus
+all three implementations — a `db`-only signature raises `TypeError` on the
+other two at runtime, not at import.
+
+**Retention is decided, and the decision is "no policy yet, and the UI says
+so".** `run_events` has no TTL and no pruning, so activity rows accumulate
+exactly like every other run event. Rather than ship an expiry boundary that can
+never fire, `run_events.activity_page_limit` bounds what a *reader* is served
+and nothing deletes rows: a projection that quietly discarded audit-adjacent
+history would be a larger claim than a visibility feature should make. The
+frontend has no "no longer retained" boundary for the same reason. Adding a real
+policy means adding it for run events generally, not for this event type alone.
+
+Still open (plan:
+[docs/plans/2026-08-01-runtime-agent-activity-visibility-plan.md](../docs/plans/2026-08-01-runtime-agent-activity-visibility-plan.md)):
+the mobile entry point (the rail does not render below `md`, so there is no host
+for the sheet), and removing the static placeholder once rollout evidence is
+clean — the placeholder still renders when the flag is off.
 
 Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runtime, all other `/api/*` → Gateway REST APIs.
 
