@@ -143,7 +143,15 @@ def build_dbtl_status_reminder(value: object) -> str | None:
     lines = [line for cycle in (cycles if isinstance(cycles, list) else []) if (line := _status_cycle_line(cycle))][:_MAX_STATUS_CYCLE_LINES]
     control = value.get("pending_control")
     control_lines: list[str] = []
-    if isinstance(control, dict) and str(control.get("next_stage") or ""):
+    if isinstance(control, dict) and control.get("kind") == "build_control":
+        # A paused Build is a control the lead agent must know about and cannot
+        # answer. Saying so is what stops it offering to run the build instead.
+        step = escape(str(control.get("step") or "the build").replace("_", " "), quote=False)
+        question = escape(str(control.get("question") or ""), quote=False)
+        control_lines.append(f"A governed build is paused at {step} and is waiting on the project owner's decision.")
+        if question:
+            control_lines.append(f"The question in front of them is: {question}")
+    elif isinstance(control, dict) and str(control.get("next_stage") or ""):
         next_stage = escape(str(control["next_stage"]).replace("_", " "), quote=False)
         approved = escape(str(control.get("approved_stage") or "").replace("_", " "), quote=False)
         answered = str(control.get("answered_with") or "")

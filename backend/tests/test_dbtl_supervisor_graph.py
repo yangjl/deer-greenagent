@@ -2194,3 +2194,64 @@ class TestLiveStageBranch:
         assert len(calls) == 2
         assert "clarification_answer" not in calls[0]
         assert calls[1]["clarification_answer"] == "A credible simulator."
+
+
+class TestAPausedBuildIsNotTalkedPast:
+    """The natural reply to "Start the build with this plan?" is "go ahead".
+
+    It names no stage, matches no intent phrase, and would otherwise reach the
+    lead agent — which cannot start a build and, before the status snapshot
+    covered this, was not even told one was waiting. The fence and the handler
+    share one predicate, because a fence that intercepts a request the handler
+    then declines falls straight through to stage execution.
+    """
+
+    @pytest.mark.asyncio
+    async def test_free_text_is_intercepted_while_a_control_waits(self):
+        from deerflow.agents.dbtl.supervisor import _build_control_message
+        from deerflow.dbtl.branches import BranchDecision
+        from deerflow.dbtl.build_control import plan_confirmation_request
+        from deerflow.dbtl.build_plan import BuildPhase, BuildPhasePlan, PlanFeasibility
+        from deerflow.dbtl.capabilities import Capability
+        from deerflow.dbtl.routing import RouteKind, RouteSource, RoutingDecision
+
+        plan = BuildPhasePlan(
+            feasibility=PlanFeasibility.PLANNED,
+            phases=(
+                BuildPhase(phase_key="simulate", title="Simulate", objective="Draw founders.", capability=Capability.SOFTWARE_ENGINEERING),
+                BuildPhase(phase_key="fit", title="Fit", objective="Fit the model.", capability=Capability.STATISTICAL_ANALYSIS),
+            ),
+        )
+        card = (
+            plan_confirmation_request(
+                plan=plan,
+                cycle_id="cyc-1",
+                stage_attempt_id="sa-1",
+                workflow_spec_key="generic:build-workflow:v1",
+                cycle_revision=3,
+            )
+            .bound_to("dbtl-build__cyc-1__deadbeef")
+            .as_card()
+        )
+        decision = BranchDecision(
+            branch=SupervisorBranch.CYCLE_CONTINUATION,
+            route=RoutingDecision(kind=RouteKind.CYCLE_CONTINUATION, source=RouteSource.SELECTED_CYCLE, cycle_id="cyc-1"),
+            cycle_id="cyc-1",
+        )
+        emitted = list(_build_control_message(decision, card, request_nonce="run-1"))
+
+        marker: list[str] = []
+        graph = compile_supervisor(SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"), marker=marker)
+        state = {
+            **FULL_STATE,
+            "messages": [*emitted, HumanMessage(content="yes, looks good, go ahead", id="human-1")],
+        }
+
+        final = await graph.ainvoke(state, config={"configurable": {"thread_id": "build-fence"}})
+
+        assert marker == [], "an unanswered build control was talked past into the lead agent"
+        # Re-presented rather than answered: the card carries the ids it was
+        # emitted under, so `add_messages` replaces it in place instead of
+        # appending a second copy.
+        assert [message.tool_call_id for message in final["messages"] if isinstance(message, ToolMessage)] == ["dbtl-build__cyc-1__deadbeef"]
+        assert not [message for message in final["messages"] if isinstance(message, AIMessage) and message.content and not message.tool_calls]

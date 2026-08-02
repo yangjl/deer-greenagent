@@ -35,6 +35,10 @@ from deerflow.dbtl.build_control import BuildControlAction, BuildControlAnswer, 
 logger = logging.getLogger(__name__)
 
 
+class BuildControlNotRecorded(RuntimeError):
+    """A chain-moving decision could not be written, so it did not happen."""
+
+
 class _CollaborationRepository(Protocol):
     """The slice of `DbtlCycleRepository` this seam needs."""
 
@@ -127,12 +131,17 @@ class BuildControlGate:
                 action=answer.action.value,
                 response_text=answer.comment,
                 responder_user_id=self.responder_user_id or None,
-                client_submission_id=answer.request_id,
                 resumed_step_run_id=resumed_step_run_id,
                 meeting_id=meeting_id,
             )
         except Exception:  # noqa: BLE001 - see the module docstring
             logger.warning("Could not record the answer to Build control %s.", answer.request_id, exc_info=True)
+            if answer.action.discards_work:
+                # Fail-soft is right for a lost audit row and wrong here: Replan
+                # and Restart move the digest chain *through* this record, so a
+                # swallowed write is not a missing note, it is a button that did
+                # nothing while reporting that it worked.
+                raise BuildControlNotRecorded(f"The decision to {answer.action.value.replace('_', ' ')} could not be recorded, so nothing was changed. Try again.") from None
             return None
 
     async def plan_is_confirmed(self, plan_digest: str) -> bool:
@@ -171,7 +180,6 @@ _CONFIRMING = frozenset(
         BuildControlAction.START_BUILD.value,
         BuildControlAction.CONTINUE_BUILD.value,
         BuildControlAction.RETRY_STEP.value,
-        BuildControlAction.ANSWER_DIRECTLY.value,
     }
 )
 

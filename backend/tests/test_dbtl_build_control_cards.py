@@ -227,3 +227,24 @@ class TestTheHandlerDecidesOnceForBothDirections:
 
         assert not result.handled
         assert result.control_answer is None
+
+
+class TestTheFenceReleasesOnceItHasSaidWhy:
+    def test_a_refused_control_stops_intercepting_after_its_receipt(self) -> None:
+        from deerflow.agents.dbtl.supervisor_support.human_input_protocol import receipt_message
+
+        state = {
+            "messages": [
+                *_emitted(_card()),
+                HumanMessage(content="go ahead"),
+                receipt_message("That build control belongs to a different cycle.", build_control_refused=REQUEST_ID),
+                HumanMessage(content="what files are in this project?"),
+            ]
+        }
+
+        assert pending_build_control(state) is None
+
+    def test_it_intercepts_until_that_receipt_exists(self) -> None:
+        state = {"messages": [*_emitted(_card()), HumanMessage(content="go ahead")]}
+
+        assert pending_build_control(state) is not None

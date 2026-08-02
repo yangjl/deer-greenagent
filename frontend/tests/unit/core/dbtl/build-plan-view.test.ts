@@ -243,3 +243,40 @@ describe("open work items keep their signal", () => {
     expect(blockerBadge(0)).toBe("");
   });
 });
+
+
+describe("a malformed status cannot unmount the rail", () => {
+  it("treats a prototype member as an unknown status", () => {
+    const projection = buildPlanProjection(
+      view({ phases: [phase("simulate", "constructor")] }),
+    );
+
+    // `in` would accept this and every lookup keyed on it would resolve to a
+    // function, which React renders as an invalid element type.
+    expect(projection.rows[0]!.status).toBe("queued");
+    expect(projection.rows[0]!.stateLabel).toBe("Queued");
+  });
+
+  it("treats an unrecognized status as queued rather than passing it through", () => {
+    const projection = buildPlanProjection(
+      view({ phases: [phase("simulate", "exploded")] }),
+    );
+
+    expect(projection.rows[0]!.stateLabel).toBe("Queued");
+  });
+
+  it("falls back to the phase key when the recorded title is empty", () => {
+    const projection = buildPlanProjection(
+      view({
+        plan: {
+          feasibility: "planned",
+          degraded: false,
+          phase_count: 1,
+          phases: [{ index: 1, phase_key: "simulate", title: "   " }],
+        },
+      }),
+    );
+
+    expect(projection.rows[0]!.title).toBe("simulate");
+  });
+});

@@ -22,6 +22,7 @@ from deerflow.utils.messages import message_content_to_text
 
 from .human_input_protocol import (
     BUILD_CONTROL_PREFIX,
+    BUILD_CONTROL_REFUSED_KEY,
     COUNCIL_ADJUST_PREFIX,
     COUNCIL_PREFLIGHT_PREFIX,
     DESIGN_AUTHORING_PREFIX,
@@ -503,6 +504,13 @@ def unanswered_build_control_card(state: dict) -> dict[str, Any] | None:
     return None
 
 
+def build_control_refusal_recorded(state: dict, request_id: str) -> bool:
+    """Whether this control's "no longer actionable" receipt was already given."""
+    if not request_id:
+        return False
+    return any((getattr(message, "additional_kwargs", None) or {}).get(BUILD_CONTROL_REFUSED_KEY) == request_id for message in state.get("messages") or [])
+
+
 def pending_build_control(state: dict, *, selected_cycle_id: str | None = None) -> dict[str, Any] | None:
     """The one Build control this request should be answering, if any.
 
@@ -510,11 +518,19 @@ def pending_build_control(state: dict, *, selected_cycle_id: str | None = None) 
     the two cannot disagree — a fence that intercepts a request the handler then
     declines would fall straight through to dispatching stage work, which is the
     opposite of what the fence is for.
+
+    Three things make a control *not* pending, matching the Start/Hold fence: it
+    was answered, its refusal was already recorded (so a control that can no
+    longer be answered truthfully states its reason once and releases the
+    conversation rather than trapping it), or the request names a different
+    cycle — a project runs several builds at once.
     """
     if answers_a_server_card(state):
         return None
     request = unanswered_build_control_card(state)
     if request is None:
+        return None
+    if build_control_refusal_recorded(state, str(request.get("request_id") or "")):
         return None
     if selected_cycle_id and str(request.get("dbtl_cycle_id") or "") != str(selected_cycle_id):
         return None

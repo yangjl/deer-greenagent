@@ -3315,14 +3315,32 @@ in agreement about what it does.
 step row records *that* a step is waiting and the sentence it waits on but not
 which formats were offered, which option was chosen, by whom, or which attempt
 resumed — and "who decided to replan" is exactly the question asked when the
-phases beneath a plan are gone. Two rules are database constraints rather than
-calling-code checks: `uq_dbtl_build_collab_open` enforces one open control per
-stage attempt (a Build pauses in exactly one place, so a second open request is
-a stale card competing with a live one), and `uq_dbtl_build_collab_submission`
-makes a response idempotent by (request, client submission id) — a
-double-clicked button replays, while a genuinely different answer under the same
-id conflicts instead of overwriting the decision already recorded. A superseded
-control is kept, since it is the record of what somebody was actually shown.
+phases beneath a plan are gone. `uq_dbtl_build_collab_open` enforces one open
+control per stage attempt at the database boundary, since a Build pauses in
+exactly one place and a second open request is a stale card competing with a
+live one. A superseded control is kept, because it is the record of what
+somebody was actually shown.
+
+**Idempotency is per open control, not per card id.** The id is derived so a
+retried turn re-renders the same question — which means the same pause
+*recurring* mints the same id again, on a second row. Keying the answer on the
+id alone therefore made every later answer to a recurring pause collide with the
+first one on `uq_dbtl_build_collab_submission` and be swallowed by the fail-soft
+write: Retry then Replan wrote nothing, the epoch never moved, the committed
+plan replayed, and the person's words went nowhere — the exact no-op button the
+epochs exist to prevent, arriving through the write path. The gate supplies no
+submission id, the repository falls back to the row's own id, and idempotency
+falls back to the payload: the same action and the same words replay, anything
+else conflicts. `answer_build_collaboration` also prefers the **open** row over
+a newer terminal one, because a person is answering the question in front of
+them.
+
+**A chain-moving decision is never silently lost.** Fail-soft is right for
+`raise_control` (losing an audit row beats losing the ability to act) and wrong
+for Replan and Restart, where the durable row *is* the mechanism: a swallowed
+write there is a button that did nothing while reporting that it worked. Those
+two raise `BuildControlNotRecorded`, and the adapter turns it into a receipt
+that says so rather than proceeding on a decision nobody recorded.
 
 **That table is also what makes Restart and Replan mean anything.**
 `build_control_epochs` counts answered restart/replan decisions, and
@@ -3347,11 +3365,19 @@ Answers are resolved against the request the **server** emitted
 option id matches nothing on a real one, and either way the request falls
 through to ordinary routing rather than starting, replanning, or restarting a
 governed Build. While a control is unanswered, a request that would otherwise
-become ordinary work is answering *that control*, so `pending_build_control`
-fences it and the supervisor re-presents the card — the same escape the
-Start/Hold handoff needed ("go ahead and build it", with no cycle scope). Fence
-and handler share one predicate, because a fence that intercepts a request the
-handler then declines falls straight through to stage execution.
+become ordinary work is answering *that control*, so `_route_decision` fences it
+beside the Start/Hold fence and the supervisor re-presents the card. The escape
+is the same shape and the natural reply is worse: "yes, looks good, go ahead"
+names no stage, matches no intent phrase, and would otherwise reach a lead agent
+that cannot start a build. Fence and handler share one predicate
+(`pending_build_control`), because a fence that intercepts a request the handler
+then declines falls straight through to stage execution. A stale control is
+refused **once**, with the receipt recording which control it closes — repeating
+the refusal on every later message would make ordinary work unreachable for the
+life of the thread, which is worse than the escape. `build_dbtl_status_reminder`
+also names a paused Build in the lead agent's read-only snapshot: it cannot
+answer one, but a lead agent that does not know a build is paused will
+cheerfully offer to run one.
 
 "Change the plan" is a second exchange on purpose: the person's words travel
 verbatim into the replan rather than being paraphrased into a planner-owned
@@ -3361,14 +3387,20 @@ otherwise would leave the epoch unmoved. Continuing past an answered boundary
 does not re-present it (that is what Continue meant), while a boundary not yet
 reached still stops.
 
-Both workers that can pause a Build now raise a bound control. The planner's
+Both workers that can pause a Build raise a bound control. The planner's
 `needs_input` used to render as a Design clarification card whose answer went
 wherever the next request went; the summarizer's was recorded as a refusal,
 which reads as "fix something" when it means "decide something". `needs_input`
 stays out of the failure taxonomy — the summary step settles as waiting rather
 than failed, the execution behind it stays selected, and the answer resumes the
 write-up rather than the Build — and the paused step records which control holds
-its question.
+its question. **The answer reaches the worker that asked**: it is quoted into
+that worker's next attempt (`owner_answer_to_your_question` for the planner, an
+appended block for the summarizer). Without that the worker re-runs on
+byte-identical inputs, asks the same question, and re-derives the same card id
+— an ask loop with no exit. A summarizer question also outranks a pause card
+derived from where the Build stopped, since it is already recorded and already
+bound to the step waiting on it.
 
 **The Build work meeting** (`live_stage/build_meeting.py`,
 `generic:build-work-meeting:v1`, behind `dbtl.build_work_meetings`) is the

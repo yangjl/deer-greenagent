@@ -259,4 +259,19 @@ async def handle_build_control(
     pending = pending_build_control(state, selected_cycle_id=context.selected_cycle_id or decision.cycle_id)
     if pending is None:
         return HandlerResult()
+    if decision.cycle_id and str(pending.get("dbtl_cycle_id") or "") != str(decision.cycle_id):
+        # Refused **once**, and the receipt records which control it closes. The
+        # fence forces every later request through here, so repeating the
+        # refusal would make ordinary work unreachable for the life of the
+        # thread — worse than the escape the fence exists to prevent.
+        return HandlerResult(
+            update={
+                "messages": [
+                    receipt_message(
+                        "That build control belongs to a different cycle, so nothing was started. You can continue working in this conversation.",
+                        build_control_refused=str(pending.get("request_id") or ""),
+                    )
+                ]
+            }
+        )
     return HandlerResult(update={"messages": list(build_card(decision, pending, request_nonce=request_nonce))})

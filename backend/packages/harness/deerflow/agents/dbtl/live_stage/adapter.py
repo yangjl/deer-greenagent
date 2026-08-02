@@ -27,7 +27,7 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.dbtl.live_stage.build_controls import DISABLED_GATE, BuildControlGate
+from deerflow.agents.dbtl.live_stage.build_controls import DISABLED_GATE, BuildControlGate, BuildControlNotRecorded
 from deerflow.agents.dbtl.live_stage.build_meeting import BUILD_WORK_MEETING_CONTRACT, MeetingContext, meeting_units, parse_recommendation
 from deerflow.agents.dbtl.live_stage.build_phases import (
     GENERALIST,
@@ -2170,13 +2170,18 @@ def _settled_control(answer: BuildControlAnswer) -> BuildControlAnswer:
     return answer
 
 
-def _control_context(answer: BuildControlAnswer) -> dict[str, Any]:
-    """The bindings a follow-up control inherits from the one being answered."""
+def _control_context(answer: BuildControlAnswer, *, workflow_spec_key: str = "") -> dict[str, Any]:
+    """The bindings a follow-up control inherits from the one being answered.
+
+    The spec key comes from the caller rather than the reply: an answer carries
+    no contract, and a record that cannot name the one it belongs to is not
+    reviewable later.
+    """
     return {
         "build_control_kind": answer.kind.value,
         "dbtl_cycle_id": answer.cycle_id,
         "stage_attempt_id": answer.stage_attempt_id,
-        "workflow_spec_key": "",
+        "workflow_spec_key": workflow_spec_key,
         "step_key": answer.step_key,
         "cycle_revision": answer.cycle_revision,
         "plan_digest": answer.plan_digest,
@@ -3053,6 +3058,7 @@ class LiveStageAdapter:
         cycle: Mapping[str, Any],
         candidates: Sequence[AgentCandidate],
         adjustment: str = "",
+        answer: str = "",
     ) -> tuple[BuildPhasePlan, tuple[str, ...]]:
         """Ask for a decomposition; accept a single phase; never fail here.
 
@@ -3072,6 +3078,10 @@ class LiveStageAdapter:
                 # instruction is the failure this second exchange exists to avoid:
                 # the point of asking was to hear what *they* wanted changed.
                 **({"owner_requested_changes": adjustment} if adjustment else {}),
+                # The owner's answer to the question this planner asked last
+                # time. Without it the planner re-runs on byte-identical inputs
+                # and asks the same question again, forever.
+                **({"owner_answer_to_your_question": answer} if answer else {}),
             },
             sort_keys=True,
             ensure_ascii=False,
@@ -3381,6 +3391,7 @@ class LiveStageAdapter:
         published: Sequence[Mapping[str, Any]],
         inputs: BuildInputBundle | None,
         cycle: Mapping[str, Any],
+        answer: str = "",
     ) -> tuple[BuildReviewPackage | None, str, str]:
         """Run the read-only summarizer over the verified execution bundle.
 
@@ -3397,6 +3408,11 @@ class LiveStageAdapter:
             inputs=inputs,
             cycle=cycle,
         )
+        if answer:
+            # The owner's answer to the question this summarizer asked last
+            # time, quoted rather than paraphrased: it is the one part of the
+            # write-up nobody else may decide.
+            unit = replace(unit, prompt=f"{unit.prompt}\n\nThe project owner answered your question:\n{answer}")
         try:
             dispatched = await dispatcher((unit,), budget=budget)
         except Exception:  # noqa: BLE001 - see the docstring
@@ -4167,6 +4183,8 @@ class LiveStageAdapter:
         build_inputs: BuildInputBundle | None = None
         control_gate = DISABLED_GATE
         plan_adjustment = ""
+        worker_answer = ""
+        worker_answer_step = ""
         if build_workflow_enabled:
             stage_attempt_row_id = str((attempt or {}).get("id") or "")
             control_gate = BuildControlGate(
@@ -4185,7 +4203,14 @@ class LiveStageAdapter:
             # and leave the button doing nothing.
             if build_control is not None and build_control.stage_attempt_id == stage_attempt_row_id:
                 settled = _settled_control(build_control)
-                answered_control = await control_gate.record_answer(settled)
+                try:
+                    answered_control = await control_gate.record_answer(settled)
+                except BuildControlNotRecorded as refusal:
+                    # Replan and Restart move the digest chain through that
+                    # record. Proceeding on an unrecorded one would replay the
+                    # committed work the person asked to discard while telling
+                    # them it had been discarded.
+                    return LiveStageResult(stage=stage, cycle_id=cycle_id, note=str(refusal))
                 if settled.action is BuildControlAction.START_MEETING:
                     # Advisory by construction: the meeting returns options and
                     # a recommendation, and the same question is put back with
@@ -4252,13 +4277,20 @@ class LiveStageAdapter:
                         note="Tell me what to change and I will draw the plan again from your words.",
                         control_request=await control_gate.raise_control(
                             change_plan_request(
-                                previous=_control_context(build_control),
+                                previous=_control_context(build_control, workflow_spec_key=resolve_build_workflow().spec_key),
                                 remaining_only=settled.kind is BuildControlKind.PHASE_PAUSE,
                             )
                         ),
                     )
                 if settled.action is BuildControlAction.REPLAN_BUILD:
                     plan_adjustment = settled.comment
+                if settled.action is BuildControlAction.ANSWER_DIRECTLY:
+                    # The answer to a worker's own question. The step that asked
+                    # settled `needs_input` — terminal and never a success — so
+                    # this run opens a fresh attempt at it, and the words have to
+                    # reach that attempt or it asks the same question again.
+                    worker_answer = "\n\n".join(part for part in (str((answered_control or {}).get("question") or ""), settled.comment) if part)
+                    worker_answer_step = settled.step_key
             build_recorder = await make_build_step_recorder(
                 self._repo,
                 RecorderRequest(
@@ -4520,6 +4552,7 @@ class LiveStageAdapter:
                     cycle=cycle,
                     candidates=self._candidates(),
                     adjustment=plan_adjustment,
+                    answer=worker_answer if worker_answer_step == BuildStepKey.PLAN_BUILD.value else "",
                 )
                 if not build_plan.dispatchable:
                     # `needs_input`. The stage stays safely paused rather than
@@ -4697,7 +4730,10 @@ class LiveStageAdapter:
                 project_root=project_root,
                 cycle=cycle,
                 stage_workspace=stage_workspace,
-                continue_past_boundary=(build_control is not None and build_control.action is BuildControlAction.CONTINUE_BUILD),
+                # The same scope guard every other use of the answer carries.
+                # This is the one place a cross-attempt answer could influence
+                # dispatch, and it should not be the exception.
+                continue_past_boundary=(build_control is not None and build_control.stage_attempt_id == str((attempt or {}).get("id") or "") and build_control.action is BuildControlAction.CONTINUE_BUILD),
             )
             outcome = phase_run.outcome
         else:
@@ -4897,6 +4933,7 @@ class LiveStageAdapter:
                 published=published_build_artifacts,
                 inputs=build_inputs,
                 cycle=cycle,
+                answer=worker_answer if worker_answer_step == BuildStepKey.SUMMARIZE_RESULTS.value else "",
             )
             written = (
                 await asyncio.to_thread(
@@ -5238,8 +5275,13 @@ class LiveStageAdapter:
         # The control is raised last, from state already committed: every phase
         # that ran is recorded, no worker lease is held, and the person's answer
         # starts a new attempt rather than resuming a process.
+        # A question the summarizer asked outranks a pause card derived from
+        # where the Build stopped: it is already recorded and already bound to
+        # the step waiting on it, and returning the other one would leave a
+        # control nobody can see holding an answer nobody can give.
         control_request = (
-            await self._build_pause_control(
+            summary_control
+            or await self._build_pause_control(
                 phase_run,
                 gate=control_gate,
                 cycle=cycle,

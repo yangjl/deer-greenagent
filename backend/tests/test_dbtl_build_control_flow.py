@@ -511,3 +511,116 @@ class TestAMeetingIsConvenedByAPersonAndAdvisesOnly:
         await _run(repo, root, dispatcher=dispatcher, meetings=True)
 
         assert not [unit for unit in dispatcher.units if unit.role == "red_team"]
+
+
+class TestARecurringPauseCanStillBeAnswered:
+    """The card id is derived, so the same pause mints the same id twice.
+
+    Keying the answer on that id alone made every later answer collide with the
+    first and be swallowed — Retry then Replan wrote nothing, the epoch never
+    moved, the committed plan replayed, and the person's words went nowhere.
+    That is the no-op button the epochs exist to prevent, arriving through the
+    write path.
+    """
+
+    async def test_the_second_answer_to_a_recurring_card_is_recorded(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        first = await _run(repo, root, dispatcher=_RefusingSecondPhase(plan=TWO_PHASE_PLAN))
+        await _run(repo, root, dispatcher=_RefusingSecondPhase(plan=TWO_PHASE_PLAN), run_id="run-2", build_control=_answer(first.control_request, "retry"))
+        again = await _run(repo, root, dispatcher=_RefusingSecondPhase(plan=TWO_PHASE_PLAN), run_id="run-3")
+
+        assert again.control_request["request_id"] == first.control_request["request_id"], "the derived id should recur; that is the point"
+        await _run(repo, root, dispatcher=_WritingDispatcher(), run_id="run-4", build_control=_answer(again.control_request, "replan"))
+
+        assert (await repo.build_control_epochs(project_id="project-1", stage_attempt_id=stage_attempt_id))["replan"] == 1
+
+    async def test_a_held_plan_can_be_started_on_the_next_turn(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        first = await _run(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), confirmation=True)
+        await _run(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), confirmation=True, run_id="run-2", build_control=_answer(first.control_request, "hold"))
+        again = await _run(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), confirmation=True, run_id="run-3")
+
+        dispatcher = _WritingDispatcher(plan=TWO_PHASE_PLAN)
+        result = await _run(repo, root, dispatcher=dispatcher, confirmation=True, run_id="run-4", build_control=_answer(again.control_request, "start"))
+
+        assert result.control_request is None, result.note
+        assert dispatcher.phase_units, "the plan was confirmed but nothing ran"
+
+
+class TestAWorkersQuestionReachesTheWorker:
+    async def test_the_summarizers_question_is_shown_rather_than_only_recorded(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        asking = json.dumps({"needs_input": True, "clarification_question": "Which metric should headline the write-up?"})
+
+        result = await _run(repo, root, dispatcher=_WritingDispatcher(summary=asking))
+
+        assert result.control_request is not None, "a control nobody can see is a control that does not exist"
+        assert result.control_request["question"] == "Which metric should headline the write-up?"
+        assert result.control_request["step_key"] == "summarize_results"
+
+    async def test_the_answer_is_carried_into_the_summarizers_next_attempt(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        asking = json.dumps({"needs_input": True, "clarification_question": "Which metric should headline the write-up?"})
+        paused = await _run(repo, root, dispatcher=_WritingDispatcher(summary=asking))
+
+        dispatcher = _WritingDispatcher()
+        await _run(
+            repo,
+            root,
+            dispatcher=dispatcher,
+            run_id="run-2",
+            build_control=_answer(paused.control_request, value="Lead with held-out accuracy."),
+        )
+
+        assert dispatcher.summarizer_units, "the summarizer did not run again"
+        assert "Lead with held-out accuracy." in dispatcher.summarizer_units[-1].prompt
+
+    async def test_the_planners_answer_reaches_the_planner(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        paused = await _run(repo, root, dispatcher=_WritingDispatcher(plan=NEEDS_INPUT_PLAN))
+
+        dispatcher = _WritingDispatcher()
+        await _run(
+            repo,
+            root,
+            dispatcher=dispatcher,
+            run_id="run-2",
+            build_control=_answer(paused.control_request, value="Hold out 2024 by family."),
+        )
+
+        assert dispatcher.planner_units, "the planner did not run again"
+        assert "Hold out 2024 by family." in dispatcher.planner_units[-1].prompt
+
+
+class TestAChainMovingDecisionIsNeverSilentlyLost:
+    async def test_a_replan_that_cannot_be_recorded_changes_nothing_and_says_so(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        failed = await _run(repo, root, dispatcher=_RefusingSecondPhase(plan=TWO_PHASE_PLAN))
+
+        class _RefusingRepo:
+            def __getattr__(self, name):
+                return getattr(repo, name)
+
+            async def answer_build_collaboration(self, **kwargs):
+                raise RuntimeError("the database is unavailable")
+
+        dispatcher = _WritingDispatcher()
+        result = await _adapter(_RefusingRepo(), dispatcher=dispatcher).execute(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            request_text="Build the approved design.",
+            state={},
+            config=_runtime(root, run_id="run-2"),
+            build_control=_answer(failed.control_request, "replan"),
+        )
+
+        assert "could not be recorded" in result.note
+        assert dispatcher.planner_units == [], "a build ran on a decision that was never recorded"

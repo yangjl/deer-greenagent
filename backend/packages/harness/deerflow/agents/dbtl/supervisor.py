@@ -89,6 +89,9 @@ from deerflow.agents.dbtl.supervisor_support.card_history import (
     latest_user_text as _latest_user_text,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
+    pending_build_control as _pending_build_control,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
     pending_stage_handoff_control as _pending_stage_handoff_control,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
@@ -96,6 +99,9 @@ from deerflow.agents.dbtl.supervisor_support.card_history import (
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
     routing_input as _routing_input,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    unanswered_build_control_card as _unanswered_build_control_card,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
     wants_roster_adjustment as _wants_roster_adjustment,
@@ -293,6 +299,20 @@ async def _dbtl_status_snapshot(
             "approved_stage": str(request.get("approved_stage") or ""),
             "next_stage": str(request.get("next_stage") or ""),
             "answered_with": answer,
+        }
+    # A Build waiting on a decision is the other control the lead agent must
+    # know about. It cannot answer one — the routing fence intercepts the reply
+    # before this branch is reached — but a lead agent that does not know a
+    # build is paused will cheerfully offer to run one.
+    build_control = _unanswered_build_control_card(state)
+    if build_control is not None:
+        pending_control = {
+            "kind": "build_control",
+            "cycle_id": str(build_control.get("dbtl_cycle_id") or ""),
+            "control_kind": str(build_control.get("build_control_kind") or ""),
+            "step": str(build_control.get("step_key") or ""),
+            "question": str(build_control.get("question") or ""),
+            "answered_with": None,
         }
     if not cycles and pending_control is None:
         return None
@@ -1283,16 +1303,18 @@ def build_supervisor_graph(
         # This must use the same predicate the handler uses. A fence that
         # intercepted a request the handler then declined to answer would fall
         # through to stage execution — the opposite of what the fence is for.
-        if (
-            decision.branch is SupervisorBranch.ORDINARY
-            and context.project_id
-            and _pending_stage_handoff_control(
-                state,
-                selected_cycle_id=context.selected_cycle_id or decision.cycle_id,
-            )
-            is not None
-        ):
-            return SupervisorBranch.CYCLE_CONTINUATION.value
+        #
+        # A paused Build's control needs the same fence for the same reason: the
+        # natural reply to "Start the build with this plan?" is "yes, looks
+        # good, go ahead", which names no stage, matches no intent phrase, and
+        # would otherwise reach the lead agent — which cannot start a build and
+        # is not even told one is waiting.
+        if decision.branch is SupervisorBranch.ORDINARY and context.project_id:
+            scoped_cycle = context.selected_cycle_id or decision.cycle_id
+            if _pending_stage_handoff_control(state, selected_cycle_id=scoped_cycle) is not None:
+                return SupervisorBranch.CYCLE_CONTINUATION.value
+            if _pending_build_control(state, selected_cycle_id=scoped_cycle) is not None:
+                return SupervisorBranch.CYCLE_CONTINUATION.value
         logger.debug(
             "dbtl supervisor route: branch=%s source=%s project=%s cycle=%s",
             decision.branch,

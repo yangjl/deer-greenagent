@@ -49,6 +49,7 @@ from deerflow.dbtl.build_workflow import (
     resolve_build_workflow_by_key,
 )
 from deerflow.dbtl.stage_spec import StageSpecNotFound, resolve_stage_spec
+from deerflow.persistence.dbtl.collaboration_ops import ANSWERED, count_control_epochs
 from deerflow.persistence.dbtl.model import DbtlArtifactRow, DbtlBuildCollaborationRow, DbtlCycleRow, DbtlStageAttemptRow, DbtlStageStepRunRow
 from deerflow.utils.time import coerce_iso
 
@@ -263,12 +264,13 @@ class StepOpsMixin:
             select(DbtlBuildCollaborationRow.action).where(
                 DbtlBuildCollaborationRow.stage_attempt_id == stage_run.id,
                 DbtlBuildCollaborationRow.project_id == stage_run.project_id,
-                DbtlBuildCollaborationRow.lifecycle == "answered",
+                DbtlBuildCollaborationRow.lifecycle == ANSWERED,
             )
         )
-        actions = [str(value or "") for value in answered.scalars().all()]
-        restart_epoch = sum(1 for value in actions if value == "restart_build")
-        replan_epoch = restart_epoch + sum(1 for value in actions if value == "replan_build")
+        # The same function the repository's own epoch reader uses. Two copies
+        # of this arithmetic would eventually disagree, and the symptom is the
+        # one thing the chain exists to prevent.
+        epochs = count_control_epochs([str(value or "") for value in answered.scalars().all()])
 
         return build_step_material(
             workflow_spec_key=workflow_spec_key,
@@ -278,8 +280,8 @@ class StepOpsMixin:
             policy_version=stage_run.approved_policy_version or (cycle.policy_version if cycle else None),
             stage_spec_key=stage_spec_key,
             dataset_fingerprint=stage_run.approved_dataset_fingerprint,
-            restart_epoch=restart_epoch,
-            replan_epoch=replan_epoch,
+            restart_epoch=epochs["restart"],
+            replan_epoch=epochs["replan"],
         )
 
     async def build_step_material_for(

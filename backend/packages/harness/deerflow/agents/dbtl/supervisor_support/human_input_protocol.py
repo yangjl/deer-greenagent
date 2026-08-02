@@ -60,7 +60,14 @@ def card_request_id(prefix: str, cycle: str, *parts: str) -> str:
 STAGE_HANDOFF_REFUSED_KEY = "dbtl_stage_handoff_refused"
 
 
-def receipt_message(content: str, *, stage_handoff_refused: str | None = None) -> AIMessage:
+#: Marks a receipt that closes an outstanding Build control. Same purpose as
+#: ``STAGE_HANDOFF_REFUSED_KEY``: a control that can no longer be answered
+#: truthfully states its reason once and hands the conversation back, rather
+#: than intercepting every later message with the same refusal.
+BUILD_CONTROL_REFUSED_KEY = "dbtl_build_control_refused"
+
+
+def receipt_message(content: str, *, stage_handoff_refused: str | None = None, build_control_refused: str | None = None) -> AIMessage:
     """A deterministic supervisor reply that must survive a page reload.
 
     These are authored by the graph with no model call behind them, so no LLM
@@ -76,6 +83,8 @@ def receipt_message(content: str, *, stage_handoff_refused: str | None = None) -
     extra: dict[str, Any] = {GRAPH_RECEIPT_KEY: True}
     if stage_handoff_refused:
         extra[STAGE_HANDOFF_REFUSED_KEY] = stage_handoff_refused
+    if build_control_refused:
+        extra[BUILD_CONTROL_REFUSED_KEY] = build_control_refused
     # The id is minted here rather than left to ``add_messages``. Reconciliation
     # identifies a message by id and skips one that has none, so leaving it to
     # the reducer would make durable delivery of this receipt depend on a

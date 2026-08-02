@@ -98,10 +98,22 @@ export interface BuildPlanProjection {
   attention: string;
 }
 
+/**
+ * `Object.hasOwn`, not `in`: `in` walks the prototype chain, so `"constructor"`
+ * and `"toString"` pass an `in` check and then resolve to functions through
+ * every lookup keyed on the result — which renders as an invalid element type
+ * and unmounts the rail. The same rule `human-input.ts` applies to field names.
+ */
 function normalizeStatus(value: string): BuildStepStatus {
-  return (value in BUILD_PHASE_STATE_LABELS
-    ? value
-    : "queued") as BuildStepStatus;
+  return (
+    Object.hasOwn(BUILD_PHASE_STATE_LABELS, value) ? value : "queued"
+  ) as BuildStepStatus;
+}
+
+/** The plan's title for a phase, or its key — never a blank row. */
+function plannedTitle(planned: Map<string, string>, key: string): string {
+  const title = planned.get(key);
+  return title?.trim() ? title : key;
 }
 
 function titleOf(
@@ -110,8 +122,7 @@ function titleOf(
 ): string {
   const recorded = row.execution?.title;
   if (typeof recorded === "string" && recorded.trim()) return recorded.trim();
-  const key = row.phase_key ?? "";
-  return planned.get(key) ?? key ?? "Untitled phase";
+  return plannedTitle(planned, row.phase_key ?? "");
 }
 
 /**
@@ -156,9 +167,9 @@ export function buildPlanProjection(
     return {
       phaseKey: key,
       index: order.get(key) ?? row?.phase_index ?? position + 1,
-      title: row ? titleOf(row, planned) : (planned.get(key) ?? key),
+      title: row ? titleOf(row, planned) : plannedTitle(planned, key),
       status,
-      stateLabel: BUILD_PHASE_STATE_LABELS[status] ?? status,
+      stateLabel: BUILD_PHASE_STATE_LABELS[status]!,
       capability: row?.capability ?? null,
       viaGeneralist: Boolean(row?.via_generalist),
       running: status === "running",

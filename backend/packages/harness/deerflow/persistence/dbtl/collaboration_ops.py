@@ -11,9 +11,12 @@ Opening a second control supersedes the first rather than leaving two cards
 competing for the same answer — and the row that is superseded is kept, because
 it is the record of what somebody was actually shown.
 
-**A response is idempotent by request plus client submission id.** A retried
-delivery replays; a *different* answer under the same id is a conflict, not a
-silent overwrite. Someone changing their mind opens a new control.
+**A response is idempotent per open control**, not per card id. The card id is
+derived so a retried turn re-renders the same question, which means the same
+pause recurring mints the same id again on a second row — so keying the answer
+on the id alone made every later answer to a recurring pause collide with the
+first and be swallowed. A retried delivery replays; a *different* answer under
+an explicitly supplied submission id is a conflict, not a silent overwrite.
 
 **An answer is never attributed to an agent.** `responder_user_id` comes from
 the authenticated run, and `response_text` is stored exactly as written. A
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -95,6 +99,23 @@ def _payload(row: DbtlBuildCollaborationRow) -> dict[str, Any]:
         "created_at": coerce_iso(row.created_at),
         "responded_at": coerce_iso(row.responded_at),
     }
+
+
+def count_control_epochs(actions: Sequence[str]) -> dict[str, int]:
+    """How many times a person has asked to replan or restart, from raw actions.
+
+    A free function because **two** callers must agree exactly: whoever opens a
+    step against this material, and the read model that recomputes it. A second
+    implementation would drift, and the symptom would be perfectly good work
+    reported as stale — or, worse, stale work reported as current.
+
+    A restart replans too: it begins again at reading the Design, so every step
+    below it is redrawn. Counting it here as well keeps the plan's material
+    moving with the design read rather than leaving a restarted Build to reuse
+    the plan it was restarted away from.
+    """
+    restart = sum(1 for value in actions if value == BuildControlAction.RESTART_BUILD.value)
+    return {"restart": restart, "replan": restart + sum(1 for value in actions if value == BuildControlAction.REPLAN_BUILD.value)}
 
 
 class CollaborationOpsMixin:
@@ -191,10 +212,19 @@ class CollaborationOpsMixin:
     ) -> dict[str, Any]:
         """Record the human answer, once.
 
-        A replay under the same submission id returns the recorded answer. A
-        different answer under the same id raises: a double-clicked button and a
-        changed mind look identical at the transport boundary, and only the
-        payload tells them apart.
+        **Idempotency is per open control, not per card id.** The card id is
+        derived so a retried turn re-renders the same question — which means the
+        *same pause recurring* mints the same id again, on a second row. Keying
+        the answer on the id alone therefore made every later answer to a
+        recurring pause collide with the first one and be swallowed: Retry then
+        Replan wrote nothing, the replan epoch never moved, and the committed
+        plan replayed while the person's words went nowhere. That is exactly the
+        no-op button the epochs exist to prevent, arriving through the write
+        path.
+
+        A caller that supplies no submission id is not asserting an identity, so
+        idempotency falls back to the payload: the same action and the same
+        words replay, anything else conflicts.
         """
         verdict = BuildControlAction(action)
         async with self._sf() as session:
@@ -206,15 +236,20 @@ class CollaborationOpsMixin:
                         DbtlBuildCollaborationRow.project_id == project_id,
                     )
                     .order_by(DbtlBuildCollaborationRow.created_at.desc())
-                    .limit(1)
                     .with_for_update()
                 )
-                row = found.scalar_one_or_none()
+                rows = list(found.scalars().all())
+                # The open control wins over a newer terminal one: a person is
+                # answering the question in front of them, and an already
+                # answered row is the record of a different exchange.
+                row = next((entry for entry in rows if entry.lifecycle == OPEN), rows[0] if rows else None)
                 if row is None:
                     raise LookupError(f"No Build control {request_id!r} in project {project_id!r}.")
 
                 if row.lifecycle in _TERMINAL:
-                    same = row.action == verdict.value and (row.response_text or "") == _bounded(response_text) and (row.client_submission_id or None) == (client_submission_id or None)
+                    same = row.action == verdict.value and (row.response_text or "") == _bounded(response_text)
+                    if same and client_submission_id is not None:
+                        same = (row.client_submission_id or None) == client_submission_id
                     if same:
                         return _payload(row)
                     raise DbtlCollaborationConflict(f"Build control {request_id!r} is already {row.lifecycle!r} and cannot take a different answer.")
@@ -223,7 +258,9 @@ class CollaborationOpsMixin:
                 row.action = verdict.value
                 row.response_text = _bounded(response_text)
                 row.responder_user_id = responder_user_id
-                row.client_submission_id = client_submission_id
+                # Falls back to the row's own id so two rows sharing a derived
+                # card id cannot collide on the submission uniqueness rule.
+                row.client_submission_id = client_submission_id or row.id
                 row.resumed_step_run_id = resumed_step_run_id
                 row.meeting_id = meeting_id
                 row.responded_at = _utc_now()
@@ -293,10 +330,4 @@ class CollaborationOpsMixin:
                 )
             )
             actions = [str(value or "") for value in found.scalars().all()]
-        restart = sum(1 for value in actions if value == BuildControlAction.RESTART_BUILD.value)
-        # A restart replans too: it begins again at reading the Design, so every
-        # step below it is redrawn. Counting it here as well keeps the plan's
-        # material moving with the load-design material rather than leaving a
-        # restarted Build to reuse the plan it was restarted away from.
-        replan = restart + sum(1 for value in actions if value == BuildControlAction.REPLAN_BUILD.value)
-        return {"restart": restart, "replan": replan}
+        return count_control_epochs(actions)
