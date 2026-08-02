@@ -95,6 +95,7 @@ import {
 } from "./message-token-usage";
 import { RunActivity, RunDuration } from "./run-duration";
 import { MessageListSkeleton } from "./skeleton";
+import { StageWorkPanel } from "./stage-work-panel";
 import { SubtaskCard } from "./subtask-card";
 
 const EMPTY_TOKEN_DEBUG_STEPS: TokenDebugStep[] = [];
@@ -1435,6 +1436,11 @@ export function MessageList({
               />
             ) : null,
           )}
+          <StageWorkPanel
+            className="w-full"
+            runId={latestRunId}
+            threadId={threadId}
+          />
           {thread.isLoading && !hasActiveAssistantText && (
             <div className="w-full">
               <RunActivity startTime={turnStartTime} />

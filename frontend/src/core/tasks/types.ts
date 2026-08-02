@@ -37,6 +37,25 @@ export interface Subtask {
    * labelling every seat wrong, silently.
    */
   councilSeat?: CouncilSeatIdentity;
+  /**
+   * The DBTL stage this worker belongs to, when the server declared one.
+   *
+   * Server-authoritative and the only honest way to tell a governed stage
+   * worker from an ordinary delegated subtask: a DBTL worker's task id is a
+   * work-unit id rather than a `task` tool-call id, so it has no assistant
+   * message to hang from and would otherwise render nowhere. Deriving it from
+   * the id or the description would break on the first rename.
+   */
+  dbtlStage?: string;
+  /**
+   * The run this task belongs to.
+   *
+   * Backfilling a task's step history is addressed by `(thread, run, task)`,
+   * so a surface that assumed "the thread's latest run" fetched the wrong
+   * run's events for every task from an earlier turn — and silently got
+   * nothing back.
+   */
+  runId?: string;
 }
 
 export interface CouncilSeatIdentity {

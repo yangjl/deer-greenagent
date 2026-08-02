@@ -1414,6 +1414,9 @@ export function useThreadStream({
   // Ref to track current thread ID across async callbacks without causing re-renders,
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
+  // The run currently streaming, so a task event can record which run it
+  // belongs to rather than being attributed to the thread's newest one.
+  const activeRunIdRef = useRef<string | null>(null);
   const startedRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingPreparedReplayRef = useRef<PendingPreparedReplayMask | null>(
@@ -1453,6 +1456,7 @@ export function useThreadStream({
   }, [threadId]);
 
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
+    activeRunIdRef.current = _runId;
     threadIdRef.current = _threadId;
     setOptimisticThreadId((currentOptimisticThreadId) => {
       const currentView = currentViewThreadIdRef.current;
@@ -1703,7 +1707,13 @@ export function useThreadStream({
 
       const taskUpdate = taskEventToSubtaskUpdate(event);
       if (taskUpdate) {
-        updateSubtask(taskUpdate);
+        // Stamp the run this task was observed in. Without it a card can only
+        // guess, and the thread's latest run is the wrong guess for every task
+        // from an earlier turn.
+        updateSubtask({
+          ...taskUpdate,
+          ...(activeRunIdRef.current ? { runId: activeRunIdRef.current } : {}),
+        });
       }
 
       if (eventType === "task_running") {

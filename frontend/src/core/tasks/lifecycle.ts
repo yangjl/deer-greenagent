@@ -8,6 +8,8 @@ type TaskStartedEvent = {
   task_id: string;
   description?: unknown;
   model_name?: unknown;
+  /** Set by the DBTL stage adapter; absent for an ordinary delegated task. */
+  dbtl_stage?: unknown;
 };
 
 type TaskRunningEvent = {
@@ -25,6 +27,7 @@ type TaskTerminalEvent = {
   stop_reason?: unknown;
   model_name?: unknown;
   usage?: unknown;
+  dbtl_stage?: unknown;
 };
 
 /** Convert an additive task lifecycle event into a task-state update. */
@@ -47,6 +50,7 @@ export function taskEventToSubtaskUpdate(
         ? started.model_name.trim()
         : undefined;
     const councilSeat = readCouncilSeat(event.council_seat);
+    const dbtlStage = normalizeText(event.dbtl_stage);
     const description =
       typeof started.description === "string" && started.description.trim()
         ? started.description.trim()
@@ -59,6 +63,7 @@ export function taskEventToSubtaskUpdate(
       subagent_type: councilSeat?.agentName ?? "subagent",
       ...(modelName ? { modelName } : {}),
       ...(councilSeat ? { councilSeat } : {}),
+      ...(dbtlStage ? { dbtlStage } : {}),
     };
   }
 
@@ -92,6 +97,10 @@ export function taskEventToSubtaskUpdate(
       ...(modelName ? { modelName } : {}),
       ...(usage ? { usage } : {}),
       ...(councilSeat ? { councilSeat } : {}),
+      // Carried on the terminal event too: a page joining mid-run can miss
+      // `task_started` entirely, and a stage worker with no stage has no
+      // surface to render on.
+      ...(normalizeText(terminal.dbtl_stage) ? { dbtlStage: normalizeText(terminal.dbtl_stage) } : {}),
     };
   }
 

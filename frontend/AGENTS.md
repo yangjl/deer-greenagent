@@ -712,23 +712,53 @@ Each participant lane is clickable and opens
 participant's steps: reasoning turns, tool calls paired with their output, and
 the closing position, with a timeline on the left and the selected step's
 request/output on the right. `src/core/tasks/meeting-transcript.ts` is the pure
-layer for it. `parseMeetingResult` renders a participant's closing position as
+layer for it, and the pairing half now lives in
+`src/core/tasks/tool-transcript.ts` because nothing about it was
+meeting-specific — a council seat and an ordinary delegated subagent record
+steps in exactly the same shape, so both read the same way and a Build worker
+never needs a renderer of its own. `parseMeetingResult` renders a participant's closing position as
 sections rather than the validated JSON it is transmitted as — **contested
 items before the synthesis**, because where the meeting disagreed is what tells
 a reader whether the synthesis is a conclusion or an average, and it is
 worthless once they have read the synthesis as settled. An unresolved
 disagreement keeps its empty resolution and renders as "Not resolved"; prose or
 a malformed payload degrades to the raw text rather than costing the reader the
-result. The transcript layer also handles pairing a tool result to the call that asked for it (position is
+result. `tool-transcript.ts` handles pairing a tool result to the call that asked for it (position is
 the only honest join; the recorded step shape carries a tool name but no call
-id), keeping a result whose requesting turn was compacted away, marking a
-still-running call `pending` rather than rendering it as an empty success, and
-appending the final answer (which is dropped from the step timeline for a
-completed subagent). Lanes also show the latest step inline, so a three-minute
+id), keeping a result whose requesting turn was compacted away, and marking a
+still-running call `pending` rather than rendering it as an empty success. Its
+one option, `dropTrailingAnswer`, removes a completed task's closing turn (which
+the caller already renders as `task.result`) *before* pairing, so the tool-call
+turns it depends on are still intact — the meeting inspector deliberately does
+not use it, because a participant's final position is part of its transcript.
+`meeting-transcript.ts` keeps the meeting's own vocabulary and appends the
+closing answer. Lanes also show the latest step inline, so a three-minute
 meeting reports what it is doing rather than spinning. A reloaded run has no
 live SSE steps, so the lane backfills once via `fetchSubtaskSteps` — the same
 endpoint the subtask card uses — which is why `DebatePanel` takes `threadId`
 and `runId`.
+
+**A tool row opens to show what was asked and what came back**
+(`subtask-tool-step.tsx`). The card named the tool and stopped there, while the
+request arguments and the tool's output sat unread in the step model — which is
+exactly the information that explains a failure (which path was denied, what the
+command printed, why a contract was rejected). Bounded twice on purpose: the
+backend truncates what it persists (`SUBAGENT_STEP_MAX_CHARS`) and the row caps
+what it renders, and **both say so** rather than trailing off silently. A
+pending call still opens, because "no output recorded yet" is the answer during
+a live run and is deliberately distinguished from "the tool returned no output".
+
+**Governed stage work gets a transcript anchor** (`stage-work-panel.tsx`,
+`src/core/tasks/stage-work.ts`). A `SubtaskCard` is mounted from an assistant
+message's `task` tool call; a DBTL stage worker is dispatched by the stage
+adapter and its task id is a work-unit id, so it had no message to hang from and
+rendered nowhere at all — a Build ran invisibly and the only evidence was a
+package appearing at the end. The panel adopts tasks whose **server-set**
+`dbtlStage` is present and that carry no `councilSeat`; both exclusions matter,
+since adopting too little makes Build invisible again and adopting too much
+renders a meeting seat twice (here and in `DebatePanel`). Never infer the stage
+from a task id or description. `dbtlStage` rides on the terminal event as well
+as `task_started`, because a page joining mid-run can miss the start entirely.
 
 The backend sends a `council_seat` block on every `task_started` /
 `task_completed` / `task_failed` event. **Do not derive the seat from the task

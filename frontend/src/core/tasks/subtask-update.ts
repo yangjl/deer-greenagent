@@ -78,6 +78,7 @@ function subtaskChanged(prev: Subtask | undefined, next: Subtask): boolean {
     prev.subagent_type !== next.subagent_type ||
     prev.description !== next.description ||
     prev.prompt !== next.prompt ||
+    prev.dbtlStage !== next.dbtlStage ||
     !councilSeatEquals(prev.councilSeat, next.councilSeat) ||
     prev.latestMessage !== next.latestMessage ||
     prev.steps !== next.steps ||

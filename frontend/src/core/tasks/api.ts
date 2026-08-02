@@ -63,3 +63,83 @@ export async function fetchSubtaskSteps(
 
   return eventsToSteps(events, taskId);
 }
+
+export interface StageWorkerRecord {
+  taskId: string;
+  description: string;
+  dbtlStage: string;
+  status: "in_progress" | "completed" | "failed";
+}
+
+/**
+ * Governed stage workers recorded in one run, for a page that missed the stream.
+ *
+ * A DBTL stage worker has no `task` tool call to render from, so on reload
+ * there is nothing in the transcript to rebuild it from — the whole block
+ * simply vanished, and a Build that ran for ten minutes left no trace in the
+ * conversation it ran in. `subagent.start` carries `dbtl_stage` for exactly
+ * this: it is the only durable signal that separates a stage worker from an
+ * ordinary delegated subtask.
+ *
+ * Terminal state comes from the matching `subagent.end`; a worker with no end
+ * event is still running (or its run died), and is reported as in progress
+ * rather than being invented as complete.
+ */
+export async function fetchStageWorkers(
+  threadId: string,
+  runId: string,
+): Promise<StageWorkerRecord[]> {
+  const base = `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
+    threadId,
+  )}/runs/${encodeURIComponent(runId)}/events`;
+  const params = new URLSearchParams({
+    event_types: "subagent.start,subagent.end",
+    limit: String(SUBTASK_STEPS_PAGE_SIZE),
+  });
+
+  const response = await fetch(`${base}?${params.toString()}`, {
+    credentials: "include",
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to load stage workers: ${response.status}`);
+  }
+  // The endpoint returns a bare array, matching `fetchSubtaskSteps` above.
+  const events = (await response.json()) as FetchedEvent[];
+
+  const started = new Map<string, StageWorkerRecord>();
+  const ended = new Map<string, "completed" | "failed">();
+  for (const event of events) {
+    const content = (event.content ?? {}) as Record<string, unknown>;
+    const taskId =
+      typeof content.task_id === "string" ? content.task_id : undefined;
+    if (!taskId) {
+      continue;
+    }
+    if (event.event_type === "subagent.start") {
+      const stage =
+        typeof content.dbtl_stage === "string" ? content.dbtl_stage.trim() : "";
+      if (!stage) {
+        // An ordinary delegated subtask: it has an assistant message to render
+        // from, and adopting it here would render it twice.
+        continue;
+      }
+      started.set(taskId, {
+        taskId,
+        description:
+          typeof content.description === "string" && content.description.trim()
+            ? content.description
+            : "Stage work",
+        dbtlStage: stage,
+        status: "in_progress",
+      });
+    } else if (event.event_type === "subagent.end") {
+      const status = content.status;
+      ended.set(taskId, status === "completed" ? "completed" : "failed");
+    }
+  }
+
+  return [...started.values()].map((record) => ({
+    ...record,
+    status: ended.get(record.taskId) ?? record.status,
+  }));
+}

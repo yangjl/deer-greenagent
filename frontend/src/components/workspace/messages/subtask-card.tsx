@@ -34,7 +34,7 @@ import {
   formatSubtaskTokenUsage,
   resolveSubtaskModelLabel,
 } from "@/core/tasks/presentation";
-import { stepsForDisplay } from "@/core/tasks/steps";
+import { taskTranscript } from "@/core/tasks/tool-transcript";
 import { explainLastToolCall } from "@/core/tools/utils";
 import { cn } from "@/lib/utils";
 
@@ -42,6 +42,7 @@ import { CitationLink } from "../citations/citation-link";
 import { FlipDisplay } from "../flip-display";
 
 import { MarkdownContent } from "./markdown-content";
+import { SubtaskToolStep } from "./subtask-tool-step";
 
 export function SubtaskCard({
   className,
@@ -74,9 +75,16 @@ export function SubtaskCard({
     : undefined;
 
   // The card shows the subagent's step timeline (#3779): its reasoning turns
-  // (AI text) interleaved with the tools it ran (by name). See stepsForDisplay
-  // for what is kept/dropped.
-  const displaySteps = stepsForDisplay(task.steps, task.status);
+  // interleaved with the tools it ran. Each tool call is paired with the output
+  // it produced (`taskTranscript`) so the row can open to show what was asked
+  // and what came back, rather than naming the tool and stopping there.
+  const entries = useMemo(
+    () =>
+      taskTranscript(task.steps, {
+        dropTrailingAnswer: task.status === "completed",
+      }),
+    [task.steps, task.status],
+  );
 
   // Backfill step history on expand for historical runs (#3779). Live runs
   // already have steps from SSE, so the `steps.length` guard skips the fetch.
@@ -209,25 +217,25 @@ export function SubtaskCard({
               }
             ></ChainOfThoughtStep>
           )}
-          {displaySteps.map((step, i) => {
+          {entries.map((entry, i) => {
             const isLastWhileRunning =
-              task.status === "in_progress" && i === displaySteps.length - 1;
+              task.status === "in_progress" && i === entries.length - 1;
             const icon = isLastWhileRunning ? (
-              <Loader2Icon className="size-4 animate-spin" />
-            ) : step.kind === "tool" ? (
+              <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+            ) : entry.kind === "tool" ? (
               <WrenchIcon className="size-4" />
             ) : (
               <SparklesIcon className="size-4" />
             );
             return (
               <ChainOfThoughtStep
-                key={`${step.message_index}-${i}`}
+                key={entry.id}
                 label={
-                  step.kind === "tool" ? (
-                    (step.tool_name ?? t.subtasks[task.status])
+                  entry.kind === "tool" ? (
+                    <SubtaskToolStep entry={entry} />
                   ) : (
                     <div className="text-muted-foreground line-clamp-3 text-sm">
-                      <MarkdownContent content={step.text} isLoading={false} />
+                      <MarkdownContent content={entry.text} isLoading={false} />
                     </div>
                   )
                 }
