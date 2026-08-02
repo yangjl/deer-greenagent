@@ -1485,7 +1485,7 @@ async def list_run_events(
 @router.get("/{thread_id}/activity")
 @require_permission("runs", "read", owner_check=True)
 async def list_thread_activity(
-    thread_id: str,
+    thread_id: ThreadId,
     request: Request,
     limit: int = Query(default=200, ge=1, le=1000),
     before_seq: int | None = Query(default=None, ge=1),

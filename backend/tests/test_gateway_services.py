@@ -2329,7 +2329,7 @@ def test_start_run_session_files_new_thread_before_first_project_run(
             run_manager=RunManager(store=run_store),
             checkpointer=InMemorySaver(),
             store=InMemoryStore(),
-            run_event_store=SimpleNamespace(),
+            run_event_store=MemoryRunEventStore(),
             run_events_config=None,
             thread_store=thread_store,
             workspace_repo=_WorkspaceRepo(),

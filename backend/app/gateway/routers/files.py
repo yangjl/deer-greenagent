@@ -29,6 +29,7 @@ from app.gateway.thread_project import (
 )
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, make_safe_user_id
 from deerflow.uploads import is_upload_staging_file
+from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,7 @@ def _append_linked_project_root(listing: FilesListResponse, thread_id: str, user
 )
 @require_permission("threads", "read", owner_check=True)
 async def list_files(
-    thread_id: str,
+    thread_id: ThreadId,
     request: Request,
     path: str = Query(VIRTUAL_PATH_PREFIX, description="Virtual directory path to list (defaults to /mnt/user-data)"),
 ) -> FilesListResponse:
@@ -237,7 +238,7 @@ def _project_info(link) -> ProjectInfo:
     description="Return the single project folder linked to this thread, or null when none is linked.",
 )
 @require_permission("threads", "read", owner_check=True)
-async def get_thread_project(thread_id: str, request: Request) -> ThreadProjectResponse:
+async def get_thread_project(thread_id: ThreadId, request: Request) -> ThreadProjectResponse:
     """Get the thread's linked project folder."""
     owner_user_id = _resolve_owner_user_id(request)
     link = await asyncio.to_thread(read_project_link, thread_id, owner_user_id)
@@ -251,7 +252,7 @@ async def get_thread_project(thread_id: str, request: Request) -> ThreadProjectR
     description="Link one project folder (an existing directory under a configured sandbox mount) to this thread.",
 )
 @require_permission("threads", "write", owner_check=True)
-async def set_thread_project(thread_id: str, body: ThreadProjectRequest, request: Request) -> ThreadProjectResponse:
+async def set_thread_project(thread_id: ThreadId, body: ThreadProjectRequest, request: Request) -> ThreadProjectResponse:
     """Set the thread's linked project folder."""
     owner_user_id = _resolve_owner_user_id(request)
     try:
@@ -268,7 +269,7 @@ async def set_thread_project(thread_id: str, body: ThreadProjectRequest, request
     description="Unlink the thread's project folder. Idempotent.",
 )
 @require_permission("threads", "write", owner_check=True)
-async def delete_thread_project(thread_id: str, request: Request) -> ThreadProjectResponse:
+async def delete_thread_project(thread_id: ThreadId, request: Request) -> ThreadProjectResponse:
     """Clear the thread's linked project folder."""
     owner_user_id = _resolve_owner_user_id(request)
     await asyncio.to_thread(clear_project_link, thread_id, owner_user_id)
@@ -282,7 +283,7 @@ async def delete_thread_project(thread_id: str, request: Request) -> ThreadProje
     description="List folders that can be linked as this thread's project: configured sandbox mount roots and their first-level subdirectories.",
 )
 @require_permission("threads", "read", owner_check=True)
-async def get_thread_project_candidates(thread_id: str, request: Request) -> ProjectCandidatesResponse:
+async def get_thread_project_candidates(thread_id: ThreadId, request: Request) -> ProjectCandidatesResponse:
     """List linkable project folders."""
     candidates = await asyncio.to_thread(list_project_candidates)
     return ProjectCandidatesResponse(candidates=[_project_info(link) for link in candidates])

@@ -31,6 +31,7 @@ from deerflow.persistence.workspaces import (
     WorkspaceSlugConflict,
 )
 from deerflow.projects.storage import ensure_project_dirs, project_folder_name
+from deerflow.utils.thread_id import ThreadId
 
 router = APIRouter(prefix="/api", tags=["workspaces"])
 
@@ -312,7 +313,7 @@ async def list_project_threads(project_id: str, request: Request):
 
 @router.put("/projects/{project_id}/threads/{thread_id}")
 @require_permission("threads", "write", owner_check=True)
-async def add_thread_to_project(project_id: str, thread_id: str, request: Request):
+async def add_thread_to_project(project_id: str, thread_id: ThreadId, request: Request):
     """File a conversation into this project."""
     user_id = await _user_id(request)
     project = await _require_project(project_id, request)
@@ -334,7 +335,7 @@ async def add_thread_to_project(project_id: str, thread_id: str, request: Reques
 
 @router.delete("/projects/{project_id}/threads/{thread_id}", status_code=status.HTTP_204_NO_CONTENT)
 @require_permission("threads", "write", owner_check=True)
-async def remove_thread_from_project(project_id: str, thread_id: str, request: Request):
+async def remove_thread_from_project(project_id: str, thread_id: ThreadId, request: Request):
     """Return a conversation to the inbox."""
     user_id = await _user_id(request)
     await _require_project(project_id, request)
