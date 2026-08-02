@@ -22,9 +22,7 @@ KNOWLEDGE_AUTHORITY_ROLES = frozenset({"owner", "admin"})
 def require_knowledge_authority(role: str) -> None:
     """Require a project role allowed to alter governed knowledge."""
     if (role or "").strip().lower() not in KNOWLEDGE_AUTHORITY_ROLES:
-        raise KnowledgeLifecycleRefused(
-            "Only a project owner or administrator may promote, publish, supersede, or retract governed knowledge."
-        )
+        raise KnowledgeLifecycleRefused("Only a project owner or administrator may promote, publish, supersede, or retract governed knowledge.")
 
 
 class ClaimGrade(StrEnum):

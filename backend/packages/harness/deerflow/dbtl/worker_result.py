@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from deerflow.dbtl.build_execution import BuildFigure, KeyOutcome, parse_figures, parse_key_outcomes
 from deerflow.dbtl.consensus import Consensus, parse_consensus
 from deerflow.dbtl.decision_request import DecisionRequest, parse_decision_request
 
@@ -140,6 +141,14 @@ class StageWorkerResult:
     #: explanation has no options to offer, and a malformed one is dropped
     #: rather than allowed to take the question down with it.
     decision_request: DecisionRequest | None = None
+    #: Figures and numeric outcomes this worker declared, when its stage asks
+    #: for them. Optional and stage-specific for the same reason ``consensus``
+    #: is: the contract is shared by all five stages, and a Design chair has no
+    #: plot to declare. Both are *presentational* declarations layered on
+    #: artifacts the contract already validated, so both parse fail-soft — a
+    #: missing caption must not discard verified execution.
+    figures: tuple[BuildFigure, ...] = ()
+    key_outcomes: tuple[KeyOutcome, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.summary.strip():
@@ -196,6 +205,8 @@ class StageWorkerResult:
             # Build package invites a reader to wonder what went missing.
             **({"consensus": self.consensus.as_dict()} if self.consensus is not None else {}),
             **({"decision_request": self.decision_request.as_dict()} if self.decision_request is not None else {}),
+            **({"figures": [item.as_dict() for item in self.figures]} if self.figures else {}),
+            **({"key_outcomes": [item.as_dict() for item in self.key_outcomes]} if self.key_outcomes else {}),
         }
 
 
@@ -411,6 +422,8 @@ def parse_worker_result(
         # trade the thing that works for the thing that reads nicely.
         consensus=parse_consensus(payload.get("consensus")),
         decision_request=decision_request,
+        figures=parse_figures(payload.get("figures")),
+        key_outcomes=parse_key_outcomes(payload.get("key_outcomes")),
     )
 
 

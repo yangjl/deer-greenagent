@@ -34,6 +34,11 @@ from deerflow.subagents.status_contract import (
     format_subagent_result_message,
     make_subagent_additional_kwargs,
 )
+from deerflow.subagents.step_streaming import (
+    POLL_INTERVAL_SECONDS,
+    SubagentStepStreamer,
+    summarize_usage,
+)
 from deerflow.tools.types import Runtime
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 from deerflow.utils.custom_events import aemit_custom_event
@@ -157,17 +162,6 @@ def _find_usage_recorder(runtime: Any) -> Any | None:
         if hasattr(cb, "record_external_llm_usage_records"):
             return cb
     return None
-
-
-def _summarize_usage(records: list[dict] | None) -> dict | None:
-    """Summarize token usage records into a compact dict for SSE events."""
-    if not records:
-        return None
-    return {
-        "input_tokens": sum(r.get("input_tokens", 0) or 0 for r in records),
-        "output_tokens": sum(r.get("output_tokens", 0) or 0 for r in records),
-        "total_tokens": sum(r.get("total_tokens", 0) or 0 for r in records),
-    }
 
 
 def _report_subagent_usage(runtime: Any, result: Any) -> None:
@@ -440,9 +434,8 @@ async def task_tool(
     # Poll for task completion in backend (removes need for LLM to poll)
     poll_count = 0
     last_status = None
-    last_message_count = 0  # Track how many AI messages we've already sent
     # Polling timeout: execution timeout + 60s buffer, checked every 5s
-    max_poll_count = (config.timeout_seconds + 60) // 5
+    max_poll_count = int((config.timeout_seconds + 60) // POLL_INTERVAL_SECONDS)
 
     logger.info(f"[trace={trace_id}] Started background task {task_id} (subagent={subagent_type}, timeout={config.timeout_seconds}s, polling_limit={max_poll_count} polls)")
 
@@ -472,6 +465,15 @@ async def task_tool(
     lineage = delegation.lineage_fields() if delegation is not None else {}
     if delegation is not None:
         await delegation.open()
+
+    async def emit_task_event(payload: dict) -> None:
+        await aemit_custom_event(payload, writer=writer)
+
+    step_stream = SubagentStepStreamer(
+        task_id=task_id,
+        emit=emit_task_event,
+        base_event={**lineage, "model_name": effective_model},
+    )
 
     # Send Task Started message'
     await aemit_custom_event(
@@ -512,30 +514,14 @@ async def task_tool(
             # The collector publishes cumulative records. Reuse one snapshot for
             # both live progress and the terminal event so the frontend can
             # replace, rather than add, its per-task total.
-            usage = _summarize_usage(getattr(result, "token_usage_records", None))
+            usage = summarize_usage(getattr(result, "token_usage_records", None))
 
-            # Check for new AI messages and send task_running events
-            ai_messages = result.ai_messages or []
-            current_message_count = len(ai_messages)
-            if current_message_count > last_message_count:
-                # Send task_running event for each new message
-                for i in range(last_message_count, current_message_count):
-                    message = ai_messages[i]
-                    await aemit_custom_event(
-                        {
-                            "type": "task_running",
-                            **lineage,
-                            "task_id": task_id,
-                            "message": message,
-                            "message_index": i + 1,  # 1-based index for display
-                            "total_messages": current_message_count,
-                            "usage": usage,
-                            "model_name": effective_model,
-                        },
-                        writer=writer,
-                    )
-                    logger.info(f"[trace={trace_id}] Task {task_id} sent message #{i + 1}/{current_message_count}")
-                last_message_count = current_message_count
+            # Report every step captured since the last poll. The cursor lives
+            # in the streamer so this loop and the DBTL stage adapter cannot
+            # drift into two notions of "already reported".
+            emitted = await step_stream.drain(result)
+            if emitted:
+                logger.info(f"[trace={trace_id}] Task {task_id} sent {emitted} step message(s)")
 
             # Check if task completed, failed, or timed out
             if result.status == SubagentStatus.COMPLETED:
@@ -644,7 +630,7 @@ async def task_tool(
                 )
 
             # Still running, wait before next poll
-            await asyncio.sleep(5)
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
             poll_count += 1
 
             # Polling timeout as a safety net (in case thread pool timeout doesn't work)
@@ -654,7 +640,7 @@ async def task_tool(
                 timeout_minutes = config.timeout_seconds // 60
                 logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
                 _report_subagent_usage(runtime, result)
-                usage = _summarize_usage(getattr(result, "token_usage_records", None))
+                usage = summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 await aemit_custom_event(
                     {

@@ -20,10 +20,7 @@ class TransitionDifficulty(StrEnum):
     HIGH_STAKES = "high_stakes"
 
 
-DEFAULT_STANDARD_RATIONALE = (
-    "No valid transition assessment was available, so the standard human-review "
-    "path is required."
-)
+DEFAULT_STANDARD_RATIONALE = "No valid transition assessment was available, so the standard human-review path is required."
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +43,7 @@ def standard_assessment(*, rationale: str = DEFAULT_STANDARD_RATIONALE, source: 
         rationale=rationale.strip() or DEFAULT_STANDARD_RATIONALE,
         source=source,
     )
+
 
 def parse_transition_assessment(raw: object) -> TransitionAssessment:
     """Parse one bounded JSON result, refusing prose and unknown values."""

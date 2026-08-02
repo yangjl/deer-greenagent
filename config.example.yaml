@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 38
+config_version: 39
 
 # ============================================================================
 # Logging
@@ -1249,6 +1249,22 @@ dbtl:
   # the assessment plus the Approve / Revise / Park choice on registered Design
   # decks. Off restores the uniform two-step gate. Transition records accumulate
   # either way, so toggling creates no audit gap.
+  # Execute Build as the versioned five-step workflow (read the approved
+  # Design, plan, run the phases, summarize, render the deck) instead of one
+  # opaque worker.
+  #
+  # On, Build hash-verifies the approved Design before dispatching anything,
+  # runs each planned phase as its own retryable attempt, and writes its review
+  # package through a read-only summarizer — so a summary that will not parse or
+  # a deck that will not render costs that step and leaves the sandbox work
+  # pinned and reusable. Off keeps today's monolithic path exactly as it was,
+  # including not re-reading the Design: that resolution is a new refusal, and a
+  # project whose approved package is unreadable through the project root should
+  # discover it in the manual profile rather than mid-experiment.
+  #
+  # Not implemented yet: human collaboration on a paused step, and retrying one
+  # step on its own from the UI.
+  build_workflow_steps: false
   progressive_gate: false
   # One-shot model that assesses the remaining work as routine, standard, or
   # high_stakes after a Design meeting produces bound evidence. null, provider

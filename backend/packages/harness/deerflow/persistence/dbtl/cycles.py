@@ -55,6 +55,7 @@ from deerflow.persistence.dbtl.model import (
 )
 from deerflow.persistence.dbtl.reconciliation_ops import RECONCILIATION_KIND, ReconciliationOpsMixin
 from deerflow.persistence.dbtl.sql import projection_hash
+from deerflow.persistence.dbtl.step_ops import StepOpsMixin
 from deerflow.persistence.dbtl.transition_ops import TransitionOpsMixin
 from deerflow.utils.time import coerce_iso
 
@@ -93,7 +94,7 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOpsMixin, ReconciliationOpsMixin, TransitionOpsMixin):
+class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, DesignFeedbackOpsMixin, ReconciliationOpsMixin, StepOpsMixin, TransitionOpsMixin):
     """Read and mutate durable DBTL cycles for one deployment.
 
     Phase 6's data-readiness operations live in

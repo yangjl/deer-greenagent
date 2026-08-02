@@ -62,6 +62,20 @@ class DbtlConfig(BaseModel):
         ),
     )
 
+    build_workflow_steps: bool = Field(
+        default=False,
+        description=(
+            "Execute Build as the versioned five-step workflow (read the approved Design, plan, run the phases, "
+            "summarize, render the deck) instead of one opaque worker. On, Build resolves and hash-verifies the "
+            "approved Design before dispatching anything, runs each planned phase as its own retryable attempt, and "
+            "produces its review package through a read-only summarizer so a presentational failure cannot discard "
+            "sandbox work. Off keeps today's monolithic Build path exactly as it was, including not re-reading the "
+            "Design — deliberately, because the resolution is a new refusal and a project whose approved package is "
+            "not readable through the project root must discover that in the manual profile rather than mid-experiment. "
+            "Human collaboration on a paused step, and targeted retry of one step, are not implemented yet."
+        ),
+    )
+
     progressive_gate: bool = Field(
         default=False,
         description=(

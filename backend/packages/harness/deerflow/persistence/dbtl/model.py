@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, event, text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, event, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -275,6 +275,126 @@ class DbtlStageWorkerRunRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
 
     __table_args__ = (UniqueConstraint("stage_attempt_id", "unit_id", name="uq_dbtl_stage_worker_unit"),)
+
+
+class DbtlStageStepRunRow(Base):
+    """One immutable attempt at one Build workflow step.
+
+    Deliberately **not** an overload of `dbtl_stage_worker_runs`. Worker rows
+    describe model-backed work units; `load_design` and `render_review_deck` are
+    deterministic server code that needs the same audit and retry semantics
+    without pretending to be an agent — a deterministic step recorded as a
+    "worker" would make the review record claim a model read the Design.
+
+    Append-only. A retry appends an attempt; it never overwrites the failed
+    record, because a failed attempt is what a reviewer reads to understand a
+    retry. Only one attempt per step may be `running`, enforced by a partial
+    unique index rather than by a check-then-write.
+
+    Phase identity (`phase_index`, `phase_key`, `plan_digest`) is nullable
+    because only `execute_phases` expands; a phase attempt whose plan changed is
+    a *different* phase rather than a retry of this one, which is why the plan
+    digest is on the row and not merely on its container.
+    """
+
+    __tablename__ = "dbtl_stage_step_runs"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    cycle_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dbtl_cycles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    stage_attempt_id: Mapped[str] = mapped_column(
+        String(96),
+        ForeignKey("dbtl_stage_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    workflow_spec_key: Mapped[str] = mapped_column(String(96), nullable=False)
+    step_key: Mapped[str] = mapped_column(String(48), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+
+    #: Phase identity. Null for the four non-container steps.
+    phase_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    phase_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    #: `phase_key` normalized to a non-null value, and the column both
+    #: uniqueness rules are actually written against.
+    #:
+    #: SQL treats NULLs as distinct, so indexing the nullable `phase_key`
+    #: constrained nothing for the four non-phase steps — which is every step
+    #: but one. Two identical `running` rows and two attempt-1 rows were both
+    #: accepted. `phase_key` stays nullable because "this step has no phase" is
+    #: the honest answer to a reader; the sentinel exists only so the database
+    #: can compare it.
+    phase_slot: Mapped[str] = mapped_column(String(96), nullable=False, default="", server_default="")
+    plan_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    #: What was asked for and who covered it. `via_generalist` is what lets a
+    #: reviewer tell a real specialist from a stand-in.
+    capability: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    agent_name: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    via_generalist: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+
+    input_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: The exact predecessor attempts this one was computed against.
+    predecessor_step_run_ids: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+
+    parent_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+
+    #: Bounded and server-owned. Never raw prompts, secrets, unbounded shell
+    #: output, or model reasoning.
+    error_code: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    error_summary: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    execution: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+    #: A paused step's collaboration request, or a bound Build work meeting.
+    human_input_request_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    meeting_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    #: Which attempt this one replaces, for reading a retry chain.
+    supersedes_step_run_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "stage_attempt_id",
+            "step_key",
+            "phase_slot",
+            "attempt",
+            name="uq_dbtl_stage_step_attempt",
+        ),
+        Index(
+            "ix_dbtl_stage_step_runs_lookup",
+            "stage_attempt_id",
+            "step_key",
+        ),
+        # "Only one attempt for a step may be `running`", enforced where two
+        # concurrent dispatches cannot both win. Mirrored in migration 0026 so
+        # the `create_all` bootstrap path and the migrated path agree. Keyed on
+        # `phase_slot`, never `phase_key`: a NULL compares unequal to itself, so
+        # the nullable column made this index a no-op for every ordinary step.
+        Index(
+            "uq_dbtl_stage_step_running",
+            "stage_attempt_id",
+            "step_key",
+            "phase_slot",
+            unique=True,
+            sqlite_where=text("status = 'running'"),
+            postgresql_where=text("status = 'running'"),
+        ),
+    )
 
 
 class DbtlBuildLineageRow(Base):

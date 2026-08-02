@@ -938,6 +938,32 @@ only top-level custom agents inherit the existing chat/edit/delete controls.
 **Concurrency and total delegation cap**: `MAX_CONCURRENT_SUBAGENTS = 3` is enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model`; runtime `max_concurrent_subagents` is clamped to 1-4). The same middleware also enforces `subagents.max_total_per_run` (default 6, config schema 1-50, runtime override `max_total_subagents` clamped to the same range) against current-run entries in the durable delegation ledger, so a long lead-agent run cannot bypass concurrency limits by launching repeated legal-sized batches at each planning checkpoint, but historical delegations from previous runs in the same thread do not consume the new run's budget. The lead-agent prompt uses the same clamped values, so model-visible limits match enforcement. Gateway `run_agent()` and embedded `DeerFlowClient.stream()` both provide a per-invocation `run_id` in runtime context; `DeerFlowClient.stream()` also tags its input `HumanMessage` with that same id so durable-context capture can identify the current request boundary. Gateway resume paths may not append a new `HumanMessage`, so the worker also exposes the pre-run checkpoint's message ids in runtime context; durable-context capture uses that as the current-run boundary and never re-tags older task calls as the resumed run. When no delegation slots remain, task calls are stripped, provider raw tool-call metadata is synced, `finish_reason` is forced to `stop`, and a visible "subagent delegation limit" note is appended so the agent can synthesize already-collected results. Default subagent timeout `subagents.timeout_seconds=1800` (30 min) and built-in `general-purpose` `max_turns=150` (raised from 100/15-min so deep-research subtasks stop hitting `GraphRecursionError` out of the box)
 **Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result. `task_started` carries the resolved effective model name. The per-subagent `SubagentTokenCollector` publishes a cumulative usage snapshot to the shared `SubagentResult` after every completed LLM response; the next `task_running` event carries that snapshot, so collapsed workspace cards can update without re-accounting parent-run totals. Terminal ToolMessage metadata (`subagent_model_name`, `subagent_token_usage`) and the persisted `subagent.end` event retain the model/usage after reload; absent provider usage stays absent rather than being estimated as zero.
 **Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_timed_out`
+
+**Step streaming is shared, terminal mapping is not** (`subagents/step_streaming.py`).
+`SubagentExecutor` appends captured steps to `SubagentResult.ai_messages`, and
+two callers turn that into `task_running` events: the `task` tool, which polls
+its background entry, and `LiveStageAdapter`, which previously awaited one
+terminal result and so rendered a DBTL stage worker as a single opaque stretch —
+no reads, no tools, no Bash output, and, when the worker's structured result was
+rejected, nothing at all to explain why. `SubagentStepStreamer` owns the cursor,
+the 1-based indexing, and the cumulative usage snapshot;
+`run_with_step_stream` runs the blocking `executor.execute` on a worker thread
+and drains beside it, including once more after it returns so a step appended in
+the last instant is not lost to the completion check. The streamer owns
+`type`/`task_id`/`message`/`message_index`/`total_messages`/`usage` and merges a
+caller's base payload *under* them, so a hand-built base cannot mislabel which
+step an event describes.
+
+Two rules shape it. **Progress reporting must never end the work it reports
+on**: an emit that raises costs one event, and the cursor advances *before*
+emitting so a failed emit cannot re-report the same step on every later poll.
+And **terminal mapping stays with each caller** — the `task` tool answers to the
+subagent status protocol while the adapter answers to a DBTL stage contract, and
+one shared notion of "done" would have to lie to one of them. Stage steps carry
+`dbtl_stage` and the worker's activity lineage but deliberately **not**
+`council_seat`: the seat is asserted once at `task_started`, and ordinary Build
+work carrying one would render as a design meeting. Tests:
+`tests/test_subagent_step_streaming.py`, `tests/test_dbtl_stage_worker_progress.py`.
 **Handled LLM failures**: `LLMErrorHandlingMiddleware` deliberately converts provider/model exceptions into an `AIMessage` so the graph can end cleanly, stamping `additional_kwargs.deerflow_error_fallback=true` plus error metadata. Clean graph termination does not imply subagent success: `SubagentExecutor` inspects the last assistant message at terminalization and maps a marked fallback to `SubagentStatus.FAILED`, which then emits `task_failed` and the existing structured `subagent_error`. Only the marker is authoritative — error-looking assistant prose without it remains a normal completed result, so neither the executor nor frontend parses display text as a status protocol.
 **Guardrail caps & `stop_reason` (#3875 Phase 2)**: three independent axes can end a subagent run early, and all now surface _why_ through one additive field rather than a new status enum. **Turn axis**: `recursion_limit` on the subagent `run_config` equals `max_turns`, so exhausting the turn budget raises `GraphRecursionError` from `agent.astream`; `executor.py::_aexecute` catches it specifically (before the generic `except Exception`). **Token axis**: `TokenBudgetMiddleware` is attached per-agent via `build_subagent_runtime_middlewares` from `subagents.token_budget` (default `max_tokens` **coupled to `summarization.enabled`** — 1,000,000 when subagent summarization is on, 2,000,000 when off, warn at 0.7, hard-stop at 1.0; a user-set budget always wins regardless of the switch — #3875 Phase 3; a backstop against a subagent that burns tokens on trivial work). It does _not_ raise: at the hard-stop threshold it strips the in-flight turn's tool calls, forces `finish_reason="stop"`, and lets the run complete naturally with a final answer. **Loop axis**: `LoopDetectionMiddleware` (attached at the same point) catches repeated identical tool-call sets — or one tool _type_ called many times with varying args — and its hard-stop likewise strips `tool_calls` and forces a final answer without raising, recording `loop_capped`. Each guard exposes its cap on a per-`run_id` `consume_stop_reason(run_id)` accessor; `_aexecute` collects **every** middleware with that method (duck-typed via `hasattr`, so the executor has no import coupling to the guard classes) and surfaces the first non-`None` reason — adding a future guard needs no executor change. **Surfacing**: whichever axis fired, `_aexecute` stamps a normal status plus an additive reason — `completed` + `stop_reason=token_capped|turn_capped|loop_capped` when a usable final answer (or partial recovered from the last streamed chunk via `_extract_final_result` → `utils/messages.py::message_content_to_text`, returning a `"No response Generated"` sentinel when no text survived) was produced; `failed` + `stop_reason=turn_capped` when nothing usable survived. `SubagentResult.stop_reason` flows through `task_tool.py::_task_result_command` → `format_subagent_result_message` (renders `Task Succeeded (capped: ...)` / `Task failed (capped: ...)`) and `make_subagent_additional_kwargs`, which stamps the additive `subagent_stop_reason` key alongside the normal `subagent_status`. **Why additive, not an enum**: a new status value would break v1 consumers; an optional field is ignored by older frontends and ledger readers, so the cross-language contract (`contracts/subagent_status_contract.json` v2 + `subagents/status_contract.py` + `frontend/.../subtask-result.ts`, pinned by `test_status_values_match_contract` / `test_stop_reason_values_match_contract`) stays backward-compatible. The durable delegation ledger captures `stop_reason` onto the entry and renders model-facing guidance ("hit a guardrail cap with a partial result; reuse it, retry tighter, or raise the per-agent budget (`max_turns` / `token_budget`)") so the lead reuses a capped completion knowingly instead of mistaking it for a clean one. (Phase 1 shipped this surfacing as a `MAX_TURNS_REACHED` status enum in #3949; Phase 2 replaced that enum with the additive `stop_reason` field per the agreed design — the `max_turns_reached` status value and `SubagentStatus.MAX_TURNS_REACHED` are gone.)
 **Context compaction (#3875 Phase 3, #4039)**: subagents inherit `DeerFlowSummarizationMiddleware` via `build_subagent_runtime_middlewares`, gated on the **same** `summarization.enabled` switch the lead reads (one config covers both chains; trigger/keep/model/prompt come from the shared `summarization` config so they cannot drift). The subagent builder attaches `DurableContextMiddleware` immediately before summarization, using the same skills path/read-tool settings as the lead chain. Compaction stores the generated summary in `ThreadState.summary_text` rather than as a `messages` item; the durable-context wrapper therefore projects it into the next model request as guarded hidden human data. This is required when a message-count keep policy preserves only an assistant tool-call plus its tool results: without the injected summary the next request begins with assistant/tool history and strict OpenAI-compatible providers can reject it. Because `DurableContextMiddleware` inserts a second `SystemMessage(authority_contract)` after the subagent's leading system prompt, the builder also appends `SystemMessageCoalescingMiddleware` innermost (mirroring the lead chain, appended after the optional summarization middleware so it is unconditionally last) to merge every `SystemMessage` into one leading `system_message` — otherwise the durable fix would trade #4039's assistant-first HTTP 400 for a duplicate-system 400 on the same strict backends (#4040). The factory is called with `skip_memory_flush=True` on the subagent path: the lead's `memory_flush_hook` (attached when `memory.enabled`) flushes pre-compaction messages into durable memory keyed by `thread_id`, and subagents share the parent's `thread_id`, so without skipping the hook a subagent's internal turns would pollute the **parent** thread's durable memory. Placement differs from the lead chain (lead appends summarization _before_ the guard trio; subagent appends it _after_) — benign because the middleware implements only `before_model` (compaction) with no `after_model`/`consume_stop_reason`, so it cannot disturb the Phase 2 guard-cap stop-reason channel. Compaction rewrites the messages channel via `RemoveMessage(id=REMOVE_ALL_MESSAGES)`, which shrinks `len(messages)` below the step-capture cursor mid-run; `capture_new_step_messages` (see Step capture below) resets the cursor to the new tail on contraction so steps appended after the compaction point are not silently dropped.
@@ -3083,6 +3109,131 @@ real Test→Design revisit, scoping), `test_migration_0024_stage_transitions.py`
 approve at every depth, one-action revise, high-stakes rationale, and deck
 binding), and `test_dbtl_deck_bridge.py::TestProgressiveTransitionGate` (the
 three choices, blocked-route handling, and the choice→intent mapping).
+
+**The Build workflow is five versioned steps, and the digest chain is what
+makes a partial Build reusable** (`deerflow/dbtl/build_workflow.py`,
+`persistence/dbtl/step_ops.py`, migration `0026`). Build executes today as one
+opaque `WorkUnit`: when the final structured answer fails to parse — or the deck
+fails to render — scientifically complete sandbox work is discarded and the
+whole thing runs again. `generic:build-workflow:v1` names the five steps that
+never vary (`load_design`, `plan_build`, `execute_phases`,
+`summarize_results`, `render_review_deck`); what varies is the phase plan step 2
+produces, which is why a phase attempt carries its own `plan_digest` — a phase
+whose plan changed is a *different* phase, not a retry of this one.
+
+Every step's identity is `input_digest(step, predecessors, material)`: the step
+itself, its selected predecessors' outputs **in order**, and server-owned
+material. `project_workflow` therefore cannot be a filter — it is a walk, since
+the expected digest of step N depends on the selected output of N-1. Three
+properties fall out of the arithmetic rather than out of care: an upstream
+change invalidates **all and only** its descendants, a successful predecessor is
+never rerun because a later step failed, and an invalidated success is
+*reported* rather than deleted, because the record of what was attempted is the
+point. `BuildErrorCode` is closed and has two deliberate absences —
+`needs_input` (it renders as **Waiting for you** and must not count against
+failure telemetry) and any code for "the result looked wrong", because no code
+here should stop a Build on a judgement that belongs to Test or a person.
+`is_presentational` is what lets the UI say "the build ran; the write-up broke".
+
+`dbtl_stage_step_runs` is deliberately **not** an overload of
+`dbtl_stage_worker_runs`: worker rows describe model-backed work units, while
+`load_design` and `render_review_deck` are deterministic server code that needs
+the same audit and retry semantics without the review record claiming a model
+read the Design. Two database constraints carry semantics calling code cannot:
+`uq_dbtl_stage_step_attempt` collapses a replayed dispatch, and the partial
+unique `uq_dbtl_stage_step_running` enforces one running attempt per step where
+two concurrent dispatches cannot both pass a check-then-write. `open_step_attempt`
+returns `(attempt, dispatched=False)` when a success already exists against the
+same input digest — the resume algorithm's replay-without-dispatch — and only
+the running index is translated into `DbtlStepConflict`; reporting every
+integrity failure that way would present a missing stage run as a busy step. A
+settled attempt is immutable, `needs_input` included: a human answer creates a
+new attempt rather than reopening the row holding the question.
+
+`GET /projects/{id}/dbtl/cycles/{cycle}/stages/{stage}/workflow` serves the
+projection in **every** mode, including with `dbtl.build_workflow_steps` off
+(default): the flag governs whether the workflow drives execution, and a read
+model that vanished with it could not tell an owner why their Build looks the
+way it does. It returns bounded metadata only — never prompts, secrets, or shell
+logs, which stay behind the run-events endpoint, and `execution`/`error_summary`
+are bounded and scalar-only **when written**, since bounding on the way out
+still stores the unbounded value for the next reader of the table to find.
+
+A step's reported status is **what actually happened**, not where the walk
+stopped: the newest attempt's own state (running, failed, `needs_input`,
+cancelled) outranks position, because "where did this Build stop and why" is the
+one question this read model exists to answer. `invalidated` is the exception —
+a success the digest chain rejected is a judgement about an attempt rather than
+a state it recorded. `waiting` is a UI projection for a queued step behind an
+unfinished one, and applies only when no attempt exists at all. Expected digests
+are computed from **current durable state** through the same
+`build_step_material` the writer uses; when the stage run cannot be resolved the
+view reports `staleness_checked: false` and asserts nothing about validity,
+rather than comparing against empty material and calling the result a check.
+
+**The material a step is opened against must be the material the read model
+recomputes**, or every step reads as stale the instant it succeeds. Two fields
+were self-invalidating and are gone from it: the cycle's `db_revision`, which
+bumps when this very Build records its own workers, and the stage run's stored
+`stage_spec_key`, which `record_worker_runs` writes partway through the same
+run. The approved dataset fingerprint and the *currently resolved* stage spec
+answer the question that actually matters — "did the material change?", "would
+today's contract produce this?" — and are stable within a run.
+`build_step_material_for` is public so the writer and the projection share one
+query; a fake repository computes both sides from the same stub and proves
+nothing, which is why `tests/test_dbtl_build_workflow_execution.py` drives the
+real schema through the real adapter.
+
+**`dbtl.build_workflow_steps` now drives Build.** With it on, four things change
+and each is behind the same switch:
+
+* **`load_design` refuses before it dispatches.** `live_stage/design_input.py`
+  resolves the approved Design attempt, reads it through the project mapping,
+  and verifies its content hash against the one the approval bound. A missing,
+  unapproved, unreadable, or moved document stops the Build with a specific code
+  — `DESIGN_MISSING_OR_STALE` (the governance record does not support a Build)
+  versus `DESIGN_UNREADABLE` (the record is fine and the file is not), because
+  different people fix them. The worker is then handed a `BuildInputBundle`
+  rather than asked to rediscover its own design, which is where a wrong guess
+  used to produce plausible work against the wrong plan.
+* **`plan_build` proposes a decomposition, and every failure still runs.**
+  `deerflow/dbtl/build_plan.py` parses a typed `BuildPhasePlan`: `single_phase`
+  is a real verdict (a short script is not four phases pretending to be a
+  project), shape problems degrade to one phase *with a recorded note* so a
+  reviewer can tell "it did not decompose" from "we could not read the planner",
+  and an unregistered capability collapses the plan and **names the capability**
+  rather than quietly becoming the generalist — that silent swap is the bug
+  capability selection exists to prevent. The plan is content-addressed, and its
+  digest excludes the rationale so rewording it cannot invalidate finished
+  phases.
+* **Each phase is its own attempt.** Phases run sequentially through
+  `live_stage/build_phases.py`, declaring a **capability** and receiving the best
+  registered agent with `via_generalist` recorded; a later phase receives the
+  preceding phases' outputs as read-only inputs. Phases sit on their own digest
+  chain *beneath* the container: phase N binds phase N−1, while
+  `execute_phases` still binds the plan. Sharing one cursor made the container
+  chain from the last phase, so a finished Build read as stale. A failed phase
+  stops the run rather than spending the remaining budget producing evidence
+  nobody planned, and `pause_after` stops at a committed, lease-free boundary.
+* **A read-only summarizer writes the reviewed document.** The `summarizer` role
+  is withheld execution and write tools and granted no writable path
+  (`_tools_for_unit`), so "read-only" is a property of the seat rather than an
+  instruction in a prompt. It may cite **only** figures the server published —
+  an invented one fails `summarize_results` alone — and selecting a few for the
+  deck never removes one from the record. `deerflow/dbtl/build_deck.py` then
+  renders a self-contained deck with figures embedded as `data:` URIs under
+  per-figure and per-deck byte caps; a format it cannot inline is named and
+  skipped, and a build with no figures says so rather than rendering an empty
+  gallery.
+
+Not implemented: the plan-confirmation card, typed `needs_input` collaboration
+(a paused summarizer or planner is recorded and reported, but there is no card
+to answer it), and per-step retry from the UI. Tests:
+`tests/test_dbtl_build_workflow.py`, `tests/test_dbtl_build_step_runs.py`,
+`tests/test_dbtl_build_input_bundle.py`, `tests/test_dbtl_build_plan.py`,
+`tests/test_dbtl_build_summary_and_deck.py`,
+`tests/test_dbtl_build_workflow_execution.py`, plus the workflow cases in
+`tests/test_dbtl_cycles_router.py`.
 
 **Progressive-gate Phases 2-3:** migration
 `0025_dbtl_stage_feedback_surfaces` adds `stage` and `surface_revision` to the

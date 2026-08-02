@@ -53,6 +53,10 @@ class DbtlFeature(BaseModel):
     #: locked because it was skipped from one locked because it is not reached.
     reconciliation_required: bool
     stage_meetings: dict[str, bool]
+    #: Build runs as the five-step workflow rather than one opaque worker. The
+    #: UI cannot infer this: a step list and a single stretch of work look the
+    #: same until one of them fails halfway.
+    build_workflow_steps: bool
     reason: str
 
 
@@ -100,6 +104,7 @@ async def list_features(config: AppConfig = Depends(get_config)) -> FeaturesResp
             # 500 this endpoint, and the safe answer is the strict rule.
             reconciliation_required=bool(getattr(config.dbtl, "reconciliation_required", True)),
             stage_meetings=stage_meeting_flags,
+            build_workflow_steps=bool(getattr(config.dbtl, "build_workflow_steps", False)),
             reason=dbtl_mode_reason(config.dbtl),
         ),
     )

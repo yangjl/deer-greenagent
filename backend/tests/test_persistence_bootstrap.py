@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0025_dbtl_stage_feedback_surfaces"
+HEAD = "0026_dbtl_stage_step_runs"
 BASELINE = "0001_baseline"
 
 

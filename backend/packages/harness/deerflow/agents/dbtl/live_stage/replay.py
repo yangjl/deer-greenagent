@@ -70,10 +70,7 @@ class ReplayService:
         return LiveStageResult(
             stage=stage,
             cycle_id=cycle_id,
-            note=(
-                f"This run already recorded {worker_count} bounded {stage} worker(s)"
-                + (f" and the review package at {artifact_uri}." if artifact_uri else "; no usable review package was produced.")
-            ),
+            note=(f"This run already recorded {worker_count} bounded {stage} worker(s)" + (f" and the review package at {artifact_uri}." if artifact_uri else "; no usable review package was produced.")),
             worker_count=worker_count,
             produced_usable_evidence=trustworthy_count > 0,
             artifact_uri=str(artifact_uri) if artifact_uri else None,

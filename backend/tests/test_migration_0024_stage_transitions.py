@@ -97,17 +97,8 @@ async def test_backfill_is_idempotent_and_skips_reconciliation(
         # never backfilled beside itself.
         await asyncio.to_thread(alembic_command.upgrade, config, "head")
         async with engine.connect() as connection:
-            repeated = (
-                await connection.execute(
-                    sa.text(
-                        f"SELECT seq, from_stage, chosen_route, to_stage, "
-                        f"decided_by, backfilled FROM {TABLE} ORDER BY seq"
-                    )
-                )
-            ).fetchall()
-        assert [tuple(row) for row in repeated] == [
-            (1, "design", "approve", "build", "reviewer-1", 1)
-        ]
+            repeated = (await connection.execute(sa.text(f"SELECT seq, from_stage, chosen_route, to_stage, decided_by, backfilled FROM {TABLE} ORDER BY seq"))).fetchall()
+        assert [tuple(row) for row in repeated] == [(1, "design", "approve", "build", "reviewer-1", 1)]
     finally:
         await engine.dispose()
 
@@ -128,7 +119,7 @@ async def test_a_drifted_schema_is_not_backfilled(tmp_path: Path) -> None:
         async with engine.connect() as connection:
             version = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
             count = await connection.scalar(sa.text(f"SELECT COUNT(*) FROM {TABLE}"))
-        assert version == "0025_dbtl_stage_feedback_surfaces"
+        assert version == "0026_dbtl_stage_step_runs"
         assert count == 0
     finally:
         await engine.dispose()

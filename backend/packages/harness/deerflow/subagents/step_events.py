@@ -216,10 +216,19 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
         description = chunk.get("description")
         if description is not None and not isinstance(description, str):
             return None
+        # The DBTL stage, when the server declared one. Retained because a
+        # reloaded page has no live stream to learn it from, and a governed
+        # stage worker that cannot be told apart from an ordinary delegated
+        # subtask has no surface to render on: its task id is a work-unit id,
+        # so there is no `task` tool call to hang it from either.
+        dbtl_stage = chunk.get("dbtl_stage")
+        content: dict[str, Any] = {"task_id": task_id, "description": description}
+        if isinstance(dbtl_stage, str) and dbtl_stage.strip():
+            content["dbtl_stage"] = dbtl_stage.strip()[:48]
         return {
             "event_type": SUBAGENT_START_EVENT.event_type,
             "category": SUBAGENT_START_EVENT.category,
-            "content": {"task_id": task_id, "description": description},
+            "content": content,
             "metadata": {"task_id": task_id},
         }
 

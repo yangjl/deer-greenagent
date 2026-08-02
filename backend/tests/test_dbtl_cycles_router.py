@@ -775,3 +775,56 @@ def test_one_failing_target_does_not_strand_retrieval_in_the_others(
     assert bind_scope(publication_scope("project-a")).user_id in store.deleted
     # And the one that failed is reported rather than silently passing.
     assert stale == ["project-broken"]
+
+
+def test_the_build_workflow_read_model_lists_its_steps_in_order(tmp_path: Path) -> None:
+    """The workflow is server-described, in every mode.
+
+    The read model is served whether or not `dbtl.build_workflow_steps` drives
+    execution: the flag governs what runs, and a projection that vanished with
+    it could not tell an owner why their Build looks the way it does.
+    """
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        project_id = _seed_project(client)
+        cycle = _create_cycle(client, project_id)
+
+        response = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/stages/build/workflow")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [step["key"] for step in body["steps"]] == [
+        "load_design",
+        "plan_build",
+        "execute_phases",
+        "summarize_results",
+        "render_review_deck",
+    ]
+    # Nothing has run, so work resumes at the first step.
+    assert body["next_step"] == "load_design"
+    assert body["is_complete"] is False
+
+
+def test_the_build_workflow_read_model_refuses_an_unknown_cycle(tmp_path: Path) -> None:
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        project_id = _seed_project(client)
+
+        response = client.get(f"/api/projects/{project_id}/dbtl/cycles/cycle-none/stages/build/workflow")
+
+    assert response.status_code == 404
+
+
+def test_the_build_workflow_read_model_carries_no_prompts_or_logs(tmp_path: Path) -> None:
+    # The endpoint returns bounded metadata; detailed task steps stay behind
+    # the authenticated run-events endpoint.
+    workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
+        project_id = _seed_project(client)
+        cycle = _create_cycle(client, project_id)
+
+        body = client.get(f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/stages/build/workflow").json()
+
+    serialized = str(body)
+    assert "prompt" not in serialized
+    assert "stdout" not in serialized

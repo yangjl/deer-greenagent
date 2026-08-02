@@ -9,6 +9,7 @@ human write bound to the evidence revision.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -21,11 +22,33 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, replace
 from inspect import isawaitable
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.dbtl.live_stage.build_phases import (
+    GENERALIST,
+    assign_phase,
+    phase_unit,
+    plan_notes,
+    planner_unit,
+)
+from deerflow.agents.dbtl.live_stage.build_recorder import (
+    DISABLED_RECORDER,
+    BuildStepRecorder,
+    RecorderRequest,
+    StepHandle,
+    make_build_step_recorder,
+)
+from deerflow.agents.dbtl.live_stage.build_review import (
+    execution_bundle,
+    parse_summary,
+    summarizer_unit,
+    write_build_deck,
+    write_build_review,
+)
+from deerflow.agents.dbtl.live_stage.design_input import approved_design_artifact, resolve_build_inputs
 from deerflow.agents.dbtl.live_stage.replay import ReplayService
 from deerflow.agents.dbtl.live_stage.test_review import (
     TestReviewService,
@@ -34,12 +57,28 @@ from deerflow.agents.dbtl.live_stage.test_review import (
     validated_test_assessment as _validated_test_assessment,
 )
 from deerflow.agents.dbtl.live_stage.types import LiveStageResult
+from deerflow.agents.dbtl.live_stage.workspace import (
+    STAGE_UNIT_WORKSPACE_PLACEHOLDER,
+    WORKSPACE_VIRTUAL_ROOT,
+    prepare_stage_workspace,
+    project_file_snapshot,
+    project_manifest,
+    safe_token,
+    sha256_file,
+    unit_stage_workspace,
+    workspace_lexical_path,
+    workspace_relative_path,
+)
 from deerflow.agents.middlewares.finalization_deadline_middleware import (
     FinalizationDeadlineMiddleware,
     model_call_budget,
 )
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.dbtl.agent_selector import AgentCandidate, Assignment, SelectionResult, build_candidates, select_agents
+from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError
+from deerflow.dbtl.build_plan import BuildPhasePlan, parse_build_plan, single_phase_plan
+from deerflow.dbtl.build_summary import BuildReviewPackage
+from deerflow.dbtl.build_workflow import BuildErrorCode, BuildStepKey, StepState
 from deerflow.dbtl.consensus import CONSENSUS_CONTRACT
 from deerflow.dbtl.council import (
     ROLE_BRIEFS,
@@ -128,6 +167,7 @@ from deerflow.runtime.activity.envelope import ActivityScope
 from deerflow.runtime.activity.lineage import supervisor_activity_id
 from deerflow.runtime.activity.spans import optional_activity_span
 from deerflow.runtime.activity.vocabulary import ActivityState, ActorKind
+from deerflow.subagents.step_streaming import SubagentStepStreamer, run_with_step_stream
 from deerflow.trace_context import (
     DEERFLOW_TRACE_METADATA_KEY,
     get_current_trace_id,
@@ -167,6 +207,12 @@ _LIGHT_DEBATE_INSTRUCTIONS = (
 
 _LIGHT_PILOT_FALLBACK_AGENT = "system:light-pilot-fallback"
 _LIGHT_PILOT_TOOL_NAMES = frozenset({"read_file"})
+
+#: Seats that may inspect and must not act. `role` carries this rather than a
+#: capability name because the rule is about what the seat is *for*, and a
+#: capability can be covered by an agent with any tool set.
+_READ_ONLY_ROLES = frozenset({"summarizer"})
+_READ_ONLY_TOOL_NAMES = frozenset({"read_file", "ls", "glob", "grep"})
 
 
 def _runtime_view(config: RunnableConfig) -> dict[str, Any]:
@@ -236,6 +282,20 @@ def _tools_for_stage_budget(tools: Sequence[Any], budget: WorkerBudget) -> list[
     if budget != depth_policy(CouncilDepth.LIGHT).budget:
         return list(tools)
     return [tool for tool in tools if str(getattr(tool, "name", "")) in _LIGHT_PILOT_TOOL_NAMES]
+
+
+def _tools_for_unit(tools: Sequence[Any], unit: WorkUnit) -> list[Any]:
+    """Withhold execution and write tools from a read-only seat.
+
+    The Build summarizer reads a bundle the server already verified and says
+    what it means. Giving it Bash would let a "summary" quietly become a second
+    execution whose outputs nobody hashed, and giving it write tools would let
+    it edit the evidence it is describing. Withholding the tools is what makes
+    "read-only" a property rather than an instruction in a prompt.
+    """
+    if unit.role not in _READ_ONLY_ROLES:
+        return list(tools)
+    return [tool for tool in tools if str(getattr(tool, "name", "")) in _READ_ONLY_TOOL_NAMES]
 
 
 def _token_limit_for_worker(unit: WorkUnit, budget: WorkerBudget) -> int | None:
@@ -1085,37 +1145,11 @@ def _approved_design_brief(cycle: dict[str, Any]) -> dict[str, Any] | None:
     and a stage naming only the path could silently work from a later revision
     of it.
 
-    Never raises: this runs on every Build/Test/Learn request and must not be
-    the reason a stage cannot run.
+    Delegates to the same lookup ``load_design`` uses: the brief a model is
+    shown and the document the step binds have to be the same file, or an
+    approval names one thing while the worker implements another.
     """
-    stages = cycle.get("stages")
-    if not isinstance(stages, Sequence) or isinstance(stages, str):
-        return None
-    attempt_id = ""
-    for item in stages:
-        if isinstance(item, dict) and item.get("stage") == "design" and str(item.get("status") or "") == "approved":
-            attempt_id = str(item.get("id") or "")
-            break
-    if not attempt_id:
-        return None
-
-    artifacts = cycle.get("artifacts")
-    if not isinstance(artifacts, Sequence) or isinstance(artifacts, str):
-        return None
-    newest: dict[str, Any] | None = None
-    for item in artifacts:
-        if not isinstance(item, dict) or str(item.get("stage_attempt_id") or "") != attempt_id:
-            continue
-        if newest is None or int(item.get("revision") or 0) > int(newest.get("revision") or 0):
-            newest = item
-    if newest is None:
-        return None
-    return {
-        "uri": str(newest.get("uri") or ""),
-        "content_hash": str(newest.get("content_hash") or ""),
-        "revision": int(newest.get("revision") or 0),
-        "artifact_type": str(newest.get("artifact_type") or ""),
-    }
+    return approved_design_artifact(cycle)
 
 
 def _stage_attempt(cycle: dict[str, Any], stage: str) -> dict[str, Any] | None:
@@ -1169,40 +1203,17 @@ def _stage_handoff_refusal(
     return None
 
 
-def _safe_token(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:20]
-
-
-#: What the sandbox calls the project root. The manifest lists the human-visible
-#: folder, but a worker can only *read* through the virtual path, so the two must
-#: be joined before the listing is shown to anyone who will act on it.
-WORKSPACE_VIRTUAL_ROOT = "/mnt/user-data"
-STAGE_WORK_ROOT = ".dbtl-stage-work"
-STAGE_UNIT_WORKSPACE_PLACEHOLDER = "__DBTL_UNIT_WORKSPACE__"
-
-
-def _prepare_stage_workspace(
-    project_root: str,
-    *,
-    attempt_id: str,
-    stage: str,
-) -> tuple[str, Path]:
-    """Create the worker's writable area outside repository-owned DBTL output.
-
-    Workers author implementation files and derived outputs here. The adapter
-    alone publishes validated review packages under ``outputs/dbtl``. Keeping
-    those two paths separate preserves the ordinary-agent write fence while
-    giving a real Build/Test worker somewhere it can execute its contract.
-    """
-    root = Path(project_root).expanduser().resolve()
-    host = project_outputs_dir(root) / STAGE_WORK_ROOT / attempt_id / stage
-    host.mkdir(parents=True, exist_ok=True)
-    return f"{WORKSPACE_VIRTUAL_ROOT}/outputs/{STAGE_WORK_ROOT}/{attempt_id}/{stage}", host
-
-
-def _unit_stage_workspace(stage_workspace: str, unit_id: str) -> str:
-    """Return the isolated writable directory for one concurrent worker."""
-    return f"{stage_workspace.rstrip('/')}/{_safe_token(unit_id)}"
+# The containment and listing rules live in one module so the Build workflow's
+# own steps resolve a worker-authored path exactly the way the adapter does. Two
+# copies is how a check ends up enforced on one path and not the other.
+_safe_token = safe_token
+_prepare_stage_workspace = prepare_stage_workspace
+_unit_stage_workspace = unit_stage_workspace
+_project_manifest = project_manifest
+_project_file_snapshot = project_file_snapshot
+_sha256_file = sha256_file
+_workspace_lexical_path = workspace_lexical_path
+_workspace_relative_path = workspace_relative_path
 
 
 def _bind_stage_unit_workspaces(
@@ -1216,123 +1227,11 @@ def _bind_stage_unit_workspaces(
             unit,
             prompt=unit.prompt.replace(
                 STAGE_UNIT_WORKSPACE_PLACEHOLDER,
-                _unit_stage_workspace(stage_workspace, unit.unit_id),
+                unit_stage_workspace(stage_workspace, unit.unit_id),
             ),
         )
         for unit in units
     )
-
-
-def _project_manifest(project_root: str, *, limit: int = 120) -> list[dict[str, Any]]:
-    """Return a bounded, metadata-only view of the human-visible project folder.
-
-    Paths are emitted as the **virtual paths a worker can actually open**
-    (``/mnt/user-data/...``), not as paths relative to the project root.
-    ``read_file`` rejects anything outside the virtual prefix, so a relative
-    listing was an invitation to a permission error: a whole design meeting
-    reported "every file read was denied", each participant returned no
-    result, and the chair could only record that it had nothing to synthesize
-    from. The listing is the only place most workers learn a path exists, so
-    it has to name the path in the form they can use.
-    """
-    root = Path(project_root).expanduser().resolve()
-    ignored = {".git", ".greenagent", STAGE_WORK_ROOT, "node_modules", "__pycache__"}
-    entries: list[dict[str, Any]] = []
-    try:
-        paths = sorted(root.rglob("*"), key=lambda item: item.as_posix())
-    except OSError:
-        return entries
-    for path in paths:
-        if len(entries) >= limit:
-            break
-        try:
-            relative = path.relative_to(root)
-            if any(part in ignored for part in relative.parts):
-                continue
-            stat = path.stat()
-        except (OSError, ValueError):
-            continue
-        entries.append(
-            {
-                "path": f"{WORKSPACE_VIRTUAL_ROOT}/{relative.as_posix()}",
-                "kind": "directory" if path.is_dir() else "file",
-                "size_bytes": 0 if path.is_dir() else stat.st_size,
-            }
-        )
-    return entries
-
-
-def _project_file_snapshot(project_root: str, *, limit: int = 5_000) -> dict[str, tuple[int, int]]:
-    """Remember which project files existed before Build touched the workspace.
-
-    Build owns input discovery when Reconciliation is optional.  The worker
-    reports the files it actually examined and the server binds their bytes,
-    but only files present in this pre-run snapshot qualify as inputs.  That
-    keeps a newly generated model or report from being mistaken for source
-    data and lets us refuse a source that changed during the run.
-    """
-    root = Path(project_root).expanduser().resolve()
-    ignored = {".git", ".greenagent", STAGE_WORK_ROOT, "node_modules", "__pycache__"}
-    snapshot: dict[str, tuple[int, int]] = {}
-    try:
-        paths = sorted(root.rglob("*"), key=lambda item: item.as_posix())
-    except OSError:
-        return snapshot
-    for path in paths:
-        if len(snapshot) >= limit:
-            break
-        try:
-            relative = path.relative_to(root)
-            if any(part in ignored for part in relative.parts) or not path.is_file():
-                continue
-            stat = path.stat()
-        except (OSError, ValueError):
-            continue
-        snapshot[relative.as_posix()] = (stat.st_size, stat.st_mtime_ns)
-    return snapshot
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _workspace_lexical_path(reference: str, *, project_root: str) -> tuple[str, Path] | None:
-    """Map one virtual reference without following worker-authored symlinks."""
-    value = reference.strip()
-    if not value:
-        return None
-    virtual_prefix = f"{WORKSPACE_VIRTUAL_ROOT}/"
-    if value.startswith(virtual_prefix):
-        relative = value[len(virtual_prefix) :]
-    elif value.startswith("/") or "://" in value:
-        return None
-    else:
-        relative = value
-    relative_path = PurePosixPath(relative)
-    if relative_path.is_absolute() or ".." in relative_path.parts:
-        return None
-    normalized = relative_path.as_posix()
-    root = Path(project_root).expanduser().resolve()
-    return normalized, root.joinpath(*relative_path.parts)
-
-
-def _workspace_relative_path(reference: str, *, project_root: str) -> tuple[str, Path] | None:
-    """Resolve one worker-authored workspace reference without escaping scope."""
-    lexical = _workspace_lexical_path(reference, project_root=project_root)
-    if lexical is None:
-        return None
-    _relative, candidate = lexical
-    root = Path(project_root).expanduser().resolve()
-    candidate = candidate.resolve()
-    try:
-        normalized = candidate.relative_to(root).as_posix()
-    except ValueError:
-        return None
-    return normalized, candidate
 
 
 def _build_input_artifacts(
@@ -2195,6 +2094,13 @@ def _publish_build_worker_artifacts(
                 result,
                 artifact_refs=tuple(remapped[reference] for reference in result.artifact_refs),
                 evidence_refs=evidence_refs,
+                # Declarations are remapped alongside the artifacts they
+                # describe. A figure still naming the worker's own scratch path
+                # would fail verification against the published outputs and be
+                # reported as a plot that does not exist — when it does, at the
+                # governed path the server just wrote.
+                figures=tuple(replace(figure, path=remapped.get(figure.path, figure.path)) for figure in result.figures),
+                key_outcomes=tuple(replace(outcome, figure=remapped.get(outcome.figure, outcome.figure)) for outcome in result.key_outcomes),
             )
         )
         published.extend(unit_outputs)
@@ -2207,6 +2113,46 @@ def _publish_build_worker_artifacts(
         ),
         published,
     )
+
+
+async def _settle_execution_step(
+    recorder: BuildStepRecorder,
+    handle: StepHandle,
+    *,
+    published: Sequence[Mapping[str, Any]],
+    outcome: StageExecutionOutcome,
+) -> None:
+    """Close the execution step against the artifacts actually published.
+
+    The digest binds the *published* bytes rather than the worker's own account
+    of them: the copies under the governed output tree are what a later step
+    reads, and hashing what the worker claimed would let a step be reported
+    valid against files that were never written.
+    """
+    if not handle.recorded:
+        return
+    if not outcome.trustworthy_results:
+        await recorder.fail(
+            handle,
+            BuildErrorCode.EXECUTION_CONTRACT_REJECTED,
+            "; ".join(outcome.rejected) or "No Build worker returned a usable structured result.",
+        )
+        return
+    if not published:
+        await recorder.fail(
+            handle,
+            BuildErrorCode.EXECUTION_OUTPUT_MISSING,
+            "The Build worker completed but published no output the server could verify.",
+        )
+        return
+    digest = hashlib.sha256(
+        json.dumps(
+            [{"uri": str(item.get("uri") or ""), "content_hash": str(item.get("content_hash") or "")} for item in published],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    await recorder.succeed(handle, digest, execution={"published_outputs": len(published)})
 
 
 class LiveStageAdapter:
@@ -2764,7 +2710,7 @@ class LiveStageAdapter:
                 include_upload_tool=False,
                 app_config=self._app_config,
             )
-            tools = _tools_for_stage_budget(tools, budget)
+            tools = _tools_for_unit(_tools_for_stage_budget(tools, budget), unit)
             trace_id = str(metadata.get("trace_id") or "") or None
             # A stage worker is graded on its final message, but the turn budget
             # is enforced by ``recursion_limit``, which aborts from inside a tool
@@ -2801,7 +2747,7 @@ class LiveStageAdapter:
                 # depth disables enforcement, even a stale participant edit
                 # must not quietly turn the kill switch back on.
                 token_budget_max_tokens=_token_limit_for_worker(unit, budget),
-                dbtl_writable_paths=((unit_workspace,) if unit_workspace else ()),
+                dbtl_writable_paths=(() if unit.role in _READ_ONLY_ROLES else ((unit_workspace,) if unit_workspace else ())),
                 thinking_enabled=unit.reasoning == REASONING_EXTENDED,
                 extra_middlewares=[deadline],
             )
@@ -2847,11 +2793,24 @@ class LiveStageAdapter:
                 trace_id=executor.trace_id,
                 status=SubagentStatus.PENDING,
             )
+            # The holder the executor writes into is the same list the streamer
+            # reads, so a stage worker's reads, tools, and Bash output appear
+            # while it works instead of arriving all at once at the end — or,
+            # when its structured result is rejected, never appearing at all.
+            # `council_seat` deliberately stays off these events: the seat was
+            # asserted once at `task_started` and repeating it per step would
+            # both bloat the stream and let ordinary Build work be mistaken for
+            # a meeting.
+            step_stream = SubagentStepStreamer(
+                task_id=unit.unit_id,
+                emit=emit,
+                base_event={"model_name": effective_model, "dbtl_stage": stage, **worker_lineage},
+            )
             try:
-                result = await asyncio.to_thread(
-                    executor.execute,
-                    unit.prompt,
-                    holder,
+                result = await run_with_step_stream(
+                    functools.partial(executor.execute, unit.prompt, holder),
+                    result=holder,
+                    streamer=step_stream,
                 )
             except asyncio.CancelledError:
                 holder.cancel_event.set()
@@ -2918,6 +2877,174 @@ class LiveStageAdapter:
             return dispatch_outcome
 
         return await asyncio.gather(*(run_one(unit, index) for index, unit in enumerate(units, start=1)))
+
+    async def _plan_build(
+        self,
+        *,
+        dispatcher: Callable[..., Any],
+        budget: WorkerBudget,
+        attempt_id: str,
+        inputs: BuildInputBundle,
+        cycle: Mapping[str, Any],
+        candidates: Sequence[AgentCandidate],
+    ) -> tuple[BuildPhasePlan, tuple[str, ...]]:
+        """Ask for a decomposition; accept a single phase; never fail here.
+
+        Every failure degrades to a one-phase plan with a recorded note, because
+        losing the decomposition costs structure while failing here costs the
+        whole Build. The note is what keeps that honest: a reviewer reading a
+        one-phase Build can tell "it did not decompose" from "we could not read
+        the planner".
+        """
+        objective = str(cycle.get("objective") or cycle.get("research_question") or "")
+        agent = next((item.name for item in candidates if item.name == GENERALIST), None) or (candidates[0].name if candidates else GENERALIST)
+        context = json.dumps(
+            {
+                "cycle": {key: cycle.get(key) for key in ("id", "title", "research_question", "objective", "success_criteria")},
+                "build_input_bundle": inputs.as_dict(),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        unit = planner_unit(attempt_id=attempt_id, agent_name=agent, context=context)
+        try:
+            dispatched = await dispatcher((unit,), budget=budget)
+        except Exception:  # noqa: BLE001 - see the docstring
+            logger.warning("The Build planner could not be dispatched.", exc_info=True)
+            return single_phase_plan(objective=objective, note="The build planner could not be run, so the build runs as one piece."), ("planner_unavailable",)
+        text = str(getattr(dispatched[0], "text", "") or "") if dispatched else ""
+        parsed = parse_build_plan(text, objective=objective)
+        if parsed.degraded:
+            logger.info("The Build plan degraded to a single phase: %s", "; ".join(parsed.reasons))
+        return parsed.plan, parsed.reasons
+
+    async def _execute_build_phases(
+        self,
+        *,
+        plan: BuildPhasePlan,
+        spec: StageSpec,
+        dispatcher: Callable[..., Any],
+        recorder: BuildStepRecorder,
+        attempt_id: str,
+        context: str,
+        candidates: Sequence[AgentCandidate],
+    ) -> StageExecutionOutcome:
+        """Run the plan's phases in order, each as its own attempt.
+
+        Sequential by design: one sandbox writer at a time is what makes the
+        workspace grant, the input snapshot, and the mutation checks tractable.
+        A phase that fails stops the run — later phases depend on outputs that
+        do not exist, and dispatching them anyway would spend budget producing
+        evidence nobody planned.
+        """
+        assignments = [assign_phase(phase, candidates) for phase in plan.phases]
+        selection = SelectionResult(
+            assignments=tuple(Assignment(capability=item.phase.capability, agent_name=item.agent_name, via_generalist=item.via_generalist) for item in assignments),
+            notes=plan_notes(plan, assignments),
+        )
+        units: list[WorkUnit] = []
+        results: list[StageWorkerResult] = []
+        rejected: list[str] = []
+        completed: list[Mapping[str, Any]] = []
+
+        for index, assignment in enumerate(assignments, start=1):
+            unit = phase_unit(
+                assignment,
+                index=index,
+                attempt_id=attempt_id,
+                spec=spec,
+                context=context,
+                completed=completed,
+                result_contract=RESULT_CONTRACT,
+            )
+            units.append(unit)
+            handle = await recorder.begin(
+                BuildStepKey.EXECUTE_PHASES,
+                phase_index=index,
+                phase_key=assignment.phase.phase_key,
+                plan_digest=plan.digest,
+                capability=assignment.phase.capability.value,
+                agent_name=assignment.agent_name,
+                via_generalist=assignment.via_generalist,
+            )
+            phase_plan = StageExecutionPlan(spec=spec, selection=selection, units=(unit,))
+            try:
+                dispatched = await dispatcher((unit,), budget=spec.budget)
+            except Exception as exc:  # noqa: BLE001 - a crashed phase is a recorded phase
+                logger.warning("Build phase %s could not be dispatched.", assignment.phase.phase_key, exc_info=True)
+                dispatched = []
+                rejected.append(f"{unit.unit_id}: {exc}")
+            phase_outcome = collect_results(phase_plan, dispatched)
+            result = phase_outcome.results[0] if phase_outcome.results else None
+            results.extend(phase_outcome.results)
+            rejected.extend(phase_outcome.rejected)
+            if result is None or not result.is_trustworthy:
+                await recorder.fail(
+                    handle,
+                    BuildErrorCode.EXECUTION_CONTRACT_REJECTED,
+                    "; ".join(phase_outcome.rejected) or f"Phase {assignment.phase.title!r} returned no usable result.",
+                )
+                break
+            await recorder.succeed(
+                handle,
+                hashlib.sha256(json.dumps(result.as_dict(), sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+                execution={"phase_key": assignment.phase.phase_key, "outputs": len(result.artifact_refs)},
+            )
+            completed.append({"phase_key": assignment.phase.phase_key, "title": assignment.phase.title, "outputs": list(result.artifact_refs), "summary": result.summary})
+            if assignment.phase.pause_after:
+                # A phase boundary is a committed, resumable state with no worker
+                # lease held, so honouring the plan's own request to stop here
+                # costs nothing and is the cheapest possible pause.
+                rejected.append(f"Paused after {assignment.phase.title!r} because the plan asked for a look before the next phase.")
+                break
+
+        return StageExecutionOutcome(
+            plan=StageExecutionPlan(spec=spec, selection=selection, units=tuple(units)),
+            results=tuple(results),
+            rejected=tuple(rejected),
+        )
+
+    async def _summarize_build(
+        self,
+        *,
+        dispatcher: Callable[..., Any],
+        budget: WorkerBudget,
+        attempt_id: str,
+        outcome: StageExecutionOutcome,
+        published: Sequence[Mapping[str, Any]],
+        inputs: BuildInputBundle | None,
+        cycle: Mapping[str, Any],
+    ) -> tuple[BuildReviewPackage | None, str]:
+        """Run the read-only summarizer over the verified execution bundle.
+
+        Returns ``(package, refusal)``. Never raises: the execution behind this
+        is already committed and hash-bound, so a provider outage or an
+        unparseable answer must cost the write-up rather than the Build.
+        """
+        bundle = execution_bundle(outcome.trustworthy_results, published=published)
+        agent = next((assignment.agent_name for assignment in outcome.plan.selection.assignments), "general-purpose")
+        unit = summarizer_unit(
+            attempt_id=attempt_id,
+            agent_name=agent,
+            bundle=bundle,
+            inputs=inputs,
+            cycle=cycle,
+        )
+        try:
+            dispatched = await dispatcher((unit,), budget=budget)
+        except Exception:  # noqa: BLE001 - see the docstring
+            logger.warning("The Build summarizer could not be dispatched.", exc_info=True)
+            return None, "The Build summarizer could not be run."
+        text = str(getattr(dispatched[0], "text", "") or "") if dispatched else ""
+        parsed = parse_summary(text, bundle=bundle)
+        if parsed.needs_input:
+            # Recorded as a refusal of this step rather than silently discarded.
+            # Phase 6 turns it into a typed collaboration request; until then the
+            # honest report is "the write-up is waiting on a person".
+            return None, parsed.clarification_question
+        if not parsed.ok:
+            return None, parsed.refusal
+        return parsed.package, ""
 
     async def _record_human_authored_design(
         self,
@@ -3650,6 +3777,59 @@ class LiveStageAdapter:
             )
         project_manifest = await asyncio.to_thread(_project_manifest, project_root)
         pre_run_files = await asyncio.to_thread(_project_file_snapshot, project_root) if stage == "build" else {}
+
+        # `load_design` runs before anything is dispatched, because the one
+        # thing a Build must not do is spend an hour implementing a document
+        # nobody approved.
+        #
+        # It is gated on the rollout switch along with the recording, and
+        # deliberately so: this is a *new refusal* on a path that previously had
+        # none, and a deployment whose approved package is not readable through
+        # the project root — an older cycle, a different sandbox mapping — would
+        # go from running Build to being unable to run it at all. The switch is
+        # what makes that discoverable in the manual profile first rather than
+        # in somebody's experiment. With the flag off, Build behaves exactly as
+        # it did.
+        build_workflow_enabled = stage == "build" and bool(getattr(getattr(self._app_config, "dbtl", None), "build_workflow_steps", False))
+        build_recorder = DISABLED_RECORDER
+        build_inputs: BuildInputBundle | None = None
+        if build_workflow_enabled:
+            build_recorder = await make_build_step_recorder(
+                self._repo,
+                RecorderRequest(
+                    enabled=True,
+                    project_id=project_id,
+                    cycle_id=cycle_id,
+                    stage_attempt_id=str((attempt or {}).get("id") or ""),
+                    parent_run_id=str(run_id),
+                ),
+            )
+            load_design = await build_recorder.begin(BuildStepKey.LOAD_DESIGN)
+            try:
+                build_inputs = await asyncio.to_thread(
+                    resolve_build_inputs,
+                    cycle,
+                    project_root=project_root,
+                    datasets=datasets,
+                    manifest=project_manifest,
+                    policy={
+                        "reconciliation_required": requires_reconciliation,
+                        "stage_spec_key": resolve_stage_spec(stage).spec_key,
+                    },
+                )
+            except BuildInputError as refusal:
+                await build_recorder.fail(load_design, refusal.code, refusal.summary)
+                return LiveStageResult(
+                    stage=stage,
+                    cycle_id=cycle_id,
+                    note=f"{refusal.summary} No Build worker was dispatched and nothing was recorded as Build evidence.",
+                )
+            await build_recorder.succeed(
+                load_design,
+                build_inputs.digest,
+                execution={"design_revision": build_inputs.design_revision, "design_truncated": build_inputs.design_truncated},
+            )
+
         stage_context_payload = {
             "request": request_text,
             "cycle": {
@@ -3757,6 +3937,10 @@ class LiveStageAdapter:
             # Its absence is meaningful: a later stage seeing no brief is
             # working before the gate, not merely without context.
             "approved_design_brief": _approved_design_brief(cycle),
+            # Build alone gets the resolved bundle: the design already read and
+            # hash-verified by the server, so the worker's first act is
+            # implementing it rather than searching for it.
+            "build_input_bundle": build_inputs.as_dict() if build_inputs is not None else None,
             # Verbatim, not summarized. The council is being asked to answer
             # this specific sentence, and a paraphrase is the failure mode
             # the refinement round exists to fix.
@@ -3845,6 +4029,41 @@ class LiveStageAdapter:
             return await base_dispatcher(
                 _bind_stage_unit_workspaces(units, stage_workspace),
                 budget=budget,
+            )
+
+        # `plan_build` is cheap and re-runnable by construction: it writes
+        # nothing, runs nothing, and dispatches nobody. Its answer is data — a
+        # content-addressed plan every phase attempt binds to — so a replan
+        # invalidates the phases beneath it rather than silently rebinding them.
+        build_plan: BuildPhasePlan | None = None
+        if build_workflow_enabled and build_inputs is not None:
+            plan_handle = await build_recorder.begin(BuildStepKey.PLAN_BUILD)
+            build_plan, plan_reasons = await self._plan_build(
+                dispatcher=dispatcher,
+                budget=spec.budget,
+                attempt_id=attempt_id,
+                inputs=build_inputs,
+                cycle=cycle,
+                candidates=self._candidates(),
+            )
+            if not build_plan.dispatchable:
+                # `needs_input`. The stage stays safely paused rather than
+                # guessing at what the Design left unresolved.
+                await build_recorder.settle(
+                    plan_handle,
+                    state=StepState.NEEDS_INPUT,
+                    summary=build_plan.clarification_question,
+                )
+                return LiveStageResult(
+                    stage=stage,
+                    cycle_id=cycle_id,
+                    note="The build planner needs one decision before any work starts.",
+                    clarification_question=build_plan.clarification_question,
+                )
+            await build_recorder.succeed(
+                plan_handle,
+                build_plan.digest,
+                execution={"feasibility": build_plan.feasibility.value, "phases": len(build_plan.phases), "degraded": bool(plan_reasons)},
             )
 
         proposal: CouncilProposal | None = None
@@ -3947,6 +4166,16 @@ class LiveStageAdapter:
             else:
                 logger.info("dbtl stage %s not dispatchable: %s", spec.spec_key, "; ".join(plan.selection.notes) or "no work units")
                 outcome = StageExecutionOutcome(plan=plan)
+        elif build_plan is not None:
+            outcome = await self._execute_build_phases(
+                plan=build_plan,
+                spec=spec,
+                dispatcher=dispatcher,
+                recorder=build_recorder,
+                attempt_id=attempt_id,
+                context=stage_context,
+                candidates=self._candidates(),
+            )
         else:
             outcome = await arun_stage(
                 spec,
@@ -4041,6 +4270,19 @@ class LiveStageAdapter:
                 attempt_id=attempt_id,
             )
             unit_result_pairs = list(zip(outcome.plan.units, outcome.results, strict=True))
+        if build_workflow_enabled:
+            # Settled from the *published* artifacts, which is what makes the
+            # step reusable: the bytes are already copied into the governed
+            # output tree and hashed, so a summary or deck that fails afterwards
+            # cannot take this work with it. The container is opened here rather
+            # than before dispatch because the per-phase attempts are what a
+            # resume reads; this row is the fold over them.
+            await _settle_execution_step(
+                build_recorder,
+                await build_recorder.begin(BuildStepKey.EXECUTE_PHASES),
+                published=published_build_artifacts,
+                outcome=outcome,
+            )
 
         results = [
             {
@@ -4083,7 +4325,15 @@ class LiveStageAdapter:
         design_ready = stage != "design" or (design_debate_complete and chair_result is not None and chair_result.is_trustworthy and chair_result.status is WorkerStatus.COMPLETED)
         test_assessment = _validated_test_assessment(outcome.trustworthy_results, build_test=build_test) if stage == "test" else None
         produced_usable_evidence = outcome.produced_usable_evidence and design_ready and (stage != "test" or test_assessment is not None)
-        if produced_usable_evidence:
+        summary_handle = await build_recorder.begin(BuildStepKey.SUMMARIZE_RESULTS) if build_workflow_enabled else StepHandle(step=BuildStepKey.SUMMARIZE_RESULTS)
+        # For Build under the workflow, the summarizer *replaces* the generic
+        # package writer. The generic renderer answers "which work units ran",
+        # and a Build reviewer needs "what did we get" — the numbers and the
+        # plots. Every other stage, and Build with the switch off, is unchanged.
+        build_summary_owns_evidence = build_workflow_enabled and produced_usable_evidence and bool(published_build_artifacts)
+        build_package = None
+        summary_refusal = ""
+        if produced_usable_evidence and not build_summary_owns_evidence:
             artifact_uri, artifact_hash, artifact_digest = await asyncio.to_thread(
                 _write_stage_package,
                 project_root=project_root,
@@ -4093,6 +4343,44 @@ class LiveStageAdapter:
                 council=council_plan,
             )
             artifact_type = spec.required_artifact_types[0]
+        elif build_summary_owns_evidence:
+            build_package, summary_refusal = await self._summarize_build(
+                dispatcher=dispatcher,
+                budget=spec.budget,
+                attempt_id=attempt_id,
+                outcome=outcome,
+                published=published_build_artifacts,
+                inputs=build_inputs,
+                cycle=cycle,
+            )
+            written = (
+                await asyncio.to_thread(
+                    write_build_review,
+                    project_root=project_root,
+                    cycle=cycle,
+                    package=build_package,
+                    execution=execution_bundle(outcome.trustworthy_results, published=published_build_artifacts),
+                )
+                if build_package is not None
+                else None
+            )
+            if written is not None:
+                artifact_uri, artifact_hash, artifact_digest = written.uri, written.content_hash, written.digest
+                artifact_type = spec.required_artifact_types[0]
+            else:
+                # The execution stays selected and reusable; only this step
+                # failed, and its code says so, so a person is not told to
+                # re-run an hour of sandbox work to recover a write-up.
+                produced_usable_evidence = False
+        if build_workflow_enabled:
+            if artifact_hash and build_summary_owns_evidence:
+                await build_recorder.succeed(summary_handle, artifact_hash, execution={"artifact_uri": artifact_uri or ""})
+            else:
+                await build_recorder.fail(
+                    summary_handle,
+                    BuildErrorCode.SUMMARY_CONTRACT_REJECTED if build_package is None else BuildErrorCode.REVIEW_PACKAGE_WRITE_FAILED,
+                    summary_refusal or "; ".join(_failure_reasons(results)) or "No Build worker returned a result that satisfied the stage contract.",
+                )
 
         if stage_activity is not None:
             await stage_activity.update(state=ActivityState.RECORDING, operation="stage.record")
@@ -4274,20 +4562,33 @@ class LiveStageAdapter:
                 review_issue_ids=(tuple(f"issue-{index + 1}" for index, _item in enumerate(chair_result.consensus.disagreements)) if chair_result is not None and chair_result.consensus is not None else ()),
                 transition_gate=transition_gate,
             )
-            deck = await asyncio.to_thread(
-                _write_council_deck,
-                project_root=project_root,
-                cycle=cycle,
-                results=results,
-                round_number=design_round,
-                stage=stage,
-                package_path=artifact_uri or "",
-                clarification_question=clarification_question or "",
-                decision_request=(chair_result.decision_request if chair_result is not None else None),
-                surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
-                surface_mode=(surface_plan.mode if surface_plan is not None else ""),
-                transition_gate=transition_gate,
-            )
+            if build_package is not None:
+                # Build gets its own deck: figures embedded, numbers first. The
+                # meeting deck renders positions and a synthesis, which is the
+                # wrong shape for a result nobody argued about.
+                rendered = await asyncio.to_thread(
+                    write_build_deck,
+                    project_root=project_root,
+                    cycle=cycle,
+                    package=build_package,
+                    package_path=artifact_uri or "",
+                )
+                deck = RenderedDeck(uri=rendered[0], content_hash=rendered[1]) if rendered is not None else None
+            else:
+                deck = await asyncio.to_thread(
+                    _write_council_deck,
+                    project_root=project_root,
+                    cycle=cycle,
+                    results=results,
+                    round_number=design_round,
+                    stage=stage,
+                    package_path=artifact_uri or "",
+                    clarification_question=clarification_question or "",
+                    decision_request=(chair_result.decision_request if chair_result is not None else None),
+                    surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
+                    surface_mode=(surface_plan.mode if surface_plan is not None else ""),
+                    transition_gate=transition_gate,
+                )
             if deck is not None:
                 deck_uri = deck.uri
                 if surface_plan is not None:
@@ -4297,6 +4598,19 @@ class LiveStageAdapter:
                         cycle_id=cycle_id,
                         project_id=project_id,
                     )
+        if build_workflow_enabled:
+            # Opened here rather than around the render call: with the summary
+            # missing there is nothing to render, and an attempt whose
+            # predecessor never succeeded would be refused by the chain anyway.
+            deck_handle = await build_recorder.begin(BuildStepKey.RENDER_REVIEW_DECK)
+            if deck is not None and deck.content_hash:
+                await build_recorder.succeed(deck_handle, deck.content_hash, execution={"deck_uri": deck.uri})
+            else:
+                await build_recorder.fail(
+                    deck_handle,
+                    BuildErrorCode.DECK_RENDER_FAILED,
+                    "The Build review deck could not be rendered from the recorded review package.",
+                )
 
         # A revision round has to say which route it took and why. The failure
         # this replaces was silence: four workers ran, three of them died, and

@@ -64,6 +64,9 @@ def test_features_reports_agents_api_enabled() -> None:
                 "test": False,
                 "learn": False,
             },
+            # The five-step Build workflow is recorded and readable either way;
+            # this flag says whether it drives execution.
+            "build_workflow_steps": False,
             "reason": "DBTL records are available for inspection, but all DBTL mutations and graph execution are disabled.",
         },
     }

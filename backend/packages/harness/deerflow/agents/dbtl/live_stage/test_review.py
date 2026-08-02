@@ -70,12 +70,8 @@ def validated_test_assessment(
         return {
             "metrics": [item.as_dict() for item in metrics],
             "checks": [item.as_dict() for item in checks],
-            "limitations": [str(item).strip() for item in limitations if str(item).strip()][:100]
-            if isinstance(limitations, Sequence) and not isinstance(limitations, (str, bytes))
-            else list(result.limitations),
-            "rationale": str(rationale).strip()[:10_000]
-            if isinstance(rationale, str) and rationale.strip()
-            else result.summary,
+            "limitations": [str(item).strip() for item in limitations if str(item).strip()][:100] if isinstance(limitations, Sequence) and not isinstance(limitations, (str, bytes)) else list(result.limitations),
+            "rationale": str(rationale).strip()[:10_000] if isinstance(rationale, str) and rationale.strip() else result.summary,
             "evaluation": evaluation.as_dict(),
         }
     return None
@@ -123,13 +119,7 @@ class TestReviewService:
             return None
         artifacts = list(cycle.get("artifacts") or [])
         evidence = max(
-            (
-                item
-                for item in artifacts
-                if isinstance(item, Mapping)
-                and item.get("stage_attempt_id") == test.get("id")
-                and item.get("artifact_type") in {"validity_report", "test_report"}
-            ),
+            (item for item in artifacts if isinstance(item, Mapping) and item.get("stage_attempt_id") == test.get("id") and item.get("artifact_type") in {"validity_report", "test_report"}),
             key=lambda item: int(item.get("revision") or 0),
             default=None,
         )

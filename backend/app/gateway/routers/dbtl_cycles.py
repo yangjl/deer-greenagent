@@ -2244,6 +2244,37 @@ async def list_stage_workers(project_id: str, cycle_id: str, stage: StageName, r
     return {"cycle_id": cycle_id, "stage": stage, "workers": await repo.list_worker_runs(cycle_id, project_id=project_id, stage=stage)}
 
 
+@router.get("/projects/{project_id}/dbtl/cycles/{cycle_id}/stages/{stage}/workflow")
+@require_permission("threads", "read")
+async def get_stage_workflow(
+    project_id: str,
+    cycle_id: str,
+    stage: StageName,
+    request: Request,
+    repo=Depends(get_dbtl_cycle_repo),
+):
+    """The Build workflow's ordered steps and what is still valid.
+
+    Served in every mode, including when `dbtl.build_workflow_steps` is off:
+    the flag governs whether the workflow *drives* execution, and a read model
+    that disappeared with it could not tell an owner why their Build looks the
+    way it does. It returns bounded metadata only — status, digests, ids, and
+    timestamps — never raw prompts, secrets, or shell logs. Detailed task steps
+    continue to come from the authenticated run-events endpoint by
+    `(thread_id, run_id, task_id)`.
+    """
+    await _require_project(project_id, request)
+    cycle = await repo.get_cycle(cycle_id, project_id=project_id)
+    if cycle is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cycle not found.")
+    attempts = [entry for entry in cycle.get("stages", []) if entry.get("stage") == stage]
+    if not attempts:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stage not found for this cycle.")
+    stage_attempt_id = str(max(attempts, key=lambda entry: int(entry.get("attempt_number") or 0))["id"])
+    view = await repo.build_workflow_view(project_id=project_id, stage_attempt_id=stage_attempt_id)
+    return {"cycle_id": cycle_id, "stage": stage, **view}
+
+
 @router.post("/projects/{project_id}/dbtl/cycles/{cycle_id}/datasets", status_code=status.HTTP_201_CREATED)
 @require_permission("threads", "write")
 async def declare_dataset(
