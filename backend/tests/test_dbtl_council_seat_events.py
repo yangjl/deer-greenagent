@@ -186,6 +186,45 @@ class TestTerminalSeatEvent:
         assert event["type"] == "task_completed"
         assert "council_seat" not in event
 
+    def test_build_file_role_kinds_complete_the_live_lane(self):
+        event = _terminal_seat_event(
+            _unit(role="position"),
+            DispatchOutcome(
+                unit_id="dbtl-build-1",
+                text=json.dumps(
+                    {
+                        "status": "completed",
+                        "summary": "Built it.",
+                        "artifact_refs": ["/mnt/user-data/outputs/.dbtl-stage-work/run/run_manifest.json"],
+                        "claims": ["The manifest was written."],
+                        "evidence_refs": [
+                            {
+                                "kind": "manifest",
+                                "reference": "/mnt/user-data/outputs/.dbtl-stage-work/run/run_manifest.json",
+                            }
+                        ],
+                        "limitations": [],
+                        "quality_checks": {
+                            "implementation_written": True,
+                            "complete_simulation_executed": False,
+                        },
+                        "recommended_next_actions": [],
+                        "provenance": {},
+                    }
+                ),
+            ),
+            model="gpt-5.6-sol",
+            meeting_stage=None,
+            stage="build",
+        )
+
+        assert event["type"] == "task_completed"
+        assert json.loads(event["result"])["evidence_refs"][0]["kind"] == "workspace_file"
+        assert json.loads(event["result"])["quality_checks"] == [
+            {"name": "implementation_written", "passed": True, "detail": ""},
+            {"name": "complete_simulation_executed", "passed": False, "detail": ""},
+        ]
+
     def test_a_named_structured_claim_completes_instead_of_showing_no_result(self):
         event = _terminal_seat_event(
             _unit(),

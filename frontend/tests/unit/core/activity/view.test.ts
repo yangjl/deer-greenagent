@@ -72,6 +72,16 @@ describe("the four resting states are distinguishable", () => {
     expect(view.mode).toBe("settled");
     expect(view.leaf?.state).toBe("completed");
   });
+
+  it("a human pause is settled history, not a spinning current actor", () => {
+    const paused = reduceActivityEvents([
+      event(),
+      event({ transition: "paused", state: "paused" }),
+    ]);
+    const view = activityView(paused);
+    expect(view.mode).toBe("settled");
+    expect(view.leaf?.state).toBe("paused");
+  });
 });
 
 describe("the leaf is the deepest actor genuinely working", () => {

@@ -117,7 +117,7 @@ class TestStageSpecRegistry:
         assert current_spec_keys() == (
             "generic:design:v2",
             "generic:reconciliation:v1",
-            "generic:build:v4",
+            "generic:build:v5",
             "generic:test:v3",
             "generic:learn:v1",
         )
@@ -332,6 +332,101 @@ class TestWorkerResultContract:
         result = parse_worker_result(_valid_payload(), capability="data_reconciliation", agent_name="steward")
         assert result.status is WorkerStatus.COMPLETED
         assert result.is_trustworthy
+
+    def test_build_normalizes_descriptive_file_kinds_to_workspace_files(self) -> None:
+        result = parse_worker_result(
+            _valid_payload(
+                evidence_refs=[
+                    {
+                        "kind": "manifest",
+                        "reference": "/mnt/user-data/outputs/.dbtl-stage-work/run/artifacts/run_manifest.json",
+                        "description": "Checksummed output manifest.",
+                    },
+                    {
+                        "kind": "execution_log",
+                        "reference": "/mnt/user-data/outputs/.dbtl-stage-work/run/logs/run.log",
+                        "description": "Execution log.",
+                    },
+                    {
+                        "kind": "implementation",
+                        "reference": "/mnt/user-data/outputs/.dbtl-stage-work/run/src/simulate.py",
+                        "description": "Simulator implementation.",
+                    },
+                ]
+            ),
+            capability="software_engineering",
+            agent_name="general-purpose",
+            stage="build",
+        )
+
+        assert [item.kind for item in result.evidence_refs] == ["workspace_file"] * 3
+
+    def test_descriptive_file_kinds_remain_strict_outside_build(self) -> None:
+        payload = _valid_payload(
+            evidence_refs=[
+                {
+                    "kind": "manifest",
+                    "reference": "/mnt/user-data/outputs/run_manifest.json",
+                }
+            ]
+        )
+
+        with pytest.raises(WorkerResultRejected, match="Unknown evidence kind 'manifest'"):
+            parse_worker_result(payload, capability="data_reconciliation", agent_name="steward")
+
+    def test_build_does_not_coerce_an_unknown_non_file_reference(self) -> None:
+        payload = _valid_payload(
+            evidence_refs=[
+                {
+                    "kind": "manifest",
+                    "reference": "a-logical-id-that-is-not-a-workspace-file",
+                }
+            ]
+        )
+
+        with pytest.raises(WorkerResultRejected, match="Unknown evidence kind 'manifest'"):
+            parse_worker_result(
+                payload,
+                capability="software_engineering",
+                agent_name="general-purpose",
+                stage="build",
+            )
+
+    def test_build_normalizes_a_named_boolean_quality_check_map(self) -> None:
+        result = parse_worker_result(
+            _valid_payload(
+                quality_checks={
+                    "implementation_written": True,
+                    "complete_simulation_executed": False,
+                }
+            ),
+            capability="software_engineering",
+            agent_name="general-purpose",
+            stage="build",
+        )
+
+        assert [(item.name, item.passed) for item in result.quality_checks] == [
+            ("implementation_written", True),
+            ("complete_simulation_executed", False),
+        ]
+
+    def test_a_quality_check_map_remains_strict_outside_build(self) -> None:
+        with pytest.raises(WorkerResultRejected, match="list of objects"):
+            parse_worker_result(
+                _valid_payload(quality_checks={"implementation_written": True}),
+                capability="data_reconciliation",
+                agent_name="steward",
+            )
+
+    @pytest.mark.parametrize("value", ["passed", 1, None])
+    def test_build_does_not_coerce_untyped_quality_check_verdicts(self, value: object) -> None:
+        with pytest.raises(WorkerResultRejected, match="must be a boolean or an object"):
+            parse_worker_result(
+                _valid_payload(quality_checks={"implementation_written": value}),
+                capability="software_engineering",
+                agent_name="general-purpose",
+                stage="build",
+            )
 
     def test_needs_input_requires_one_focused_clarification(self) -> None:
         result = parse_worker_result(
@@ -736,6 +831,29 @@ class TestStageFanOut:
         assert outcome.results[0].status is WorkerStatus.FAILED
         assert outcome.rejected and plan.units[0].unit_id in outcome.rejected[0]
 
+    def test_build_collection_accepts_descriptive_kinds_for_workspace_files(self) -> None:
+        spec = resolve_stage_spec("build")
+        plan = plan_stage(spec, build_candidates([GENERALIST_AGENT]), attempt_id="a1")
+        payload = _valid_payload(
+            evidence_refs=[
+                {
+                    "kind": "test_suite",
+                    "reference": "/mnt/user-data/outputs/.dbtl-stage-work/run/tests/test_build.py",
+                }
+            ],
+            quality_checks={"implementation_written": True},
+        )
+
+        outcome = collect_results(
+            plan,
+            [DispatchOutcome(unit_id=plan.units[0].unit_id, text=json.dumps(payload))],
+        )
+
+        assert outcome.results[0].status is WorkerStatus.COMPLETED
+        assert outcome.results[0].evidence_refs[0].kind == "workspace_file"
+        assert outcome.results[0].quality_checks[0].name == "implementation_written"
+        assert not outcome.rejected
+
     def test_every_unit_produces_exactly_one_result(self) -> None:
         candidates = self._candidates() + [
             AgentCandidate(name="qc", capabilities=frozenset({Capability.FIELD_TRIAL_QC})),
@@ -781,20 +899,24 @@ class TestBuildRecordsRerunInformationRatherThanProvingIt:
         assert "recorded_rerun_procedure" in BUILD_SPEC_V4.validity_gates
         assert "server_bound_input_lineage" in BUILD_SPEC_V4.validity_gates
 
-    def test_build_v4_is_current_and_keeps_v3_budget_and_inputs(self) -> None:
-        from deerflow.dbtl.stage_spec import BUILD_SPEC_V3, BUILD_SPEC_V4
+    def test_build_v5_is_current_with_a_smaller_execution_envelope(self) -> None:
+        from deerflow.dbtl.stage_spec import BUILD_SPEC_V4, BUILD_SPEC_V5
 
-        assert resolve_stage_spec("build").spec_key == "generic:build:v4"
-        assert BUILD_SPEC_V4.required_inputs == BUILD_SPEC_V3.required_inputs
-        assert BUILD_SPEC_V4.budget == BUILD_SPEC_V3.budget
+        assert resolve_stage_spec("build").spec_key == "generic:build:v5"
+        assert BUILD_SPEC_V5.required_inputs == BUILD_SPEC_V4.required_inputs
+        assert BUILD_SPEC_V5.validity_gates == BUILD_SPEC_V4.validity_gates
+        assert BUILD_SPEC_V5.budget.max_turns == 77
+        assert BUILD_SPEC_V5.budget.max_tokens == 120_000
+        assert BUILD_SPEC_V5.budget.timeout_seconds == 600
 
     def test_the_older_build_contracts_are_unchanged(self) -> None:
-        from deerflow.dbtl.stage_spec import BUILD_SPEC_V2, BUILD_SPEC_V3
+        from deerflow.dbtl.stage_spec import BUILD_SPEC_V2, BUILD_SPEC_V3, BUILD_SPEC_V4
 
         # An approved attempt records the spec it ran under, so relaxing the
         # rule must add a version rather than rewrite the ones people approved.
         assert "reproducible_execution" in BUILD_SPEC_V2.validity_gates
         assert "reproducible_execution" in BUILD_SPEC_V3.validity_gates
+        assert BUILD_SPEC_V4.budget == BUILD_SPEC_V3.budget
 
     def test_test_still_requires_the_reproducibility_check(self) -> None:
         from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK, ValidityCheckName
@@ -817,3 +939,19 @@ class TestBuildRecordsRerunInformationRatherThanProvingIt:
         assert "NOT required" in prompt
         assert "Do not mark your own result failed" in prompt
         assert "limitations" in prompt
+
+    def test_the_build_worker_is_told_to_classify_implementation_files_by_location(self) -> None:
+        from deerflow.dbtl.agent_selector import Assignment
+        from deerflow.dbtl.stage_runner import build_prompt
+
+        spec = resolve_stage_spec("build")
+        assignment = Assignment(
+            capability=Capability.SOFTWARE_ENGINEERING,
+            agent_name="general-purpose",
+            via_generalist=True,
+        )
+
+        prompt = build_prompt(spec, assignment, context="ctx")
+
+        assert "Evidence kind says where the evidence lives" in prompt
+        assert "Use workspace_file for manifests, logs, source code, tests" in prompt

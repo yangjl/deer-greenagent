@@ -48,7 +48,31 @@ Design–Build–Test–Learn (DBTL) governance.
   presenting Build work as another Design meeting. A paused Build is shown as
   **Waiting for you** in both the stage row and Build plan, and the Human Input
   Card remains the only control that can resume it. Worker cards render bounded
-  prose while typed result JSON stays available as audit data.
+  prose while typed result JSON stays available as audit data. If a worker is
+  interrupted, DeerFlow releases that run's durable step immediately so Retry
+  can continue without waiting for orphan cleanup. A rejected worker result
+  leaves later steps visibly waiting and offers Retry/Replan/Restart/Hold; it
+  does not fabricate a failed review deck for work that never produced a review
+  package. Build also tolerates descriptive implementation-file labels such as
+  `manifest`, `execution_log`, and `test_suite`: project-virtual paths carrying
+  those labels are normalized to `workspace_file` before the usual containment,
+  publication, and hashing checks. A Build worker's compact boolean
+  `quality_checks` map is likewise normalized to named check rows; Test still
+  owns the verdict. Other stages, non-file references, and non-boolean check
+  values remain strict, so compatibility cannot manufacture evidence. Local
+  Build shell execution preserves virtual paths only in positively recognized,
+  non-expanding data heredocs (for example JSON written by `cat`/`tee`). Python
+  and stored-code heredocs still undergo path translation and host-path audits;
+  extensionless executable targets fail closed. Ordinary `./` and ordered,
+  same-command virtual-path-variable operands work, while expanding heredocs,
+  traversal, reassignment, and host roots stay blocked. Worker JSON keeps
+  `/mnt/user-data/...` provenance portable instead of exposing a local host
+  path, and host-rooted filesystem MCP tools are kept out of virtual stage
+  workspaces even when their configured names change. Current Build phases use
+  a compact, hash-bound context, a server-created workspace layout, and a
+  six-call/120K-token envelope; completed phases are replayed while only a
+  failed phase is retried. Direct callbacks and subagent usage reports share
+  one model-call identity, so the run ledger cannot count the same tokens twice.
 - **Human-controlled automation** — AI may recommend or route DBTL work, but it
   cannot satisfy scientific gates or create authoritative results by itself.
   Starting a cycle launches a project-grounded Design council: independent

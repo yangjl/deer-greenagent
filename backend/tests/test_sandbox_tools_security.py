@@ -692,6 +692,172 @@ def test_validate_local_bash_command_paths_allows_cd_virtual_workspace_with_rela
     )
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        (
+            "set -euo pipefail; "
+            "D=/mnt/user-data/outputs/.dbtl-stage-work/run/build/attempt; "
+            'cp /mnt/user-data/outputs/dbtl/spec.json "$D/simulation-spec.json"; '
+            'chmod +x "$D/run.sh"; "$D/run.sh" > "$D/run.log" 2>&1; '
+            'sha256sum "$D"/data/* "$D"/simulate.py > "$D/SHA256SUMS"'
+        ),
+        ("set -euo pipefail; cd /mnt/user-data/outputs/.dbtl-stage-work/run/build/attempt; chmod +x run.sh; ./run.sh > run.log 2>&1; sha256sum data/* > SHA256SUMS"),
+        ('set -euo pipefail; D=/mnt/user-data/outputs/.dbtl-stage-work/run/build/attempt; chmod +x "$D"/*.sh; "$D"/*.sh > "$D"/run.log 2>&1; sha256sum "$D"/data/* > "$D"/SHA256SUMS'),
+    ],
+)
+def test_validate_local_bash_command_paths_allows_build_commands_with_safe_path_variables(command: str) -> None:
+    """Exact forms emitted by Build workers must not invent root paths."""
+    validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_allows_cd_to_a_quoted_safe_path_variable() -> None:
+    validate_local_bash_command_paths(
+        "set -euo pipefail; STAGE='/mnt/user-data/outputs/.dbtl-stage-work/run/build/attempt'; cd \"$STAGE\"; python src/simulate.py",
+        _THREAD_DATA,
+    )
+
+
+def test_validate_local_bash_command_paths_does_not_allow_cd_before_the_safe_assignment() -> None:
+    with pytest.raises(PermissionError, match="Unsafe working directory change"):
+        validate_local_bash_command_paths(
+            'cd "$STAGE"; STAGE=/mnt/user-data/outputs/.dbtl-stage-work/run/build/attempt; pwd',
+            _THREAD_DATA,
+        )
+
+
+def test_python_writer_heredoc_audits_nested_source_without_treating_division_as_paths() -> None:
+    command = r'''python - <<'PY'
+from pathlib import Path
+s = Path('/mnt/user-data/outputs/.dbtl-stage-work/run/build/attempt')
+(s / 'src/simulate.py').write_text(r"""from pathlib import Path
+import numpy as np
+ratio = np.var([1, 2]) / 2
+marker = f'chr{1000 // 1000 + 1:02d}_m{1000 % 1000 + 1:04d}'
+Path('/mnt/user-data/outputs/result.txt').write_text(marker)
+""")
+PY'''
+
+    validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_python_writer_heredoc_still_rejects_a_host_path_in_nested_source() -> None:
+    command = r'''python - <<'PY'
+from pathlib import Path
+s = Path('/mnt/user-data/outputs/.dbtl-stage-work/run/build/attempt')
+(s / 'src/simulate.py').write_text("""from pathlib import Path
+Path('/etc/passwd').read_text()
+""")
+PY'''
+
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_ignores_source_inside_a_quoted_build_heredoc() -> None:
+    command = r"""cat > /mnt/user-data/outputs/.dbtl-stage-work/run/build/attempt/run.sh <<'EOF'
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+python -c 'value = numerator / denominator'
+echo "$ROOT/run.log"
+EOF
+python - <<\PY
+from pathlib import Path
+ratio = 10 / 2
+Path("/mnt/user-data/outputs/.dbtl-stage-work/run/build/attempt/result.txt").write_text(str(ratio))
+PY
+chmod +x /mnt/user-data/outputs/.dbtl-stage-work/run/build/attempt/run.sh"""
+
+    validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_a_quoted_python_heredoc_cannot_hide_a_host_path() -> None:
+    command = """python - <<'PY'
+open('/etc/passwd').read()
+PY"""
+
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    "opening",
+    [
+        "cat > /mnt/user-data/workspace/script.py <<'PY'",
+        "cat <<'PY' > /mnt/user-data/workspace/script.py",
+    ],
+)
+def test_a_stored_code_heredoc_cannot_hide_a_host_path(opening: str) -> None:
+    command = f"""{opening}
+open('/etc/passwd').read()
+PY
+python /mnt/user-data/workspace/script.py"""
+
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_an_extensionless_stored_script_cannot_hide_a_host_path() -> None:
+    command = """cat > /mnt/user-data/workspace/run <<'EOF'
+cat /etc/passwd
+EOF
+bash /mnt/user-data/workspace/run"""
+
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_still_checks_an_expanding_heredoc_body() -> None:
+    command = """cat > /mnt/user-data/workspace/script.txt <<EOF
+$(cd / && cat etc/passwd)
+EOF"""
+
+    with pytest.raises(PermissionError, match="Unsafe working directory change in command substitution"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+def test_an_unquoted_heredoc_assignment_cannot_authorize_a_later_path_variable() -> None:
+    command = """cat > /mnt/user-data/workspace/note.txt <<EOF
+D=/mnt/user-data/workspace
+EOF
+cat "$D"/etc/passwd"""
+
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    "opening_text",
+    [
+        '''printf '%s\n' "<<'EOF'"''',
+        """echo ignored # <<'EOF' """,
+    ],
+)
+def test_quoted_or_commented_heredoc_text_cannot_hide_a_later_host_path(opening_text: str) -> None:
+    command = f"{opening_text}\ncat /etc/passwd\nEOF"
+
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'cat "$HOME"/.ssh/id_rsa',
+        'D=/mnt/user-data/workspace; D=/etc; cat "$D"/passwd',
+        'D=/mnt/user-data/workspace; unset D; cat "$D"/etc/passwd',
+        'D=/mnt/user-data/workspace; read D; cat "$D"/etc/passwd',
+        'D=/mnt/user-data/workspace; printf -v D /etc; cat "$D"/passwd',
+        'false && D=/mnt/user-data/workspace; cat "$D"/etc/passwd',
+        '(D=/mnt/user-data/workspace); cat "$D"/etc/passwd',
+        'D=/mnt/user-data/workspace env; cat "$D"/etc/passwd',
+        'cat "$D"/etc/passwd; D=/mnt/user-data/workspace',
+    ],
+)
+def test_validate_local_bash_command_paths_does_not_trust_dynamic_or_reassigned_path_variables(command: str) -> None:
+    with pytest.raises(PermissionError, match="Unsafe absolute paths"):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
 def test_validate_local_bash_command_paths_allows_http_url_dotdot_segments() -> None:
     validate_local_bash_command_paths(
         "curl https://example.com/packages/../archive.tar.gz -o /mnt/user-data/workspace/archive.tar.gz",

@@ -1173,7 +1173,7 @@ async def test_ready_for_build_runs_build_and_records_reproducibility_lineage(
     )
 
     assert result.stage == "build"
-    assert repo.recorded[0]["stage_spec_key"] == "generic:build:v4"
+    assert repo.recorded[0]["stage_spec_key"] == "generic:build:v5"
     assert len(repo.lineage) == 1
     assert repo.lineage[0]["expected_db_revision"] == 4
     assert repo.lineage[0]["output_artifacts"][0]["content_hash"]
@@ -1218,6 +1218,37 @@ async def test_build_worker_receives_an_attempt_scoped_writable_workspace(
     assert (tmp_path / "outputs" / ".dbtl-stage-work" / attempt_id / "build").is_dir()
     assert repo.lineage == []
     assert "none produced usable evidence" in result.note.lower()
+
+
+@pytest.mark.asyncio
+async def test_a_retry_uses_the_build_contract_recorded_on_its_stage_attempt(tmp_path: Path) -> None:
+    cycle = _cycle(state="ready_for_build")
+    build_attempt = next(item for item in cycle["stages"] if item["stage"] == "build")
+    build_attempt["stage_spec_key"] = "generic:build:v4"
+    repo = FakeRepo(cycle)
+    dispatcher = FakeDispatcher(text=_structured_result())
+    adapter = LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="builder",
+                capabilities=frozenset({Capability.SOFTWARE_ENGINEERING}),
+            ),
+        ),
+        dispatcher=dispatcher,
+    )
+
+    await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Retry the Build.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert dispatcher.calls[0][1].max_tokens == 400_000
+    assert repo.recorded[0]["stage_spec_key"] == "generic:build:v4"
 
 
 def test_concurrent_stage_units_receive_distinct_workspace_paths() -> None:
@@ -1312,6 +1343,105 @@ def test_build_discovers_and_hashes_the_workspace_input_reported_by_a_worker(tmp
     )
 
     assert artifacts == [f"workspace_file:uploads/tiny.csv:sha256:{hashlib.sha256(source.read_bytes()).hexdigest()}"]
+
+
+class TestAPhaseMayReadWhatTheRunAlreadyPublished:
+    """A later phase's declared input is often an earlier phase's output.
+
+    That is the documented shape of a multi-phase Build, and the pre-run
+    snapshot cannot contain those bytes by construction: the server published
+    them minutes into the same run. Judging a phase's inputs against the
+    snapshot alone therefore failed every plan whose phases build on each
+    other, with a message ("was not present when this Build run started")
+    describing the snapshot rather than anything wrong with the work.
+    """
+
+    @staticmethod
+    def _published(tmp_path: Path, relative: str, body: str) -> tuple[dict[str, str], str]:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        return {relative: digest}, digest
+
+    def test_an_earlier_phases_output_binds_by_the_hash_it_was_published_under(self, tmp_path: Path) -> None:
+        snapshot = _project_file_snapshot(str(tmp_path))
+        run_published, digest = self._published(tmp_path, "outputs/dbtl/c1/build/spec.yaml", "n: 1000\n")
+        worker = SimpleNamespace(
+            provenance={"inputs_examined": ["/mnt/user-data/outputs/dbtl/c1/build/spec.yaml"]},
+            evidence_refs=(),
+        )
+
+        artifacts = _build_input_artifacts(
+            datasets=(),
+            results=(worker,),
+            project_root=str(tmp_path),
+            pre_run_files=snapshot,
+            strict_workspace_inputs=True,
+            run_published=run_published,
+        )
+
+        assert artifacts == [f"workspace_file:outputs/dbtl/c1/build/spec.yaml:sha256:{digest}"]
+
+    def test_a_published_output_that_no_longer_matches_its_hash_is_refused(self, tmp_path: Path) -> None:
+        snapshot = _project_file_snapshot(str(tmp_path))
+        run_published, _digest = self._published(tmp_path, "outputs/dbtl/c1/build/spec.yaml", "n: 1000\n")
+        run_published["outputs/dbtl/c1/build/spec.yaml"] = "0" * 64
+        worker = SimpleNamespace(
+            provenance={"inputs_examined": ["/mnt/user-data/outputs/dbtl/c1/build/spec.yaml"]},
+            evidence_refs=(),
+        )
+
+        with pytest.raises(ValueError, match="changed"):
+            _build_input_artifacts(
+                datasets=(),
+                results=(worker,),
+                project_root=str(tmp_path),
+                pre_run_files=snapshot,
+                strict_workspace_inputs=True,
+                run_published=run_published,
+            )
+
+    def test_a_path_this_run_never_published_is_still_refused(self, tmp_path: Path) -> None:
+        snapshot = _project_file_snapshot(str(tmp_path))
+        (tmp_path / "outputs").mkdir()
+        (tmp_path / "outputs" / "invented.yaml").write_text("x: 1\n", encoding="utf-8")
+        worker = SimpleNamespace(
+            provenance={"inputs_examined": ["/mnt/user-data/outputs/invented.yaml"]},
+            evidence_refs=(),
+        )
+
+        with pytest.raises(ValueError, match="was not present when this Build run started"):
+            _build_input_artifacts(
+                datasets=(),
+                results=(worker,),
+                project_root=str(tmp_path),
+                pre_run_files=snapshot,
+                strict_workspace_inputs=True,
+                run_published={},
+            )
+
+    def test_build_lineage_records_the_cross_phase_input_rather_than_dropping_it(self, tmp_path: Path) -> None:
+        # Lineage binding is non-strict, so before this the same reference was
+        # silently skipped. A plan whose only inputs are earlier phases' outputs
+        # then produced empty lineage, which `record_build_lineage` refuses --
+        # so the whole Build failed at the very end, after every phase had run.
+        snapshot = _project_file_snapshot(str(tmp_path))
+        run_published, digest = self._published(tmp_path, "outputs/dbtl/c1/build/spec.yaml", "n: 1000\n")
+        worker = SimpleNamespace(
+            provenance={"inputs_examined": ["/mnt/user-data/outputs/dbtl/c1/build/spec.yaml"]},
+            evidence_refs=(),
+        )
+
+        artifacts = _build_input_artifacts(
+            datasets=(),
+            results=(worker,),
+            project_root=str(tmp_path),
+            pre_run_files=snapshot,
+            run_published=run_published,
+        )
+
+        assert artifacts == [f"workspace_file:outputs/dbtl/c1/build/spec.yaml:sha256:{digest}"]
 
 
 @pytest.mark.asyncio

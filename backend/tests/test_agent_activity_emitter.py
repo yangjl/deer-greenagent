@@ -77,6 +77,12 @@ class TestASpanAlwaysCloses:
             await handle.settle(ActivityState.INTERRUPTED)
         assert writer.states() == [("started", "thinking"), ("interrupted", "interrupted")]
 
+    async def test_a_human_pause_is_a_terminal_outcome(self):
+        writer = RecordingWriter()
+        async with _span(writer) as handle:
+            await handle.settle(ActivityState.PAUSED, operation="stage.wait_human")
+        assert writer.states() == [("started", "thinking"), ("paused", "paused")]
+
     async def test_a_settled_span_ignores_later_updates(self):
         writer = RecordingWriter()
         async with _span(writer) as handle:

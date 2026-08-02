@@ -1021,6 +1021,7 @@ class TestExternalUsageRecords:
         assert j._total_tokens == 150
         assert j._total_input_tokens == 100
         assert j._total_output_tokens == 50
+        assert j._llm_call_count == 1
 
     def test_records_added_to_middleware_bucket(self, journal_setup):
         j, _ = journal_setup
@@ -1133,6 +1134,42 @@ class TestExternalUsageRecords:
         assert j._lead_agent_tokens == 15
         assert j._subagent_tokens == 150
         assert j._total_tokens == 165
+        assert j._llm_call_count == 2
+
+    @pytest.mark.parametrize("external_first", [False, True])
+    def test_same_model_run_is_counted_once_across_inline_and_external_paths(self, journal_setup, external_first: bool):
+        """DBTL collectors and inherited callbacks may report the same call."""
+        j, _ = journal_setup
+        run_id = uuid4()
+        usage = {"input_tokens": 100, "output_tokens": 25, "total_tokens": 125}
+        record = {
+            "source_run_id": str(run_id),
+            "caller": "subagent:general-purpose",
+            **usage,
+        }
+
+        if external_first:
+            j.record_external_llm_usage_records([record])
+            j.on_llm_end(
+                _make_llm_response("Answer", usage=usage),
+                run_id=run_id,
+                parent_run_id=None,
+                tags=["subagent:general-purpose"],
+            )
+        else:
+            j.on_llm_end(
+                _make_llm_response("Answer", usage=usage),
+                run_id=run_id,
+                parent_run_id=None,
+                tags=["subagent:general-purpose"],
+            )
+            j.record_external_llm_usage_records([record])
+
+        assert j._total_input_tokens == 100
+        assert j._total_output_tokens == 25
+        assert j._total_tokens == 125
+        assert j._subagent_tokens == 125
+        assert j._llm_call_count == 1
 
     def test_track_token_usage_false_skips_external_records(self):
         """When token tracking is disabled, external records must not accumulate."""

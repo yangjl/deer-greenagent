@@ -270,6 +270,7 @@ def _claim_tuple(
     *,
     artifact_aliases: Mapping[str, str] | None = None,
     evidence_ids: Mapping[str, EvidenceRef] | None = None,
+    stage: str | None = None,
 ) -> tuple[tuple[str, ...], tuple[EvidenceRef, ...]]:
     """Normalize strings or explicitly named structured claims.
 
@@ -306,7 +307,7 @@ def _claim_tuple(
             # as external evidence by implication.
             claim_evidence = entry.get("evidence_refs")
             if isinstance(claim_evidence, Mapping):
-                nested_evidence.extend(_evidence_tuple([claim_evidence], artifact_aliases=artifact_aliases))
+                nested_evidence.extend(_evidence_tuple([claim_evidence], artifact_aliases=artifact_aliases, stage=stage))
             elif isinstance(claim_evidence, Sequence) and not isinstance(claim_evidence, str):
                 inline: list[Mapping[str, Any]] = []
                 for evidence_item in claim_evidence:
@@ -320,10 +321,10 @@ def _claim_tuple(
                         inline.append(evidence_item)
                     else:
                         raise WorkerResultRejected("Claim evidence references must be evidence ids or typed evidence objects.")
-                nested_evidence.extend(_evidence_tuple(inline, artifact_aliases=artifact_aliases))
+                nested_evidence.extend(_evidence_tuple(inline, artifact_aliases=artifact_aliases, stage=stage))
             singular_evidence = entry.get("evidence_ref")
             if isinstance(singular_evidence, Mapping):
-                nested_evidence.extend(_evidence_tuple([singular_evidence], artifact_aliases=artifact_aliases))
+                nested_evidence.extend(_evidence_tuple([singular_evidence], artifact_aliases=artifact_aliases, stage=stage))
         else:
             raise WorkerResultRejected("'claims' must contain only strings or named claim objects.")
         if text:
@@ -335,6 +336,7 @@ def _evidence_items(
     raw: object,
     *,
     artifact_aliases: Mapping[str, str] | None = None,
+    stage: str | None = None,
 ) -> tuple[tuple[EvidenceRef, ...], dict[str, EvidenceRef]]:
     if raw is None:
         return (), {}
@@ -388,6 +390,17 @@ def _evidence_items(
             if kind and kind != inferred_kind:
                 raise WorkerResultRejected(f"Evidence kind {kind!r} conflicts with its {inferred_kind!r} locator.")
             kind = inferred_kind
+        # Build workers create several concrete implementation file types and
+        # models naturally label them by role (``manifest``, ``execution_log``,
+        # ``test_suite``, ``implementation``) even though the shared contract
+        # asks where evidence lives.  Losing a completed multi-minute Build over
+        # that harmless vocabulary mismatch is worse than the mismatch itself.
+        # Normalize only project-virtual file references, and only for Build;
+        # unknown logical ids remain rejected and every other stage stays
+        # strict.  Publication still validates containment, regular-file type,
+        # bytes, and hashes before any result becomes governed evidence.
+        if stage == "build" and kind not in EVIDENCE_KINDS and reference.startswith("/mnt/user-data/"):
+            kind = "workspace_file"
         parsed = EvidenceRef(
             kind=kind,
             reference=reference[:MAX_ITEM_CHARS],
@@ -403,8 +416,9 @@ def _evidence_tuple(
     raw: object,
     *,
     artifact_aliases: Mapping[str, str] | None = None,
+    stage: str | None = None,
 ) -> tuple[EvidenceRef, ...]:
-    refs, _ids = _evidence_items(raw, artifact_aliases=artifact_aliases)
+    refs, _ids = _evidence_items(raw, artifact_aliases=artifact_aliases, stage=stage)
     return refs
 
 
@@ -412,9 +426,27 @@ def _dedupe_evidence(refs: Sequence[EvidenceRef]) -> tuple[EvidenceRef, ...]:
     return tuple(dict.fromkeys(refs))
 
 
-def _quality_tuple(raw: object) -> tuple[QualityCheck, ...]:
+def _quality_tuple(raw: object, *, stage: str | None = None) -> tuple[QualityCheck, ...]:
     if raw is None:
         return ()
+    # Build workers frequently return the natural compact shape
+    # ``{"tests_written": true, "simulation_executed": false}``.  That says
+    # exactly as much as the requested list of named verdict objects, and Build
+    # records those verdicts for Test rather than using them as a gate.  Keep
+    # the stricter shared contract everywhere else, and do not coerce strings
+    # or numbers into booleans.
+    if stage == "build" and isinstance(raw, Mapping):
+        normalized: list[dict[str, Any]] = []
+        for raw_name, value in list(raw.items())[:MAX_ITEMS]:
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                raise WorkerResultRejected("A Build quality-check map must use non-empty string names.")
+            if isinstance(value, bool):
+                normalized.append({"name": raw_name, "passed": value})
+            elif isinstance(value, Mapping):
+                normalized.append({**value, "name": raw_name})
+            else:
+                raise WorkerResultRejected(f"Build quality check {raw_name!r} must be a boolean or an object.")
+        raw = normalized
     if isinstance(raw, str) or not isinstance(raw, Sequence):
         raise WorkerResultRejected("'quality_checks' must be a list of objects.")
     checks: list[QualityCheck] = []
@@ -482,6 +514,7 @@ def parse_worker_result(
     capability: str,
     agent_name: str,
     stop_reason: str | None = None,
+    stage: str | None = None,
 ) -> StageWorkerResult:
     """Validate one worker's structured output.
 
@@ -513,11 +546,16 @@ def parse_worker_result(
         raise WorkerResultRejected("'clarification_question' must be a string.")
 
     artifact_refs, artifact_aliases = _artifact_tuple(payload.get("artifact_refs"))
-    top_level_evidence, evidence_ids = _evidence_items(payload.get("evidence_refs"), artifact_aliases=artifact_aliases)
+    top_level_evidence, evidence_ids = _evidence_items(
+        payload.get("evidence_refs"),
+        artifact_aliases=artifact_aliases,
+        stage=stage,
+    )
     claims, claim_evidence = _claim_tuple(
         payload.get("claims"),
         artifact_aliases=artifact_aliases,
         evidence_ids=evidence_ids,
+        stage=stage,
     )
     evidence_refs = _dedupe_evidence((*top_level_evidence, *claim_evidence))
 
@@ -557,7 +595,7 @@ def parse_worker_result(
         claims=claims,
         limitations=_string_tuple(payload.get("limitations"), "limitations"),
         provenance=dict(provenance),
-        quality_checks=_quality_tuple(payload.get("quality_checks")),
+        quality_checks=_quality_tuple(payload.get("quality_checks"), stage=stage),
         recommended_next_actions=_string_tuple(payload.get("recommended_next_actions"), "recommended_next_actions"),
         clarification_question=clarification_question,
         stop_reason=stop_reason,

@@ -1,10 +1,13 @@
+import ast
 import asyncio
+import io
 import json
 import logging
 import os
 import posixpath
 import re
 import shlex
+import tokenize
 from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
@@ -15,7 +18,7 @@ from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-from deerflow.runtime.secret_context import read_active_secrets, read_pre_isolation_command
+from deerflow.runtime.secret_context import read_active_secrets, read_pre_isolation_command, read_pre_isolation_literals
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.exceptions import (
     SandboxError,
@@ -23,6 +26,13 @@ from deerflow.sandbox.exceptions import (
     SandboxRuntimeError,
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
+from deerflow.sandbox.heredoc import (
+    HEREDOC_START,
+    heredoc_code_kind,
+    heredoc_command_name,
+    heredoc_delimiter,
+    heredoc_is_literal_data,
+)
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.sandbox import Sandbox
@@ -1037,6 +1047,260 @@ def _is_allowed_local_bash_absolute_path(path: str, allowed_paths: list[str], *,
     return False
 
 
+def _allowed_local_bash_path_variables(command: str, allowed_paths: list[str]) -> frozenset[str]:
+    """Return allowed-path variables assigned before every path-like use.
+
+    The raw absolute-path scanner sees the ``/file`` part of ``"$D/file"`` as
+    a root path even when this command just assigned ``D=/mnt/user-data/...``.
+    Only a single literal, non-system, allowed-path assignment earns this
+    exemption. Unassigned, empty, dynamic, repeated, or explicitly unset/read
+    variables remain unsafe, so ``$HOME/.ssh`` and reassignment tricks keep
+    hitting the guard.
+    """
+    tokens = _split_shell_tokens(command)
+    assignments: dict[str, list[str]] = {}
+    segment: list[str] = []
+    preceding_separator: str | None = None
+
+    def record_unconditional_assignment_segment() -> None:
+        # A standalone top-level ``D=/allowed/path;`` assignment persists in
+        # this shell. An assignment beside a command is only that command's
+        # environment, and assignments after &&/||/| or control keywords may
+        # never run, so none of those can authorize a later suffix.
+        if preceding_separator not in {None, ";"} or not segment or not all(_is_shell_assignment(item) for item in segment):
+            return
+        for item in segment:
+            name, _separator, value = item.partition("=")
+            assignments.setdefault(name, []).append(value)
+
+    for token in tokens:
+        if _is_shell_command_separator(token):
+            record_unconditional_assignment_segment()
+            segment = []
+            preceding_separator = token
+        else:
+            segment.append(token)
+    record_unconditional_assignment_segment()
+
+    safe: set[str] = set()
+    for name, values in assignments.items():
+        if len(values) != 1:
+            continue
+        value = values[0]
+        if not value.startswith("/"):
+            continue
+        if _is_allowed_local_bash_absolute_path(value, allowed_paths, allow_system_paths=False):
+            escaped_value = re.escape(value)
+            assignment_pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(name)}=(?:'{escaped_value}'|\"{escaped_value}\"|{escaped_value})(?=$|[\s;&|()])")
+            assignment_matches = list(assignment_pattern.finditer(command))
+            if len(assignment_matches) != 1:
+                continue
+            assignment_end = assignment_matches[0].end()
+            # The binding must exist before *every* use, including ``cd
+            # "$D"`` where there is no slash suffix for the raw path scanner
+            # to notice. This also keeps a later assignment from authorizing an
+            # earlier working-directory change.
+            use_pattern = re.compile(rf"(?:\$\{{{re.escape(name)}\}}|\${re.escape(name)})(?![A-Za-z0-9_])")
+            if all(match.start() >= assignment_end for match in use_pattern.finditer(command)):
+                safe.add(name)
+
+    # These builtins can replace a value after the literal assignment without
+    # introducing a second ``NAME=...`` token. Conservatively revoke the
+    # exemption when they name the variable anywhere in this command.
+    for index, token in enumerate(tokens):
+        command_name = token.rsplit("/", 1)[-1]
+        if command_name in {"read", "unset"}:
+            for candidate in tokens[index + 1 :]:
+                if _is_shell_command_separator(candidate):
+                    break
+                safe.discard(candidate.lstrip("-").strip())
+        elif command_name == "printf" and index + 2 < len(tokens) and tokens[index + 1] == "-v":
+            safe.discard(tokens[index + 2])
+    return frozenset(safe)
+
+
+def _is_allowed_variable_path_suffix(command: str, position: int, allowed_variables: frozenset[str]) -> bool:
+    """Whether a raw ``/suffix`` match follows a known-safe path variable."""
+    if not allowed_variables:
+        return False
+    prefix = command[max(0, position - 160) : position]
+    match = re.search(r"(?:\$([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)\})[\"']?$", prefix)
+    return bool(match and (match.group(1) or match.group(2)) in allowed_variables)
+
+
+def _is_relative_dot_path(command: str, position: int) -> bool:
+    """Whether a raw ``/name`` match is the slash in a relative ``./name``."""
+    if position < 1 or command[position - 1] != ".":
+        return False
+    if position == 1:
+        return True
+    return command[position - 2].isspace() or command[position - 2] in ";&|<>()\"'`"
+
+
+def _is_unquoted_shell_operator(line: str, position: int) -> bool:
+    """Whether ``position`` is shell syntax rather than quoted/comment text."""
+    quote = ""
+    escaped = False
+    for index, char in enumerate(line[:position]):
+        if escaped:
+            escaped = False
+            continue
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            continue
+        if quote == '"':
+            if char == "\\":
+                escaped = True
+            elif char == '"':
+                quote = ""
+            continue
+        if char == "\\":
+            escaped = True
+        elif char in {"'", '"'}:
+            quote = char
+        elif char == "#" and (index == 0 or line[index - 1].isspace() or line[index - 1] in ";&|()"):
+            return False
+    return not quote and not escaped
+
+
+_PYTHON_SOURCE_NODES = (
+    ast.AnnAssign,
+    ast.Assign,
+    ast.AsyncFunctionDef,
+    ast.ClassDef,
+    ast.For,
+    ast.FunctionDef,
+    ast.If,
+    ast.Import,
+    ast.ImportFrom,
+    ast.Try,
+    ast.While,
+    ast.With,
+)
+
+
+def _looks_like_embedded_python_source(value: str) -> bool:
+    """Whether a Python string is itself a program rather than ordinary data."""
+    try:
+        tree = ast.parse(value)
+    except (SyntaxError, ValueError):
+        return False
+    return any(isinstance(node, _PYTHON_SOURCE_NODES) for node in ast.walk(tree))
+
+
+def _python_string_literals(source: str, *, depth: int = 0) -> str:
+    """Extract auditable Python strings while omitting arithmetic operators.
+
+    Build workers commonly use a short Python heredoc to write a second Python
+    file. The outer program sees that file as one triple-quoted string; scanning
+    the raw value mistakes divisions and f-string expressions in the embedded
+    source for root paths. Re-tokenize program-shaped strings so real literals
+    such as ``/etc/passwd`` remain visible without treating ``x / 2`` as a
+    filesystem access.
+    """
+    literals: list[str] = []
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+        for token in tokens:
+            if token.type != tokenize.STRING:
+                continue
+            try:
+                value = ast.literal_eval(token.string)
+            except (SyntaxError, ValueError):
+                value = token.string
+            if isinstance(value, str):
+                if depth < 4 and _looks_like_embedded_python_source(value):
+                    literals.append(_python_string_literals(value, depth=depth + 1))
+                else:
+                    literals.append(value)
+    except (IndentationError, tokenize.TokenError):
+        # Incomplete source is still scanned conservatively through its quoted
+        # fragments rather than allowing arithmetic slashes to look like paths.
+        literals.extend(re.findall(r"['\"]([^'\"\r\n]*)['\"]", source))
+    return "\n".join(literals)
+
+
+_SHELL_SELF_DIR_ASSIGNMENT = re.compile(
+    r'''(?P<name>[A-Za-z_][A-Za-z0-9_]*)="\$\(cd "\$\(dirname "\$0"\)" && pwd\)"''',
+)
+
+
+def _stored_shell_source_for_audit(source: str) -> str:
+    """Normalize the standard script-directory idiom to its proven mount."""
+    return _SHELL_SELF_DIR_ASSIGNMENT.sub(lambda match: f"{match.group('name')}=/mnt/user-data", source)
+
+
+def _command_for_heredoc_audit(command: str, *, purpose: str) -> str:
+    r"""Project heredoc bodies into the syntax or path audit that consumes them.
+
+    Quoting a delimiter disables *shell expansion*; it does not make the body
+    inert to the receiving program. Literal ``cat``/``tee`` payloads may be
+    hidden. Python input contributes only its string literals to path scanning
+    (so ``x / y`` is not a root path) and nothing to shell-syntax scanning.
+    Shell-interpreter bodies and unquoted expanding bodies remain visible.
+    """
+    lines = command.splitlines(keepends=True)
+    audited: list[str] = []
+    pending: list[tuple[str, bool, str, list[str]]] = []
+
+    for line in lines:
+        if pending:
+            delimiter, strip_tabs, body_mode, body_lines = pending[0]
+            candidate = line.rstrip("\r\n")
+            comparable = candidate.lstrip("\t") if strip_tabs else candidate
+            if comparable == delimiter:
+                if body_mode == "python_paths":
+                    audited.append(_python_string_literals("".join(body_lines)) + "\n")
+                elif body_mode == "shell_source":
+                    audited.append(_stored_shell_source_for_audit("".join(body_lines)) + "\n")
+                pending.pop(0)
+                audited.append(line)
+            elif body_mode == "hide":
+                # Preserve line boundaries for readable diagnostics without
+                # exposing inert source text to path/substitution scanners.
+                audited.append("\n" if line.endswith(("\n", "\r")) else "")
+            elif body_mode == "python_paths":
+                body_lines.append(line)
+                audited.append("\n" if line.endswith(("\n", "\r")) else "")
+            elif body_mode == "shell_source":
+                body_lines.append(line)
+                audited.append("\n" if line.endswith(("\n", "\r")) else "")
+            else:
+                audited.append(line)
+            continue
+
+        audited.append(line)
+        syntax_line = line.rstrip("\r\n")
+        for marker in HEREDOC_START.finditer(syntax_line):
+            if not _is_unquoted_shell_operator(syntax_line, marker.start()):
+                continue
+            command_name = heredoc_command_name(syntax_line, marker)
+            code_kind = heredoc_code_kind(syntax_line)
+            if purpose == "assignments":
+                body_mode = "hide"
+            elif heredoc_is_literal_data(syntax_line, marker):
+                body_mode = "hide"
+            elif command_name in {"python", "python3"} or code_kind == "python":
+                body_mode = "python_paths" if purpose == "paths" else "hide"
+            elif code_kind == "shell" and purpose == "shell":
+                body_mode = "shell_source"
+            elif code_kind == "code" and purpose == "shell":
+                body_mode = "hide"
+            else:
+                body_mode = "keep"
+            delimiter = heredoc_delimiter(marker)
+            pending.append((delimiter, bool(marker.group("strip")), body_mode, []))
+
+    for _delimiter, _strip_tabs, body_mode, body_lines in pending:
+        if body_mode == "python_paths":
+            audited.append(_python_string_literals("".join(body_lines)))
+        elif body_mode == "shell_source":
+            audited.append(_stored_shell_source_for_audit("".join(body_lines)))
+
+    return "".join(audited)
+
+
 def _next_cd_target(tokens: list[str], start_index: int) -> tuple[str | None, int]:
     index = start_index
     while index < len(tokens):
@@ -1059,9 +1323,17 @@ def _next_cd_target(tokens: list[str], start_index: int) -> tuple[str | None, in
     return None, index
 
 
-def _validate_local_bash_cwd_target(command_name: str, target: str | None, allowed_paths: list[str]) -> None:
+def _validate_local_bash_cwd_target(
+    command_name: str,
+    target: str | None,
+    allowed_paths: list[str],
+    allowed_variables: frozenset[str],
+) -> None:
     if target is None or target == "-":
         raise PermissionError(f"Unsafe working directory change in command: {command_name}. Use paths under {VIRTUAL_PATH_PREFIX}")
+    variable = re.fullmatch(r"\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}|(?P<plain>[A-Za-z_][A-Za-z0-9_]*))", target)
+    if variable is not None and (variable.group("braced") or variable.group("plain")) in allowed_variables:
+        return
     if target.startswith(("$", "`")):
         raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
     if target.startswith("~"):
@@ -1089,7 +1361,11 @@ def _validate_local_bash_root_path_args(command_name: str, tokens: list[str], st
         index += 1
 
 
-def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) -> None:
+def _validate_local_bash_shell_tokens(
+    command: str,
+    allowed_paths: list[str],
+    allowed_variables: frozenset[str],
+) -> None:
     """Conservatively reject relative path escapes missed by absolute-path scanning."""
     if re.search(r"\$\([^)]*\b(?:cd|pushd)\b", command):
         raise PermissionError(f"Unsafe working directory change in command substitution. Use paths under {VIRTUAL_PATH_PREFIX}")
@@ -1134,7 +1410,7 @@ def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) ->
             wrapped_name = tokens[index + 1].rsplit("/", 1)[-1]
             if wrapped_name in _LOCAL_BASH_CWD_COMMANDS:
                 target, next_index = _next_cd_target(tokens, index + 2)
-                _validate_local_bash_cwd_target(wrapped_name, target, allowed_paths)
+                _validate_local_bash_cwd_target(wrapped_name, target, allowed_paths, allowed_variables)
                 index = next_index
                 continue
             _validate_local_bash_root_path_args(wrapped_name, tokens, index + 2)
@@ -1145,7 +1421,7 @@ def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) ->
             continue
 
         target, next_index = _next_cd_target(tokens, index + 1)
-        _validate_local_bash_cwd_target(command_name, target, allowed_paths)
+        _validate_local_bash_cwd_target(command_name, target, allowed_paths, allowed_variables)
         index = next_index
 
 
@@ -1220,18 +1496,30 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
+    path_audit_command = _command_for_heredoc_audit(command, purpose="paths")
+    shell_audit_command = _command_for_heredoc_audit(command, purpose="shell")
+    assignment_command = _command_for_heredoc_audit(command, purpose="assignments")
+
     # Block file:// URLs which bypass the absolute-path regex but allow local file exfiltration
-    file_url_match = _FILE_URL_PATTERN.search(command)
+    file_url_match = _FILE_URL_PATTERN.search(path_audit_command)
     if file_url_match:
         raise PermissionError(f"Unsafe file:// URL in command: {file_url_match.group()}. Use paths under {VIRTUAL_PATH_PREFIX}")
 
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
-    _validate_local_bash_shell_tokens(command, allowed_paths)
-    url_spans = _non_file_url_spans(command)
+    # Heredoc body text is never an assignment in the outer shell, even when
+    # an unquoted body expands substitutions. Do not let an inert ``D=...``
+    # line there authorize a later ``"$D"/file`` suffix.
+    allowed_variables = _allowed_local_bash_path_variables(assignment_command, allowed_paths)
+    _validate_local_bash_shell_tokens(shell_audit_command, allowed_paths, allowed_variables)
+    url_spans = _non_file_url_spans(path_audit_command)
 
-    for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
+    for match in _ABSOLUTE_PATH_PATTERN.finditer(path_audit_command):
         if _is_in_spans(match.start(), url_spans):
+            continue
+        if _is_relative_dot_path(path_audit_command, match.start()):
+            continue
+        if _is_allowed_variable_path_suffix(path_audit_command, match.start(), allowed_variables):
             continue
         absolute_path = match.group()
         if _is_non_path_literal_fragment(absolute_path):
@@ -1806,9 +2094,13 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             # guard excludes. Audit the model's own text in that case; the
             # wrapper still runs, and its profile — not this guard — is what
             # confines writes.
-            audited = read_pre_isolation_command(getattr(runtime, "context", None), authored=command) or command
+            context = getattr(runtime, "context", None)
+            audited = read_pre_isolation_command(context, authored=command) or command
+            preserved_literals = read_pre_isolation_literals(context, authored=command)
             validate_local_bash_command_paths(audited, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
+            for placeholder, literal in preserved_literals.items():
+                command = command.replace(placeholder, literal)
             command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via
             # PowerShell/cmd.exe where `export` is not valid syntax.

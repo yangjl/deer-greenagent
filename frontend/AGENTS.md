@@ -678,6 +678,9 @@ keeps only `ACTIVITY_STATE_LABELS` for the state words, and an unknown state
 degrades to its raw value rather than blanking the row. `labels.ts` lives in
 `core/activity` rather than `core/dbtl` because activity describes every
 conversation, including projectless ones with no cycle near them.
+`paused` is a terminal Activity state labelled **Waiting for you**: it removes
+the actor from Current while preserving the exact handoff in Earlier. This is
+distinct from the transient `waiting` state used while an actor is still live.
 
 `ThreadScopedActivityProvider` is mounted beside `ThreadScopedSubtasksProvider`
 in `ChatProviders`, keyed the same way. Two keys, and conflating them is a bug:
@@ -1013,7 +1016,10 @@ after a run settles, even when a partial live task already exists. Async
 terminal hydration uses eager batch reconciliation rather than the
 render-deferred ToolMessage path. Governed cards render `displaySummary` (or a
 safe legacy structured summary), never raw contract JSON. The Build rail
-projects an open collaboration as **Waiting for you**.
+projects an open collaboration as **Waiting for you**. Its parent Build stage
+row also follows a terminal workflow phase: failed and cancelled phase attempts
+read **Stopped** or **Interrupted** instead of inheriting the cycle's broad
+`in_progress` spinner.
 
 A cycle may name its immutable `originating_thread_id`. The expanded rail links
 it only when that conversation remains in the authenticated project list; the

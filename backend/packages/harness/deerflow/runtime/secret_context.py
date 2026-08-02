@@ -14,6 +14,7 @@ trace payloads).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 # Reserved sub-key of the run context that holds request-scoped secrets supplied
@@ -76,7 +77,13 @@ def read_active_secrets(context: Any) -> dict[str, str]:
     return _string_pairs(context.get(ACTIVE_SECRETS_CONTEXT_KEY))
 
 
-def write_pre_isolation_command(context: Any, *, authored: str, original: str) -> None:
+def write_pre_isolation_command(
+    context: Any,
+    *,
+    authored: str,
+    original: str,
+    preserved_literals: Mapping[str, str] | None = None,
+) -> None:
     """Record the model's command beside the wrapper a middleware authored.
 
     ``DbtlOutputPolicyMiddleware`` rewrites a ``bash`` call into a
@@ -86,7 +93,11 @@ def write_pre_isolation_command(context: Any, *, authored: str, original: str) -
     own text. This lets the tool audit what the model actually asked for.
     """
     if isinstance(context, dict) and isinstance(authored, str) and authored and isinstance(original, str):
-        context[PRE_ISOLATION_COMMAND_CONTEXT_KEY] = {"authored": authored, "original": original}
+        context[PRE_ISOLATION_COMMAND_CONTEXT_KEY] = {
+            "authored": authored,
+            "original": original,
+            "preserved_literals": _string_pairs(dict(preserved_literals or {})),
+        }
 
 
 def read_pre_isolation_command(context: Any, *, authored: str) -> str | None:
@@ -107,6 +118,22 @@ def read_pre_isolation_command(context: Any, *, authored: str) -> str | None:
         return None
     original = record.get("original")
     return original if isinstance(original, str) else None
+
+
+def read_pre_isolation_literals(context: Any, *, authored: str) -> dict[str, str]:
+    """Return server-preserved data literals for this exact shell wrapper.
+
+    The DBTL shell wrapper temporarily replaces virtual paths inside heredoc
+    bodies so local command-path translation cannot turn provenance text into
+    host paths. The mapping is accepted only under the same byte-identical
+    wrapper binding used by :func:`read_pre_isolation_command`.
+    """
+    if not isinstance(context, dict) or not isinstance(authored, str) or not authored:
+        return {}
+    record = context.get(PRE_ISOLATION_COMMAND_CONTEXT_KEY)
+    if not isinstance(record, dict) or record.get("authored") != authored:
+        return {}
+    return _string_pairs(record.get("preserved_literals"))
 
 
 def write_slash_skill_source_path(context: Any, path: str, *, owner_token: str) -> None:

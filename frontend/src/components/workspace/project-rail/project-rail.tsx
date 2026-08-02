@@ -144,17 +144,17 @@ function StageRow({
   onOpen,
   designDeckFeedback,
   openWorkCount = 0,
-  waitingForHuman = false,
+  attentionLabel = "",
 }: {
   cycle: CycleRecord;
   stage: DbtlStage;
   onOpen: (stage: DbtlStage) => void;
   designDeckFeedback: boolean;
   openWorkCount?: number;
-  waitingForHuman?: boolean;
+  attentionLabel?: string;
 }) {
   const record = cycle.stages.find((item) => item.stage === stage);
-  const mark = waitingForHuman
+  const mark = attentionLabel
     ? { icon: AlertTriangle, tone: "text-amber-700 dark:text-amber-400" }
     : (STATUS_MARK[record?.status ?? "locked"] ?? LOCKED_MARK);
   const Icon = mark.icon;
@@ -181,8 +181,8 @@ function StageRow({
         </span>
       )}
       <span className="text-muted-foreground shrink-0 text-[11px]">
-        {waitingForHuman
-          ? "Waiting for you"
+        {attentionLabel
+          ? attentionLabel
           : STATUS_LABELS[record?.status ?? "locked"]}
       </span>
     </button>
@@ -268,7 +268,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   });
   const buildProjection = buildPlanProjection(buildWorkflow.data);
   const buildProgress = buildProjection.progress;
-  const buildWaitingForHuman = Boolean(buildWorkflow.data?.waiting_control);
+  const buildStageStatusLabel = buildProjection.stageStatusLabel;
 
   // Cycles minimize themselves once nothing is running; an explicit click
   // always wins over that default.
@@ -500,14 +500,15 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                             dbtl.feature?.design_deck_feedback === true
                           }
                           openWorkCount={
-                            entry.id === selected?.id && stage === "reconciliation"
+                            entry.id === selected?.id &&
+                            stage === "reconciliation"
                               ? reconciliationBlockers
                               : 0
                           }
-                          waitingForHuman={
-                            entry.id === selected?.id &&
-                            stage === "build" &&
-                            buildWaitingForHuman
+                          attentionLabel={
+                            entry.id === selected?.id && stage === "build"
+                              ? buildStageStatusLabel
+                              : ""
                           }
                         />
                       ))}
@@ -523,7 +524,8 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                           >
                             <MessagesSquare className="size-3.5 shrink-0" />
                             <span className="min-w-0 truncate">
-                              Origin · {originConversation.title ??
+                              Origin ·{" "}
+                              {originConversation.title ??
                                 "Untitled conversation"}
                             </span>
                           </Link>

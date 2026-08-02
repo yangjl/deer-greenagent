@@ -45,6 +45,7 @@ const STATE_MARK: Record<
   // actor is between things without competing with the leaf that is running.
   dispatching: { icon: Loader2, tone: "text-muted-foreground", spin: false },
   waiting: { icon: CircleDashed, tone: "text-muted-foreground", spin: false },
+  paused: { icon: CircleDashed, tone: "text-muted-foreground", spin: false },
   completed: {
     icon: CheckCircle2,
     tone: "text-emerald-700 dark:text-emerald-400",

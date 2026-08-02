@@ -67,6 +67,7 @@ class TestTheVocabularyIsClosed:
             "coordinating",
             "recording",
             "waiting",
+            "paused",
             "completed",
             "failed",
             "cancelled",

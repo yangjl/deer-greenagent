@@ -67,6 +67,15 @@ describe("one row follows its own transitions", () => {
     expect(activeRows(projection)).toEqual([]);
   });
 
+  it("treats a human pause as terminal activity", () => {
+    const projection = reduceActivityEvents([
+      event(),
+      event({ transition: "paused", state: "paused" }),
+    ]);
+    expect(activeRows(projection)).toEqual([]);
+    expect(projection.rows.act_one?.state).toBe("paused");
+  });
+
   it("keeps identity fields from the opening event", () => {
     const projection = reduceActivityEvents([
       event({

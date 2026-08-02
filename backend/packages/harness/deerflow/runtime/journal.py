@@ -272,7 +272,10 @@ class RunJournal(BaseCallbackHandler):
         # Per-model token accumulator
         self._tokens_by_model: dict[str, dict[str, int]] = {}
 
-        # Dedup: LangChain may fire on_llm_end multiple times for the same run_id
+        # Dedup: one model call may reach this journal twice — first through an
+        # inherited LangChain callback and later through a subagent collector's
+        # external record.  The ids in both paths are the same model run id, so
+        # each path must consult the other path's set as well as its own.
         self._counted_llm_run_ids: set[str] = set()
         self._counted_external_source_ids: set[str] = set()
         self._counted_message_llm_run_ids: set[str] = set()
@@ -583,7 +586,7 @@ class RunJournal(BaseCallbackHandler):
                 total_tk = usage_dict.get("total_tokens", 0) or 0
                 if total_tk == 0:
                     total_tk = input_tk + output_tk
-                if total_tk > 0 and rid not in self._counted_llm_run_ids:
+                if total_tk > 0 and rid not in self._counted_llm_run_ids and rid not in self._counted_external_source_ids:
                     self._counted_llm_run_ids.add(rid)
                     self._total_input_tokens += input_tk
                     self._total_output_tokens += output_tk
@@ -1004,7 +1007,7 @@ class RunJournal(BaseCallbackHandler):
             source_id = str(record.get("source_run_id", ""))
             if not source_id:
                 continue
-            if source_id in self._counted_external_source_ids:
+            if source_id in self._counted_external_source_ids or source_id in self._counted_llm_run_ids:
                 continue
 
             total_tk = record.get("total_tokens", 0) or 0
@@ -1022,6 +1025,11 @@ class RunJournal(BaseCallbackHandler):
             self._total_input_tokens += input_tk
             self._total_output_tokens += output_tk
             self._total_tokens += total_tk
+            # External-only subagent calls are still model calls. Previously
+            # they contributed tokens but not calls, while a callback that also
+            # leaked through contributed both and then had its tokens added a
+            # second time here.
+            self._llm_call_count += 1
 
             caller = str(record.get("caller", ""))
             if caller.startswith("subagent:"):

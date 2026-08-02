@@ -42,6 +42,7 @@ class ActivityState(StrEnum):
     COORDINATING = "coordinating"
     RECORDING = "recording"
     WAITING = "waiting"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -53,6 +54,7 @@ class ActivityTransition(StrEnum):
 
     STARTED = "started"
     UPDATED = "updated"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -62,6 +64,7 @@ class ActivityTransition(StrEnum):
 TERMINAL_STATES: Final[frozenset[ActivityState]] = frozenset(
     {
         ActivityState.COMPLETED,
+        ActivityState.PAUSED,
         ActivityState.FAILED,
         ActivityState.CANCELLED,
         ActivityState.INTERRUPTED,
@@ -71,6 +74,7 @@ TERMINAL_STATES: Final[frozenset[ActivityState]] = frozenset(
 TERMINAL_TRANSITIONS: Final[frozenset[ActivityTransition]] = frozenset(
     {
         ActivityTransition.COMPLETED,
+        ActivityTransition.PAUSED,
         ActivityTransition.FAILED,
         ActivityTransition.CANCELLED,
         ActivityTransition.INTERRUPTED,

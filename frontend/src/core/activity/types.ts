@@ -12,6 +12,7 @@
 export type ActivityTransition =
   | "started"
   | "updated"
+  | "paused"
   | "completed"
   | "failed"
   | "cancelled"
@@ -35,12 +36,14 @@ export type ActivityState =
   | "coordinating"
   | "recording"
   | "waiting"
+  | "paused"
   | "completed"
   | "failed"
   | "cancelled"
   | "interrupted";
 
 export const TERMINAL_ACTIVITY_STATES: ReadonlySet<string> = new Set([
+  "paused",
   "completed",
   "failed",
   "cancelled",

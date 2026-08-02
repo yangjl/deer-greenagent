@@ -22,6 +22,7 @@ export const ACTIVITY_STATE_LABELS: Record<ActivityState, string> = {
   coordinating: "Coordinating",
   recording: "Recording",
   waiting: "Waiting",
+  paused: "Waiting for you",
   completed: "Done",
   failed: "Failed",
   cancelled: "Cancelled",

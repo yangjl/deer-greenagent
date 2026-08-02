@@ -404,6 +404,35 @@ BUILD_SPEC_V4 = StageSpec(
 )
 
 
+BUILD_SPEC_V5 = StageSpec(
+    stage="build",
+    domain_profile=GENERIC_PROFILE,
+    version=5,
+    title=BUILD_SPEC_V4.title,
+    purpose=BUILD_SPEC_V4.purpose,
+    cycle_classes=BUILD_SPEC_V4.cycle_classes,
+    cycle_weights=BUILD_SPEC_V4.cycle_weights,
+    required_inputs=BUILD_SPEC_V4.required_inputs,
+    required_artifact_types=BUILD_SPEC_V4.required_artifact_types,
+    output_schema="build_package.v5",
+    required_capabilities=BUILD_SPEC_V4.required_capabilities,
+    optional_capabilities=BUILD_SPEC_V4.optional_capabilities,
+    validity_gates=BUILD_SPEC_V4.validity_gates,
+    memory_write_policy=BUILD_SPEC_V4.memory_write_policy,
+    # Build phases now receive one compact, hash-bound context and a
+    # server-created workspace scaffold. Six model calls are enough to inspect,
+    # author, execute, repair once, and land the structured result; the smaller
+    # token ceiling prevents a simple implementation from repeatedly paying for
+    # a growing tool transcript.
+    budget=WorkerBudget(
+        max_workers=3,
+        max_turns=77,
+        max_tokens=120_000,
+        timeout_seconds=600,
+    ),
+)
+
+
 TEST_SPEC_V1 = StageSpec(
     stage="test",
     domain_profile=GENERIC_PROFILE,
@@ -557,6 +586,7 @@ _REGISTRY: dict[str, StageSpec] = {
         BUILD_SPEC_V2,
         BUILD_SPEC_V3,
         BUILD_SPEC_V4,
+        BUILD_SPEC_V5,
         TEST_SPEC_V1,
         TEST_SPEC_V2,
         TEST_SPEC_V3,
@@ -574,7 +604,7 @@ _CURRENT: MappingProxyType[tuple[str, str], int] = MappingProxyType(
     {
         (GENERIC_PROFILE, "design"): DESIGN_SPEC_V2.version,
         (GENERIC_PROFILE, "reconciliation"): RECONCILIATION_SPEC_V1.version,
-        (GENERIC_PROFILE, "build"): BUILD_SPEC_V4.version,
+        (GENERIC_PROFILE, "build"): BUILD_SPEC_V5.version,
         (GENERIC_PROFILE, "test"): TEST_SPEC_V3.version,
         (GENERIC_PROFILE, "learn"): LEARN_SPEC_V1.version,
     }

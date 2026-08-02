@@ -457,7 +457,8 @@ Lead-agent middlewares are assembled in strict order across three functions: the
 9. **Authorization / GuardrailMiddleware** - Up to two independent pre-tool-call gates run here. When `authorization.enabled`, the `AuthorizationProvider` instance already used for Layer 1 capability filtering is wrapped by `GuardrailAuthorizationAdapter` and reused for Layer 2 execution checks. A generated `tool_search` bypasses the adapter's second provider call only when the current build has a concrete deferred setup; its catalog was already filtered by Layer 1, and an ordinary same-named tool without that deferred setup receives no exemption. When `guardrails.enabled`, the explicitly configured `GuardrailProvider` is appended after authorization and still evaluates every call, including `tool_search`. Authorization therefore runs outermost and can deny before an external guardrail call; both use the existing middleware's fail-closed, audit, sync/async, and error-`ToolMessage` behavior. See the authorization RFC and [docs/GUARDRAILS.md](docs/GUARDRAILS.md).
 10. **DbtlOutputPolicyMiddleware**, then **SandboxAuditMiddleware** - The DBTL policy blocks model-facing `write_file`, `str_replace`, and direct shell paths into `outputs/dbtl`; repository-owned stage publication remains the only writer. LocalSandbox also overlays that subtree read-only, and governance readiness fails if host bash is enabled or a non-local provider cannot prove equivalent nested-mount isolation. The audit middleware then records sandboxed shell/file operations before tool execution.
 
-    **A guard written for model input must not be pointed at server-authored text.** On macOS + `LocalSandboxProvider` the policy rewrites every `bash` call as `sandbox-exec -p '<profile>' /bin/bash -c '<command>'`, and when a stage grant exists that profile names host scratch directories (`/private/tmp`, `/tmp`, `tempfile.gettempdir()`) so interpreters can write temporaries. `validate_local_bash_command_paths` — a best-effort audit of paths a *model* wrote, active only under the `sandbox.allow_host_bash: true` opt-in — then scanned the **rewritten** string and rejected exactly those paths, because its allowlist excludes them on purpose. Every shell call from a DBTL stage worker was refused, so Build could write code and never execute it; a real Build worker returned a well-formed `StageWorkerResult` with `status=failed` and its own `execution validation` / `seeded reproducibility` checks false. It fired **only** once `writable_paths` was non-empty — that is, only inside stage workers, the one place the grant exists to permit execution — so ordinary chat was unaffected, and the two guards had no test that composed them. The middleware now records the model's own command beside the wrapper it authored (`write_pre_isolation_command`), and the bash tool audits that instead (`read_pre_isolation_command`). The record is trusted only when the incoming command is byte-identical to the wrapper produced for that call, and its `__`-prefixed key is stripped from caller-supplied context by `build_run_config`, so it can never redirect the audit away from text the middleware did not write. It substitutes *which string is audited* and never relaxes the audit; write confinement remains the sandbox profile, which still runs unchanged. Tests: `tests/test_dbtl_output_policy_middleware.py::TestTheIsolationWrapperSurvivesTheLocalBashPathGuard`.
+    **A guard written for model input must not be pointed at server-authored text.** On macOS + `LocalSandboxProvider` the policy rewrites every `bash` call as `sandbox-exec -p '<profile>' /bin/bash -c '<command>'`, and when a stage grant exists that profile names host scratch directories (`/private/tmp`, `/tmp`, `tempfile.gettempdir()`) so interpreters can write temporaries. `validate_local_bash_command_paths` — a best-effort audit of paths a *model* wrote, active only under the `sandbox.allow_host_bash: true` opt-in — then scanned the **rewritten** string and rejected exactly those paths, because its allowlist excludes them on purpose. Every shell call from a DBTL stage worker was refused, so Build could write code and never execute it; a real Build worker returned a well-formed `StageWorkerResult` with `status=failed` and its own `execution validation` / `seeded reproducibility` checks false. It fired **only** once `writable_paths` was non-empty — that is, only inside stage workers, the one place the grant exists to permit execution — so ordinary chat was unaffected, and the two guards had no test that composed them. The middleware now records the model's own command beside the wrapper it authored (`write_pre_isolation_command`), and the bash tool audits that instead (`read_pre_isolation_command`). The record is trusted only when the incoming command is byte-identical to the wrapper produced for that call, and its `__`-prefixed key is stripped from caller-supplied context by `build_run_config`, so it can never redirect the audit away from text the middleware did not write. It substitutes *which string is audited* and never relaxes the audit; write confinement remains the sandbox profile, which still runs unchanged.
+    The audit also parses enough shell structure to avoid treating inert source as an operation. A body behind a quoted/escaped heredoc delimiter is omitted from best-effort path scanning because Bash performs no parameter or command expansion there; unquoted heredoc bodies remain visible and a fake heredoc marker inside quoted or commented text cannot hide a later command. `./run.sh` is recognized as relative, and a suffix such as `"$D"/run.log` is accepted only when that same command assigns `D` exactly once to an allowed non-system virtual/mounted path. Repeated, dynamic, `read`, `unset`, or `printf -v` mutation revokes the exemption. These are audit false-positive fixes, not the write authority: `sandbox-exec` still confines the process tree. Tests: `tests/test_dbtl_output_policy_middleware.py::TestTheIsolationWrapperSurvivesTheLocalBashPathGuard`, `tests/test_dbtl_output_policy_middleware.py::test_real_build_shell_can_write_and_execute_a_quoted_heredoc_script`, and the Build-command/adversarial cases in `tests/test_sandbox_tools_security.py`.
 11. **ReadBeforeWriteMiddleware** - _(optional, if `read_before_write.enabled`, default on)_ Outermost write gate (issue #3857): `read_file` stamps a content hash onto its ToolMessage; `write_file` (append/overwrite-existing) and `str_replace` are blocked unless the newest mark for that path matches the file's current hash. Sits outside ToolProgressMiddleware and ToolErrorHandlingMiddleware so a blocked write returns immediately without consuming a ToolProgress slot. Blocked results call `normalize_tool_result` directly to stamp `deerflow_tool_meta` (`recoverable_by_model=True`) before returning, keeping the result well-formed for any outer consumer. Marks live on messages, so summarization dropping the read result invalidates the gate automatically; writes never refresh marks, forcing a re-read between consecutive edits. Gate check + tool execution are serialized per (thread, path) so same-turn parallel writes cannot reuse one stale mark; on sandboxes whose `read_file` reports failures as `"Error: ..."` strings instead of raising (AIO/E2B), uninspectable targets fail open (creation proceeds, no mark stamped)
 12. **ToolProgressMiddleware** - _(optional, if `tool_progress.enabled`)_ State-machine-based stagnation guard (RFC #3177). Outer wrapper around ToolErrorHandlingMiddleware so its `wrap_tool_call` receives results already stamped with `deerflow_tool_meta`. Tracks per-(thread, tool) consecutive "no-new-info" calls across three error categories: (a) `recoverable_by_model=True` (no_results, not_found, permission, Jaccard-duplicate success): ACTIVE → WARNED (terminal — hint re-injected on each subsequent problem); (b) `recoverable_by_model=False, action≠stop` (rate_limited, transient): ACTIVE → WARNED → BLOCKED after `warn_escalation_count` more problems; (c) `recoverable_by_model=False, action=stop` (auth, config, internal): immediately BLOCKED on first occurrence. **Division of labor with LoopDetectionMiddleware:** ToolProgressMiddleware is a result-quality guard — fires after tool execution and blocks specific tools that stop producing new information; LoopDetectionMiddleware is a call-pattern guard — fires after the model responds and hard-stops the whole turn when the model repeatedly issues identical tool_calls. Both can inject HumanMessage hints in the same model call without conflict; neither reads the other's internal state.
 13. **ToolErrorHandlingMiddleware** - Receives `AppConfig`, converts tool exceptions into error `ToolMessage`s so the run can continue instead of aborting, stamps every result with `deerflow_tool_meta` (status / error_type / recoverable_by_model / recommended_next_action / source) via `tool_result_meta.normalize_tool_result`, stamps structured metadata for task exception wrappers, and stamps skill-read metadata for downstream durable-context capture. Task tool result text is generated from the same status/result/error inputs as the structured metadata so callers do not hand-write a second protocol string.
@@ -2572,7 +2573,8 @@ inspect, write, execute, diagnose, and still return its structured result in
 the same request.
 
 **Build records how to re-run its work; Test and the human decide whether it
-is reproducible.** `generic:build:v4` is the current Build contract. V1–V3
+is reproducible.** V4 introduced the current scientific contract and remains
+resolvable; `generic:build:v5` is the current execution contract. V1–V3
 carried a `reproducible_execution` validity gate, which asked Build to *prove*
 a repeat run — so a worker that wrote a complete, correct implementation but
 could not run it twice marked its own result `failed`, and the whole attempt
@@ -2590,8 +2592,40 @@ metrics, and the Build review meeting still asks whether another person could
 reproduce the work from the record alone. V1–V3 keep their gate unchanged and
 stay resolvable, because an approval names the contract it ran under and
 relaxing a rule must add a version rather than rewrite the one somebody
-approved. Tests:
+approved. V5 keeps V4's inputs and validity gates while replacing the former
+twelve-call/400K-token worker allowance with six calls/120K tokens and a
+ten-minute timeout. Each phase receives one compact, hash-bound Build packet
+instead of generic stage history, and the server creates `src/`, `tests/`,
+`config/`, `artifacts/`, and `logs/` before dispatch. The phase prompt directs
+workers to file tools for authoring and reserves Bash for short execution and
+verification commands. A retry still resolves the spec recorded on the stage
+attempt, so a V4 attempt never changes budget or output schema halfway through.
+Tests:
 `tests/test_dbtl_stage_contracts.py::TestBuildRecordsRerunInformationRatherThanProvingIt`.
+
+Build's structured-result parser is deliberately looser only about the label on
+a concrete implementation file. Models often return semantic kinds such as
+`manifest`, `execution_log`, `implementation`, or `test_suite` even though the
+shared contract's `kind` field describes location. When `parse_worker_result`
+is called with `stage="build"`, an otherwise unknown kind whose reference starts
+under `/mnt/user-data/` is normalized to `workspace_file`. The live terminal
+event, authoritative `collect_results`, and committed-phase replay all pass the
+same stage context, so Activity cannot fail a result that persistence accepts
+or vice versa. Unknown logical ids are still rejected, Design/Reconciliation/
+Test/Learn remain strict, and Build publication still checks containment,
+regular-file type, bytes, and hashes before evidence is governed. The prompt
+also tells workers to put semantic file roles in `description`. Tests:
+`tests/test_dbtl_stage_contracts.py::TestWorkerResultContract::test_build_normalizes_descriptive_file_kinds_to_workspace_files`,
+`tests/test_dbtl_stage_contracts.py::TestStageFanOut::test_build_collection_accepts_descriptive_kinds_for_workspace_files`,
+and
+`tests/test_dbtl_council_seat_events.py::TestTerminalSeatEvent::test_build_file_role_kinds_complete_the_live_lane`.
+The same Build-only compatibility boundary accepts a compact mapping of quality
+check names to boolean verdicts and normalizes it to the canonical list of
+`QualityCheck` rows. Mapping values may also be full check objects; strings,
+numbers, empty names, and non-Build mappings remain rejected. A false check is
+recorded rather than converted into a failed Build result because Build records
+what ran and Test decides validity. Live events, authoritative collection, and
+replay all receive the same `stage="build"` context.
 
 `generic:test:v3` retains that allowance and pins
 `generic-predictive:v2`, its exact required-check list, optional-Reconciliation
@@ -3201,6 +3235,39 @@ integrity failure that way would present a missing stage run as a busy step. A
 settled attempt is immutable, `needs_input` included: a human answer creates a
 new attempt rather than reopening the row holding the question.
 
+A known parent-run cancellation settles only that run's still-running step rows
+as `cancelled` before propagating `CancelledError`; the six-hour orphan reclaim
+is only the hard-crash backstop. The stage-level Activity row likewise settles
+to terminal `paused` when a plan or worker question needs a person and to
+terminal `failed` when execution returns no evidence. A successfully delivered
+failure card still leaves the parent run transport-successful: the Activity
+timeline carries the governed-work outcome instead of misreporting that the
+Gateway failed to deliver it.
+
+Stage workers whose writable root is the virtual
+`/mnt/user-data/outputs/.dbtl-stage-work/...` path receive the sandbox-native
+file tools, not host-rooted `filesystem_*` MCP tools that cannot resolve that
+namespace. MCP origin metadata keeps that exclusion correct when an operator
+renames the server or disables its visible tool-name prefix. Under
+`sandbox-exec`, the process-level write sandbox remains the authority for shell
+commands, but a quoted delimiter means only that Bash will not expand the
+body—it does not make the receiving interpreter inert. A shared heredoc
+classifier preserves virtual paths only for positively recognized,
+non-expanding `cat`/`tee` payloads targeting known data extensions. Immediate
+Python, stored Python, and stored shell/code bodies remain subject to local path
+translation and host-path audit; extensionless targets fail closed. Python
+source contributes its string literals rather than arithmetic operators to the
+path scanner, including recursively tokenizing program-shaped strings used by
+a small Python writer. A literal, ordered virtual-path assignment may authorize
+`cd "$STAGE"`; later, dynamic, or reassigned values may not. The standard shell
+self-directory idiom is normalized only for shell-syntax auditing. Direct
+file-writing tools and non-isolated shell mode remain statically fail-closed.
+This keeps durable JSON provenance virtual without hiding executable host-path
+access from the policy boundary.
+The review-deck step opens only after execution produced both the review
+artifact URI and content hash; an incomplete Build therefore leaves the deck
+waiting rather than recording a secondary renderer failure.
+
 `GET /projects/{id}/dbtl/cycles/{cycle}/stages/{stage}/workflow` serves the
 projection in **every** mode, including with `dbtl.build_workflow_steps` off
 (default): the flag governs whether the workflow drives execution, and a read
@@ -3296,7 +3363,52 @@ same switch:
   run rather than inheriting it. Every phase success also binds the exact
   workspace-input hashes it read. Replay re-hashes those bytes, so editing an
   input between attempts reopens that phase and every dependent phase instead
-  of attributing old work to new data. A failed phase stops the run rather than
+  of attributing old work to new data.
+
+  **What the run itself published is an input like any other.** A phase's
+  declared inputs were judged only against the pre-run workspace snapshot, and
+  that snapshot cannot contain an earlier phase's output by construction — the
+  server wrote it minutes into the same run. So the normal shape of a
+  multi-phase plan was refused: the second phase returned a clean,
+  contract-valid result, its step failed with `input_changed_during_execution`
+  ("was not present when this Build run started"), and the Build stopped behind
+  a recovery card with the finished phase stranded — a message describing the
+  snapshot rather than anything wrong with the work. `_build_input_artifacts`
+  now also consults `run_published`, an index of what this run has published so
+  far keyed the same way `_project_file_snapshot` keys its entries. These are
+  **bindings, not exemptions**: the file is re-hashed and must still match the
+  hash the publisher recorded, so a governed output altered after publication is
+  refused exactly like a source that changed mid-run. The index passed to a
+  phase deliberately holds only the phases *before* it — `published` is extended
+  with the phase's own outputs after the call — or a phase could bind what it
+  just wrote as something it read. Build lineage is then assembled from
+  `_PhaseRun.input_artifacts`, the per-phase bindings established as the run
+  went, rather than one end-of-run recomputation: the aggregate view cannot
+  reconstruct what existed at each phase's own starting point, and its
+  non-strict pass silently *dropped* every cross-phase input — so a plan whose
+  inputs were all upstream outputs produced empty lineage, which
+  `record_build_lineage` refuses, failing the Build at the very end after every
+  phase had run. A replayed phase contributes its recorded bindings through
+  `_restore_phase`'s fourth return value for the same reason. Tests:
+  `tests/test_dbtl_live_stage_execution.py::TestAPhaseMayReadWhatTheRunAlreadyPublished`,
+  `tests/test_dbtl_build_workflow_execution.py::TestAPhaseMayBuildOnThePhaseBeforeIt`.
+
+  **A phase does not pay for the Design on every turn.** Whatever sits in a
+  phase's prompt is re-sent on every model call it makes, and on a measured
+  pilot the inlined Design excerpt was 19,380 characters — 92% of the input
+  bundle and roughly 45% of each of that phase's four model calls (43,032 input
+  tokens against 4,549 output), for a document `plan_build` had already
+  decomposed into that phase's objective, inputs, outputs, and done-condition.
+  `_build_phase_context` therefore drops `design_text` while keeping the
+  binding: the phase is still told which approved artifact it implements and
+  the hash it was approved under, and reads it when it needs the wording.
+  `_plan_build` builds its own context and is untouched — it is the one seat
+  whose whole job is reading the Design, and it makes a single call. Nothing
+  here moves a digest; `BuildInputBundle.digest` already excludes the excerpt.
+  Tests:
+  `tests/test_dbtl_build_workflow_execution.py::TestAPhaseDoesNotPayForTheDesignOnEveryTurn`.
+
+  A failed phase stops the run rather than
   spending the remaining budget producing evidence nobody planned. A worker's
   typed `needs_input` result raises its exact question through a durable Build
   control (with the optional meeting route) and resumes the same phase with the

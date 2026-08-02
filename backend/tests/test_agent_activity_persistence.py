@@ -151,7 +151,7 @@ class TestATerminalRowIsNeverReopened:
                 settled.add(frame["activity_id"])
 
         assert len(settled) == 3, "each round is its own row"
-        assert {frame["display_name"] for frame in captured} == {"Design stage"}
+        assert {frame["display_name"] for frame in captured} == {"Design coordinator"}
 
 
 class TestLineageSurvivesAGraphNodeBoundary:

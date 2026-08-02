@@ -18,9 +18,9 @@ import platform
 import re
 import sys
 import tempfile
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from inspect import isawaitable
 from pathlib import Path
 from typing import Any
@@ -157,6 +157,7 @@ from deerflow.dbtl.stage_spec import (
     StageSpecNotFound,
     WorkerBudget,
     resolve_review_stage_spec,
+    resolve_spec_by_key,
     resolve_stage_spec,
 )
 from deerflow.dbtl.transition_assessment import (
@@ -186,6 +187,7 @@ from deerflow.runtime.activity.lineage import supervisor_activity_id
 from deerflow.runtime.activity.spans import optional_activity_span
 from deerflow.runtime.activity.vocabulary import ActivityState, ActorKind
 from deerflow.subagents.step_streaming import SubagentStepStreamer, run_with_step_stream
+from deerflow.tools.mcp_metadata import get_mcp_source, is_mcp_tool
 from deerflow.trace_context import (
     DEERFLOW_TRACE_METADATA_KEY,
     get_current_trace_id,
@@ -193,6 +195,16 @@ from deerflow.trace_context import (
 )
 
 logger = logging.getLogger(__name__)
+
+_BUILD_UNIT_SUBDIRECTORIES = ("src", "tests", "config", "artifacts", "logs")
+
+
+def _prepare_unit_workspace(path: Path, *, stage: str) -> None:
+    """Create the server-owned scratch layout before a worker is dispatched."""
+    path.mkdir(parents=True, exist_ok=True)
+    if stage == "build":
+        for name in _BUILD_UNIT_SUBDIRECTORIES:
+            path.joinpath(name).mkdir(exist_ok=True)
 
 
 #: How long the roster proposal may take before the meeting proceeds without it.
@@ -320,6 +332,50 @@ def _tools_for_unit(tools: Sequence[Any], unit: WorkUnit) -> list[Any]:
     if unit.role not in _READ_ONLY_ROLES:
         return list(tools)
     return [tool for tool in tools if str(getattr(tool, "name", "")) in _READ_ONLY_TOOL_NAMES]
+
+
+_HOST_FILESYSTEM_MCP_TOOL_NAMES = frozenset(
+    {
+        "create_directory",
+        "directory_tree",
+        "edit_file",
+        "get_file_info",
+        "list_allowed_directories",
+        "list_directory",
+        "list_directory_with_sizes",
+        "move_file",
+        "read_file",
+        "read_media_file",
+        "read_multiple_files",
+        "read_text_file",
+        "search_files",
+        "write_file",
+    }
+)
+
+
+def _is_host_filesystem_mcp_tool(tool: Any) -> bool:
+    if not is_mcp_tool(tool):
+        return False
+    source = get_mcp_source(tool)
+    original_name = str((source or {}).get("original_name") or getattr(tool, "name", ""))
+    return original_name in _HOST_FILESYSTEM_MCP_TOOL_NAMES or str(getattr(tool, "name", "")).startswith("filesystem_")
+
+
+def _tools_for_virtual_workspace(tools: Sequence[Any], *, writable_workspace: str | None) -> list[Any]:
+    """Remove host-path filesystem MCP tools from a virtual-path worker.
+
+    DBTL workers receive paths below ``/mnt/user-data`` and the built-in
+    sandbox tools translate those paths to the project mount.  The optional
+    filesystem MCP server has a different authority model: it accepts host
+    paths below its configured roots and therefore cannot use the virtual path
+    named in the stage contract.  Offering both tool families turns a denied
+    shell call into a misleading second denial and invites a worker to try a
+    host path that must never appear in its prompt.
+    """
+    if not writable_workspace or not writable_workspace.startswith("/mnt/user-data/"):
+        return list(tools)
+    return [tool for tool in tools if not _is_host_filesystem_mcp_tool(tool)]
 
 
 def _token_limit_for_worker(unit: WorkUnit, budget: WorkerBudget) -> int | None:
@@ -535,6 +591,7 @@ def _terminal_seat_event(
     *,
     model: str,
     meeting_stage: str | None = "design",
+    stage: str | None = None,
     lineage: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Report contract-valid evidence progress, not child-graph termination."""
@@ -591,6 +648,7 @@ def _terminal_seat_event(
             capability=unit.capability,
             agent_name=unit.agent_name,
             stop_reason=outcome.stop_reason,
+            stage=stage,
         )
     except WorkerResultRejected as exc:
         return {
@@ -1318,6 +1376,7 @@ def _build_input_artifacts(
     project_root: str,
     pre_run_files: Mapping[str, tuple[int, int]],
     strict_workspace_inputs: bool = False,
+    run_published: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Bind Build's actual inputs without a separate declaration ceremony.
 
@@ -1325,7 +1384,22 @@ def _build_input_artifacts(
     dataset bindings.  In optional mode, exact workspace paths come from the
     validated worker contract and hashes are computed by the server, never
     requested from the person running the cycle.
+
+    `run_published` is what *this run* already published, keyed by project-
+    relative path and carrying the hash the publisher computed.  A multi-phase
+    Build is sequential precisely so a later phase can read an earlier one's
+    output, and those bytes cannot be in the pre-run snapshot by construction —
+    the server wrote them minutes into the same run.  Judging every input
+    against the snapshot alone therefore refused the normal shape of a
+    multi-phase plan, with a message describing the snapshot rather than
+    anything wrong with the work, and left the finished phases stranded behind
+    a recovery card.
+
+    These are bindings, not exemptions: the file is re-hashed and must still
+    match what was published, so a governed output edited after publication is
+    refused exactly like a source that changed mid-run.
     """
+    published_hashes = dict(run_published or {})
     artifacts: list[str] = []
     for item in datasets:
         source_key = str(item.get("source_key") or "").strip()
@@ -1357,6 +1431,20 @@ def _build_input_artifacts(
                 raise ValueError(f"Build input {reference!r} is not a contained workspace file.")
             continue
         relative, path = resolved
+        published_hash = published_hashes.get(relative)
+        if published_hash is not None:
+            # An earlier phase's output. Already hashed by the publisher into a
+            # content-addressed, model-unwritable path, so the binding is the
+            # recorded hash -- re-read here so a file altered after publication
+            # is refused rather than silently rebound to its new bytes.
+            try:
+                current = _sha256_file(path)
+            except OSError:
+                raise ValueError(f"Build input {relative!r} is no longer readable.") from None
+            if current != published_hash:
+                raise ValueError(f"Build input {relative!r} changed after this run published it; rerun Build from an unchanged source file.")
+            artifacts.append(f"workspace_file:{relative}:sha256:{published_hash}")
+            continue
         before = pre_run_files.get(relative)
         if before is None:
             if required:
@@ -1373,6 +1461,44 @@ def _build_input_artifacts(
         artifacts.append(f"workspace_file:{relative}:sha256:{_sha256_file(path)}")
 
     return list(dict.fromkeys(artifacts))
+
+
+def _extend_unique(target: list[str], items: Iterable[str]) -> None:
+    """Append what is not already there, preserving first-seen order.
+
+    Spelled out rather than folded into an `extend` over a filtering generator:
+    that reads the list it is appending to, so it only dedupes within a batch
+    because `list.extend` happens to consume lazily. Correctness should not rest
+    on that.
+    """
+    seen = set(target)
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            target.append(item)
+
+
+def _published_input_index(
+    published: Sequence[Mapping[str, Any]],
+    *,
+    project_root: str,
+) -> dict[str, str]:
+    """Index what this run has published so far, for later phases to bind against.
+
+    Keyed the same way `_project_file_snapshot` keys its entries — project-
+    relative POSIX — so one lookup answers "was this file here before the run,
+    or did the run produce it?" without the two sides normalizing differently.
+    """
+    index: dict[str, str] = {}
+    for entry in published:
+        content_hash = str(entry.get("content_hash") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", content_hash):
+            continue
+        resolved = _workspace_relative_path(str(entry.get("uri") or ""), project_root=project_root)
+        if resolved is None:
+            continue
+        index[resolved[0]] = content_hash
+    return index
 
 
 _WORKSPACE_INPUT_BINDING = re.compile(r"^workspace_file:(.+):sha256:([0-9a-f]{64})$")
@@ -2301,6 +2427,10 @@ class _PhaseRun:
     outcome: StageExecutionOutcome
     published: list[dict[str, Any]]
     complete: bool
+    #: What every phase bound as an input, established phase by phase. Build
+    #: lineage uses this instead of a single end-of-run recomputation, which
+    #: cannot reconstruct what existed at each phase's own starting point.
+    input_artifacts: list[str] = field(default_factory=list)
     stopped_because: str = ""
     #: A plan that stopped at its own boundary and one that stopped on a failure
     #: are both incomplete, and they are not the same thing to a person: one
@@ -2324,6 +2454,48 @@ def _phase_note(assignment: PhaseAssignment, result: StageWorkerResult) -> dict[
         "outputs": list(result.artifact_refs),
         "summary": result.summary,
     }
+
+
+def _build_phase_context(
+    stage_context: Mapping[str, Any],
+    inputs: BuildInputBundle,
+) -> str:
+    """Return the one bounded context packet an implementation phase needs.
+
+    The generic stage context also carries prior meeting turns, duplicate
+    Design projections, review state, and Test-only policy. Sending all of it
+    to every tool-loop turn made a small Build pay repeatedly for governance
+    history it could not act on. The hash-bound input bundle is authoritative;
+    one cycle summary and the two Build policies are enough orientation.
+
+    The approved Design's **text** is dropped here for the same reason, and it
+    is what was left of that cost: on a measured pilot the excerpt was 19,380
+    characters, 92% of the bundle and roughly 45% of every one of a phase's four
+    model calls -- for a document the planner had already decomposed into this
+    phase's objective, inputs, outputs, and done-condition. The excerpt is
+    described by its own module as "a convenience for the worker's first model
+    call", which is true of the planner (one call, whose whole job is reading
+    the Design) and false of a tool loop that re-sends it every turn.
+
+    The *binding* stays: the phase is still told exactly which approved artifact
+    it implements and the hash it was approved under, and may read it when it
+    needs the wording. Dropping the pointer as well would restore the guessing
+    the bundle exists to end, and none of this moves a digest -- the bundle's
+    own identity already excludes the excerpt.
+    """
+    bundle = inputs.as_dict()
+    bundle.pop("design_text", None)
+    bundle.pop("design_truncated", None)
+    bundle["design_text_note"] = "The approved Design is not inlined here. Read it at the design reference above if you need its exact wording; it is bound by the content hash recorded there."
+    payload = {
+        "cycle": stage_context.get("cycle"),
+        "build_input_bundle": bundle,
+        "input_provenance_policy": stage_context.get("input_provenance_policy"),
+        "build_input_policy": stage_context.get("build_input_policy"),
+        "workspace_root": stage_context.get("workspace_root"),
+        "stage_workspace": stage_context.get("stage_workspace"),
+    }
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False)
 
 
 def _pause_note(assignment: PhaseAssignment) -> str:
@@ -2439,7 +2611,7 @@ def _restore_phase(
     spec: StageSpec,
     expected_digest: str,
     project_root: str,
-) -> tuple[WorkUnit, StageWorkerResult, list[dict[str, Any]]] | None:
+) -> tuple[WorkUnit, StageWorkerResult, list[dict[str, Any]], list[str]] | None:
     """Rebuild a phase that already committed, or `None` to run it again.
 
     A phase's committed row proves the work happened and its outputs are in the
@@ -2483,6 +2655,7 @@ def _restore_phase(
             raw_result,
             capability=assignment.phase.capability.value,
             agent_name=assignment.agent_name,
+            stage="build",
         )
     except Exception:  # noqa: BLE001 - a payload this server wrote is still untrusted on the way back
         logger.warning("A recorded Build phase payload could not be read back; the phase will run again.", exc_info=True)
@@ -2498,7 +2671,10 @@ def _restore_phase(
         context="",
         result_contract="",
     )
-    return replace(unit, unit_id=unit_id), result, published
+    # The recorded bindings travel out too: Build lineage is assembled from what
+    # each phase actually read, and a replayed phase that contributed nothing
+    # would quietly drop its inputs from the provenance record.
+    return replace(unit, unit_id=unit_id), result, published, input_artifacts
 
 
 async def _settle_execution_step(
@@ -3081,7 +3257,11 @@ class LiveStageAdapter:
                         text=None,
                         error="The stage adapter could not resolve this worker's isolated workspace.",
                     )
-                await asyncio.to_thread(resolved_workspace[1].mkdir, parents=True, exist_ok=True)
+                await asyncio.to_thread(
+                    _prepare_unit_workspace,
+                    resolved_workspace[1],
+                    stage=stage,
+                )
             base_config = get_subagent_config(
                 unit.agent_name,
                 app_config=self._app_config,
@@ -3132,6 +3312,7 @@ class LiveStageAdapter:
                 app_config=self._app_config,
             )
             tools = _tools_for_unit(_tools_for_stage_budget(tools, budget), unit)
+            tools = _tools_for_virtual_workspace(tools, writable_workspace=unit_workspace)
             trace_id = str(metadata.get("trace_id") or "") or None
             # A stage worker is graded on its final message, but the turn budget
             # is enforced by ``recursion_limit``, which aborts from inside a tool
@@ -3264,6 +3445,7 @@ class LiveStageAdapter:
                     dispatch_outcome,
                     model=effective_model,
                     meeting_stage=stage if meeting else None,
+                    stage=stage,
                     lineage=worker_lineage,
                 )
                 await emit(terminal_event)
@@ -3289,6 +3471,7 @@ class LiveStageAdapter:
                     dispatch_outcome,
                     model=effective_model,
                     meeting_stage=stage if meeting else None,
+                    stage=stage,
                     lineage=worker_lineage,
                 )
             )
@@ -3410,6 +3593,12 @@ class LiveStageAdapter:
         rejected: list[str] = []
         completed: list[Mapping[str, Any]] = []
         published: list[dict[str, Any]] = []
+        # Each phase's exact bindings, in the order they were established. Build
+        # lineage is assembled from these rather than recomputed at the end,
+        # because only the phase loop knows which outputs already existed when a
+        # given phase ran -- the aggregate view cannot tell a phase's own output
+        # from one it legitimately read.
+        input_artifacts: list[str] = []
         stopped = ""
         paused = False
         paused_title = ""
@@ -3458,10 +3647,11 @@ class LiveStageAdapter:
                 # a digest that no longer describes anything on disk.
                 handle = await recorder.reopen(handle)
             if restored is not None:
-                unit, result, phase_published = restored
+                unit, result, phase_published, phase_inputs = restored
                 units.append(unit)
                 results.append(result)
                 published.extend(phase_published)
+                _extend_unique(input_artifacts, phase_inputs)
                 completed.append(_phase_note(assignment, result))
                 # A replayed phase's boundary was already shown and answered —
                 # that is what "Continue" meant. Stopping at it again would ask
@@ -3566,6 +3756,10 @@ class LiveStageAdapter:
                     project_root=project_root,
                     pre_run_files=pre_run_files,
                     strict_workspace_inputs=True,
+                    # Only the phases *before* this one: `published` is extended
+                    # with this phase's own outputs below, and a phase must not
+                    # be able to bind what it just wrote as something it read.
+                    run_published=_published_input_index(published, project_root=project_root),
                 )
             except ValueError as exc:
                 stopped = str(exc)
@@ -3574,6 +3768,7 @@ class LiveStageAdapter:
                 break
 
             published.extend(phase_published)
+            _extend_unique(input_artifacts, phase_input_artifacts)
             await recorder.succeed(
                 handle,
                 # The same function the restorer recomputes with, so a replay
@@ -3609,6 +3804,7 @@ class LiveStageAdapter:
                 rejected=tuple(rejected),
             ),
             published=published,
+            input_artifacts=input_artifacts,
             complete=len(completed) == len(plan.phases) and not stopped,
             stopped_because=stopped,
             paused=paused,
@@ -4313,6 +4509,41 @@ class LiveStageAdapter:
                     expected_cycle_revision=expected_cycle_revision,
                     build_control=build_control,
                 )
+        except asyncio.CancelledError:
+            # A graceful Gateway reload/cancel reaches this boundary while the
+            # persistence engine is still available.  Settle every Build step
+            # owned by this run immediately; leaving it ``running`` forces the
+            # next request to wait for the six-hour orphan-reclaim backstop and
+            # leaves every read model spinning in the meantime.
+            runtime = self._runtime(config)
+            run_id = runtime.get("run_id")
+            cancel_steps = getattr(self._repo, "cancel_running_step_attempts", None)
+            if callable(cancel_steps) and isinstance(run_id, str) and run_id and project_id and cycle_id:
+                cleanup = asyncio.create_task(
+                    cancel_steps(
+                        project_id=project_id,
+                        cycle_id=cycle_id,
+                        parent_run_id=run_id,
+                        summary="The run owning this Build step was interrupted before the step settled. Retry resumes from the last committed predecessor.",
+                    )
+                )
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        # Shutdown can cancel the parent more than once. The
+                        # database cleanup is bounded and must finish before
+                        # the run releases ownership of its durable step.
+                        continue
+                    except Exception:  # noqa: BLE001 - cancellation itself must still propagate
+                        break
+                try:
+                    cleanup.result()
+                except asyncio.CancelledError:
+                    logger.warning("Interrupted Build-step cleanup was itself cancelled for run %s.", run_id)
+                except Exception:  # noqa: BLE001 - cancellation itself must still propagate
+                    logger.warning("Could not settle interrupted Build steps for run %s.", run_id, exc_info=True)
+            raise
         except (BuildStepRecordingError, BuildControlNotRecorded) as refusal:
             # Persistence is part of the enabled Build workflow's authority.
             # Return a visible, retryable pause instead of attaching evidence
@@ -4440,6 +4671,38 @@ class LiveStageAdapter:
                 cycle_id=cycle_id,
                 note=f"The {stage} stage is {status or 'unavailable'} and cannot accept worker evidence.",
             )
+        recorded_spec_key = str((attempt or {}).get("stage_spec_key") or "").strip()
+        try:
+            spec = resolve_spec_by_key(recorded_spec_key) if recorded_spec_key else resolve_stage_spec(stage)
+        except StageSpecNotFound as exc:
+            return LiveStageResult(
+                stage=stage,
+                cycle_id=cycle_id,
+                note=f"The stage records an unavailable execution contract ({recorded_spec_key}): {exc}",
+            )
+        # Build is a resumable, multi-call workflow. Pin its version before
+        # opening the first durable step so a deployment between phases cannot
+        # change the output contract, prompt budget, or retry material for an
+        # attempt that is already under way. The repository lock also resolves
+        # two concurrent starters to the same pinned version.
+        if stage == "build":
+            pin_stage_spec = getattr(self._repo, "pin_stage_spec", None)
+            if callable(pin_stage_spec):
+                try:
+                    pinned_key = await pin_stage_spec(
+                        project_id=project_id,
+                        stage_attempt_id=str((attempt or {}).get("id") or ""),
+                        stage_spec_key=spec.spec_key,
+                    )
+                    spec = resolve_spec_by_key(pinned_key)
+                    if spec.stage != stage:
+                        raise ValueError(f"Pinned stage spec {pinned_key!r} belongs to {spec.stage!r}, not {stage!r}.")
+                except (LookupError, StageSpecNotFound, ValueError) as exc:
+                    return LiveStageResult(
+                        stage=stage,
+                        cycle_id=cycle_id,
+                        note=f"The Build execution contract could not be pinned safely: {exc}",
+                    )
 
         datasets = await self._repo.list_datasets(cycle_id, project_id=project_id)
         requires_reconciliation = reconciliation_required()
@@ -4601,7 +4864,7 @@ class LiveStageAdapter:
                             stage=stage,
                             meeting=True,
                         ),
-                        budget=resolve_stage_spec(stage).budget,
+                        budget=spec.budget,
                         attempt_id=attempt_id,
                         context=MeetingContext(
                             question=question,
@@ -4689,7 +4952,7 @@ class LiveStageAdapter:
                     manifest=project_manifest,
                     policy={
                         "reconciliation_required": requires_reconciliation,
-                        "stage_spec_key": resolve_stage_spec(stage).spec_key,
+                        "stage_spec_key": spec.spec_key,
                     },
                 )
             except BuildInputError as refusal:
@@ -4847,7 +5110,7 @@ class LiveStageAdapter:
             sort_keys=True,
             ensure_ascii=False,
         )
-        spec = resolve_stage_spec(stage)
+        build_phase_context = _build_phase_context(stage_context_payload, build_inputs) if stage == "build" and build_inputs is not None else stage_context
         council_plan: CouncilPlan | None = None
         approved_proposal: CouncilProposal | None = None
         if stage == "design":
@@ -4988,6 +5251,8 @@ class LiveStageAdapter:
                         summary=build_plan.clarification_question,
                         human_input_request_id=str(control.get("request_id") or ""),
                     )
+                    if stage_activity is not None:
+                        await stage_activity.settle(ActivityState.PAUSED, operation="stage.wait_human")
                     return LiveStageResult(
                         stage=stage,
                         cycle_id=cycle_id,
@@ -5012,20 +5277,23 @@ class LiveStageAdapter:
             # because it interrupts every Build, and a deployment that trusts
             # its planner should not be asked four times a day.
             if bool(getattr(dbtl_config, "build_plan_confirmation", False)) and build_plan.dispatchable and not await control_gate.plan_is_confirmed(build_plan.digest):
+                control = await control_gate.raise_control(
+                    plan_confirmation_request(
+                        plan=build_plan,
+                        cycle_id=cycle_id,
+                        stage_attempt_id=str((attempt or {}).get("id") or ""),
+                        workflow_spec_key=build_recorder.spec_key,
+                        cycle_revision=int(cycle.get("db_revision") or 0),
+                        input_digest=build_inputs.digest,
+                    )
+                )
+                if stage_activity is not None:
+                    await stage_activity.settle(ActivityState.PAUSED, operation="stage.wait_human")
                 return LiveStageResult(
                     stage=stage,
                     cycle_id=cycle_id,
                     note="Here is the plan for this build. Nothing has run yet.",
-                    control_request=await control_gate.raise_control(
-                        plan_confirmation_request(
-                            plan=build_plan,
-                            cycle_id=cycle_id,
-                            stage_attempt_id=str((attempt or {}).get("id") or ""),
-                            workflow_spec_key=build_recorder.spec_key,
-                            cycle_revision=int(cycle.get("db_revision") or 0),
-                            input_digest=build_inputs.digest,
-                        )
-                    ),
+                    control_request=control,
                 )
 
         proposal: CouncilProposal | None = None
@@ -5137,7 +5405,7 @@ class LiveStageAdapter:
                 control_gate=control_gate,
                 attempt_id=attempt_id,
                 stage_attempt_id=str((attempt or {}).get("id") or ""),
-                context=stage_context,
+                context=build_phase_context,
                 candidates=self._candidates(),
                 project_root=project_root,
                 cycle=cycle,
@@ -5502,13 +5770,20 @@ class LiveStageAdapter:
             deviations = []
             if not supplied_code_revision:
                 deviations.append("Runtime did not provide a source-control revision; recorded workspace:unversioned.")
-            input_artifacts = await asyncio.to_thread(
-                _build_input_artifacts,
-                datasets=datasets,
-                results=outcome.trustworthy_results,
-                project_root=project_root,
-                pre_run_files=pre_run_files,
-            )
+            if phase_run is not None:
+                # The phase loop already bound each phase's inputs against the
+                # state that phase actually started from. Recomputing here would
+                # judge every phase against the pre-run snapshot alone, which by
+                # construction cannot contain an earlier phase's output.
+                input_artifacts = list(phase_run.input_artifacts)
+            else:
+                input_artifacts = await asyncio.to_thread(
+                    _build_input_artifacts,
+                    datasets=datasets,
+                    results=outcome.trustworthy_results,
+                    project_root=project_root,
+                    pre_run_files=pre_run_files,
+                )
             await self._repo.record_build_lineage(
                 cycle_id=cycle_id,
                 project_id=project_id,
@@ -5662,7 +5937,7 @@ class LiveStageAdapter:
                         deck_registered = True
                     except Exception as exc:  # noqa: BLE001 - recorded below, then re-raised
                         registration_error = exc
-        if build_workflow_enabled:
+        if build_workflow_enabled and artifact_uri and artifact_hash:
             # Opened here rather than around the render call: with the summary
             # missing there is nothing to render, and an attempt whose
             # predecessor never succeeded would be refused by the chain anyway.
@@ -5767,6 +6042,12 @@ class LiveStageAdapter:
             if build_workflow_enabled
             else None
         )
+
+        if stage_activity is not None:
+            if clarification_question or control_request is not None:
+                await stage_activity.settle(ActivityState.PAUSED, operation="stage.wait_human")
+            elif build_plan_incomplete or not produced_usable_evidence:
+                await stage_activity.settle(ActivityState.FAILED)
 
         return LiveStageResult(
             stage=stage,

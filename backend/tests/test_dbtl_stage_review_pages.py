@@ -130,20 +130,40 @@ class _Repo:
 
 
 class _Dispatcher:
+    def __init__(self, project_root: Path) -> None:
+        self.project_root = project_root
+
     async def __call__(self, units, *, budget):
-        payload = json.dumps(
-            {
-                "status": "completed",
-                "summary": "Recorded the run and its outputs.",
-                "claims": ["Every declared input was consumed as declared."],
-                "evidence_refs": [{"kind": "workspace_file", "reference": "/mnt/user-data/outputs/run.json"}],
-                "limitations": [],
-                "quality_checks": [{"name": "outputs versioned", "passed": True, "detail": ""}],
-                "recommended_next_actions": ["Review the record."],
-                "provenance": {"inputs_examined": ["run log"]},
-            }
-        )
-        return [DispatchOutcome(unit_id=unit.unit_id, text=payload) for unit in units]
+        outcomes = []
+        for unit in units:
+            artifact_refs: list[str] = []
+            evidence_refs = [{"kind": "workspace_file", "reference": "/mnt/user-data/outputs/run.json"}]
+            if "Project context:\n" in unit.prompt:
+                context_text = unit.prompt.split("Project context:\n", 1)[1].split("\n\nReading files:", 1)[0]
+                context = json.loads(context_text)
+                stage_workspace = str((context.get("stage_workspace") or {}).get("path") or "")
+                if stage_workspace.startswith("/mnt/user-data/"):
+                    artifact_uri = f"{stage_workspace}/artifacts/result.json"
+                    artifact_path = self.project_root / artifact_uri.removeprefix("/mnt/user-data/")
+                    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                    artifact_path.write_text('{"status":"ok"}\n', encoding="utf-8")
+                    artifact_refs = [artifact_uri]
+                    evidence_refs = [{"kind": "workspace_file", "reference": artifact_uri}]
+            payload = json.dumps(
+                {
+                    "status": "completed",
+                    "summary": "Recorded the run and its outputs.",
+                    "artifact_refs": artifact_refs,
+                    "claims": ["Every declared input was consumed as declared."],
+                    "evidence_refs": evidence_refs,
+                    "limitations": [],
+                    "quality_checks": [{"name": "outputs versioned", "passed": True, "detail": ""}],
+                    "recommended_next_actions": ["Review the record."],
+                    "provenance": {"inputs_examined": ["run log"]},
+                }
+            )
+            outcomes.append(DispatchOutcome(unit_id=unit.unit_id, text=payload))
+        return outcomes
 
 
 async def _run(stage: str, tmp_path: Path, *, progressive_gate: bool = True):
@@ -170,7 +190,7 @@ async def _run(stage: str, tmp_path: Path, *, progressive_gate: bool = True):
                 ),
             ),
         ),
-        dispatcher=_Dispatcher(),
+        dispatcher=_Dispatcher(tmp_path),
         transition_assessor=assessor,
     )
     result = await adapter.execute(

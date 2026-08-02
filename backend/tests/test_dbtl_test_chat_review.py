@@ -196,6 +196,7 @@ def test_rollout_cursor_projects_build_approved_test_active_as_test():
         id="cycle-1",
         project_id="project-1",
         parent_cycle_id=None,
+        originating_thread_id="thread-1",
         title="Tiny holdout",
         cycle_class="computational",
         state="build",

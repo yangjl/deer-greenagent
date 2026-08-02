@@ -18,7 +18,11 @@ function view(overrides: Partial<BuildWorkflowView> = {}): BuildWorkflowView {
       degraded: false,
       phase_count: 3,
       phases: [
-        { index: 1, phase_key: "simulate", title: "Simulate founder population" },
+        {
+          index: 1,
+          phase_key: "simulate",
+          title: "Simulate founder population",
+        },
         { index: 2, phase_key: "markers", title: "Derive marker matrix" },
         { index: 3, phase_key: "fit", title: "Fit and evaluate model" },
       ],
@@ -190,7 +194,9 @@ describe("state is in words, and stopping is called out", () => {
       view({ phases: [phase("markers", "needs_input")] }),
     );
 
-    expect(projection.attention).toBe("Derive marker matrix is waiting for you.");
+    expect(projection.attention).toBe(
+      "Derive marker matrix is waiting for you.",
+    );
   });
 
   it("says when a phase stopped", () => {
@@ -199,6 +205,16 @@ describe("state is in words, and stopping is called out", () => {
     );
 
     expect(projection.attention).toBe("Derive marker matrix stopped.");
+    expect(projection.stageStatusLabel).toBe("Stopped");
+  });
+
+  it("makes an interrupted phase stop the parent stage spinner", () => {
+    const projection = buildPlanProjection(
+      view({ phases: [phase("markers", "cancelled")] }),
+    );
+
+    expect(projection.attention).toBe("Derive marker matrix was interrupted.");
+    expect(projection.stageStatusLabel).toBe("Interrupted");
   });
 
   it("says nothing when the plan is simply in progress", () => {
@@ -225,6 +241,7 @@ describe("state is in words, and stopping is called out", () => {
     expect(projection.attention).toBe(
       "Waiting for you — confirm the Build plan.",
     );
+    expect(projection.stageStatusLabel).toBe("Waiting for you");
   });
 });
 
@@ -261,7 +278,6 @@ describe("open work items keep their signal", () => {
     expect(blockerBadge(0)).toBe("");
   });
 });
-
 
 describe("a malformed status cannot unmount the rail", () => {
   it("treats a prototype member as an unknown status", () => {

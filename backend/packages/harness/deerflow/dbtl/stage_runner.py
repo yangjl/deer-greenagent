@@ -257,6 +257,11 @@ def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> st
         lines.extend(
             [
                 "",
+                "Build evidence vocabulary:",
+                "- Evidence kind says where the evidence lives, not what role the file plays.",
+                "- Use workspace_file for manifests, logs, source code, tests, generated artifact directories, documentation, scripts, and input specifications under /mnt/user-data/.",
+                "- Put labels such as manifest, execution_log, implementation, or test_suite in description instead of kind.",
+                "",
                 "Reproducibility (read this before judging your own result):",
                 "- Record what someone else needs to re-run this: the exact command, any seed,",
                 "  the input paths, and the interpreter or environment you used.",
@@ -353,6 +358,7 @@ def collect_results(plan: StageExecutionPlan, outcomes: Sequence[DispatchOutcome
                 capability=unit.capability,
                 agent_name=unit.agent_name,
                 stop_reason=outcome.stop_reason,
+                stage=plan.spec.stage,
             )
             if outcome.forced_finalization:
                 parsed = replace(

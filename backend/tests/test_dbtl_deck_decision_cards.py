@@ -8,6 +8,8 @@ job; nothing here may anticipate it by shipping an enabled control.
 
 from __future__ import annotations
 
+import re
+
 from deerflow.dbtl.council_deck import render_council_deck
 from deerflow.dbtl.decision_request import parse_decision_request
 
@@ -75,7 +77,7 @@ class TestTheOptionsRenderAsAChoice:
         """A default that becomes the answer is a decision nobody made."""
         html = _deck(decision=_request())
 
-        assert "checked" not in html
+        assert re.search(r"<input\b[^>]*\bchecked(?:\s|=|>)", html) is None
 
     def test_the_recommendation_is_labelled_as_the_chair_s_view(self) -> None:
         html = _deck(decision=_request())

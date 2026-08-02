@@ -606,6 +606,40 @@ class TestAStepLeftRunningByADeadProcessIsReclaimed:
         with pytest.raises(DbtlStepConflict):
             await _open(repo, stage_attempt_id, BuildStepKey.LOAD_DESIGN, parent_run_id="run-1")
 
+    async def test_a_known_interrupted_run_is_cancelled_immediately(self, repo, stage_attempt_id) -> None:
+        first, _ = await _open(repo, stage_attempt_id, BuildStepKey.LOAD_DESIGN, parent_run_id="run-1")
+
+        settled = await repo.cancel_running_step_attempts(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            parent_run_id="run-1",
+            summary="The owning run was interrupted.",
+        )
+        second, dispatched = await _open(repo, stage_attempt_id, BuildStepKey.LOAD_DESIGN, parent_run_id="run-2")
+
+        assert settled == 1
+        assert dispatched is True
+        assert second["attempt"] == 2
+        rows = await repo.list_step_attempts(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        interrupted = next(row for row in rows if row["id"] == first["id"])
+        assert interrupted["status"] == StepState.CANCELLED.value
+        assert interrupted["error_code"] == BuildErrorCode.CANCELLED.value
+        assert interrupted["completed_at"] is not None
+
+    async def test_interrupt_cleanup_cannot_cancel_another_runs_step(self, repo, stage_attempt_id) -> None:
+        first, _ = await _open(repo, stage_attempt_id, BuildStepKey.LOAD_DESIGN, parent_run_id="run-1")
+
+        settled = await repo.cancel_running_step_attempts(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            parent_run_id="run-2",
+            summary="The owning run was interrupted.",
+        )
+
+        assert settled == 0
+        rows = await repo.list_step_attempts(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        assert next(row for row in rows if row["id"] == first["id"])["status"] == StepState.RUNNING.value
+
 
 async def _age_step(repo, step_run_id: str, *, hours: int) -> None:
     """Backdate an attempt's start, standing in for a process that died then."""

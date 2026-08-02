@@ -102,6 +102,8 @@ export interface BuildPlanProjection {
   emptyNote: string;
   /** Present when the Build stopped somewhere a person should look. */
   attention: string;
+  /** Overrides the broad stage status when a phase has stopped. */
+  stageStatusLabel: string;
 }
 
 /**
@@ -143,7 +145,13 @@ export function buildPlanProjection(
   view: BuildWorkflowView | null | undefined,
 ): BuildPlanProjection {
   if (!view) {
-    return { rows: [], progress: "", emptyNote: "No build has started.", attention: "" };
+    return {
+      rows: [],
+      progress: "",
+      emptyNote: "No build has started.",
+      attention: "",
+      stageStatusLabel: "",
+    };
   }
 
   const planned = new Map(
@@ -184,17 +192,30 @@ export function buildPlanProjection(
 
   const done = rows.filter((row) => row.status === "succeeded").length;
   const stopped = rows.find(
-    (row) => row.status === "failed" || row.status === "needs_input",
+    (row) =>
+      row.status === "failed" ||
+      row.status === "needs_input" ||
+      row.status === "cancelled",
   );
+  const waitingForHuman =
+    Boolean(view.waiting_control) || stopped?.status === "needs_input";
+  let attention = view.waiting_control?.label ?? "";
+  let stageStatusLabel = waitingForHuman ? "Waiting for you" : "";
+  if (!attention && stopped?.status === "needs_input") {
+    attention = `${stopped.title} is waiting for you.`;
+  } else if (!attention && stopped?.status === "cancelled") {
+    attention = `${stopped.title} was interrupted.`;
+    stageStatusLabel = "Interrupted";
+  } else if (!attention && stopped?.status === "failed") {
+    attention = `${stopped.title} stopped.`;
+    stageStatusLabel = "Stopped";
+  }
   return {
     rows,
     progress: rows.length ? `${done} of ${rows.length}` : "",
     emptyNote: rows.length ? "" : "No build has started.",
-    attention: view.waiting_control?.label ?? (stopped
-      ? stopped.status === "needs_input"
-        ? `${stopped.title} is waiting for you.`
-        : `${stopped.title} stopped.`
-      : ""),
+    attention,
+    stageStatusLabel,
   };
 }
 
@@ -206,9 +227,7 @@ export function buildPlanProjection(
  * same one. Returning a single key rather than a per-row boolean is what makes
  * "two spinners" unrepresentable instead of merely unlikely.
  */
-export function movingRow(
-  projection: BuildPlanProjection,
-): string | null {
+export function movingRow(projection: BuildPlanProjection): string | null {
   const running = projection.rows.filter((row) => row.running);
   return running.length === 1 ? running[0]!.phaseKey : null;
 }

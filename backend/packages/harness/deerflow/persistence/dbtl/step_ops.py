@@ -48,7 +48,7 @@ from deerflow.dbtl.build_workflow import (
     resolve_build_workflow,
     resolve_build_workflow_by_key,
 )
-from deerflow.dbtl.stage_spec import StageSpecNotFound, resolve_stage_spec
+from deerflow.dbtl.stage_spec import StageSpecNotFound, resolve_spec_by_key, resolve_stage_spec
 from deerflow.persistence.dbtl.collaboration_ops import ANSWERED, OPEN, count_control_epochs
 from deerflow.persistence.dbtl.model import DbtlArtifactRow, DbtlBuildCollaborationRow, DbtlCycleRow, DbtlStageAttemptRow, DbtlStageStepRunRow
 from deerflow.utils.time import coerce_iso
@@ -212,6 +212,79 @@ class StepOpsMixin:
         )
         return list(result.scalars().all())
 
+    async def pin_stage_spec(
+        self,
+        *,
+        project_id: str,
+        stage_attempt_id: str,
+        stage_spec_key: str,
+    ) -> str:
+        """Bind an attempt to its execution contract before any worker runs."""
+        spec = resolve_spec_by_key(stage_spec_key)
+        async with self._sf() as session:
+            async with session.begin():
+                found = await session.execute(
+                    select(DbtlStageAttemptRow)
+                    .where(
+                        DbtlStageAttemptRow.id == stage_attempt_id,
+                        DbtlStageAttemptRow.project_id == project_id,
+                    )
+                    .with_for_update()
+                )
+                stage_run = found.scalar_one_or_none()
+                if stage_run is None:
+                    raise LookupError(f"Unknown stage attempt {stage_attempt_id!r}.")
+                if stage_run.stage != spec.stage:
+                    raise ValueError(f"Stage spec {stage_spec_key!r} belongs to {spec.stage!r}, not {stage_run.stage!r}.")
+                if stage_run.stage_spec_key:
+                    pinned_key = str(stage_run.stage_spec_key)
+                    pinned_spec = resolve_spec_by_key(pinned_key)
+                    if pinned_spec.stage != stage_run.stage:
+                        raise ValueError(f"Pinned stage spec {pinned_key!r} belongs to {pinned_spec.stage!r}, not {stage_run.stage!r}.")
+                    return pinned_key
+                stage_run.stage_spec_key = stage_spec_key
+                await session.flush()
+                return stage_spec_key
+
+    async def cancel_running_step_attempts(
+        self,
+        *,
+        project_id: str,
+        cycle_id: str,
+        parent_run_id: str,
+        summary: str,
+    ) -> int:
+        """Settle every Build step still owned by an interrupted run.
+
+        The six-hour reclaim window remains the hard-crash backstop.  A
+        graceful cancellation has stronger evidence: the run worker is telling
+        us this exact owner stopped, so keeping its rows ``running`` is both
+        inaccurate and needlessly blocks an immediate retry.
+        """
+        if not parent_run_id:
+            return 0
+        now = _utc_now()
+        async with self._sf() as session:
+            async with session.begin():
+                found = await session.execute(
+                    select(DbtlStageStepRunRow)
+                    .where(
+                        DbtlStageStepRunRow.project_id == project_id,
+                        DbtlStageStepRunRow.cycle_id == cycle_id,
+                        DbtlStageStepRunRow.parent_run_id == parent_run_id,
+                        DbtlStageStepRunRow.status == StepState.RUNNING.value,
+                    )
+                    .with_for_update()
+                )
+                rows = list(found.scalars().all())
+                for row in rows:
+                    row.status = StepState.CANCELLED.value
+                    row.error_code = BuildErrorCode.CANCELLED.value
+                    row.error_summary = _bounded_summary(summary)
+                    row.completed_at = now
+                await session.flush()
+                return len(rows)
+
     async def _step_material(
         self,
         session: AsyncSession,
@@ -244,15 +317,13 @@ class StepOpsMixin:
             found = await session.execute(select(DbtlArtifactRow).where(DbtlArtifactRow.stage_attempt_id == design_stage.id).order_by(DbtlArtifactRow.revision.desc()).limit(1))
             design_artifact = found.scalar_one_or_none()
 
-        # The **currently resolved** contract, not the one stored on the row.
-        # `record_worker_runs` writes `stage_run.stage_spec_key` partway through
-        # the very run whose steps are being recorded, so reading it made the
-        # material change mid-Build and every earlier step read as invalidated
-        # the moment execution committed. Resolving it answers the question that
-        # actually matters — "would today's contract produce this?" — and is
-        # stable within a run, moving only on a real contract upgrade.
+        # A Build pins this before opening its first step. Historical rows from
+        # before that invariant may still be blank, in which case resolving the
+        # current contract is the only honest fallback. Once pinned, an upgrade
+        # cannot invalidate completed phases or change a retry's budget halfway
+        # through the attempt.
         try:
-            stage_spec_key = resolve_stage_spec(stage_run.stage).spec_key
+            stage_spec_key = stage_run.stage_spec_key or resolve_stage_spec(stage_run.stage).spec_key
         except StageSpecNotFound:
             stage_spec_key = stage_run.stage_spec_key
 

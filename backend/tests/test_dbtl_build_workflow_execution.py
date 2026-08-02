@@ -16,9 +16,11 @@ execution stays selected, the deck alone is where a retry resumes.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +38,7 @@ from deerflow.dbtl.stage_runner import DispatchOutcome
 from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlWorkflowRefused
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
+from deerflow.runtime.activity.vocabulary import ActivityState
 
 pytestmark = pytest.mark.asyncio
 
@@ -398,6 +401,30 @@ def _step(view: dict, key: BuildStepKey) -> dict:
 
 
 class TestTheWriterAndTheReadModelAgree:
+    async def test_build_contract_is_pinned_before_the_first_worker_dispatch(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        events: list[tuple[str, str]] = []
+        original_pin = repo.pin_stage_spec
+
+        async def observed_pin(**kwargs):
+            pinned_key = await original_pin(**kwargs)
+            events.append(("pin", pinned_key))
+            return pinned_key
+
+        repo.pin_stage_spec = observed_pin  # type: ignore[method-assign]
+
+        class _ObservingDispatcher:
+            async def __call__(self, units, *, budget):
+                events.append(("dispatch", ""))
+                return [DispatchOutcome(unit_id=unit.unit_id, text="not a valid result") for unit in units]
+
+        dispatcher = _ObservingDispatcher()
+        await _run_build(repo, root, dispatcher=dispatcher)
+
+        assert events[0] == ("pin", "generic:build:v5")
+        assert events[1][0] == "dispatch"
+
     async def test_a_successful_build_records_a_complete_chain(self, project) -> None:
         """The property a fake repository cannot show.
 
@@ -492,6 +519,68 @@ class TestAPresentationalFailureKeepsTheScience:
         # something is unfinished.
         assert view["next_step"] == BuildStepKey.EXECUTE_PHASES.value
 
+    async def test_a_failed_execution_does_not_open_a_fake_deck_failure(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        class _ProseDispatcher:
+            async def __call__(self, units, *, budget):
+                return [DispatchOutcome(unit_id=unit.unit_id, text="I built it, trust me.") for unit in units]
+
+        await _run_build(repo, root, dispatcher=_ProseDispatcher())
+
+        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        assert _step(view, BuildStepKey.EXECUTE_PHASES)["status"] == StepState.FAILED.value
+        deck = _step(view, BuildStepKey.RENDER_REVIEW_DECK)
+        assert deck["status"] == "waiting"
+        assert deck["attempts"] == []
+        assert deck["error_code"] is None
+        assert view["next_step"] == BuildStepKey.EXECUTE_PHASES.value
+
+
+async def test_virtual_workspace_workers_do_not_receive_host_filesystem_mcp_tools() -> None:
+    from deerflow.agents.dbtl.live_stage.adapter import _tools_for_virtual_workspace
+    from deerflow.tools.mcp_metadata import tag_mcp_tool
+
+    builtin_tools = [
+        SimpleNamespace(name="read_file"),
+        SimpleNamespace(name="write_file"),
+    ]
+    filesystem_tools = [
+        tag_mcp_tool(
+            SimpleNamespace(name="filesystem_create_directory", metadata={}),
+            source_name="filesystem",
+            original_name="create_directory",
+        ),
+        tag_mcp_tool(
+            SimpleNamespace(name="fs_write_file", metadata={}),
+            source_name="fs",
+            original_name="write_file",
+        ),
+        tag_mcp_tool(
+            SimpleNamespace(name="write_file", metadata={}),
+            source_name="project_files",
+            original_name="write_file",
+        ),
+    ]
+    web_tool = tag_mcp_tool(
+        SimpleNamespace(name="web_search", metadata={}),
+        source_name="web",
+        original_name="search",
+    )
+    tools = [*builtin_tools, *filesystem_tools, web_tool]
+
+    selected = _tools_for_virtual_workspace(
+        tools,
+        writable_workspace="/mnt/user-data/outputs/.dbtl-stage-work/attempt/build/unit",
+    )
+
+    assert selected == [*builtin_tools, web_tool]
+
+    host_selected = _tools_for_virtual_workspace(tools, writable_workspace="/private/tmp/build/unit")
+    assert [tool.name for tool in host_selected] == [tool.name for tool in tools]
+
 
 class TestTheSummarizerWritesTheReviewedDocument:
     async def test_the_build_review_answers_what_we_got(self, project) -> None:
@@ -558,6 +647,25 @@ class TestTheSummarizerWritesTheReviewedDocument:
 
 
 class TestABuildStopsBeingOneOpaqueWorker:
+    async def test_each_phase_gets_compact_build_context_and_tool_guidance(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        _result, dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=SINGLE_PHASE_PLAN))
+
+        prompt = dispatcher.phase_units[0].prompt
+        assert '"build_input_bundle"' in prompt
+        assert '"prior_design_council_runs"' not in prompt
+        assert '"test_validity_contract"' not in prompt
+        assert '"approved_design_brief"' not in prompt
+        assert "Use write_file or str_replace" in prompt
+        assert "do not embed complete files in" in prompt
+
+    async def test_server_prepares_the_standard_build_workspace_layout(self, tmp_path: Path) -> None:
+        adapter_module._prepare_unit_workspace(tmp_path, stage="build")
+
+        assert {path.name for path in tmp_path.iterdir()} == {"src", "tests", "config", "artifacts", "logs"}
+
     async def test_each_planned_phase_is_its_own_attempt(self, project) -> None:
         repo, root = project
         await _ready_for_build(repo)
@@ -630,10 +738,24 @@ class TestABuildStopsBeingOneOpaqueWorker:
         assert "simulate" in second
         assert "you may not modify them" in second
 
-    async def test_a_failed_phase_stops_the_run_rather_than_spending_the_rest(self, project) -> None:
+    async def test_a_failed_phase_stops_the_run_rather_than_spending_the_rest(self, project, monkeypatch) -> None:
         repo, root = project
         await _ready_for_build(repo)
         stage_attempt_id = await _build_stage_attempt_id(repo)
+        settled: list[tuple[ActivityState, str | None]] = []
+
+        class _Handle:
+            async def update(self, **_kwargs):
+                return None
+
+            async def settle(self, state, *, operation=None, **_kwargs):
+                settled.append((state, operation))
+
+        @asynccontextmanager
+        async def _activity(_run_id, **kwargs):
+            yield _Handle() if kwargs.get("actor_id") == "build-stage" else None
+
+        monkeypatch.setattr(adapter_module, "optional_activity_span", _activity)
 
         class _SecondPhaseFails(_WritingDispatcher):
             async def __call__(self, units, *, budget):
@@ -642,12 +764,14 @@ class TestABuildStopsBeingOneOpaqueWorker:
                     return [DispatchOutcome(unit_id=units[0].unit_id, text="it did not work")]
                 return await super().__call__(units, budget=budget)
 
-        _result, dispatcher = await _run_build(repo, root, dispatcher=_SecondPhaseFails(plan=TWO_PHASE_PLAN))
+        result, dispatcher = await _run_build(repo, root, dispatcher=_SecondPhaseFails(plan=TWO_PHASE_PLAN))
 
         assert len(dispatcher.phase_units) == 2, "a third phase should never have been dispatched"
         phases = (await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id))["phases"]
         assert [entry["status"] for entry in phases] == [StepState.SUCCEEDED.value, StepState.FAILED.value]
         assert phases[1]["error_code"] == BuildErrorCode.EXECUTION_CONTRACT_REJECTED.value
+        assert result.control_request is not None
+        assert settled[-1] == (ActivityState.PAUSED, "stage.wait_human")
 
     async def test_an_unplannable_build_still_runs_as_one_piece(self, project) -> None:
         """Losing the decomposition costs structure; failing here would cost the
@@ -731,6 +855,35 @@ class TestACommittedStepIsReplayedRatherThanReRun:
         workers = await repo.list_worker_runs("cycle-1", project_id="project-1", stage="build")
         assert len(workers) == len({entry["unit_id"] for entry in workers}) == 2
 
+    async def test_retry_after_second_phase_failure_replays_only_the_first_phase(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        class _SecondPhaseFails(_WritingDispatcher):
+            async def __call__(self, units, *, budget):
+                if units[0].role == "phase" and len(self.phase_units) >= 1:
+                    self.phase_units.append(units[0])
+                    return [DispatchOutcome(unit_id=units[0].unit_id, text="it did not work")]
+                return await super().__call__(units, budget=budget)
+
+        first_result, first = await _run_build(
+            repo,
+            root,
+            dispatcher=_SecondPhaseFails(plan=TWO_PHASE_PLAN),
+            run_id="run-1",
+        )
+        second_result, second = await _run_build(
+            repo,
+            root,
+            dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN),
+            run_id="run-2",
+        )
+
+        assert not first_result.produced_usable_evidence
+        assert len(first.phase_units) == 2
+        assert [unit.capability for unit in second.phase_units] == ["statistical_analysis"]
+        assert second_result.produced_usable_evidence
+
     async def test_the_replayed_evidence_is_the_evidence_the_first_run_published(self, project, monkeypatch) -> None:
         repo, root = project
         await _ready_for_build(repo)
@@ -800,6 +953,65 @@ class TestWorkflowPersistenceIsAuthoritative:
         assert "durable workflow could not be initialized" in result.note
         assert dispatcher.calls == []
         assert result.artifact_uri is None
+
+    async def test_an_interrupted_phase_releases_its_durable_step_immediately(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        class _CancellingDispatcher:
+            async def __call__(self, units, *, budget):
+                unit = units[0]
+                if unit.role == "planner":
+                    return [DispatchOutcome(unit_id=unit.unit_id, text=SINGLE_PHASE_PLAN)]
+                raise asyncio.CancelledError
+
+        with pytest.raises(asyncio.CancelledError):
+            await _run_build(repo, root, dispatcher=_CancellingDispatcher(), run_id="run-interrupted")
+
+        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        phase = next(item for item in view["phases"] if item["phase_key"] == "build")
+        assert phase["status"] == StepState.CANCELLED.value
+        assert phase["error_code"] == BuildErrorCode.CANCELLED.value
+        assert view["next_step"] == BuildStepKey.EXECUTE_PHASES.value
+
+    async def test_repeated_parent_cancellation_cannot_abandon_step_cleanup(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+        phase_started = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        release_cleanup = asyncio.Event()
+
+        class _BlockingDispatcher:
+            async def __call__(self, units, *, budget):
+                unit = units[0]
+                if unit.role == "planner":
+                    return [DispatchOutcome(unit_id=unit.unit_id, text=SINGLE_PHASE_PLAN)]
+                phase_started.set()
+                await asyncio.Event().wait()
+
+        real_cleanup = repo.cancel_running_step_attempts
+
+        async def delayed_cleanup(**kwargs):
+            cleanup_started.set()
+            await release_cleanup.wait()
+            return await real_cleanup(**kwargs)
+
+        monkeypatch.setattr(repo, "cancel_running_step_attempts", delayed_cleanup)
+        task = asyncio.create_task(_run_build(repo, root, dispatcher=_BlockingDispatcher(), run_id="run-interrupted-twice"))
+        await phase_started.wait()
+        task.cancel()
+        await cleanup_started.wait()
+        task.cancel()
+        release_cleanup.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        phase = next(item for item in view["phases"] if item["phase_key"] == "build")
+        assert phase["status"] == StepState.CANCELLED.value
 
     async def test_an_incomplete_workflow_cannot_be_submitted_even_with_artifact_and_lineage(self, project, monkeypatch) -> None:
         from deerflow.config import app_config as app_config_module
@@ -978,6 +1190,111 @@ class TestTheRolloutSwitchIsReal:
 
         assert dispatcher.calls, "the Build was refused on the path the flag is supposed to leave alone"
         assert await repo.list_step_attempts(project_id="project-1", stage_attempt_id=stage_attempt_id) == []
+
+
+class _SecondPhaseReadsTheFirst(_WritingDispatcher):
+    """A phase that consumes the phase before it, which is the normal shape.
+
+    Sequential phases exist so a later one can build on an earlier one's output.
+    This dispatcher does exactly that: it reads the published paths the adapter
+    put in its prompt and declares one of them as an input it examined.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.declared: list[str] = []
+
+    async def __call__(self, units, *, budget):
+        outcomes = []
+        for unit in units:
+            if unit.role != "phase" or "This is the first phase" in unit.prompt:
+                outcomes.extend(await super().__call__((unit,), budget=budget))
+                continue
+            self.phase_units.append(unit)
+            preceding = json.loads(unit.prompt.split("they are inputs, hash-bound like any other.\n", 1)[1].split("\n", 1)[0])
+            upstream = preceding[0]["outputs"][0]
+            self.declared.append(upstream)
+            grant = _grant_from_prompt(unit.prompt)
+            grant.mkdir(parents=True, exist_ok=True)
+            produced = grant / "model.bin"
+            produced.write_text("fitted", encoding="utf-8")
+            plot = grant / "accuracy.png"
+            plot.write_bytes(PNG)
+            payload = json.loads(_build_result(artifact=_virtual(produced), figure=_virtual(plot)))
+            payload["provenance"]["inputs_examined"] = [upstream]
+            outcomes.append(DispatchOutcome(unit_id=unit.unit_id, text=json.dumps(payload)))
+        return outcomes
+
+
+class TestAPhaseMayBuildOnThePhaseBeforeIt:
+    """The pre-run snapshot cannot contain what the run itself published.
+
+    Judging a phase's declared inputs against that snapshot alone refused every
+    plan whose phases build on each other: the second phase reported a clean,
+    contract-valid result, the server failed its step with "was not present when
+    this Build run started", and the Build stopped behind a recovery card with
+    the finished phase stranded. Nothing was wrong with the work.
+    """
+
+    async def test_the_second_phase_succeeds_and_binds_the_first_phases_output(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        _result, dispatcher = await _run_build(repo, root, dispatcher=_SecondPhaseReadsTheFirst(plan=TWO_PHASE_PLAN))
+
+        assert dispatcher.declared, "the second phase never declared the first phase's output"
+        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        phases = view["phases"]
+        assert [entry["phase_key"] for entry in phases] == ["simulate", "fit"]
+        assert {entry["status"] for entry in phases} == {StepState.SUCCEEDED.value}
+        assert _step(view, BuildStepKey.EXECUTE_PHASES)["status"] == StepState.SUCCEEDED.value
+
+    async def test_build_lineage_records_the_upstream_phase_output_it_consumed(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        _result, dispatcher = await _run_build(repo, root, dispatcher=_SecondPhaseReadsTheFirst(plan=TWO_PHASE_PLAN))
+
+        view = await repo.build_test_view("cycle-1", project_id="project-1")
+        bound = view["build_lineage"]["input_artifacts"]
+        upstream_relative = dispatcher.declared[0][len("/mnt/user-data/") :]
+        assert any(entry.startswith(f"workspace_file:{upstream_relative}:sha256:") for entry in bound), bound
+
+
+class TestAPhaseDoesNotPayForTheDesignOnEveryTurn:
+    """The excerpt is a first-call convenience; a phase is a tool loop.
+
+    Whatever sits in a phase's prompt is re-sent on every model call it makes,
+    and the approved Design is by far the largest thing there — measured at 45%
+    of every call on a real pilot, four calls per phase, for a document the
+    planner had already decomposed into that phase's own objective. The planner
+    still receives it in full: it is the seat whose whole job is reading it.
+    """
+
+    async def test_the_planner_reads_the_design_and_the_phases_do_not(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        _result, dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN))
+
+        body = "Fit a genomic prediction model and report held-out accuracy."
+        assert all(body in unit.prompt for unit in dispatcher.planner_units)
+        assert dispatcher.phase_units
+        assert not any(body in unit.prompt for unit in dispatcher.phase_units)
+
+    async def test_a_phase_is_still_told_which_design_it_implements(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        _result, dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN))
+
+        prompt = dispatcher.phase_units[0].prompt
+        # Dropping the body must not drop the binding: a phase that cannot name
+        # the document it implements is the guessing this bundle exists to end.
+        assert DESIGN_URI in prompt
+        assert DESIGN_HASH in prompt
+        assert "read" in prompt.lower()
 
 
 class TestTheReadModelCanNameThePhases:
