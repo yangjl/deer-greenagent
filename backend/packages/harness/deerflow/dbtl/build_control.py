@@ -186,6 +186,11 @@ class BuildControlRequest:
     #: question — and so the durable record and the card in thread history name
     #: the same exchange.
     request_id: str = ""
+    #: The durable collaboration row this card was emitted from. The request id
+    #: recurs by design — the same pause re-derives it — so the row id is what
+    #: distinguishes *this emission* from the last one, and it is what an answer
+    #: must name to be recorded against the exchange it actually answers.
+    collaboration_id: str = ""
 
     def bound_to(self, request_id: str) -> BuildControlRequest:
         return replace(self, request_id=request_id)
@@ -217,6 +222,7 @@ class BuildControlRequest:
         return {
             "clarification_type": "dbtl_build_control",
             "request_id": self.request_id,
+            "collaboration_id": self.collaboration_id,
             "build_control_kind": self.kind.value,
             "dbtl_cycle_id": self.cycle_id,
             "cycle_revision": int(self.cycle_revision),
@@ -254,6 +260,7 @@ class BuildControlAnswer:
     #: The person's own words, verbatim. Never paraphrased into a decision.
     comment: str = ""
     request_id: str = ""
+    collaboration_id: str = ""
 
     @property
     def dispatches(self) -> bool:
@@ -272,6 +279,7 @@ class BuildControlAnswer:
             "step_run_id": self.step_run_id,
             "comment": self.comment,
             "request_id": self.request_id,
+            "collaboration_id": self.collaboration_id,
         }
 
 
@@ -331,6 +339,7 @@ def resolve_answer(request: Mapping[str, Any] | None, response: Mapping[str, Any
         step_run_id=str(request.get("step_run_id") or ""),
         comment=comment,
         request_id=str(request.get("request_id") or ""),
+        collaboration_id=str(request.get("collaboration_id") or ""),
     )
 
 

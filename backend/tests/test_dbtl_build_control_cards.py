@@ -248,3 +248,17 @@ class TestTheFenceReleasesOnceItHasSaidWhy:
         state = {"messages": [*_emitted(_card()), HumanMessage(content="go ahead")]}
 
         assert pending_build_control(state) is not None
+
+
+class TestTheFenceReleaseIsServerOwned:
+    def test_the_gateway_strips_a_client_supplied_release_marker(self) -> None:
+        """A caller that could assert it would release the fence permanently.
+
+        `build_control_refusal_recorded` compares by value across every message,
+        so this marker has to be stripped at the boundary the way its Start/Hold
+        sibling already is.
+        """
+        from app.gateway.services import _SERVER_OWNED_MESSAGE_METADATA_KEYS
+        from deerflow.agents.dbtl.supervisor_support.human_input_protocol import BUILD_CONTROL_REFUSED_KEY
+
+        assert BUILD_CONTROL_REFUSED_KEY in _SERVER_OWNED_MESSAGE_METADATA_KEYS

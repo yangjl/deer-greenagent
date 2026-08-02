@@ -3078,10 +3078,11 @@ class LiveStageAdapter:
                 # instruction is the failure this second exchange exists to avoid:
                 # the point of asking was to hear what *they* wanted changed.
                 **({"owner_requested_changes": adjustment} if adjustment else {}),
-                # The owner's answer to the question this planner asked last
-                # time. Without it the planner re-runs on byte-identical inputs
-                # and asks the same question again, forever.
-                **({"owner_answer_to_your_question": answer} if answer else {}),
+                # The exchange that followed the question this planner asked
+                # last time — its own sentence and the owner's, each labelled.
+                # Without it the planner re-runs on byte-identical inputs and
+                # asks the same question again, forever.
+                **({"previous_exchange_with_the_owner": answer} if answer else {}),
             },
             sort_keys=True,
             ensure_ascii=False,
@@ -3409,10 +3410,9 @@ class LiveStageAdapter:
             cycle=cycle,
         )
         if answer:
-            # The owner's answer to the question this summarizer asked last
-            # time, quoted rather than paraphrased: it is the one part of the
+            # Quoted rather than paraphrased: it is the one part of the
             # write-up nobody else may decide.
-            unit = replace(unit, prompt=f"{unit.prompt}\n\nThe project owner answered your question:\n{answer}")
+            unit = replace(unit, prompt=f"{unit.prompt}\n\n{answer}")
         try:
             dispatched = await dispatcher((unit,), budget=budget)
         except Exception:  # noqa: BLE001 - see the docstring
@@ -4210,7 +4210,17 @@ class LiveStageAdapter:
                     # record. Proceeding on an unrecorded one would replay the
                     # committed work the person asked to discard while telling
                     # them it had been discarded.
-                    return LiveStageResult(stage=stage, cycle_id=cycle_id, note=str(refusal))
+                    #
+                    # The control is re-presented with the refusal, because a
+                    # reply counts as answered the moment it resolves: without
+                    # this the routing fence has already stood down and "try
+                    # again" reaches ordinary chat instead of the control.
+                    return LiveStageResult(
+                        stage=stage,
+                        cycle_id=cycle_id,
+                        note=str(refusal),
+                        control_request=await control_gate.reopen_card(),
+                    )
                 if settled.action is BuildControlAction.START_MEETING:
                     # Advisory by construction: the meeting returns options and
                     # a recommendation, and the same question is put back with
@@ -4289,7 +4299,12 @@ class LiveStageAdapter:
                     # settled `needs_input` — terminal and never a success — so
                     # this run opens a fresh attempt at it, and the words have to
                     # reach that attempt or it asks the same question again.
-                    worker_answer = "\n\n".join(part for part in (str((answered_control or {}).get("question") or ""), settled.comment) if part)
+                    # Labelled, because the question is the *worker's* own
+                    # sentence: shipping the two as one string would attribute
+                    # it to the person, which is the one thing every other
+                    # verbatim-capture rule here exists to prevent.
+                    asked = str((answered_control or {}).get("question") or "")
+                    worker_answer = "\n\n".join(part for part in (f"You asked: {asked}" if asked else "", f"The project owner answered: {settled.comment}") if part)
                     worker_answer_step = settled.step_key
             build_recorder = await make_build_step_recorder(
                 self._repo,

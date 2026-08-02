@@ -234,3 +234,39 @@ class TestRestartAndReplanMoveTheDigestChain:
 
         assert before["load_design"] == after["load_design"]
         assert before["plan_build"] != after["plan_build"]
+
+
+class TestAnAnswerNamesTheEmissionItAnswers:
+    """The card id recurs by design, so the row id is what distinguishes them.
+
+    Without it a redelivered answer to an *earlier* emission settles whichever
+    control is open now — and for Replan and Restart that moves the digest chain
+    a second time, discarding committed phases nobody asked to discard again.
+    """
+
+    async def test_a_redelivered_answer_settles_its_own_row_and_not_the_new_one(self, repo: DbtlCycleRepository, stage_attempt_id: str) -> None:
+        first = await repo.open_build_collaboration(project_id="project-1", cycle_id="cycle-1", stage_attempt_id=stage_attempt_id, request=_failure_card("req-1", stage_attempt_id))
+        await repo.answer_build_collaboration(project_id="project-1", request_id="req-1", collaboration_id=first["id"], action="restart_build")
+        # The same pause recurs: same derived id, second row.
+        second = await repo.open_build_collaboration(project_id="project-1", cycle_id="cycle-1", stage_attempt_id=stage_attempt_id, request=_failure_card("req-1", stage_attempt_id))
+        assert second["id"] != first["id"]
+
+        replayed = await repo.answer_build_collaboration(project_id="project-1", request_id="req-1", collaboration_id=first["id"], action="restart_build")
+
+        assert replayed["id"] == first["id"]
+        assert await repo.build_control_epochs(project_id="project-1", stage_attempt_id=stage_attempt_id) == {"restart": 1, "replan": 1}
+        assert (await repo.latest_build_collaboration(project_id="project-1", stage_attempt_id=stage_attempt_id))["id"] == second["id"]
+
+    async def test_a_different_answer_to_a_settled_emission_still_conflicts(self, repo: DbtlCycleRepository, stage_attempt_id: str) -> None:
+        row = await repo.open_build_collaboration(project_id="project-1", cycle_id="cycle-1", stage_attempt_id=stage_attempt_id, request=_failure_card("req-1", stage_attempt_id))
+        await repo.answer_build_collaboration(project_id="project-1", request_id="req-1", collaboration_id=row["id"], action="restart_build")
+
+        with pytest.raises(DbtlCollaborationConflict):
+            await repo.answer_build_collaboration(project_id="project-1", request_id="req-1", collaboration_id=row["id"], action="replan_build")
+
+    async def test_an_answer_naming_no_emission_still_settles_the_open_control(self, repo: DbtlCycleRepository, stage_attempt_id: str) -> None:
+        await repo.open_build_collaboration(project_id="project-1", cycle_id="cycle-1", stage_attempt_id=stage_attempt_id, request=_card("req-1", stage_attempt_id))
+
+        answered = await repo.answer_build_collaboration(project_id="project-1", request_id="req-1", action="start_build")
+
+        assert answered["lifecycle"] == ANSWERED

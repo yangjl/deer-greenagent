@@ -204,6 +204,7 @@ class CollaborationOpsMixin:
         project_id: str,
         request_id: str,
         action: str,
+        collaboration_id: str | None = None,
         response_text: str = "",
         responder_user_id: str | None = None,
         client_submission_id: str | None = None,
@@ -225,6 +226,13 @@ class CollaborationOpsMixin:
         A caller that supplies no submission id is not asserting an identity, so
         idempotency falls back to the payload: the same action and the same
         words replay, anything else conflicts.
+
+        `collaboration_id` names the exact emission the card came from, and when
+        the caller supplies it that row is the one settled — never whichever is
+        open now. A redelivered answer to an *earlier* emission of the same
+        recurring pause would otherwise settle the current control, and for
+        Replan and Restart that moves the digest chain a second time, discarding
+        committed phases nobody asked to discard again.
         """
         verdict = BuildControlAction(action)
         async with self._sf() as session:
@@ -239,10 +247,13 @@ class CollaborationOpsMixin:
                     .with_for_update()
                 )
                 rows = list(found.scalars().all())
-                # The open control wins over a newer terminal one: a person is
-                # answering the question in front of them, and an already
-                # answered row is the record of a different exchange.
-                row = next((entry for entry in rows if entry.lifecycle == OPEN), rows[0] if rows else None)
+                if collaboration_id:
+                    row = next((entry for entry in rows if entry.id == collaboration_id), None)
+                else:
+                    # No emission named, so the open control wins over a newer
+                    # terminal one: a person is answering the question in front
+                    # of them, and an answered row records a different exchange.
+                    row = next((entry for entry in rows if entry.lifecycle == OPEN), rows[0] if rows else None)
                 if row is None:
                     raise LookupError(f"No Build control {request_id!r} in project {project_id!r}.")
 

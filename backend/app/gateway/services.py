@@ -31,7 +31,7 @@ from app.gateway.internal_auth import (
 )
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
-from deerflow.agents.dbtl.supervisor_support.human_input_protocol import STAGE_HANDOFF_REFUSED_KEY
+from deerflow.agents.dbtl.supervisor_support.human_input_protocol import BUILD_CONTROL_REFUSED_KEY, STAGE_HANDOFF_REFUSED_KEY
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
@@ -114,6 +114,12 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = frozenset(
         # Closes a stale Start/Hold control and releases its routing fence. Like
         # the receipt marker above, only the supervisor may assert it.
         STAGE_HANDOFF_REFUSED_KEY,
+        # The same marker for a paused Build's control, and it must be stripped
+        # for the same reason: the refusal check compares by value across every
+        # message, so a caller that could assert one would permanently release
+        # the fence and reach the lead agent with a governed control still
+        # unanswered — the exact escape the fence exists to close.
+        BUILD_CONTROL_REFUSED_KEY,
     }
 )
 

@@ -97,7 +97,7 @@ class BuildControlGate:
         if not self.available:
             return card
         try:
-            await self.repo.open_build_collaboration(  # type: ignore[union-attr]
+            recorded = await self.repo.open_build_collaboration(  # type: ignore[union-attr]
                 project_id=self.project_id,
                 cycle_id=self.cycle_id,
                 stage_attempt_id=self.stage_attempt_id,
@@ -107,6 +107,12 @@ class BuildControlGate:
             )
         except Exception:  # noqa: BLE001 - see the module docstring
             logger.warning("Could not record the Build control for stage attempt %s.", self.stage_attempt_id, exc_info=True)
+            return card
+        # The card names the row it came from. Without it a redelivered answer
+        # to an *earlier* emission would settle the control now open — and for
+        # Replan and Restart that moves the digest chain a second time, silently
+        # discarding committed phases nobody asked to discard again.
+        card["collaboration_id"] = str(recorded.get("id") or "")
         return card
 
     async def record_answer(
@@ -129,6 +135,7 @@ class BuildControlGate:
                 project_id=self.project_id,
                 request_id=answer.request_id,
                 action=answer.action.value,
+                collaboration_id=answer.collaboration_id or None,
                 response_text=answer.comment,
                 responder_user_id=self.responder_user_id or None,
                 resumed_step_run_id=resumed_step_run_id,
@@ -161,6 +168,42 @@ class BuildControlGate:
             logger.warning("Could not read Build controls for stage attempt %s.", self.stage_attempt_id, exc_info=True)
             return False
         return any(row.get("plan_digest") == plan_digest and row.get("lifecycle") == "answered" and str(row.get("action") or "") in _CONFIRMING for row in rows)
+
+    async def reopen_card(self) -> dict[str, Any] | None:
+        """Rebuild the card for the control still open on this Build, if any.
+
+        The refusal path needs it: a reply is marked answered the moment it
+        *resolves*, not when the durable write lands, so a failed Replan told
+        the person to try again while the routing fence had already stood down
+        and their next words reached ordinary chat. Re-presenting the same
+        control from its own durable row makes that instruction reachable.
+        """
+        row = await self.open_control()
+        if not isinstance(row, dict):
+            return None
+        return {
+            "clarification_type": "dbtl_build_control",
+            "request_id": str(row.get("request_id") or ""),
+            "collaboration_id": str(row.get("id") or ""),
+            "build_control_kind": str(row.get("kind") or ""),
+            "dbtl_cycle_id": str(row.get("cycle_id") or ""),
+            "cycle_revision": int(row.get("bound_cycle_revision") or 0),
+            "stage_attempt_id": str(row.get("stage_attempt_id") or ""),
+            "workflow_spec_key": str(row.get("workflow_spec_key") or ""),
+            "step_key": str(row.get("step_key") or ""),
+            "step_run_id": str(row.get("step_run_id") or ""),
+            "plan_digest": str(row.get("plan_digest") or ""),
+            "input_digest": str(row.get("input_digest") or ""),
+            "error_code": "",
+            "question": str(row.get("question") or ""),
+            "rationale": str(row.get("rationale") or ""),
+            "assumptions": [],
+            "open_questions": [],
+            "build_plan_rows": [],
+            "recommended_option_id": str(row.get("recommended_option_id") or ""),
+            "input_mode": str(row.get("response_format") or "single_choice"),
+            "options": list(row.get("options") or []),
+        }
 
     async def open_control(self) -> dict[str, Any] | None:
         """The control still waiting for an answer on this Build, if any."""

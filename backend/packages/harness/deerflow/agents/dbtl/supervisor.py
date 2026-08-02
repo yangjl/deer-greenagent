@@ -1282,7 +1282,13 @@ def build_supervisor_graph(
         decision = decide(state)
         if decision.branch is SupervisorBranch.ORDINARY and context.project_id and context.selected_cycle_id is None and _stage_control_intent(_latest_user_text(state)) is not None:
             return SupervisorBranch.CYCLE_CONTINUATION.value
-        if decision.branch is SupervisorBranch.CYCLE_CONTINUATION:
+        # An unanswered control outranks the parked-Design route below. Parking
+        # sends ordinary cycle work to the lead agent, which is right — but a
+        # waiting control is not ordinary cycle work, and the fence's whole
+        # premise is that no path to ORDINARY skips it.
+        scoped_cycle = context.selected_cycle_id or decision.cycle_id
+        waiting_control = bool(context.project_id and (_pending_stage_handoff_control(state, selected_cycle_id=scoped_cycle) is not None or _pending_build_control(state, selected_cycle_id=scoped_cycle) is not None))
+        if decision.branch is SupervisorBranch.CYCLE_CONTINUATION and not waiting_control:
             reader = getattr(stage_adapter, "parked_design_context", None)
             if callable(reader):
                 parked = reader(
@@ -1309,12 +1315,8 @@ def build_supervisor_graph(
         # good, go ahead", which names no stage, matches no intent phrase, and
         # would otherwise reach the lead agent — which cannot start a build and
         # is not even told one is waiting.
-        if decision.branch is SupervisorBranch.ORDINARY and context.project_id:
-            scoped_cycle = context.selected_cycle_id or decision.cycle_id
-            if _pending_stage_handoff_control(state, selected_cycle_id=scoped_cycle) is not None:
-                return SupervisorBranch.CYCLE_CONTINUATION.value
-            if _pending_build_control(state, selected_cycle_id=scoped_cycle) is not None:
-                return SupervisorBranch.CYCLE_CONTINUATION.value
+        if decision.branch is SupervisorBranch.ORDINARY and waiting_control:
+            return SupervisorBranch.CYCLE_CONTINUATION.value
         logger.debug(
             "dbtl supervisor route: branch=%s source=%s project=%s cycle=%s",
             decision.branch,

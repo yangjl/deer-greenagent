@@ -3321,26 +3321,33 @@ exactly one place and a second open request is a stale card competing with a
 live one. A superseded control is kept, because it is the record of what
 somebody was actually shown.
 
-**Idempotency is per open control, not per card id.** The id is derived so a
+**An answer names the emission it answers.** The card id is derived so a
 retried turn re-renders the same question — which means the same pause
 *recurring* mints the same id again, on a second row. Keying the answer on the
-id alone therefore made every later answer to a recurring pause collide with the
-first one on `uq_dbtl_build_collab_submission` and be swallowed by the fail-soft
-write: Retry then Replan wrote nothing, the epoch never moved, the committed
-plan replayed, and the person's words went nowhere — the exact no-op button the
-epochs exist to prevent, arriving through the write path. The gate supplies no
-submission id, the repository falls back to the row's own id, and idempotency
-falls back to the payload: the same action and the same words replay, anything
-else conflicts. `answer_build_collaboration` also prefers the **open** row over
-a newer terminal one, because a person is answering the question in front of
-them.
+id alone made every later answer to a recurring pause collide with the first on
+`uq_dbtl_build_collab_submission` and be swallowed by the fail-soft write: Retry
+then Replan wrote nothing, the epoch never moved, the committed plan replayed,
+and the person's words went nowhere — the exact no-op button the epochs exist to
+prevent, arriving through the write path. So a card carries the durable row it
+was emitted from (`collaboration_id`), the reply carries it back, and
+`answer_build_collaboration` settles *that* row. A redelivered answer to an
+earlier emission therefore replays against its own record instead of settling
+the control now open, which for Replan and Restart would move the digest chain a
+second time and discard committed phases nobody asked to discard again. An
+answer naming no emission still settles the open control, and a caller that
+supplies no submission id gets payload idempotency: the same action and the same
+words replay, anything else conflicts.
 
 **A chain-moving decision is never silently lost.** Fail-soft is right for
 `raise_control` (losing an audit row beats losing the ability to act) and wrong
 for Replan and Restart, where the durable row *is* the mechanism: a swallowed
 write there is a button that did nothing while reporting that it worked. Those
-two raise `BuildControlNotRecorded`, and the adapter turns it into a receipt
-that says so rather than proceeding on a decision nobody recorded.
+two raise `BuildControlNotRecorded`, and the adapter turns it into a receipt that
+says so **and re-presents the control** rather than proceeding on a decision
+nobody recorded. Re-presenting is not decoration: a reply counts as answered the
+moment it resolves, not when the write lands, so without it the routing fence
+has already stood down and the "try again" the message asks for reaches ordinary
+chat.
 
 **That table is also what makes Restart and Replan mean anything.**
 `build_control_epochs` counts answered restart/replan decisions, and
@@ -3374,7 +3381,12 @@ that cannot start a build. Fence and handler share one predicate
 then declines falls straight through to stage execution. A stale control is
 refused **once**, with the receipt recording which control it closes — repeating
 the refusal on every later message would make ordinary work unreachable for the
-life of the thread, which is worse than the escape. `build_dbtl_status_reminder`
+life of the thread, which is worse than the escape. That marker is server-owned
+and stripped from external run input beside `STAGE_HANDOFF_REFUSED_KEY`: the
+refusal check compares by value across every message, so a caller able to assert
+one would release the fence permanently. An unanswered control also outranks the
+parked-Design route, which otherwise sends cycle-scoped work to the lead agent —
+the fence's premise is that no path to ordinary work skips it. `build_dbtl_status_reminder`
 also names a paused Build in the lead agent's read-only snapshot: it cannot
 answer one, but a lead agent that does not know a build is paused will
 cheerfully offer to run one.

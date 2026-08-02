@@ -624,3 +624,8 @@ class TestAChainMovingDecisionIsNeverSilentlyLost:
 
         assert "could not be recorded" in result.note
         assert dispatcher.planner_units == [], "a build ran on a decision that was never recorded"
+        # The control comes back with the refusal. A reply counts as answered
+        # the moment it resolves, so without this the fence has already stood
+        # down and the "try again" the message asks for is unreachable.
+        assert result.control_request is not None
+        assert result.control_request["request_id"] == failed.control_request["request_id"]
