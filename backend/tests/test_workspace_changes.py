@@ -678,3 +678,106 @@ async def test_workspace_changes_route_forwards_include_files_flag():
     assert response["available"] is True
     assert response["files"] == []
     assert calls["event_types"] == ["workspace_changes"]
+
+
+class TestOverlappingRootsAreScannedOnce:
+    """A file has one canonical virtual path, so the most specific root owns it.
+
+    In a thread the three roots are siblings under `user-data/` and can never
+    overlap. In a *project* the workspace IS the project folder, so `outputs/`
+    sits inside it — and the scanner keys its result map by virtual path, so
+    one host file was recorded twice, once as
+    `/mnt/user-data/workspace/outputs/report.md` and once as
+    `/mnt/user-data/outputs/report.md`. The run summary then reported "Edited 2
+    files" for a single write, listing the same name twice.
+
+    Pruning is the fix rather than dropping the parent root: the project root
+    legitimately holds files of its own (a trial CSV, data notes), and those are
+    only reachable through the workspace root.
+    """
+
+    @staticmethod
+    def _project_roots(project_root: Path) -> list[WorkspaceRoot]:
+        return [
+            WorkspaceRoot(
+                name="workspace",
+                host_path=project_root,
+                virtual_prefix="/mnt/user-data/workspace",
+            ),
+            WorkspaceRoot(
+                name="outputs",
+                host_path=project_root / "outputs",
+                virtual_prefix="/mnt/user-data/outputs",
+            ),
+        ]
+
+    def test_a_nested_root_owns_its_files(self, tmp_path):
+        project_root = tmp_path / "G2F"
+        (project_root / "outputs").mkdir(parents=True)
+        (project_root / "outputs" / "report.md").write_text("# report")
+
+        snapshot = scan_workspace_roots(self._project_roots(project_root))
+
+        assert sorted(snapshot.files) == ["/mnt/user-data/outputs/report.md"]
+
+    def test_the_parent_root_still_reports_its_own_files(self, tmp_path):
+        """Pruning the nested subtree must not prune the root itself."""
+        project_root = tmp_path / "G2F"
+        (project_root / "outputs").mkdir(parents=True)
+        (project_root / "trial.csv").write_text("plot_id\n")
+        (project_root / "outputs" / "report.md").write_text("# report")
+
+        snapshot = scan_workspace_roots(self._project_roots(project_root))
+
+        assert sorted(snapshot.files) == [
+            "/mnt/user-data/outputs/report.md",
+            "/mnt/user-data/workspace/trial.csv",
+        ]
+
+    def test_a_deeper_file_under_the_nested_root_is_not_duplicated(self, tmp_path):
+        project_root = tmp_path / "G2F"
+        nested = project_root / "outputs" / "dbtl" / "cycle-1"
+        nested.mkdir(parents=True)
+        (nested / "package.md").write_text("# package")
+
+        snapshot = scan_workspace_roots(self._project_roots(project_root))
+
+        assert sorted(snapshot.files) == ["/mnt/user-data/outputs/dbtl/cycle-1/package.md"]
+
+    def test_sibling_roots_are_unaffected(self, tmp_path):
+        """The thread layout has no overlap and must scan exactly as before."""
+        base = tmp_path / "user-data"
+        (base / "workspace").mkdir(parents=True)
+        (base / "outputs").mkdir(parents=True)
+        (base / "workspace" / "notes.txt").write_text("notes")
+        (base / "outputs" / "report.md").write_text("# report")
+
+        snapshot = scan_workspace_roots(
+            [
+                WorkspaceRoot(
+                    name="workspace",
+                    host_path=base / "workspace",
+                    virtual_prefix="/mnt/user-data/workspace",
+                ),
+                WorkspaceRoot(
+                    name="outputs",
+                    host_path=base / "outputs",
+                    virtual_prefix="/mnt/user-data/outputs",
+                ),
+            ]
+        )
+
+        assert sorted(snapshot.files) == [
+            "/mnt/user-data/outputs/report.md",
+            "/mnt/user-data/workspace/notes.txt",
+        ]
+
+    def test_a_missing_nested_root_does_not_prune_a_real_directory(self, tmp_path):
+        """An outputs folder that does not exist yet must not hide anything."""
+        project_root = tmp_path / "G2F"
+        project_root.mkdir(parents=True)
+        (project_root / "trial.csv").write_text("plot_id\n")
+
+        snapshot = scan_workspace_roots(self._project_roots(project_root))
+
+        assert sorted(snapshot.files) == ["/mnt/user-data/workspace/trial.csv"]

@@ -95,6 +95,30 @@ def is_sensitive_workspace_path(path: str) -> bool:
     return False
 
 
+def _nested_root_paths(root: WorkspaceRoot, roots: list[WorkspaceRoot]) -> set[Path]:
+    """Resolved host paths of other roots that sit strictly inside *root*.
+
+    Compared after ``resolve()`` on both sides so a symlinked or
+    non-normalized configuration still matches; a root equal to this one is not
+    nested, or a root would prune itself.
+    """
+    try:
+        here = root.host_path.resolve()
+    except OSError:  # pragma: no cover - an unreadable root is skipped by the caller
+        return set()
+    nested: set[Path] = set()
+    for other in roots:
+        if other is root:
+            continue
+        try:
+            candidate = other.host_path.resolve()
+        except OSError:
+            continue
+        if candidate != here and here in candidate.parents:
+            nested.add(candidate)
+    return nested
+
+
 def scan_workspace_roots(
     roots: list[WorkspaceRoot],
     *,
@@ -115,8 +139,19 @@ def scan_workspace_roots(
         if not root.host_path.exists():
             continue
 
+        # A file has exactly one canonical virtual path, so where roots nest the
+        # most specific one owns it and the parent does not descend into it.
+        # Thread roots are siblings under `user-data/` and never overlap, but a
+        # project's workspace IS the project folder with `outputs/` inside it —
+        # and because results are keyed by virtual path, one host file was
+        # recorded twice (`/mnt/user-data/workspace/outputs/report.md` and
+        # `/mnt/user-data/outputs/report.md`), so a single write reported as two
+        # edited files. Pruning rather than dropping the parent root: the
+        # project folder holds files of its own that nothing else would reach.
+        nested_roots = _nested_root_paths(root, roots)
+
         for dirpath, dirnames, filenames in os.walk(root.host_path, followlinks=False):
-            dirnames[:] = [dirname for dirname in dirnames if dirname not in EXCLUDED_DIR_NAMES and not (Path(dirpath) / dirname).is_symlink()]
+            dirnames[:] = [dirname for dirname in dirnames if dirname not in EXCLUDED_DIR_NAMES and not (Path(dirpath) / dirname).is_symlink() and (Path(dirpath) / dirname).resolve() not in nested_roots]
             for filename in sorted(filenames):
                 if scanned >= resolved_limits.max_scanned_files:
                     truncated = True

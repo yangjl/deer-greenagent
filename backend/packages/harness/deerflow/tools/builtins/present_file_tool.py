@@ -63,8 +63,21 @@ def _normalize_presented_filepath(
     outputs_dir = Path(outputs_path).resolve()
     stripped = filepath.lstrip("/")
     virtual_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
+    outputs_prefix = OUTPUTS_VIRTUAL_PREFIX.lstrip("/")
 
-    if stripped == virtual_prefix or stripped.startswith(virtual_prefix + "/"):
+    if stripped == outputs_prefix or stripped.startswith(outputs_prefix + "/"):
+        # Resolve the outputs prefix against `outputs_path` itself rather than
+        # through `Paths`, which resolves `/mnt/user-data/...` under the
+        # thread's own internal directory and deliberately keeps no project
+        # layout. In a project conversation `outputs_path` is the project's
+        # human-visible `outputs/`, so the two disagreed and every present
+        # failed naming a path that was plainly inside the allowed directory.
+        # `outputs_path` is exactly the directory this tool may present from,
+        # which makes it the right anchor for both layouts; the containment
+        # check below still runs, so traversal out of it is refused.
+        relative = stripped[len(outputs_prefix) :].lstrip("/")
+        actual_path = (outputs_dir / relative).resolve() if relative else outputs_dir
+    elif stripped == virtual_prefix or stripped.startswith(virtual_prefix + "/"):
         try:
             actual_path = get_paths().resolve_virtual_path(thread_id, filepath, user_id=get_effective_user_id())
         except TypeError:

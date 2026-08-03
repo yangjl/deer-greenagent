@@ -14,6 +14,11 @@ import pytest
 from deerflow.config.paths import Paths
 from deerflow.sandbox.local.local_sandbox import PathMapping
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+from deerflow.sandbox.tools import (
+    _resolve_and_validate_user_data_path,
+    _thread_virtual_to_actual_mappings,
+    replace_virtual_path,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -121,6 +126,107 @@ class TestProjectScopedWorkspace:
         assert scoped is not None and unscoped is not None
         assert all(not (mapping.container_path == "/mnt/projects" and mapping.local_path == str(project_root.parent)) for mapping in scoped.path_mappings)
         assert any(mapping.container_path == "/mnt/projects" and mapping.local_path == str(project_root.parent) for mapping in unscoped.path_mappings)
+
+
+class TestFilesAtTheProjectRootAreReadable:
+    """`/mnt/user-data/<file>` must resolve for a file sitting at the project root.
+
+    The sandbox's own `PathMapping` table has always mapped the virtual root
+    onto the project folder, but the *tool* layer resolves virtual paths
+    through `replace_virtual_path`, which built its root mapping only when
+    workspace, uploads, and outputs shared a common parent. That holds for a
+    thread sandbox (all three sit under `user-data/`) and is false for a
+    project, where the workspace *is* the parent of the other two. So the root
+    mapping was silently absent, `/mnt/user-data/trial.csv` came back
+    unresolved, and the containment check then rejected the literal virtual
+    path as traversal.
+
+    This is the shape every DBTL stage worker is handed: `_project_manifest`
+    emits `/mnt/user-data/<relative>` for project files, so a design meeting
+    reported every read denied and returned no evidence at all.
+    """
+
+    def test_the_virtual_root_maps_onto_the_project_folder(self, project_root: Path):
+        thread_data = {
+            "workspace_path": str(project_root),
+            "uploads_path": str(project_root / "uploads"),
+            "outputs_path": str(project_root / "outputs"),
+        }
+
+        assert _thread_virtual_to_actual_mappings(thread_data)["/mnt/user-data"] == str(project_root)
+
+    def test_a_root_level_file_resolves_into_the_project(self, project_root: Path):
+        thread_data = {
+            "workspace_path": str(project_root),
+            "uploads_path": str(project_root / "uploads"),
+            "outputs_path": str(project_root / "outputs"),
+        }
+
+        resolved = replace_virtual_path("/mnt/user-data/trial_2025_yield.csv", thread_data)
+
+        assert resolved == str(project_root / "trial_2025_yield.csv")
+
+    def test_the_containment_check_accepts_it(self, project_root: Path):
+        """Resolution alone is not enough — the security gate must also pass."""
+        thread_data = {
+            "workspace_path": str(project_root),
+            "uploads_path": str(project_root / "uploads"),
+            "outputs_path": str(project_root / "outputs"),
+        }
+
+        _resolve_and_validate_user_data_path("/mnt/user-data/DATA_NOTES.md", thread_data)
+
+    def test_read_file_returns_the_bytes(self, project_root: Path):
+        """End to end through the sandbox, the way a stage worker reads."""
+        provider = LocalSandboxProvider()
+        sandbox_id = provider.acquire("thread-1", user_id="alice", project_id="project-abc", project_root=str(project_root))
+        sandbox = provider.get(sandbox_id)
+        assert sandbox is not None
+        (project_root / "trial_2025_yield.csv").write_text("plot_id,grain_yield_g\nP0001,148.2\n", encoding="utf-8")
+
+        thread_data = {
+            "workspace_path": str(project_root),
+            "uploads_path": str(project_root / "uploads"),
+            "outputs_path": str(project_root / "outputs"),
+        }
+        host_path = _resolve_and_validate_user_data_path("/mnt/user-data/trial_2025_yield.csv", thread_data)
+
+        assert "P0001" in sandbox.read_file(host_path)
+
+    def test_the_subfolders_still_resolve(self, project_root: Path):
+        """The explicit longer prefixes must keep winning over the new root."""
+        thread_data = {
+            "workspace_path": str(project_root),
+            "uploads_path": str(project_root / "uploads"),
+            "outputs_path": str(project_root / "outputs"),
+        }
+
+        assert replace_virtual_path("/mnt/user-data/uploads/a.csv", thread_data) == str(project_root / "uploads" / "a.csv")
+        assert replace_virtual_path("/mnt/user-data/outputs/b.md", thread_data) == str(project_root / "outputs" / "b.md")
+        assert replace_virtual_path("/mnt/user-data/workspace/c.txt", thread_data) == str(project_root / "c.txt")
+
+    def test_a_thread_sandbox_is_unchanged(self, isolated_paths: Paths):
+        """The common-parent case that already worked must keep working."""
+        base = Path(isolated_paths.base_dir) / "user-data"
+        thread_data = {
+            "workspace_path": str(base / "workspace"),
+            "uploads_path": str(base / "uploads"),
+            "outputs_path": str(base / "outputs"),
+        }
+
+        assert _thread_virtual_to_actual_mappings(thread_data)["/mnt/user-data"] == str(base)
+        assert replace_virtual_path("/mnt/user-data/x.csv", thread_data) == str(base / "x.csv")
+
+    def test_an_unrelated_host_path_is_still_refused(self, project_root: Path):
+        """Widening the mapping must not widen the containment check."""
+        thread_data = {
+            "workspace_path": str(project_root),
+            "uploads_path": str(project_root / "uploads"),
+            "outputs_path": str(project_root / "outputs"),
+        }
+
+        with pytest.raises(PermissionError):
+            _resolve_and_validate_user_data_path("/mnt/user-data/../../etc/passwd", thread_data)
 
 
 class TestAsyncAcquire:

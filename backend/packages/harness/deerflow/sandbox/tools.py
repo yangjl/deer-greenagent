@@ -736,12 +736,31 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
     if outputs:
         mappings[f"{VIRTUAL_PATH_PREFIX}/outputs"] = outputs
 
-    # Also map the virtual root when all known dirs share the same parent.
+    # Also map the virtual root. Two layouts produce one, and both must be
+    # recognized here or the root mapping is silently absent:
+    #
+    #   thread  — workspace/, uploads/, and outputs/ are siblings under one
+    #             parent (``user-data/``), which is what the root aliases.
+    #   project — the project folder IS the workspace, with uploads/ and
+    #             outputs/ as its own subfolders. ``/mnt/user-data`` and
+    #             ``/mnt/user-data/workspace`` therefore both alias the
+    #             project root, matching the sandbox's own PathMapping table.
+    #
+    # Only the sibling case was handled before, so a project file sitting at
+    # the root (``/mnt/user-data/trial.csv``) resolved to nothing and the
+    # containment check then rejected the unresolved virtual path as
+    # traversal — the shape every DBTL stage worker is handed by the project
+    # manifest.
     actual_dirs = [Path(p) for p in (workspace, uploads, outputs) if p]
     if actual_dirs:
         common_parent = str(Path(actual_dirs[0]).parent)
         if all(str(path.parent) == common_parent for path in actual_dirs):
             mappings[VIRTUAL_PATH_PREFIX] = common_parent
+        elif workspace:
+            workspace_dir = Path(workspace)
+            subfolders = [Path(p) for p in (uploads, outputs) if p]
+            if subfolders and all(path.parent == workspace_dir for path in subfolders):
+                mappings[VIRTUAL_PATH_PREFIX] = workspace
 
     return mappings
 

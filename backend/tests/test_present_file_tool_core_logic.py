@@ -95,3 +95,71 @@ def test_present_files_rejects_paths_outside_outputs(tmp_path):
 
     assert "artifacts" not in result.update
     assert result.update["messages"][0].content == f"Error: Only files in /mnt/user-data/outputs can be presented: {leaked_path}"
+
+
+def test_present_files_resolves_a_project_conversation_outputs_path(tmp_path):
+    """A project's outputs folder is not the thread's internal one.
+
+    `Paths.resolve_virtual_path` resolves `/mnt/user-data/...` against the
+    thread's own `.deer-flow/users/<u>/threads/<t>/user-data` directory and
+    knows nothing about projects — `Paths` deliberately keeps no project
+    layout. But in a project conversation `thread_data["outputs_path"]` is the
+    project's human-visible `outputs/`, so the resolved path and the
+    containment root pointed at different places and every present failed with
+    "Only files in /mnt/user-data/outputs can be presented" naming a path that
+    was plainly inside it.
+
+    Resolving the outputs prefix against `outputs_path` itself is correct for
+    both layouts, because that value is exactly the directory this tool is
+    allowed to present from.
+    """
+    project_root = tmp_path / "Documents" / "projects" / "G2F"
+    outputs_dir = project_root / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (outputs_dir / "design_package.md").write_text("# design")
+
+    result = present_file_tool_module.present_file_tool.func(
+        runtime=_make_runtime(str(outputs_dir)),
+        filepaths=["/mnt/user-data/outputs/design_package.md"],
+        tool_call_id="tc-project",
+    )
+
+    assert result.update["artifacts"] == ["/mnt/user-data/outputs/design_package.md"]
+    assert result.update["messages"][0].content == "Successfully presented files"
+
+
+def test_present_files_still_rejects_a_project_workspace_path(tmp_path):
+    """Widening resolution must not widen what may be presented.
+
+    In a project the workspace IS the project root, so `outputs/` sits inside
+    it. A file at the root must still be refused — otherwise the one directory
+    boundary this tool enforces would disappear exactly where the folders
+    overlap.
+    """
+    project_root = tmp_path / "Documents" / "projects" / "G2F"
+    outputs_dir = project_root / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (project_root / "trial.csv").write_text("plot_id\n")
+
+    result = present_file_tool_module.present_file_tool.func(
+        runtime=_make_runtime(str(outputs_dir)),
+        filepaths=["/mnt/user-data/trial.csv"],
+        tool_call_id="tc-refuse",
+    )
+
+    assert "can be presented" in result.update["messages"][0].content
+
+
+def test_present_files_refuses_traversal_out_of_project_outputs(tmp_path):
+    project_root = tmp_path / "Documents" / "projects" / "G2F"
+    outputs_dir = project_root / "outputs"
+    outputs_dir.mkdir(parents=True)
+    (project_root / "secret.txt").write_text("no")
+
+    result = present_file_tool_module.present_file_tool.func(
+        runtime=_make_runtime(str(outputs_dir)),
+        filepaths=["/mnt/user-data/outputs/../secret.txt"],
+        tool_call_id="tc-traversal",
+    )
+
+    assert "can be presented" in result.update["messages"][0].content
