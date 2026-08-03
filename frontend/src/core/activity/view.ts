@@ -29,7 +29,7 @@ export interface ActivityView {
   chain: readonly ActivityRow[];
   /** Other active leaves, so the block can say "Also running: …". */
   siblings: readonly ActivityRow[];
-  stepCount: number;
+  runCount: number;
 }
 
 const EMPTY_VIEW: ActivityView = {
@@ -37,7 +37,7 @@ const EMPTY_VIEW: ActivityView = {
   leaf: undefined,
   chain: [],
   siblings: [],
-  stepCount: 0,
+  runCount: 0,
 };
 
 const cache = new WeakMap<ActivityProjection, ActivityView>();
@@ -59,7 +59,8 @@ export function activityView(
   if (cached) return cached;
 
   const leaves = [...activeLeaves(projection)].sort((a, b) => b.seq - a.seq);
-  const stepCount = projection.timeline.length;
+  const runCount = new Set(projection.timeline.map((entry) => entry.runId))
+    .size;
 
   let view: ActivityView;
   if (leaves.length > 0) {
@@ -71,9 +72,9 @@ export function activityView(
       leaf,
       chain: dispatcherChain(projection, leaf),
       siblings,
-      stepCount,
+      runCount,
     };
-  } else if (stepCount > 0) {
+  } else if (runCount > 0) {
     // Hold the terminal actor until the next run starts, so a reader who looks
     // up a moment late still learns how the work ended.
     const settled = projection.order
@@ -86,7 +87,7 @@ export function activityView(
       leaf: settled[0],
       chain: settled[0] ? dispatcherChain(projection, settled[0]) : [],
       siblings: [],
-      stepCount,
+      runCount,
     };
   } else {
     view = EMPTY_VIEW;

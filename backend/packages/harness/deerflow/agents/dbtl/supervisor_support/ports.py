@@ -34,6 +34,8 @@ class StageExecutionPort(Protocol):
 
     async def active_cycle_status(self, *, project_id: str) -> Sequence[Mapping[str, Any]]: ...
 
+    async def recover_paused_build_control(self, **kwargs: Any) -> Mapping[str, Any] | None: ...
+
     async def preview_council(
         self,
         *,
@@ -133,6 +135,9 @@ class CompatibleStagePort:
 
     async def active_cycle_status(self, **kwargs: Any) -> Any:
         return await self._optional("active_cycle_status", **kwargs)
+
+    async def recover_paused_build_control(self, **kwargs: Any) -> Any:
+        return await self._optional("recover_paused_build_control", **kwargs)
 
     async def preview_council(self, **kwargs: Any) -> CouncilPlan | None:
         return await self._optional("preview_council", **kwargs)

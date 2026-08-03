@@ -24,7 +24,7 @@ DingTalk) bridge into the same agent through the Gateway.
 
 A single `make dev` / Docker stack runs four cooperating services:
 
-| Service         | Port   | Role                                                                 |
+| Service         | Port   | Role                                                                |
 | --------------- | ------ | ------------------------------------------------------------------- |
 | **Nginx**       | `2026` | Unified reverse-proxy entry point — open this in the browser        |
 | **Gateway API** | `8001` | FastAPI REST API + embedded LangGraph-compatible agent runtime      |
@@ -75,6 +75,7 @@ Gateway API. Config schema and resolution order are documented in
 [backend/AGENTS.md](backend/AGENTS.md).
 
 Skill quality review note:
+
 - `skills/public/skill-reviewer/` is the built-in read-only skill quality reviewer.
   It uses the harness-layer `review_skill_package` tool and contracts in
   `contracts/skill_review/`. Model-visible review data is compact and
@@ -83,10 +84,12 @@ Skill quality review note:
   `skill-creator` ownership boundaries.
 
 Scheduled-task note:
+
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
 - Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. The key is honored only for internally-authenticated callers (the scheduler launch path); client-supplied `context.non_interactive` is dropped.
 
 Breeding-workspace note:
+
 - **The project owns the data, in a human-visible folder.** A project's
   workspace is a real directory under `config.yaml -> projects.root` (e.g.
   `~/Documents/projects/G2F`) that the human can browse in Finder; the sandbox
@@ -146,7 +149,7 @@ Breeding-workspace note:
   for one project request, preserving normal checkpoint access and safe
   rollback. It routes one request to one of four terminal branches — ordinary
   work, clarification, cycle setup/confirmation, existing-cycle continuation —
-  and the ordinary branch *is* the existing lead agent. Stage execution remains
+  and the ordinary branch _is_ the existing lead agent. Stage execution remains
   behind a stub that structurally cannot write results or satisfy gates. A
   per-request DBTL scope selector sits **in the composer's tool row**, beside
   attachments and voice: it is a quiet flask icon for ordinary work and gains a
@@ -179,7 +182,7 @@ Breeding-workspace note:
   Readiness and Reconciliation is a real gate: every declared input is pinned
   by content hash, raw data must be declared immutable, and Build stays locked
   until every required matrix row is settled. An agent may propose a
-  resolution but may never close a *judgement* row (contradictory sources,
+  resolution but may never close a _judgement_ row (contradictory sources,
   trait direction, exclusions, leakage, train/test separation) — that stays a
   person's decision, enforced at the write boundary. An approval binds the
   dataset fingerprint, stage-spec version, and policy version it was granted
@@ -226,11 +229,12 @@ Breeding-workspace note:
   `ask_clarification` human-input card and resumes in the same selected cycle.
   A completed synthesis is emitted through the existing `present_files`
   message shape and thread artifact inspector; it only creates review evidence
-  and never submits or approves the human gate. The in-chat council view reports
-  validated seat progress and counted consensus, while the Design review sheet
-  renders a structured decision map from the package referenced by the bound
-  Markdown. Automatic kickoff plumbing is hidden from the user-authored
-  transcript. The
+  and never submits or approves the human gate. Chat renders one durable,
+  run-scoped meeting footprint followed by the round's assistant conclusion or
+  `present_files` output, keeping the Design slide deck below the meeting. The
+  Design review sheet renders a structured decision map from the package
+  referenced by the bound Markdown. Automatic kickoff plumbing is hidden from
+  the user-authored transcript. The
   presentation icon beside Cycles opens a client-only Phase 7 three-case demo
   and never mutates durable records.
 - A registered Design feedback deck is the normal post-meeting input surface.
@@ -245,14 +249,15 @@ Breeding-workspace note:
   lock ordinary chat. Request changes starts a focused refinement in the
   originating conversation. The parent follows a chair-resume run through the
   authenticated surface read model: a successor deck refreshes durable thread
-  history, while a terminal run with no successor marks the same payload-bound
-  action failed and re-enables its preserved choice/comment. Because recording
-  the failed worker advances `db_revision`, that exact failed action may rebind
-  only its optimistic revision under the same client submission id; changing
-  the answer, deck, evidence, or id still conflicts. On reload or such a
-  conflict, the authenticated parent restores the original selected
-  option/comment from the failed action before re-enabling the deck, so the
-  person is not trapped with a non-retryable draft.
+  history, while a terminal run with no successor marks the same action failed,
+  reports the latest chair-worker rejection detail, and re-enables its
+  choice/comment as an editable draft. Because recording the failed worker
+  advances `db_revision`, the retry rebinds the optimistic revision under the
+  same client submission id and deck; the failed payload remains in bounded
+  attempt history, while the replacement answer may differ. Successful answers
+  and review/handoff actions remain immutable. On reload, the authenticated
+  parent restores the last failed answer as the starting draft without forcing
+  the person to replay it byte-for-byte.
   An approval that opens another stage also starts a short hidden supervisor
   run in the originating conversation. That run emits a deterministic,
   checkpointed Human Input Card with **Start &lt;next stage&gt;** and **Hold here**;
@@ -275,7 +280,7 @@ Breeding-workspace note:
   refresh, and the owner's next words, "go ahead with build", reached ordinary
   chat. Four layers each failed independently.
   **Rendering**: the card carries `design_feedback_surface_id`, and the web UI
-  returned `null` for *any* request carrying that field — a rule written for the
+  returned `null` for _any_ request carrying that field — a rule written for the
   Design decision card, where the deck genuinely is the input surface. On a
   handoff the surface id is only an audit binding (which approval opened this
   stage) and the deck holds no control that could answer it, so the card
@@ -287,7 +292,7 @@ Breeding-workspace note:
   input message, which requires an id nothing mints, so graph-authored cards
   were silently never reconciled; the worker now hands the journal the
   thread's pre-run messages as the boundary (an empty set for a thread's first
-  run, which is a *known* boundary — only a failed snapshot stays unknown),
+  run, which is a _known_ boundary — only a failed snapshot stays unknown),
   deck-started runs stamp an explicit input id as well, and a deterministic
   supervisor reply marked `deerflow_graph_receipt` (server-owned, stripped from
   client input) is reconciled too — otherwise "Holding here" is spoken into a
@@ -299,13 +304,13 @@ Breeding-workspace note:
   retry loop covers it; swallowing it ended the watch and reported delivered
   exactly when a struggling store was the likely reason the card was missing.
   **Routing**: while a Start/Hold card the server emitted is still unanswered,
-  a request that would otherwise become ordinary work is answering *that card*
+  a request that would otherwise become ordinary work is answering _that card_
   — the supervisor re-presents it and dispatches nothing. Every earlier guard
-  missed this because each fires only on a card *answer* or an explicitly
+  missed this because each fires only on a card _answer_ or an explicitly
   scoped request.
   `pending_stage_handoff_control` is the single predicate the route fence and
   the handler share, because a fence that intercepts a request the handler then
-  declines would fall through to stage execution. Three things make a card *not*
+  declines would fall through to stage execution. Three things make a card _not_
   pending: it was answered (**Hold** is a decision, and re-presenting it would
   argue with the person who made it); its refusal was already recorded, so a
   stale card states its reason once and hands the conversation back rather than
@@ -320,7 +325,7 @@ artifact` is server-owned in full and is now stripped from external run input:
   `convert_to_messages` will build a `ToolMessage` with any caller-supplied
   artifact, and the supervisor resolves replies against the card it finds
   there — so an unstripped artifact let a client place a fabricated control in
-  a thread, hijack its routing, and (by forging an *answered* card) suppress
+  a thread, hijack its routing, and (by forging an _answered_ card) suppress
   the fence while a real one waited. No legitimate client sends one; the
   composer and every IM channel send human messages only. `cycle_revision` is
   validated where the card is read rather than coerced where the marker is
@@ -345,12 +350,12 @@ artifact` is server-owned in full and is now stripped from external run input:
   the council vocabulary so the protocol and history stay stable.
 - **An unscoped request in the conversation that opened a cycle can still
   reach it.** The composer's cycle scope is next-request-only by design, so the
-  *second* consecutive cycle request arrives unscoped and the routing ladder had
+  _second_ consecutive cycle request arrives unscoped and the routing ladder had
   nothing to continue: it fell through to the classifier, which read "run the
   meeting again" as ordinary chat. The lead agent then read the trial data
   itself, wrote a file named like a design package into `outputs/`, and answered
   — no meeting, no worker rows, no artifact, and a Design stage that looked
-  answered while its gate had not moved. Nothing was *recorded*, but the person
+  answered while its gate had not moved. Nothing was _recorded_, but the person
   received a stage deliverable from the one actor that must never produce one.
   A conversation's own live cycle is now recovered server-side from
   `dbtl_cycles.originating_thread_id` when the request deterministically names
@@ -360,7 +365,7 @@ artifact` is server-owned in full and is now stripped from external run input:
   [backend/AGENTS.md](backend/AGENTS.md) for the rung and its failure mode.
 - **A meeting is convened when a person asks for one, and only then.** Three
   rules in `deerflow.agents.dbtl.stage_execution` replace the old "any Design
-  request runs the whole council". (1) *Hold*: a Design stage stays
+  request runs the whole council". (1) _Hold_: a Design stage stays
   `in_progress` until someone submits it for review, so a package already on
   the table and no `changes_requested` review means the next cycle-scoped
   request convenes nobody and points at the review sheet instead;
@@ -372,15 +377,15 @@ artifact` is server-owned in full and is now stripped from external run input:
   stay verbatim in the record while interpretation absorbs typos and
   paraphrases; only an explicit CONVENE verdict convenes, and an absent model,
   provider failure, or ambiguous reply holds. A `changes_requested` review
-  still re-opens the debate without being asked, because that verdict *is* the
+  still re-opens the debate without being asked, because that verdict _is_ the
   request to argue again.
-  (2) *Resume*: answering the chair's `needs_input` question dispatches the
+  (2) _Resume_: answering the chair's `needs_input` question dispatches the
   chair alone (`_resumed_chair_unit`) over the positions already recorded, with
   the question and the owner's words carried verbatim — re-running the full
   council spent a second meeting's budget re-arguing what nobody questioned and
   read to the owner as being ignored. The supervisor passes the answer as an
   explicit `clarification_answer`, since the answer and an ordinary request are
-  the same string. (3) *Model*: `dbtl.council_model_name` sets the default model
+  the same string. (3) _Model_: `dbtl.council_model_name` sets the default model
   for seats that do not name one; inheriting the composer's meant a meeting
   convened from an expensive chat quietly ran four workers on that model. An
   unconfigured name warns and falls back rather than failing the meeting.
@@ -396,7 +401,7 @@ artifact` is server-owned in full and is now stripped from external run input:
   is right for every turn belonging to the meeting it opened. A deliberate
   re-run arrives with that guard already tripped, so a second council's budget
   was spent with nobody asked; and because the readers for depth, roster, and
-  participant dials are all scoped to the turn that *answers* a card, a re-run
+  participant dials are all scoped to the turn that _answers_ a card, a re-run
   answered nothing and the server re-derived all three. Asking again in the
   same words therefore produced a different number of participants, on
   different agents, on different models, with the owner's per-seat instructions
@@ -412,11 +417,12 @@ artifact` is server-owned in full and is now stripped from external run input:
   `deerflow.dbtl.council_deck` renders a trustworthy completed chair result or
   an uncapped `needs_input` result as one self-contained HTML deck (inline
   CSS/JS, no network, print-friendly) written beside the review package as
-  `design-slides-rev<N>-<hash>.html`. Slide order is agreements → contested →
-  needs-your-decision → synthesis, the same "disagreement before synthesis"
-  rule the review Markdown follows. It is a **renderer, not a worker**: it has
+  `design-slides-rev<N>-<hash>.html`. Slide order is background → objectives →
+  agreements → contested → needs-your-decision → conclusions → limitations →
+  next → the human gate, preserving the "disagreement before synthesis" rule
+  the review Markdown follows. It is a **renderer, not a worker**: it has
   no sentence of its own, so it cannot smooth a contested point away. It is
-  deliberately not registered as a durable artifact and is presented *after*
+  deliberately not registered as a durable artifact and is presented _after_
   the review Markdown in `present_files`, because an approval must bind to the
   reviewed document and a deck listed first is the one a reader reviews. A
   paused meeting gets a deck too, shown ahead of the `ask_clarification` card:
@@ -428,6 +434,33 @@ artifact` is server-owned in full and is now stripped from external run input:
   red-team report. Light may retain completed-but-capped reports as an
   explicitly limited pilot, but provider failures and contract rejections are
   not debate input and cannot be converted into a conclusion.
+- **The deck is paced for a reader, and the gate is the last thing they reach.**
+  Background and Objectives are quoted verbatim from the cycle's own
+  `research_question`, `objective`, and `success_criteria` — the renderer still
+  authors nothing, and a cycle with none recorded simply omits those slides
+  rather than showing an empty one. Every section runs onto **as many screens
+  as it needs** (`BULLETS_PER_SLIDE`, `CARDS_PER_SLIDE`,
+  `PARAGRAPHS_PER_SLIDE`, bounded by `MAX_SLIDES_PER_SECTION`), with
+  continuation slides marked `cont.`; a section collects up to
+  `MAX_SECTION_ITEMS` before that bound bites, deliberately above the display
+  size, because collecting only what fits makes the overflow count zero and the
+  deck could never say it was holding something back. Consensus sections are
+  already capped upstream at `MAX_CONSENSUS_ITEMS`, so the deck is never what
+  drops an agreement. The human gate moves to the **end**, after everything it
+  is a verdict on; the sentence that the deck approves nothing merely by being
+  opened moves with it onto the last content slide, since losing it would let a
+  reader infer that reaching the end is itself an approval.
+  Each content slide carries its own **note box**, shipped `disabled` like every
+  other control and enabled individually by the authenticated parent — an
+  enabled `fieldset` does not clear a control's own `disabled`. Notes are
+  drafts, not a second record: `withNotes` folds them, each labelled by
+  `data-note-label`, into the comment of whatever decision is actually taken,
+  so a note can never be stored as a verdict nobody gave and the record keeps
+  one comment. Validation runs against that folded text, because a reviewer who
+  wrote their reasons on the slide the reasons are about has written them down.
+  A restored comment (a retry after a failed submission) **clears** the boxes,
+  since it already contains them and re-folding would duplicate the note.
+  The gate slide has no box of its own — it owns the comment they fold into.
 - **A paused chair may offer a structured choice, and the deck renders it.**
   `deerflow.dbtl.decision_request` adds an optional `decision_request` beside
   `clarification_question`: two to five options, each with a stable slug id, a
@@ -550,11 +583,11 @@ artifact` is server-owned in full and is now stripped from external run input:
   raises a free-text `council_adjustment` card, carries the reviewer's words
   **verbatim** into `build_proposal_prompt`, redraws the roster, and shows it
   again before anyone runs. It is deliberately not a `CouncilDepth` — a value in
-  that enum is something the council can be *run at*. The note is read back from
+  that enum is something the council can be _run at_. The note is read back from
   the emitted card at dispatch (`_council_adjustment`), scanning back rather than
   reading only the newest message, because by then the depth answer is the newest
   thing said and the roster that runs must be the one that was approved.
-  Being *registered* is not the same as being able to debate: `bash` is a real
+  Being _registered_ is not the same as being able to debate: `bash` is a real
   subagent, so the fail-closed agent check accepted it and a live council seated
   it as an independent position, where it spent its whole budget running commands
   and returned no argument. `NON_DELIBERATIVE_AGENTS` keeps built-in execution
@@ -566,7 +599,7 @@ artifact` is server-owned in full and is now stripped from external run input:
   `config.example.yaml` ships a worked `experimental-design` specialist.
   The roster itself is **proposed for the question, then validated**.
   `deerflow.dbtl.council_proposal` parses a one-shot `nostream` reply into seats
-  that carry a *focus* and a *brief* — what each seat argues from — which is
+  that carry a _focus_ and a _brief_ — what each seat argues from — which is
   what makes three seats disagree even when all three resolve to
   `general-purpose`, the case every deployment without registered specialists
   lands in. Parsing is fail-closed **per seat**: an unregistered agent, an
@@ -577,7 +610,7 @@ artifact` is server-owned in full and is now stripped from external run input:
   the same thing read as corroboration rather than repetition), and positions are
   capped by the chosen **depth**, not by how many seats capability selection
   happened to fill — inheriting selection's limit would cap a heavy council at
-  one position in exactly the deployment this exists for. A proposal *replaces*
+  one position in exactly the deployment this exists for. A proposal _replaces_
   selection's units rather than sitting beside them, so the package cannot
   describe a council that did not run; the refusals ride in `selection.notes`,
   since a seat that was asked for and refused is otherwise indistinguishable
@@ -587,7 +620,7 @@ artifact` is server-owned in full and is now stripped from external run input:
   gained `model`, so a seat may name its own; before this every seat ran on
   whatever the composer was set to.
   The chair reports a **structured consensus** beside its prose
-  (`deerflow.dbtl.consensus`): agreements, disagreements that keep *both*
+  (`deerflow.dbtl.consensus`): agreements, disagreements that keep _both_
   positions and how each was settled, and the questions only the project owner
   can answer. The chair is told not to average incompatible positions, and prose
   is exactly where a reviewer cannot check that — a real convergence and a
@@ -641,7 +674,7 @@ artifact` is server-owned in full and is now stripped from external run input:
   **Build, Test, and Learn receive the approved design.** `_approved_design_brief`
   puts the human-approved Design package into `stage_context` with its content
   hash, since the approval bound a specific document and a stage naming only the
-  path could silently work from a later revision. Only an *approved* design
+  path could silently work from a later revision. Only an _approved_ design
   travels; its absence is meaningful (work happening before the gate, not merely
   without context), and the read never raises because it runs on every
   Build/Test/Learn request.
@@ -649,13 +682,14 @@ artifact` is server-owned in full and is now stripped from external run input:
   run request carries `context` at the top level, but LangGraph relocates it to
   `configurable["context"]` before a node sees it, so code running on both sides
   must look in both places or silently read nothing on one of them.
+
 - **Test can be a required gate or a decision the reviewer takes.**
   `dbtl.conditional_test` (default **false**) keeps today's rule: an approved
   Build always opens Test, and Learn waits for a human-owned validity
   assessment. Turn it on and an approved Build offers a second route —
-  *Learn from this exploration* — which records Test as explicitly **skipped**
+  _Learn from this exploration_ — which records Test as explicitly **skipped**
   and opens Learn directly. The switch exists because one predictive check
-  pack is pinned to the Test *stage* rather than to the claim a Build made, so
+  pack is pinned to the Test _stage_ rather than to the claim a Build made, so
   the ordinary deliverable here — a population-structure PCA, a QC
   distribution, a trait correlation plot — has no folds, no holdout, and no
   predictive ceiling, scores four of seven required checks as not-applicable,
@@ -685,7 +719,7 @@ artifact` is server-owned in full and is now stripped from external run input:
   `dbtl.reconciliation_required` (default **true**) keeps today's rule: an
   approved Design opens Reconciliation, and Build waits for a settled matrix.
   Set it false and an approved Design opens Build directly, while the stage,
-  its endpoints, and its matrix stay available — it is *skipped*, never
+  its endpoints, and its matrix stay available — it is _skipped_, never
   deleted, and a cycle already working the matrix stays advanceable in either
   direction so flipping the switch cannot strand one. The rule lives in
   `deerflow.dbtl.reconciliation_policy`, read by the state machine, the route
@@ -729,7 +763,7 @@ artifact` is server-owned in full and is now stripped from external run input:
   argument rather than naming Reconciliation unconditionally.
 - **A cycle awaiting changes does not argue with every message.** The hold
   rule used to skip `changes_requested` entirely, on the grounds that the
-  verdict *is* the request to argue again — true of the verdict, false of
+  verdict _is_ the request to argue again — true of the verdict, false of
   every message after it, so a cycle in that status convened a meeting for
   the word "hello". `_unreviewed_design_package` now holds for that status
   too, and the review endpoint's own refinement kickoff is recognised
@@ -773,13 +807,13 @@ artifact` is server-owned in full and is now stripped from external run input:
   preselected including the recommendation, and Hold is a decision rather than
   the absence of one. The exchange is durable: one control may be open per
   Build, a response is idempotent by request plus submission id, and a
-  *different* answer under that id conflicts instead of overwriting the one
+  _different_ answer under that id conflicts instead of overwriting the one
   already recorded. Those records are also what make Restart and Replan mean
   anything — both move the digest chain, so a restart discards the committed
   work it exists to discard rather than replaying it. "Change the plan" is a
   second exchange whose words travel verbatim into the replan. Answers resolve
   against the card the server emitted, and while a control is unanswered a
-  request that would otherwise be ordinary work is answering *that control*.
+  request that would otherwise be ordinary work is answering _that control_.
   A **Build work meeting** (`dbtl.build_work_meetings`) is the escalation for a
   question one exchange cannot settle: three seats, convened only when a person
   chooses it, advisory to the end — it returns options and a recommendation, and
@@ -937,7 +971,7 @@ derived on a surface: a boolean column could disagree with the evidence a
 reviewer opens. Scoping to the attempt is load-bearing, since a revised attempt
 receives a new assessment and must not inherit the previous attempt's meeting.
 Before this, `meeting_completed` was a parameter nothing passed as true, so a
-*required* meeting could never be satisfied.
+_required_ meeting could never be satisfied.
 
 **A deck-started round that dies mid-flight says so in chat.** A revision
 round ("Request changes") and a convened review meeting both run in the

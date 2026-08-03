@@ -112,6 +112,7 @@ def test_profile_is_isolated_and_disables_background_writers(tmp_path: Path) -> 
     assert generated["projects"]["root"] == str((manual_root / "live" / "projects").resolve())
     assert generated["dbtl"]["mode"] == "graph_enabled"
     assert generated["dbtl"]["design_deck_feedback"] is True
+    assert generated["sandbox"]["allow_host_bash"] is True
     assert generated["memory"]["enabled"] is False
     assert generated["memory"]["injection_enabled"] is False
     assert generated["scheduler"]["enabled"] is False
@@ -131,6 +132,7 @@ def test_existing_manual_profile_is_upgraded_to_persistent_history_without_force
     profile = dbtl_manual.initialize_profile(source_config=source, manual_root=manual_root)
     generated = yaml.safe_load(profile.read_text(encoding="utf-8"))
     generated["run_events"] = {"backend": "memory", "track_token_usage": True}
+    generated["sandbox"]["allow_host_bash"] = False
     profile.write_text(yaml.safe_dump(generated), encoding="utf-8")
 
     same_profile = dbtl_manual.initialize_profile(source_config=source, manual_root=manual_root)
@@ -138,6 +140,7 @@ def test_existing_manual_profile_is_upgraded_to_persistent_history_without_force
     upgraded = yaml.safe_load(same_profile.read_text(encoding="utf-8"))
     assert same_profile == profile
     assert upgraded["run_events"] == {"backend": "db", "track_token_usage": True}
+    assert upgraded["sandbox"]["allow_host_bash"] is True
 
 
 def test_legacy_empty_event_feed_is_backfilled_once_from_latest_checkpoint(tmp_path: Path) -> None:

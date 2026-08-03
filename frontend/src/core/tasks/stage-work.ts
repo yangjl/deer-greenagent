@@ -27,8 +27,19 @@ export interface StageWorkGroup {
 }
 
 /** DBTL stage workers with no transcript anchor of their own, oldest first. */
-export function stageWorkTasks(subtasks: readonly Subtask[]): Subtask[] {
-  return subtasks.filter((task) => Boolean(task.dbtlStage) && !task.councilSeat);
+export function stageWorkTasks(
+  subtasks: readonly Subtask[],
+  runId?: string,
+): Subtask[] {
+  return subtasks.filter(
+    (task) =>
+      Boolean(task.dbtlStage) &&
+      !task.councilSeat &&
+      // The panel is mounted under the latest conversation turn. Historical
+      // workers belong to their own run and must not reappear beneath a later
+      // Lead Agent reply, which made unrelated chat look like an active Build.
+      (!runId || task.runId === runId),
+  );
 }
 
 /**
@@ -38,9 +49,12 @@ export function stageWorkTasks(subtasks: readonly Subtask[]): Subtask[] {
  * and a Test that began — and a flat list would present them as one stretch of
  * work.
  */
-export function stageWorkGroups(subtasks: readonly Subtask[]): StageWorkGroup[] {
+export function stageWorkGroups(
+  subtasks: readonly Subtask[],
+  runId?: string,
+): StageWorkGroup[] {
   const byStage = new Map<string, Subtask[]>();
-  for (const task of stageWorkTasks(subtasks)) {
+  for (const task of stageWorkTasks(subtasks, runId)) {
     const stage = task.dbtlStage!;
     const group = byStage.get(stage) ?? [];
     group.push(task);

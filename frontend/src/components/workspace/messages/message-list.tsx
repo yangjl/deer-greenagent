@@ -69,6 +69,7 @@ import {
 import type { Subtask } from "@/core/tasks";
 import { useSubtaskContext, useUpdateSubtask } from "@/core/tasks/context";
 import {
+  meetingAnchorIndices,
   meetingsByRun,
   unanchoredMeetings,
 } from "@/core/tasks/meeting-timeline";
@@ -227,14 +228,11 @@ type SelectionToolbarState = {
   placement: "top" | "bottom";
 };
 
-/**
- * Meetings no turn has claimed yet, rendered at the tail.
+/** Meetings no transcript group has claimed yet, rendered at the tail.
  *
- * A meeting's seats stream before its run's first message lands, so during the
- * live round there is no group to sit inside. Rendering here keeps it visible
- * while it argues; once the turn appears, `anchoredRunIds` contains its run and
- * the meeting moves into that turn instead. Nothing is ever shown twice, and
- * nothing falls off the end.
+ * Participant events arrive before the run's first assistant message. Keeping
+ * that meeting at the tail makes it visible while it runs; as soon as the
+ * result turn arrives, the same run id anchors it above that turn instead.
  */
 function UnanchoredMeetings({
   anchoredRunIds,
@@ -246,10 +244,7 @@ function UnanchoredMeetings({
   const { tasks: taskMap } = useSubtaskContext();
   const pending = useMemo(
     () =>
-      unanchoredMeetings(
-        meetingsByRun(Object.values(taskMap)),
-        anchoredRunIds,
-      ),
+      unanchoredMeetings(meetingsByRun(Object.values(taskMap)), anchoredRunIds),
     [anchoredRunIds, taskMap],
   );
   if (pending.length === 0) {
@@ -539,8 +534,6 @@ export function MessageList({
   }, [groupedMessages]);
   const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
-  // Which run each group belongs to, so a meeting renders inside the turn that
-  // held it rather than floating at a computed index bound to `latestRunId`.
   const groupRunIds = useMemo(
     () =>
       groupedMessages.map((group) => {
@@ -554,15 +547,30 @@ export function MessageList({
       }),
     [groupedMessages],
   );
-  const anchoredRunIds = useMemo(
-    () => new Set(groupRunIds.filter((runId): runId is string => !!runId)),
-    [groupRunIds],
+  const meetingAnchorGroupIndices = useMemo(
+    () =>
+      meetingAnchorIndices(
+        groupedMessages.map((group, index) => ({
+          runId: groupRunIds[index],
+          type: group.type,
+        })),
+      ),
+    [groupRunIds, groupedMessages],
   );
-
-  // The run whose subagent steps the debate panel can backfill on reload.
+  const anchoredRunIds = useMemo(
+    () =>
+      new Set(
+        [...meetingAnchorGroupIndices]
+          .map((index) => groupRunIds[index])
+          .filter((runId): runId is string => !!runId),
+      ),
+    [groupRunIds, meetingAnchorGroupIndices],
+  );
+  // The latest run whose generic stage-work activity can backfill on reload.
   const latestRunId = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const runId = (messages[index] as { run_id?: string } | undefined)?.run_id;
+      const runId = (messages[index] as { run_id?: string } | undefined)
+        ?.run_id;
       if (typeof runId === "string" && runId) {
         return runId;
       }
@@ -1115,11 +1123,17 @@ export function MessageList({
             hasMore={hasMoreHistory}
             loadMore={loadMoreHistory}
           />
-          {(
-            groupedMessages.map((group, groupIndex) => {
+          {groupedMessages.map((group, groupIndex) => {
             const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
             const groupIsLoading =
               thread.isLoading && groupIndex === lastGroupIndex;
+            const meetingCard = meetingAnchorGroupIndices.has(groupIndex) ? (
+              <DebatePanel
+                className="mb-4 w-full"
+                runId={groupRunIds[groupIndex]}
+                threadId={threadId}
+              />
+            ) : null;
 
             if (group.type === "human" || group.type === "assistant") {
               return withRunDuration(
@@ -1134,6 +1148,7 @@ export function MessageList({
                     group.type === "assistant" && "group/assistant-turn",
                   )}
                 >
+                  {meetingCard}
                   {group.messages.map((msg) => {
                     const item = (
                       <MessageListItem
@@ -1235,7 +1250,13 @@ export function MessageList({
               const humanInputRequest = extractHumanInputRequest(message);
               if (humanInputRequest) {
                 if (isDeckOwnedHumanInputRequest(humanInputRequest)) {
-                  return null;
+                  return withRunDuration(
+                    group,
+                    groupIndex,
+                    meetingCard ? (
+                      <div className="w-full">{meetingCard}</div>
+                    ) : null,
+                  );
                 }
                 const latestDeliveryId =
                   humanInputState.latestRequestMessageIds.get(
@@ -1258,6 +1279,7 @@ export function MessageList({
                   group,
                   groupIndex,
                   <div className="w-full">
+                    {meetingCard}
                     <HumanInputCard
                       answeredResponse={answeredResponse}
                       disabled={
@@ -1293,6 +1315,7 @@ export function MessageList({
                   group,
                   groupIndex,
                   <div className="w-full">
+                    {meetingCard}
                     <MarkdownContent
                       content={extractContentFromMessage(message)}
                       isLoading={thread.isLoading}
@@ -1304,7 +1327,13 @@ export function MessageList({
                   </div>,
                 );
               }
-              return withRunDuration(group, groupIndex, null);
+              return withRunDuration(
+                group,
+                groupIndex,
+                meetingCard ? (
+                  <div className="w-full">{meetingCard}</div>
+                ) : null,
+              );
             } else if (group.type === "assistant:present-files") {
               const files: string[] = [];
               for (const message of group.messages) {
@@ -1317,6 +1346,7 @@ export function MessageList({
                 group,
                 groupIndex,
                 <div className="w-full">
+                  {meetingCard}
                   {group.messages[0] && hasContent(group.messages[0]) && (
                     <MarkdownContent
                       content={extractContentFromMessage(group.messages[0])}
@@ -1420,6 +1450,7 @@ export function MessageList({
                 group,
                 groupIndex,
                 <div className="relative z-1 flex flex-col gap-2">
+                  {meetingCard}
                   {results}
                   {renderTokenUsage({
                     messages: group.messages,
@@ -1433,14 +1464,7 @@ export function MessageList({
               group,
               groupIndex,
               <div className="w-full">
-                {/* Above the answer, so the conclusion reads below the meeting
-                    that produced it — and inside this turn, so a later run
-                    cannot move it. */}
-                <DebatePanel
-                  className="mb-4 w-full"
-                  runId={groupRunIds[groupIndex]}
-                  threadId={threadId}
-                />
+                {meetingCard}
                 <MessageGroup
                   messages={group.messages}
                   isLoading={groupIsLoading}
@@ -1458,12 +1482,7 @@ export function MessageList({
                 })}
               </div>,
             );
-            })
-          )}
-          {/* A meeting whose run has no message group yet: the seats stream
-              before the run's first message lands, so this is what keeps a
-              live meeting visible while it argues. Once its turn appears the
-              meeting moves into it and stays there. */}
+          })}
           <UnanchoredMeetings
             anchoredRunIds={anchoredRunIds}
             threadId={threadId}

@@ -33,6 +33,34 @@ export interface Meeting {
   isRunning: boolean;
 }
 
+export interface MeetingTranscriptGroup {
+  runId?: string;
+  type: string;
+}
+
+/** Pick one transcript group to own each run-scoped meeting card. */
+export function meetingAnchorIndices(
+  groups: readonly MeetingTranscriptGroup[],
+): Set<number> {
+  const anchors = new Map<string, { index: number; priority: number }>();
+  groups.forEach((group, index) => {
+    if (!group.runId || group.type === "human") {
+      return;
+    }
+    const priority =
+      group.type === "assistant:present-files"
+        ? 3
+        : group.type === "assistant"
+          ? 2
+          : 1;
+    const existing = anchors.get(group.runId);
+    if (!existing || priority >= existing.priority) {
+      anchors.set(group.runId, { index, priority });
+    }
+  });
+  return new Set([...anchors.values()].map(({ index }) => index));
+}
+
 /**
  * Every meeting in the conversation, ordered by first appearance.
  *

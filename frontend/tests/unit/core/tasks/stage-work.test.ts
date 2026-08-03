@@ -30,7 +30,9 @@ function task(overrides: Partial<Subtask> & { id: string }): Subtask {
 
 describe("stage work is what the server labelled with a stage", () => {
   it("adopts a worker carrying a stage", () => {
-    const adopted = stageWorkTasks([task({ id: "unit-1", dbtlStage: "build" })]);
+    const adopted = stageWorkTasks([
+      task({ id: "unit-1", dbtlStage: "build" }),
+    ]);
     expect(adopted.map((entry) => entry.id)).toEqual(["unit-1"]);
   });
 
@@ -106,7 +108,6 @@ describe("the stage reads as a name, not an identifier", () => {
   });
 });
 
-
 describe("a task belongs to the run it was observed in", () => {
   it("keeps the run id it was stamped with", () => {
     const adopted = stageWorkTasks([
@@ -118,7 +119,32 @@ describe("a task belongs to the run it was observed in", () => {
   });
 
   it("tolerates a task recorded before the run was known", () => {
-    const adopted = stageWorkTasks([task({ id: "unit-1", dbtlStage: "build" })]);
+    const adopted = stageWorkTasks([
+      task({ id: "unit-1", dbtlStage: "build" }),
+    ]);
     expect(adopted[0]?.runId).toBeUndefined();
+  });
+
+  it("does not render historical Build workers under a later run", () => {
+    const groups = stageWorkGroups(
+      [
+        task({ id: "old-build", dbtlStage: "build", runId: "run-old" }),
+        task({ id: "current-build", dbtlStage: "build", runId: "run-current" }),
+      ],
+      "run-current",
+    );
+
+    expect(groups[0]?.tasks.map((entry) => entry.id)).toEqual([
+      "current-build",
+    ]);
+  });
+
+  it("shows no stage panel when the latest run was ordinary Lead Agent work", () => {
+    expect(
+      stageWorkGroups(
+        [task({ id: "old-build", dbtlStage: "build", runId: "run-old" })],
+        "run-lead",
+      ),
+    ).toEqual([]);
   });
 });

@@ -41,7 +41,6 @@ import {
   resolveMessageImageURL,
 } from "@/core/artifacts/utils";
 import { extractCitationSources } from "@/core/citations/sources";
-import { readDesignMeetingProgress } from "@/core/dbtl/design-meeting-progress";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
@@ -67,7 +66,6 @@ import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 import { SlashSkillChip } from "../slash-skill-chip";
 import { Tooltip } from "../tooltip";
 
-import { DesignMeetingProgressCard } from "./design-meeting-progress-card";
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
 
@@ -414,10 +412,6 @@ function MessageContent_({
 
   const rawContent = extractContentFromMessage(message);
   const reasoningContent = extractReasoningContentFromMessage(message);
-  const designMeetingProgress = useMemo(
-    () => readDesignMeetingProgress(message.additional_kwargs),
-    [message.additional_kwargs],
-  );
 
   const files = useMemo(() => {
     const files = message.additional_kwargs?.files;
@@ -472,14 +466,6 @@ function MessageContent_({
             </div>
           </TaskTrigger>
         </Task>
-      </AIElementMessageContent>
-    );
-  }
-
-  if (!isHuman && designMeetingProgress) {
-    return (
-      <AIElementMessageContent className={className}>
-        <DesignMeetingProgressCard progress={designMeetingProgress} />
       </AIElementMessageContent>
     );
   }

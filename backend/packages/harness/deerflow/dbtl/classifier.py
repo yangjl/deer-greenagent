@@ -26,11 +26,13 @@ A model classifier can be layered on later behind ``ClassifierProtocol``; the
 routing layer already evaluates every deterministic signal before it would be
 consulted.
 
-**The errors are asymmetric**, so the thresholds are not symmetric either. A
-false upgrade interrupts someone's ordinary file work with a card they did not
-ask for, and it does so in a project where they will see it constantly. A
-missed cycle costs one manual "Start a cycle" click. Ordinary is therefore the
-default, and the negative rules are strong enough to veto a positive score.
+**Data work is cycle-worthy by policy.** A request that names structured data,
+an analytical operation, or a tabular data artifact is a high-confidence DBTL
+candidate even when it asks for only one plot, conversion, or explanation.
+This deliberately overrides the otherwise conservative single-file and
+single-artifact vetoes: losing the governed design/test path for data work is
+more costly than offering the human a proposal they can decline. Ordinary
+remains the default for requests without a data signal.
 """
 
 from __future__ import annotations
@@ -135,6 +137,23 @@ _PLAN_AND_VERIFY_PATTERN = rf"\b(?:{_PLAN_VERBS})\w*\b[^.]{{0,140}}\b(?:and|then
 _CHECKED_AGAINST_PATTERN = rf"\b(?:{_VERIFY_VERBS})\w*\b[^.]{{0,40}}\b(?:against|versus|vs\.?|relative\s+to|baseline)\b"
 
 _SUCCESS_CRITERIA_PATTERN = r"\b(?:success|acceptance|pass(?:ing)?)\s+criteri\w*|\bcriteri\w+\s+for\s+success\b|\bdefinition\s+of\s+done\b"
+
+# Data work is intentionally a first-class policy signal rather than an
+# accumulation of weak research vocabulary. The match covers structured data
+# assets, tabular concepts, and common analytical operations. It avoids bare
+# JSON because application/config JSON is usually ordinary software work;
+# JSONL is included because it is conventionally a record-oriented dataset.
+_DATA_TASK_PATTERN = (
+    r"\b(?:data|datasets?|databases?|dataframes?|tabular|csv|tsv|spreadsheet|"
+    r"workbooks?|worksheets?|parquet|jsonl|arrow|feather|rows?|columns?|"
+    r"features?|predictors?|outcomes?|regressions?|correlations?|"
+    r"cross[- ]validat\w*|predict(?:ion|ions|ive|or|ors|s|ed|ing)?|"
+    r"phenotypes?|genotypes?|traits?|yield)\b"
+    r"|(?:^|[/\\\s])[\w.-]+\.(?:csv|tsv|xlsx?|parquet|jsonl|arrow|feather)\b"
+)
+
+# 1 - exp(-1.25) ~= 0.7135, safely inside the HIGH band on this signal alone.
+_DATA_TASK_RULES: tuple[tuple[str, str, float], ...] = (("intent.data_task", _DATA_TASK_PATTERN, 1.25),)
 
 # ── Rule tables ──────────────────────────────────────────────────────────
 #
@@ -284,6 +303,7 @@ _ORDINARY_SHAPE_RULES: tuple[tuple[str, str], ...] = (
 # path then check it runs" stops being vetoed and is then rejected on its
 # merits, which is the correct outcome for both rules.
 _OVERRIDE_RULES: tuple[tuple[str, str], ...] = (
+    ("override.data_task", _DATA_TASK_PATTERN),
     ("override.design_experiment", r"\bdesign(?:ing)?\s+(?:a|an|the)?\s*\w*\s*experiment\b"),
     ("override.design_and_validate", r"\bdesign\b[^.]{0,60}\bvalidat"),
     ("override.test_whether", r"\btest(?:ing)?\s+whether\b"),
@@ -493,6 +513,7 @@ def classify_request(
         )
 
     text_hits = [
+        *_collect(_DATA_TASK_RULES, normalized),
         *_collect(_RESEARCH_INTENT_RULES, normalized),
         *_collect(_RESEARCH_OBJECT_RULES, normalized),
         *_collect(_SCOPE_RULES, normalized),
@@ -508,10 +529,10 @@ def classify_request(
     confidence = round(1.0 - pow(2.718281828459045, -score), 4)
 
     override = _matches_any(_OVERRIDE_RULES, normalized)
-    ordinary_shape = None if override else _matches_any(_ORDINARY_SHAPE_RULES, normalized)
+    ordinary_shape = _matches_any(_ORDINARY_SHAPE_RULES, normalized)
 
     decisive: RuleHit | None = None
-    if ordinary_shape is not None:
+    if ordinary_shape is not None and override is None:
         decisive = ordinary_shape
         hits.append(decisive)
         decision = ClassifierDecision.ORDINARY
@@ -520,6 +541,13 @@ def classify_request(
         # the confidence in "ordinary", which the veto makes high.
         confidence = 0.0
     else:
+        # Keep the request shape visible even when an override wins. Selected-
+        # cycle routing uses this evidence to send read/explain questions to
+        # ordinary chat instead of convening stage work; the same unscoped
+        # request remains a data-cycle proposal because the override decides
+        # the classifier outcome below.
+        if ordinary_shape is not None:
+            hits.append(ordinary_shape)
         if override is not None:
             decisive = RuleHit(rule_id=override.rule_id, weight=0.0, evidence=override.evidence)
             hits.append(decisive)

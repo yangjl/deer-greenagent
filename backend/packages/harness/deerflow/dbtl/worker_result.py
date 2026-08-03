@@ -228,7 +228,12 @@ def _string_tuple(raw: object, field_name: str) -> tuple[str, ...]:
     return tuple(items)
 
 
-def _artifact_tuple(raw: object) -> tuple[tuple[str, ...], dict[str, str]]:
+def _artifact_tuple(
+    raw: object,
+    *,
+    stage: str | None = None,
+    capability: str = "",
+) -> tuple[tuple[str, ...], dict[str, str]]:
     """Normalize canonical paths or explicit named-path objects.
 
     The identifier is only an alias inside this one worker result; the server
@@ -251,6 +256,17 @@ def _artifact_tuple(raw: object) -> tuple[tuple[str, ...], dict[str, str]]:
             raw_id = entry.get("id")
             raw_name = entry.get("name")
             raw_path = entry.get("path")
+            # A Design chair sometimes preserves the evidence-reference shape
+            # when copying a project file into ``artifact_refs``:
+            # ``{"kind": "workspace_file", "reference": "/mnt/user-data/..."}``.
+            # The locator has exactly the same meaning as ``path`` and the
+            # server still validates the virtual path later.  Recover only that
+            # one meaning-preserving shape, only for the chair, and only for a
+            # canonical project-virtual path; logical ids and other stages stay
+            # strict so this cannot manufacture an artifact from prose.
+            raw_reference = entry.get("reference")
+            if (not isinstance(raw_path, str) or not raw_path.strip()) and stage == "design" and capability == "design_council_chair" and isinstance(raw_reference, str) and raw_reference.strip().startswith("/mnt/user-data/"):
+                raw_path = raw_reference
             artifact_id = raw_id.strip() if isinstance(raw_id, str) else ""
             artifact_name = raw_name.strip() if isinstance(raw_name, str) else ""
             if raw_id is not None and not artifact_id:
@@ -683,7 +699,11 @@ def parse_worker_result(
     if raw_clarification is not None and not isinstance(raw_clarification, str):
         raise WorkerResultRejected("'clarification_question' must be a string.")
 
-    artifact_refs, artifact_aliases = _artifact_tuple(payload.get("artifact_refs"))
+    artifact_refs, artifact_aliases = _artifact_tuple(
+        payload.get("artifact_refs"),
+        stage=stage,
+        capability=capability,
+    )
     top_level_evidence, evidence_ids = _evidence_items(
         payload.get("evidence_refs"),
         artifact_aliases=artifact_aliases,

@@ -16,9 +16,11 @@ import asyncio
 import sys
 import types
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
+from deerflow.agents.dbtl.live_stage import adapter as adapter_module
 from deerflow.dbtl.stage_runner import WorkerBudget, WorkUnit
 
 pytestmark = pytest.mark.asyncio
@@ -131,7 +133,35 @@ def _unit(unit_id: str = "unit-1") -> WorkUnit:
 
 
 class TestAStageWorkerReportsItsSteps:
-    async def test_uncapped_build_omits_all_resource_kill_switches(self, dispatch):
+    async def test_build_preflight_refuses_before_dispatch_when_bash_is_absent(self, monkeypatch):
+        tools_module = types.ModuleType("deerflow.tools")
+        tools_module.get_available_tools = lambda **kwargs: [SimpleNamespace(name="read_file")]
+        monkeypatch.setitem(sys.modules, "deerflow.tools", tools_module)
+        adapter = adapter_module.LiveStageAdapter(repo=object(), app_config=None)
+
+        refusal = adapter._build_execution_preflight_error(
+            config={},
+            stage_workspace="/mnt/user-data/outputs/.dbtl-stage-work/run/build",
+        )
+
+        assert "no Bash execution tool" in refusal
+        assert "No planner or Build worker ran" in refusal
+
+    async def test_build_preflight_accepts_the_effective_bash_tool(self, monkeypatch):
+        tools_module = types.ModuleType("deerflow.tools")
+        tools_module.get_available_tools = lambda **kwargs: [SimpleNamespace(name="bash")]
+        monkeypatch.setitem(sys.modules, "deerflow.tools", tools_module)
+        adapter = adapter_module.LiveStageAdapter(repo=object(), app_config=None)
+
+        assert (
+            adapter._build_execution_preflight_error(
+                config={},
+                stage_workspace="/mnt/user-data/outputs/.dbtl-stage-work/run/build",
+            )
+            == ""
+        )
+
+    async def test_legacy_uncapped_build_gets_the_operational_safety_ceiling(self, dispatch):
         budget = WorkerBudget(
             max_workers=3,
             max_turns=10_000,
@@ -142,11 +172,11 @@ class TestAStageWorkerReportsItsSteps:
 
         await dispatch([_unit()], budget=budget)
 
-        assert _FakeExecutor.last_kwargs["config"].max_turns == 10_000
-        assert _FakeExecutor.last_kwargs["token_budget_max_tokens"] is None
-        assert _FakeExecutor.last_kwargs["token_budget_enabled"] is False
-        assert _FakeExecutor.last_kwargs["loop_detection_enabled"] is False
-        assert _FakeExecutor.last_kwargs["extra_middlewares"] == []
+        assert _FakeExecutor.last_kwargs["config"].max_turns == 450
+        assert _FakeExecutor.last_kwargs["token_budget_max_tokens"] == 120_000
+        assert _FakeExecutor.last_kwargs["token_budget_enabled"] is None
+        assert _FakeExecutor.last_kwargs["loop_detection_enabled"] is None
+        assert len(_FakeExecutor.last_kwargs["extra_middlewares"]) == 1
 
     async def test_each_captured_step_becomes_a_running_event(self, dispatch):
         _FakeExecutor.steps = [

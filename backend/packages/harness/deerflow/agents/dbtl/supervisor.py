@@ -218,7 +218,7 @@ _REVIEW_INTENT_RE = re.compile(
 
 _STAGE_CONTROL_PATTERNS = (
     re.compile(
-        r"\b(?P<action>start|run|retry|rerun|re-run)\s+(?:the\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
+        r"\b(?P<action>start|run|retry|rerun|re-run|replan|re-plan|restart)\s+(?:to\s+)?(?:the\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -226,7 +226,7 @@ _STAGE_CONTROL_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?P<action>let['’]?s|let\s+us|shall\s+we)\s+(?:(?:start|run|retry|rerun|re-run)\s+|(?:move|go|proceed|advance|continue)\s+(?:to|into|with)\s+)?(?:the\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
+        r"\b(?P<action>let['’]?s|let\s+us|shall\s+we)\s+(?:(?:start|run|retry|rerun|re-run|replan|re-plan|restart)\s+(?:to\s+)?|(?:move|go|proceed|advance|continue)\s+(?:to|into|with)\s+)?(?:the\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
         re.IGNORECASE,
     ),
 )
@@ -774,8 +774,8 @@ def _render_continuation(
     *,
     stage: str | None = None,
     review_deck_presented: bool = False,
+    deck_presented: bool = False,
 ) -> str:
-    cycle = decision.cycle_id or "the selected cycle"
     normalized_stage = (stage or "").strip().lower()
     if review_deck_presented and normalized_stage == "build":
         gate_guidance = (
@@ -788,9 +788,19 @@ def _render_continuation(
         gate_guidance = f"This run produced {stage_label} evidence but did not approve it. Open the presented HTML review deck and use its Human gate slide to record the next human decision for {stage_label}."
     elif normalized_stage in {"build", "test", "learn"}:
         gate_guidance = f"This run cannot approve {normalized_stage.title()} by itself. Use the server-owned review controls in the stage sheet in the project rail to submit and record the next human decision."
+    elif deck_presented:
+        # Name the thing on screen. "The project's server-owned human review
+        # record" is what the control is in the code, not what the reader is
+        # looking at, and a person told to find a record they cannot see reads
+        # it as having nothing to do.
+        # "Below", not "above": the present-files card renders after this text,
+        # so a reader told to look up finds the question they just read.
+        gate_guidance = "Open the slide deck below and work through it — the last slide is where you record your decision on this design."
     else:
-        gate_guidance = "This run cannot satisfy a review gate by itself. Use the project's server-owned human review record to submit and decide the stage."
-    return f"This request is scoped to {cycle}.\n\n{note}\n\n{gate_guidance}"
+        gate_guidance = "Nothing here decides the stage. The design is recorded and waiting for your review."
+    # The cycle id is dropped: it identifies the record for a machine and tells
+    # a reader nothing they can act on, and it led every reply.
+    return f"{note}\n\n{gate_guidance}"
 
 
 #: The preflight option that is not a depth. Choosing it asks what should
@@ -1150,6 +1160,10 @@ def _present_artifact_messages(
                 note,
                 stage=stage,
                 review_deck_presented=bool(deck_uri),
+                # A paused chair presents its deck as the single artifact, so
+                # "a deck is on screen" is not the same question as "a review
+                # deck followed the reviewed document".
+                deck_presented=bool(filepaths),
             ),
             tool_calls=[tool_call],
         ),
@@ -1241,6 +1255,65 @@ def _make_llm_question_writer(context: SupervisorContext, request_context: Mappi
     return write
 
 
+async def _round_summary_note(summarizer, result, *, clarification_question: str = "") -> str:
+    """The sentence that opens the reply, drawn from the round that just ran.
+
+    Reads the chair result off the stage outcome rather than being handed one,
+    so a caller cannot summarise a different meeting than the one presented.
+    """
+    from deerflow.dbtl.consensus import parse_consensus
+
+    return await summarizer(
+        research_question=str(getattr(result, "research_question", "") or ""),
+        chair_summary=str(getattr(result, "chair_summary", "") or ""),
+        consensus=parse_consensus(getattr(result, "chair_consensus", None)),
+        clarification_question=clarification_question,
+    )
+
+
+def _make_llm_round_summarizer(request_context: Mapping[str, Any] | None = None):
+    """One nostream call that says what the round established. Fail-soft.
+
+    Same contract as the setup-question writer: an unconfigured model, a denied
+    ``model:use``, an outage, or an unusable reply degrades to the recorded
+    counts. A meeting that already ran must not lose its reply because the
+    sentence introducing it could not be written.
+    """
+
+    async def summarize(*, research_question: str, chair_summary: str, consensus, clarification_question: str = "") -> str:
+        from deerflow.dbtl.round_summary import fallback_summary
+
+        try:
+            from deerflow.agents.dbtl.model_access import authorize_model_use
+            from deerflow.config.app_config import get_app_config
+            from deerflow.dbtl.round_summary import build_round_summary_prompt, parse_round_summary
+            from deerflow.utils.oneshot_llm import run_oneshot_llm
+
+            app_config = get_app_config()
+            model_name = getattr(getattr(app_config, "dbtl", None), "setup_draft_model_name", None)
+            if not model_name:
+                return fallback_summary(consensus, clarification_question=clarification_question)
+
+            raw = await run_oneshot_llm(
+                system_instruction="You report research meeting outcomes in one plain sentence. No preamble.",
+                user_content=build_round_summary_prompt(
+                    research_question=research_question,
+                    chair_summary=chair_summary,
+                    consensus=consensus,
+                    clarification_question=clarification_question,
+                ),
+                run_name="dbtl_round_summary",
+                app_config=app_config,
+                model_name=authorize_model_use(model_name, context=request_context, app_config=app_config),
+            )
+            return parse_round_summary(raw, consensus=consensus, clarification_question=clarification_question)
+        except Exception:  # noqa: BLE001 - a summary must not fail the turn
+            logger.warning("DBTL round summary: drafting failed; reporting the recorded counts", exc_info=True)
+            return fallback_summary(consensus, clarification_question=clarification_question)
+
+    return summarize
+
+
 def build_supervisor_graph(
     *,
     lead_agent,
@@ -1248,6 +1321,7 @@ def build_supervisor_graph(
     state_schema,
     stage_adapter: StageExecutionPort,
     question_writer=None,
+    round_summarizer=None,
     depth_interpreter=None,
     thread_cycle_resolver=None,
     principal_request_context: Mapping[str, Any] | None = None,
@@ -1271,6 +1345,7 @@ def build_supervisor_graph(
     """
     stage_adapter = compatible_stage_port(stage_adapter)
     writer = question_writer or _make_llm_question_writer(context, principal_request_context)
+    summarizer = round_summarizer or _make_llm_round_summarizer(principal_request_context)
     depth_reader = depth_interpreter or make_llm_depth_interpreter(principal_request_context)
 
     def decide(state: dict, thread_cycle_id: str | None = None) -> BranchDecision:
@@ -1456,7 +1531,11 @@ def build_supervisor_graph(
         # would route to continuation and then find nothing to continue.
         decision = decide(state, await _conversation_cycle_id(config))
         latest_text = _latest_user_text(state)
-        unscoped_stage_intent = _stage_control_intent(latest_text) if decision.branch is SupervisorBranch.ORDINARY and context.selected_cycle_id is None else None
+        # The route may already have recovered this conversation's originating
+        # cycle, but the command is still unscoped from the composer's point of
+        # view. Keep the explicit intent so a held Build can raise its fresh
+        # recovery control instead of falling through to generic guidance.
+        unscoped_stage_intent = _stage_control_intent(latest_text) if context.selected_cycle_id is None else None
         active_cycles: list[dict[str, Any]] = []
         if decision.cycle_id is None and (_review_intent(latest_text) is not None or unscoped_stage_intent is not None):
             active_cycles = [item for item in await _active_cycles(stage_adapter, project_id=context.project_id) if not item.get("parked")]
@@ -1557,6 +1636,36 @@ def build_supervisor_graph(
             )
             if represented is not None:
                 return represented
+        # Hold correctly releases ordinary conversation, but a later explicit
+        # Build command is not ordinary conversation. Re-open a *new* durable
+        # control from the latest Build record; never reinterpret the words as
+        # consent and never let the Lead Agent simulate governed work.
+        if unscoped_stage_intent is not None and unscoped_stage_intent[1] == "build":
+            if not active_cycles:
+                active_cycles = [item for item in await _active_cycles(stage_adapter, project_id=context.project_id) if not item.get("parked")]
+            recovery_cycle_id = decision.cycle_id
+            if len(active_cycles) == 1 and not any(str(item.get("cycle_id") or "") == recovery_cycle_id for item in active_cycles):
+                recovery_cycle_id = str(active_cycles[0].get("cycle_id") or "") or None
+            recover = getattr(stage_adapter, "recover_paused_build_control", None)
+            if callable(recover) and recovery_cycle_id:
+                recovered = recover(
+                    project_id=context.project_id,
+                    cycle_id=recovery_cycle_id,
+                    requested_action=unscoped_stage_intent[0],
+                    config=config,
+                )
+                if isawaitable(recovered):
+                    recovered = await recovered
+                if isinstance(recovered, Mapping):
+                    return {
+                        "messages": list(
+                            _build_control_message(
+                                decision,
+                                recovered,
+                                request_nonce=request_nonce,
+                            )
+                        )
+                    }
         if unscoped_stage_intent is not None:
             if not active_cycles:
                 active_cycles = [item for item in await _active_cycles(stage_adapter, project_id=context.project_id) if not item.get("parked")]
@@ -1789,7 +1898,7 @@ def build_supervisor_graph(
                 list(
                     _present_artifact_messages(
                         decision,
-                        note="Here is where the meeting got to — what the participants agreed, and where they are still split.",
+                        note=await _round_summary_note(summarizer, result, clarification_question=clarification_question),
                         artifact_uri=deck_uri,
                         request_nonce=request_nonce,
                     )

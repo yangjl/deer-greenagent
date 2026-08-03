@@ -464,6 +464,36 @@ BUILD_SPEC_V6 = StageSpec(
 )
 
 
+BUILD_SPEC_V7 = StageSpec(
+    stage="build",
+    domain_profile=GENERIC_PROFILE,
+    version=7,
+    title=BUILD_SPEC_V6.title,
+    purpose=BUILD_SPEC_V6.purpose,
+    cycle_classes=BUILD_SPEC_V6.cycle_classes,
+    cycle_weights=BUILD_SPEC_V6.cycle_weights,
+    required_inputs=BUILD_SPEC_V6.required_inputs,
+    required_artifact_types=BUILD_SPEC_V6.required_artifact_types,
+    output_schema="build_package.v7",
+    required_capabilities=BUILD_SPEC_V6.required_capabilities,
+    optional_capabilities=BUILD_SPEC_V6.optional_capabilities,
+    validity_gates=BUILD_SPEC_V6.validity_gates,
+    memory_write_policy=BUILD_SPEC_V6.memory_write_policy,
+    # V6 removed every worker guard to avoid a premature six-call finalizer.
+    # A real manual run then consumed 301k tokens in one phase and still did
+    # not execute. V7 restores a roomy, enforced ceiling: about 37 model calls
+    # at the executor's graph-step ratio, 120k tokens, and the existing
+    # ten-minute wall clock. Durable phase replay remains the recovery path.
+    budget=WorkerBudget(
+        max_workers=3,
+        max_turns=450,
+        max_tokens=120_000,
+        timeout_seconds=900,
+        token_limit_enforced=True,
+    ),
+)
+
+
 TEST_SPEC_V1 = StageSpec(
     stage="test",
     domain_profile=GENERIC_PROFILE,
@@ -619,6 +649,7 @@ _REGISTRY: dict[str, StageSpec] = {
         BUILD_SPEC_V4,
         BUILD_SPEC_V5,
         BUILD_SPEC_V6,
+        BUILD_SPEC_V7,
         TEST_SPEC_V1,
         TEST_SPEC_V2,
         TEST_SPEC_V3,
@@ -636,7 +667,7 @@ _CURRENT: MappingProxyType[tuple[str, str], int] = MappingProxyType(
     {
         (GENERIC_PROFILE, "design"): DESIGN_SPEC_V2.version,
         (GENERIC_PROFILE, "reconciliation"): RECONCILIATION_SPEC_V1.version,
-        (GENERIC_PROFILE, "build"): BUILD_SPEC_V6.version,
+        (GENERIC_PROFILE, "build"): BUILD_SPEC_V7.version,
         (GENERIC_PROFILE, "test"): TEST_SPEC_V3.version,
         (GENERIC_PROFILE, "learn"): LEARN_SPEC_V1.version,
     }

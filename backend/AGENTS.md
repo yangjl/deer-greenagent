@@ -130,6 +130,15 @@ see the live Gateway. Its data stays under gitignored
 `.deer-flow/manual-dbtl/`; it must not become a production DBTL skip flag or
 route. Focused coverage lives in
 `tests/test_dbtl_manual_pipeline.py`.
+The generated manual profile also sets `sandbox.allow_host_bash=true`:
+executable Build work must be able to run its implementation in this
+developer-owned local sandbox. This is scoped to the generated profile and
+never mutates the source or production configuration.
+Build execution also owns an explicit capability preflight before planning: if
+the effective worker toolset has no Bash tool, it raises a recorded Retry/Hold
+control and spends no model tokens. A Hold remains immutable, while a later
+explicit start/retry/replan command may raise a fresh recovery control rather
+than overriding the earlier decision or reaching ordinary Lead Agent work.
 
 **Only the Gateway holds the database, so only the Gateway has to move.**
 `restore --hot` (`make dbtl-manual-restore-hot`) exists because the cold loop's
@@ -473,7 +482,7 @@ Before changing a later authorization phase, read the [authorization RFC](../doc
 
 **Lead-only middlewares** (`build_middlewares`, appended after the base):
 
-14. **AgentActivityMiddleware** - Opens the lead agent's runtime activity row in `abefore_agent` and closes it in `aafter_agent`, reporting Thinking on a model call, Computing on a tool call, and Waiting on `task` delegation. First among the lead-only middlewares so its row brackets the rest of the chain; the shared base's positions are deliberately untouched, since `InputSanitizationMiddleware` must stay the outermost `wrap_model_call` wrapper. It holds a handle across hooks rather than a span, so closing is best-effort and the run worker's `ActivityEventBuffer.close_open_activities` settles anything a cancelled or raising run left open. See the Runtime agent activity section.
+14. **AgentActivityMiddleware** - Opens the lead agent's runtime activity row in `abefore_agent` and closes it in `aafter_agent`, reporting Thinking on a model call, Computing on a tool call, and Waiting on `task` delegation. First among the lead-only middlewares so its row brackets the rest of the chain; the shared base's positions are deliberately untouched, since `InputSanitizationMiddleware` must stay the outermost `wrap_model_call` wrapper. It holds a handle across hooks rather than a span, so closing is best-effort and the run worker's `ActivityEventBuffer.close_open_activities` settles anything a cancelled or raising run left open. A lead graph invoked as the supervisor's ordinary child may receive a fresh `Runtime.context` without the outer run id; `_run_id` therefore falls back to LangGraph's ambient `RunnableConfig` through the same server-owned `run_id_from_config` boundary used by other activity producers, so the feed names Lead agent rather than stopping at Cycle supervisor. See the Runtime agent activity section.
 15. **DynamicContextMiddleware** - Injects the current date (and optionally memory) as a `<system-reminder>` into the first HumanMessage, keeping the base system prompt fully static for prefix-cache reuse. Unfiled conversations read the authenticated user's global memory bucket; project conversations derive a stable bucket from `(user_id, project_id)`. On the next run of an older project thread, a frozen legacy/global snapshot is replaced with the selected project's snapshot.
 16. **SkillActivationMiddleware** - Detects strict `/skill-name task` syntax on the latest real user message, resolves only enabled and runtime-allowed skills, injects the `SKILL.md` body as hidden current-turn context, and records a `middleware:skill_activation` audit event
 17. **SkillToolPolicyMiddleware** - Applies `allowed-tools` only after real activation; passive enabled skills and a custom agent's configured skill allowlist do not clamp the lead toolset. A run-scoped slash activation is authoritative and suppresses `skill_context` as a policy source, so reading another skill cannot widen the explicit skill's tools; without slash activation, skills captured after configured `read_file` loads retain the existing union semantics. The middleware filters model-visible schemas and blocks unauthorized execution, resolving canonical paths against the live enabled/agent-allowed registry on every model call, then stores a versioned, JSON-safe, middleware-token-bound decision signed by policy source plus active paths in run context for the resulting tool calls to reuse. The next model call always refreshes it, and malformed, foreign, stale, or unmatched decisions fall back to live resolution. `tool_search` and `describe_skill` remain framework-safe discovery tools under a restrictive policy; they may reveal or promote metadata, but a deferred business tool must still be declared by the active policy before its schema or execution can survive the policy middleware. The decision's owner token is authorization-sensitive, so its reserved context key is owned by `runtime.secret_context` and included in `REDACTED_CONTEXT_KEYS` for observable and persisted context copies. Registry load failures and a non-empty active set with no authorized skill fail closed to framework-safe tools; an individual stale path is skipped only when at least one valid active skill remains. This is best-effort behavioral scoping rather than a hard security boundary: alternate loads such as `bash cat` are not captured, and bounded autonomous `skill_context` can evict old entries. `task` is not framework-exempt, so a restricted skill cannot delegate around its policy. The middleware must remain immediately after `SkillActivationMiddleware` (which publishes the slash source through `runtime.secret_context`'s public path helpers authenticated by a required token shared only within the assembled middleware chain) and immediately before `DurableContextMiddleware`; assembly and compiled-graph tests pin ordering, token sharing, schema filtering, and execution blocking.
@@ -2066,12 +2075,13 @@ classified one without re-deriving it.
 telemetry is only comparable across runs if the same text classifies the same
 way every time, and the exit review has to judge _why_ a request was flagged,
 which means inspectable rule hits rather than a model's account of its own
-reasoning. The errors are asymmetric — a false upgrade interrupts ordinary work
-in a project where the user will see it constantly, a missed cycle costs one
-manual click — so ordinary is the default and the negative shape rules veto a
-positive score outright. Simulated genomic datasets are cycle-shaped only when
-the request combines simulation intent with both marker/genotype and phenotype
-data; a generic simulation or a single synthetic artifact stays ordinary.
+reasoning. Data work is a deliberate high-confidence exception to the otherwise
+conservative policy: `_DATA_TASK_PATTERN` recognizes structured-data assets,
+tabular concepts, and analytical operations; `intent.data_task` clears the high
+band by itself, and `override.data_task` defeats the ordinary explain/read/edit/
+single-artifact veto. Explicit routing choices still outrank classification, so
+a human can keep data work in ordinary chat. Outside that exception ordinary
+remains the default and negative request-shape rules veto a positive score.
 After at least one positive text rule matches, three small, auditable lifecycle
 priors may raise a borderline request: first visible user turn (`0.10`), no
 unfinished project cycle (`0.10`), and a project with no cycles yet (`0.08`).
@@ -2642,7 +2652,7 @@ the same request.
 
 **Build records how to re-run its work; Test and the human decide whether it
 is reproducible.** V4 introduced the current scientific contract and remains
-resolvable; `generic:build:v6` is the current execution contract. V1–V3
+resolvable; `generic:build:v7` is the current execution contract. V1–V3
 carried a `reproducible_execution` validity gate, which asked Build to *prove*
 a repeat run — so a worker that wrote a complete, correct implementation but
 could not run it twice marked its own result `failed`, and the whole attempt
@@ -2683,6 +2693,11 @@ prior-phase directories are expanded over the union of unchanged pre-run files
 and server-published file hashes;
 they are no longer rejected merely because the pre-run snapshot could not have
 contained same-run output.
+V7 keeps the V6 evidence contract but restores an enforced 120K-token,
+450-superstep, 15-minute worker ceiling. The production dispatcher applies the
+same operational ceiling to already-pinned uncapped V6 attempts, so the attempt
+that exposed the regression cannot consume another 300K-token phase merely
+because version pinning correctly preserves its recorded contract.
 Tests:
 `tests/test_dbtl_stage_contracts.py::TestBuildRecordsRerunInformationRatherThanProvingIt`.
 
@@ -2702,6 +2717,19 @@ also tells workers to put semantic file roles in `description`. Tests:
 `tests/test_dbtl_stage_contracts.py::TestStageFanOut::test_build_collection_accepts_descriptive_kinds_for_workspace_files`,
 and
 `tests/test_dbtl_council_seat_events.py::TestTerminalSeatEvent::test_build_file_role_kinds_complete_the_live_lane`.
+Artifact publication distinguishes a reference that is missing, unreadable,
+or outside its isolated worker grant. When server verification rejects a
+worker after its JSON contract passed, it emits a correcting `task_failed`
+event under the same task id; the transcript cannot keep showing “Subtask
+completed” for bytes the server never found.
+The Design chair has one separate, equally narrow compatibility case: an
+`artifact_refs` entry shaped as
+`{"kind":"workspace_file","reference":"/mnt/user-data/..."}` is normalized
+to the identical canonical path. This preserves an otherwise valid chair
+synthesis when it copied the typed evidence-reference shape into the artifact
+list. It applies only to `stage="design"` plus
+`capability="design_council_chair"`; logical ids, non-workspace references,
+other Design participants, and every other stage remain strict.
 The same Build-only compatibility boundary accepts a compact mapping of quality
 check names to boolean verdicts and normalizes it to the canonical list of
 `QualityCheck` rows. Mapping values may also be full check objects; strings,
@@ -3218,14 +3246,13 @@ artifact revision, or deck hash conflicts without rebasing.
 Chair answers use the recorded option/value or exact free text, bind to the
 supervisor-emitted `human_input_request_id`, and start the run only in the
 originating thread. Once the run is admitted, the router also appends one
-server-owned visible `llm.ai.response` to that thread's durable event feed.
-Its bounded `dbtl_meeting_progress` snapshot is built from the Design stage's
-recorded worker rows: completed independent/red-team participants plus the
-resuming chair. This is the chat-first fallback for deck-started background
-runs, which do not share the open page's live `task_*` stream; the frontend
-polls the existing stage-worker read endpoint to settle the chair lane. Failure
-to publish the progress card is fail-soft and cannot roll back an already
-admitted chair run.
+ordinary, server-owned visible `llm.ai.response` to that thread's durable event
+feed. It records the selected decision and marks where the resumed meeting
+began; it does not carry a `dbtl_meeting_progress` snapshot or ask the frontend
+to render a bespoke meeting card. The resumed chair's ordinary reply and
+`present_files` output follow in transcript order, leaving the slide deck below
+the meeting. Failure to publish this turn is fail-soft and cannot roll back an
+already admitted chair run.
 
 Supervisor branches create their `ask_clarification` and `present_files`
 message pairs as graph output rather than model/tool callbacks. `RunJournal`'s
@@ -3249,15 +3276,16 @@ The chair action is not complete merely because `start_run` returned. A failed
 chair worker is valid stage audit data, so its parent run can finish with
 `success` while producing no successor feedback surface. The authenticated
 surface read repairs that stranded `resume_started` action to `failed` once the
-run is terminal and the old chair surface is still current. A retry must keep
-the same client submission id, action, selected cards, comment, evidence, and
-deck hash. It may rebind only `expected_db_revision`, because recording the
-failed worker itself advanced the cycle revision; any substantive payload
-change remains a conflict. This preserves one human answer while making a
-provider outage recoverable. The authenticated read includes that failed
-action's selected cards and comment; on remount the parent sends them back as
-initialization state so the inert HTML restores the exact retryable answer
-instead of defaulting to an empty or different draft.
+run is terminal and the old chair surface is still current. It surfaces the
+latest failed chair worker's bounded contract detail, rather than replacing a
+specific refusal with “no follow-up deck.” A retry keeps the same client
+submission id and deck hash but may replace the selected option or comment,
+because a contract-rejected byte-identical answer is guaranteed to fail again;
+the old payload, run, and refusal remain in bounded `failed_attempts` receipt
+history. Successful chair answers and non-chair actions remain immutable. The
+authenticated read includes the failed action's selected cards and comment so
+a remount begins from the recorded draft, while the enabled deck remains
+editable before the next attempt.
 
 `dbtl.design_deck_feedback=false` is the rollback switch. Descriptor and review
 records are retained when it is off; consumed surfaces never reopen. Historical

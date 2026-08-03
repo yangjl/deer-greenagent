@@ -442,6 +442,11 @@ test.describe("design deck feedback, end to end", () => {
   }) => {
     await mockProjectScope(page);
     let reads = 0;
+    const submissions: Array<{
+      action: { kind: string; option_ids: string[] };
+      comment: string;
+      client_submission_id: string;
+    }> = [];
     await deckSurfaceRoute(page, () => {
       reads += 1;
       return reads === 1
@@ -452,14 +457,15 @@ test.describe("design deck feedback, end to end", () => {
               failure_code: "resume_no_feedback_surface",
               receipt: {
                 message:
-                  "The Design chair could not produce a follow-up deck. Try sending it again.",
+                  "The Design chair's response was rejected: malformed artifact reference. Edit your answer if needed, then send it again.",
               },
             },
-            note: "The Design chair could not produce a follow-up deck. Try sending it again.",
+            note: "The Design chair's response was rejected: malformed artifact reference. Edit your answer if needed, then send it again.",
           });
     });
-    await page.route(ACTIONS_URL, (route) =>
-      route.fulfill({
+    await page.route(ACTIONS_URL, (route) => {
+      submissions.push(route.request().postDataJSON());
+      return route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
@@ -468,8 +474,8 @@ test.describe("design deck feedback, end to end", () => {
           replayed: false,
           receipt: { message: "Recorded. The Design chair is resuming." },
         }),
-      }),
-    );
+      });
+    });
 
     const deck = await openDeckArtifact(page);
     await expect(deck.locator("[data-deck-submit]")).toBeEnabled();
@@ -479,7 +485,7 @@ test.describe("design deck feedback, end to end", () => {
     await deck.locator("[data-deck-submit]").click();
 
     await expect(deck.locator("[data-deck-status]")).toHaveText(
-      "The Design chair could not produce a follow-up deck. Try sending it again.",
+      "The Design chair's response was rejected: malformed artifact reference. Edit your answer if needed, then send it again.",
       { timeout: 10_000 },
     );
     await expect(deck.locator("[data-deck-submit]")).toBeEnabled();
@@ -489,6 +495,17 @@ test.describe("design deck feedback, end to end", () => {
     await expect(deck.locator("[data-deck-comment]")).toHaveValue(
       "Keep this answer.",
     );
+
+    await deck.locator("#inbreeding-route--selfing_f5_f6").check();
+    await deck.locator("[data-deck-comment]").fill("Use the corrected answer.");
+    await deck.locator("[data-deck-submit]").click();
+    await expect.poll(() => submissions.length).toBe(2);
+
+    expect(submissions[1]!.client_submission_id).toBe(
+      submissions[0]!.client_submission_id,
+    );
+    expect(submissions[1]!.action.option_ids).toEqual(["selfing_f5_f6"]);
+    expect(submissions[1]!.comment).toBe("Use the corrected answer.");
   });
 
   test("a reopened deck visibly resumes polling an active chair run", async ({
@@ -525,11 +542,15 @@ test.describe("design deck feedback, end to end", () => {
     );
   });
 
-  test("a reopened failed chair deck restores the exact audited answer", async ({
+  test("a reopened failed chair deck restores the audited answer as an editable draft", async ({
     page,
   }) => {
     await mockProjectScope(page);
-    let submissionId = "";
+    let submitted: {
+      action: { option_ids: string[] };
+      comment: string;
+      client_submission_id: string;
+    } | null = null;
     await deckSurfaceRoute(
       page,
       surface({
@@ -548,10 +569,7 @@ test.describe("design deck feedback, end to end", () => {
       }),
     );
     await page.route(ACTIONS_URL, (route) => {
-      const body = route.request().postDataJSON() as {
-        client_submission_id: string;
-      };
-      submissionId = body.client_submission_id;
+      submitted = route.request().postDataJSON();
       return route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -576,11 +594,17 @@ test.describe("design deck feedback, end to end", () => {
       "Use the recorded choice.",
     );
     await expect(deck.locator("[data-deck-submit]")).toBeEnabled();
+    await deck.locator("#inbreeding-route--selfing_f5_f6").check();
+    await deck.locator("[data-deck-comment]").fill("Use the edited choice.");
     await deck.locator("[data-deck-submit]").click();
     await expect(deck.locator("[data-deck-status]")).toHaveText(
       "Recorded on retry.",
     );
-    expect(submissionId).toBe("submission-recorded");
+    expect(submitted).toMatchObject({
+      action: { option_ids: ["selfing_f5_f6"] },
+      comment: "Use the edited choice.",
+      client_submission_id: "submission-recorded",
+    });
   });
 
   test("an unverifiable surface leaves the deck inert with the reason", async ({

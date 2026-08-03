@@ -184,17 +184,17 @@ export function AgentActivityBlock({
         <button
           type="button"
           onClick={() => setOpen(true)}
-          disabled={view.stepCount === 0 && !hasOlder}
+          disabled={view.runCount === 0 && !hasOlder}
           aria-expanded={open}
           aria-controls={SHEET_ID}
           className="text-muted-foreground hover:text-foreground hover:bg-muted/60 mt-0.5 flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] transition-colors disabled:pointer-events-none disabled:opacity-60"
         >
           <span className="min-w-0 flex-1 truncate">
-            {view.stepCount === 0
+            {view.runCount === 0
               ? hasOlder
                 ? "Earlier activity"
                 : "No activity yet"
-              : `Activity · ${view.stepCount} step${view.stepCount === 1 ? "" : "s"}`}
+              : `Activity · ${view.runCount} run${view.runCount === 1 ? "" : "s"}`}
           </span>
           <ChevronRight className="size-3.5 shrink-0" aria-hidden />
         </button>

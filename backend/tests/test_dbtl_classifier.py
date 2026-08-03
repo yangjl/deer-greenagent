@@ -31,16 +31,22 @@ ORDINARY_REQUESTS = [
     "Create a small chart",
     "Simulate a coin flip 100 times",
     "Simulate an image of a maize field",
-    "Simulate a small SNP dataset",
-    "Link the SNP markers with the phenotype data",
-    "What does the third column in this csv mean?",
     "Rename these output files so they sort by date",
     "Summarize the notes I uploaded",
     "Fix the broken path in my plotting script",
     "Read design.md and tell me if the formatting is consistent",
+    "Show me the files in the workspace",
+]
+
+DATA_REQUESTS = [
+    "Simulate a small SNP dataset",
+    "Link the SNP markers with the phenotype data",
+    "What does the third column in this csv mean?",
     "Make a bar plot of the yield column",
     "Convert this spreadsheet to csv",
-    "Show me the files in the workspace",
+    "Plot the genomic prediction accuracies from results.csv",
+    "I want to look at the drought data",
+    "Can plant height and leaf count predict grain yield well enough to pre-screen genotypes before harvest? Data is trial_2025_yield.csv.",
 ]
 
 RESEARCH_REQUESTS = [
@@ -92,6 +98,15 @@ def test_ordinary_work_is_not_proposed_as_a_cycle(text: str) -> None:
     assert result.decision is ClassifierDecision.ORDINARY, f"false upgrade on {text!r}: {result.rule_hits}"
 
 
+@pytest.mark.parametrize("text", DATA_REQUESTS)
+def test_data_work_is_a_high_confidence_cycle_candidate(text: str) -> None:
+    result = classify_request(text)
+
+    assert result.decision is ClassifierDecision.PROPOSE_CYCLE, f"missed data cycle on {text!r}: {result.rule_hits}"
+    assert result.band is ConfidenceBand.HIGH
+    assert any(hit.rule_id == "intent.data_task" for hit in result.rule_hits)
+
+
 @pytest.mark.parametrize("text", RESEARCH_REQUESTS)
 def test_multi_step_research_work_is_proposed(text: str) -> None:
     result = classify_request(text)
@@ -123,8 +138,8 @@ def test_a_stated_verification_beats_the_single_artifact_veto() -> None:
     make-an-artifact opening would veto exactly the plan-and-test work this
     classifier exists to find.
     """
-    one_deliverable = classify_request("Write a script that generates the dataset")
-    with_verification = classify_request("Write a script that generates the dataset and the figures, then verify the totals against the source export")
+    one_deliverable = classify_request("Write a script that generates a README")
+    with_verification = classify_request("Write a script that generates a README and the figures, then verify the totals against the source export")
 
     assert one_deliverable.decision is ClassifierDecision.ORDINARY
     assert with_verification.decision is ClassifierDecision.PROPOSE_CYCLE
@@ -164,20 +179,17 @@ def test_the_decisive_rule_survives_hit_truncation() -> None:
     )
     result = classify_request(crowded)
 
-    assert result.decision is ClassifierDecision.ORDINARY
+    assert result.decision is ClassifierDecision.PROPOSE_CYCLE
     assert len(result.rule_hits) <= 16
-    assert any(hit.rule_id.startswith("ordinary.") for hit in result.rule_hits), "the veto that decided this is missing from its own evidence"
+    assert any(hit.rule_id == "override.data_task" for hit in result.rule_hits), "the override that decided this is missing from its own evidence"
 
 
-def test_file_and_artifact_work_stays_ordinary_even_with_a_research_noun() -> None:
-    """The negative rules must beat a bare domain noun.
-
-    "Plot the genomic prediction accuracies" mentions the domain but asks for
-    one artifact. Without this the classifier would fire on every message in a
-    breeding project.
-    """
+def test_data_artifact_work_overrides_the_single_artifact_veto() -> None:
+    """A one-plot request remains governed when its source is structured data."""
     result = classify_request("Plot the genomic prediction accuracies from results.csv")
-    assert result.decision is ClassifierDecision.ORDINARY
+    assert result.decision is ClassifierDecision.PROPOSE_CYCLE
+    assert result.band is ConfidenceBand.HIGH
+    assert any(hit.rule_id == "override.data_task" for hit in result.rule_hits)
 
 
 def test_a_decision_carries_the_rules_that_produced_it() -> None:
@@ -203,10 +215,11 @@ def test_confidence_and_band_agree() -> None:
             assert result.confidence < 0.4
 
 
-def test_an_ambiguous_request_lands_in_the_low_or_medium_band() -> None:
-    """Ambiguity must be visible, not rounded up into a confident proposal."""
+def test_an_ambiguous_data_request_is_still_high_confidence() -> None:
+    """Data work is governed even when its requested operation is underspecified."""
     result = classify_request("I want to look at the drought data")
-    assert result.band is not ConfidenceBand.HIGH
+    assert result.decision is ClassifierDecision.PROPOSE_CYCLE
+    assert result.band is ConfidenceBand.HIGH
 
 
 def test_fresh_project_context_promotes_a_borderline_research_request() -> None:

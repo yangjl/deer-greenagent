@@ -57,7 +57,10 @@ def test_the_deck_is_one_self_contained_file() -> None:
 def test_where_the_meeting_split_comes_before_the_synthesis() -> None:
     html = _deck()
 
-    assert html.index(">Contested<") < html.index(">Where this lands<")
+    # The synthesis slide is titled "Conclusions"; the rule it enforces is
+    # unchanged — where the meeting split is what tells a reader whether the
+    # synthesis is a conclusion or an average.
+    assert html.index(">Contested<") < html.index(">Conclusions<")
     assert html.index(">Agreed<") < html.index(">Contested<")
 
 

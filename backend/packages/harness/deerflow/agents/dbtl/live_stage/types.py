@@ -32,6 +32,13 @@ class LiveStageResult:
     #: two lead to different words and different next steps, so the caller must
     #: be able to tell them apart without parsing `note`.
     control_request: Mapping[str, Any] | None = None
+    #: What the round established, for the one sentence that introduces it in
+    #: chat. Carried here rather than re-read by the supervisor, which has no
+    #: access to the worker rows and would otherwise summarise a meeting it
+    #: cannot see. Absent leaves the reply on its recorded-counts fallback.
+    research_question: str = ""
+    chair_summary: str = ""
+    chair_consensus: Mapping[str, Any] | None = None
 
     @property
     def satisfies_gate(self) -> bool:

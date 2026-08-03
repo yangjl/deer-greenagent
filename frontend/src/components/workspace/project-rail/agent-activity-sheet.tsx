@@ -12,6 +12,7 @@ import {
 import {
   type ActivityProjection,
   type ActivityRow,
+  activityFootprints,
   activityView,
   activityStateLabel,
   dispatcherChain,
@@ -155,9 +156,12 @@ export function AgentActivitySheet({
   const active = nodes.filter(
     (node) => !isTerminalActivityState(node.row.state),
   );
-  const timeline = useMemo(
-    () => [...projection.timeline].reverse(),
-    [projection.timeline],
+  const footprints = useMemo(
+    () =>
+      activityFootprints(projection).filter((footprint) =>
+        isTerminalActivityState(footprint.state),
+      ),
+    [projection],
   );
 
   return (
@@ -179,8 +183,7 @@ export function AgentActivitySheet({
         <SheetHeader>
           <SheetTitle>Activity</SheetTitle>
           <SheetDescription>
-            What the runtime is doing in this conversation, and which actor
-            dispatched it. Read-only.
+            Main actor and one compact footprint for each run. Read-only.
           </SheetDescription>
         </SheetHeader>
 
@@ -208,30 +211,45 @@ export function AgentActivitySheet({
 
         <section className="px-4 pb-6">
           <h3 className="text-muted-foreground/70 mb-1 text-[11px] font-semibold tracking-widest uppercase">
-            Earlier
+            Run history
           </h3>
-          {timeline.length === 0 ? (
+          {footprints.length === 0 ? (
             <p className="text-muted-foreground text-sm">
-              No activity has been recorded yet.
+              No completed runs have been recorded yet.
             </p>
           ) : (
             // `role="log"` with `aria-live="off"`, matching the conversation
             // element: a reader who opened this is reading it, not being read
             // to.
             <ol role="log" aria-live="off" className="space-y-1">
-              {timeline.map((entry) => (
+              {footprints.map((footprint) => (
                 <li
-                  key={`${entry.activityId}-${entry.seq}`}
-                  className="flex items-start gap-2 text-sm"
+                  key={footprint.runId}
+                  className="flex items-start gap-2 py-1 text-sm"
                 >
                   <span className="text-muted-foreground/60 w-16 shrink-0 text-[11px] tabular-nums">
-                    {new Date(entry.receivedAt).toLocaleTimeString()}
+                    {new Date(footprint.receivedAt).toLocaleTimeString()}
                   </span>
-                  <span className="min-w-0 flex-1 truncate">
-                    {entry.displayName}
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">
+                      {footprint.displayName}
+                    </span>
+                    <span className="text-muted-foreground/70 block truncate text-[11px]">
+                      {[
+                        footprint.operation,
+                        footprint.dispatchedBy
+                          ? `via ${footprint.dispatchedBy}`
+                          : null,
+                        footprint.cycleId
+                          ? (cycleLabel?.(footprint.cycleId) ?? null)
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </span>
                   </span>
                   <span className="text-muted-foreground shrink-0 text-[11px]">
-                    {activityStateLabel(entry.state)}
+                    {activityStateLabel(footprint.state)}
                   </span>
                 </li>
               ))}

@@ -46,6 +46,23 @@ MAX_POSITIONS_PER_DISAGREEMENT = 4
 MAX_BULLET_CHARS = 400
 MAX_SUMMARY_CHARS = 4_000
 
+#: How much of a section goes on one screen. A topic longer than this runs onto
+#: another slide rather than being cut: the reader gets fewer things per screen,
+#: which is what makes the deck read as a summary, and loses none of them.
+BULLETS_PER_SLIDE = 5
+CARDS_PER_SLIDE = 2
+PARAGRAPHS_PER_SLIDE = 3
+
+#: A section that would run past this is bounded, and says so on the last slide
+#: rather than trailing off. Silent truncation reads as "that was all of it".
+MAX_SLIDES_PER_SECTION = 4
+
+#: How many entries a section collects before pagination bounds what is shown.
+#: Deliberately larger than the display bound: capping at the display size makes
+#: the overflow count zero, so the deck could never tell a reader that it was
+#: holding something back.
+MAX_SECTION_ITEMS = 200
+
 
 def _text(value: object, *, limit: int = MAX_BULLET_CHARS) -> str:
     cleaned = str(value or "").strip()
@@ -79,14 +96,147 @@ def _chair_result(results: Sequence[Mapping[str, object]]) -> Mapping[str, objec
     return with_consensus[-1] if with_consensus else usable[-1]
 
 
-def _slide(*, kind: str, title: str, body: str, eyebrow: str = "") -> str:
+def _open_question_boxes(items: Sequence[str]) -> str:
+    """An answer box per open question, not a list of things you cannot answer.
+
+    The chair's own question got a control and every other open item rendered
+    as an inert bullet, so a slide headed "Needs your decision" offered one
+    decision and three read-only reminders. Each box is a
+    ``data-deck-note`` control, so the bridge folds them all into the comment
+    of whatever decision is taken — one record, and each answer labelled with
+    the question it belongs to rather than its position on the slide.
+    """
+    if not items:
+        return ""
+    boxes: list[str] = []
+    for index, question in enumerate(items, start=1):
+        text = _text(question, limit=240)
+        if not text:
+            continue
+        boxes.append(f'<div class="open-question"><p class="open-question-text">{html.escape(text)}</p>{_note_box(f"open-{index}", text)}</div>')
+    return f'<div class="open-questions">{"".join(boxes)}</div>' if boxes else ""
+
+
+def chair_result(results: Sequence[Mapping[str, object]]) -> Mapping[str, object] | None:
+    """The chair result a round is described from — deck and chat reply alike.
+
+    Public so the chat summary and the deck resolve the same chair from the
+    same rows; two independent notions of "the chair" would eventually describe
+    different meetings in the same turn.
+    """
+    return _chair_result(results)
+
+
+def _note_box(note_id: str, label: str) -> str:
+    """The reader's own box on a slide, shipped inert like every other control.
+
+    Rendered into the persisted bytes rather than injected later for the same
+    reason the gate's comment is: an approval binds to this file, and a control
+    that appeared afterwards would not be part of what was hashed.
+
+    ``data-note-label`` is what the note is filed under when the bridge folds it
+    into the recorded decision, so the label travels with the text instead of
+    being reconstructed from slide order — which changes with pagination.
+    """
+    return (
+        f'<div class="note" data-note-for="{html.escape(note_id)}">'
+        f'<label for="note-{html.escape(note_id)}">Your note on {html.escape(label.lower())} <span class="option-detail">travels with your decision</span></label>'
+        f'<textarea id="note-{html.escape(note_id)}" data-deck-note data-note-label="{html.escape(label)}" rows="2" disabled></textarea>'
+        f"</div>"
+    )
+
+
+def _slide(
+    *,
+    kind: str,
+    title: str,
+    body: str,
+    eyebrow: str = "",
+    note_id: str = "",
+    note_label: str = "",
+) -> str:
     eyebrow_html = f'<p class="eyebrow">{html.escape(eyebrow)}</p>' if eyebrow else ""
-    return f'<section class="slide slide--{kind}">{eyebrow_html}<h2>{html.escape(title)}</h2>{body}</section>'
+    note_html = _note_box(note_id, note_label or title) if note_id else ""
+    return f'<section class="slide slide--{kind}">{eyebrow_html}<h2>{html.escape(title)}</h2>{body}{note_html}</section>'
 
 
-def render_design_deck_slide(*, kind: str, title: str, body: str, eyebrow: str = "") -> str:
+def render_design_deck_slide(*, kind: str, title: str, body: str, eyebrow: str = "", note_id: str = "", note_label: str = "") -> str:
     """Render one slide with the canonical Design-deck structure."""
-    return _slide(kind=kind, title=title, body=body, eyebrow=eyebrow)
+    return _slide(kind=kind, title=title, body=body, eyebrow=eyebrow, note_id=note_id, note_label=note_label)
+
+
+def _pages(items: Sequence[object], per_page: int) -> list[list[object]]:
+    """Split a section across screens, bounded, keeping the overflow count.
+
+    Returns the pages plus nothing else; the caller asks ``_overflow`` how many
+    entries the bound dropped, because a section that quietly stops is
+    indistinguishable from one that had no more to say.
+    """
+    if per_page < 1:
+        per_page = 1
+    chunks = [list(items[index : index + per_page]) for index in range(0, len(items), per_page)]
+    return chunks[:MAX_SLIDES_PER_SECTION]
+
+
+def _overflow(items: Sequence[object], per_page: int) -> int:
+    shown = sum(len(page) for page in _pages(items, per_page))
+    return max(0, len(items) - shown)
+
+
+def _more_note(count: int) -> str:
+    if count < 1:
+        return ""
+    entry = "entry" if count == 1 else "entries"
+    return f'<p class="more">{count} further {entry} in the full review package.</p>'
+
+
+def _paged_slides(
+    *,
+    kind: str,
+    title: str,
+    eyebrow: str,
+    items: Sequence[str],
+    per_page: int,
+    body_of,
+    empty: str,
+    note_label: str,
+    note_prefix: str,
+) -> list[str]:
+    """One section as however many screens it needs, each with its own note box.
+
+    Continuation slides keep the title and mark themselves ``cont.`` rather than
+    inventing a new heading: they are the same topic, and a reader flipping back
+    needs to see that.
+    """
+    pages = _pages(items, per_page)
+    if not pages:
+        return [
+            _slide(
+                kind=kind,
+                eyebrow=eyebrow,
+                title=title,
+                body=f'<p class="empty">{html.escape(empty)}</p>',
+                note_id=note_prefix,
+                note_label=note_label,
+            )
+        ]
+    dropped = _overflow(items, per_page)
+    slides: list[str] = []
+    for index, page in enumerate(pages):
+        last = index == len(pages) - 1
+        heading = title if index == 0 else f"{title} (cont.)"
+        body = body_of(page) + (_more_note(dropped) if last else "")
+        slides.append(
+            _slide(
+                kind=kind,
+                eyebrow=eyebrow if index == 0 else f"{eyebrow} · {index + 1} of {len(pages)}",
+                title=heading,
+                body=body,
+                note_id=note_prefix if index == 0 else f"{note_prefix}-{index + 1}",
+                note_label=note_label,
+            )
+        )
+    return slides
 
 
 def _list_body(items: Sequence[str], *, empty: str) -> str:
@@ -104,8 +254,13 @@ def _disagreement_body(consensus: Consensus) -> str:
             # told which one they might be holding.
             return '<p class="empty">The chair recorded no disagreement at all. Every participant agreed, and no argument was written down — worth a second look before approving.</p>'
         return '<p class="empty">The chair recorded no disagreement.</p>'
+    return _disagreement_cards(consensus.disagreements[:MAX_DISAGREEMENTS])
+
+
+def _disagreement_cards(items: Sequence[object]) -> str:
+    """A page of contested topics, each keeping both sides and how it stands."""
     cards: list[str] = []
-    for item in consensus.disagreements[:MAX_DISAGREEMENTS]:
+    for item in items:
         positions = "".join(f"<li>{html.escape(_text(value))}</li>" for value in item.positions[:MAX_POSITIONS_PER_DISAGREEMENT])
         if item.resolved:
             verdict = f'<p class="verdict verdict--settled"><span>Settled</span> {html.escape(_text(item.resolution))}</p>'
@@ -429,9 +584,32 @@ _BRIDGE_TEMPLATE = """
   var choices = Array.prototype.slice.call(
     document.querySelectorAll('fieldset.decision input[type="radio"], fieldset.review input[type="radio"], [data-deck-issue]')
   );
+  // One box per content slide. They are drafts, not a second record: whatever
+  // is in them is folded into the comment of the decision actually taken, so a
+  // note can never be stored as a verdict nobody gave.
+  var notes = Array.prototype.slice.call(document.querySelectorAll('[data-deck-note]'));
+  var NOTE_LIMIT = 1000;
   var GATE_KINDS = ['advance', 'approve', 'request_changes', 'park'];
 
   function say(text) { if (status) { status.textContent = text; } }
+
+  function withNotes(text) {
+    var parts = [];
+    notes.forEach(function (note) {
+      var value = (note.value || '').trim();
+      if (!value) { return; }
+      var label = note.getAttribute('data-note-label') || 'Note';
+      parts.push('[' + label + '] ' + value.slice(0, NOTE_LIMIT));
+    });
+    if (!parts.length) { return text; }
+    // Notes first, then the verdict's own words: the reader of the record
+    // works through the deck in the order the reviewer did.
+    return text ? parts.join('\\n') + '\\n---\\n' + text : parts.join('\\n');
+  }
+
+  function clearNotes() {
+    notes.forEach(function (note) { note.value = ''; });
+  }
 
   function send(type, extra) {
     var payload = { source: SOURCE, protocol: PROTOCOL, surfaceId: SURFACE_ID, type: type };
@@ -460,6 +638,9 @@ _BRIDGE_TEMPLATE = """
         || allowed.indexOf(kind) === -1;
     });
     if (comment) { comment.disabled = !on; }
+    // A note box carries its own `disabled` for the same reason every other
+    // control does, so activation has to clear each one individually.
+    notes.forEach(function (note) { note.disabled = !on; });
     // Every option ships individually disabled so the persisted file is inert
     // wherever it is opened. An enabled fieldset does not re-enable a control
     // that carries its own `disabled`, so activation has to clear each one --
@@ -490,7 +671,7 @@ _BRIDGE_TEMPLATE = """
       // the person had typed rather than asking them to retype it.
       send('submit_intent', {
         action: { kind: 'chair_option', optionIds: [option] },
-        comment: comment ? comment.value : ''
+        comment: withNotes(comment ? comment.value : '')
       });
     });
   }
@@ -507,7 +688,10 @@ _BRIDGE_TEMPLATE = """
         : value === 'park' ? 'park'
         : (allowed.indexOf('advance') !== -1 ? 'advance' : 'approve');
       if (allowed.indexOf(kind) === -1) { say('That choice is not available right now.'); return; }
-      var text = comment ? comment.value.trim() : '';
+      // Validate what is actually recorded. A reviewer who wrote their reasons
+      // on the slide the reasons are about has written them down; refusing the
+      // verdict because the last box is empty would be asking twice.
+      var text = withNotes(comment ? comment.value.trim() : '').trim();
       var effective = assessment ? assessment.dataset.assessedDifficulty : 'standard';
       if (kind === 'request_changes' && !text) {
         say('Describe what should change before sending the Design back.'); return;
@@ -533,7 +717,7 @@ _BRIDGE_TEMPLATE = """
       if (kind === 'request_changes') {
         optionIds = Array.prototype.slice.call(document.querySelectorAll('[data-deck-issue]:checked')).map(function (item) { return item.value; });
       }
-      var text = comment ? comment.value.trim() : '';
+      var text = withNotes(comment ? comment.value.trim() : '').trim();
       if ((kind === 'chair_text' || kind === 'reject') && !text) {
         say('Add a rationale before recording this decision.'); return;
       }
@@ -577,6 +761,11 @@ _BRIDGE_TEMPLATE = """
       }
       if (comment && typeof data.comment === 'string') {
         comment.value = data.comment;
+        // A restored comment is one this deck already folded its notes into,
+        // so the boxes are cleared rather than merged a second time. The
+        // reviewer's words are not lost -- they are in the comment now, which
+        // is the field the record actually keeps.
+        if (data.comment) { clearNotes(); }
       }
       submitting = false;
       var live = !!channel && allowed.length > 0;
@@ -635,6 +824,48 @@ def _decision_items(consensus: Consensus | None, clarification_question: str) ->
     return _bullets(items)
 
 
+def _brief_slides(*, research_question: str, objective: str, success_criteria: Sequence[str] | str) -> list[str]:
+    """Background and Objectives, read off the cycle record rather than written.
+
+    These two sections are the only ones on the deck that do not come from the
+    meeting, and they are quoted verbatim from what the cycle was opened with.
+    The renderer has no sentence of its own here either: a "background" it
+    composed would be an account of the science that nobody reviewed.
+    """
+    slides: list[str] = []
+    question = _text(research_question, limit=MAX_SUMMARY_CHARS)
+    if question:
+        slides.append(
+            _slide(
+                kind="background",
+                eyebrow="Why this cycle exists",
+                title="Background",
+                body=f'<p class="statement">{html.escape(question)}</p><p class="source">The question this cycle was opened with.</p>',
+                note_id="background",
+                note_label="Background",
+            )
+        )
+    goals = [item for item in ([_text(objective, limit=MAX_SUMMARY_CHARS)] if objective else []) if item]
+    # A str is itself a Sequence[str], so iterating one yields characters and
+    # would render a criterion as a column of single letters.
+    raw_criteria: Sequence[object] = [success_criteria] if isinstance(success_criteria, str) else list(success_criteria or ())
+    criteria = _bullets(raw_criteria, limit=BULLETS_PER_SLIDE)
+    if goals or criteria:
+        objective_html = f'<p class="statement">{html.escape(goals[0])}</p>' if goals else ""
+        criteria_html = f'<p class="source">What would count as success</p>{_list_body(criteria, empty="")}' if criteria else ""
+        slides.append(
+            _slide(
+                kind="objective",
+                eyebrow="What it has to achieve",
+                title="Objectives",
+                body=objective_html + criteria_html,
+                note_id="objectives",
+                note_label="Objectives",
+            )
+        )
+    return slides
+
+
 def render_council_deck(
     *,
     cycle_title: str,
@@ -648,6 +879,9 @@ def render_council_deck(
     surface_mode: str = "",
     transition_gate: Mapping[str, object] | None = None,
     stage: str = "design",
+    research_question: str = "",
+    objective: str = "",
+    success_criteria: Sequence[str] | str = (),
     generated_at: datetime | None = None,
 ) -> str:
     """The meeting's outcome as one self-contained HTML slide deck."""
@@ -666,25 +900,56 @@ def render_council_deck(
             body=f'<p class="lede">What the participants agreed, where they split, and what still needs your decision.</p><p class="stamp">{html.escape(stamp)}</p>',
         )
     )
-    slides.append(
-        _slide(
+    slides.extend(_brief_slides(research_question=research_question, objective=objective, success_criteria=success_criteria))
+    slides.extend(
+        _paged_slides(
             kind="agree",
             eyebrow="Where the meeting agreed",
             title="Agreed",
-            body=_list_body(
-                _bullets(consensus.agreements) if consensus is not None else [],
-                empty="The chair recorded no agreement.",
-            ),
+            items=_bullets(consensus.agreements, limit=MAX_SECTION_ITEMS) if consensus is not None else [],
+            per_page=BULLETS_PER_SLIDE,
+            body_of=lambda page: _list_body([str(item) for item in page], empty=""),
+            empty="The chair recorded no agreement.",
+            note_label="Agreed",
+            note_prefix="agreed",
         )
     )
-    slides.append(
-        _slide(
-            kind="contest",
-            eyebrow="Where the meeting split",
-            title="Contested",
-            body=(_disagreement_body(consensus) if consensus is not None else '<p class="empty">The chair reported no structured consensus, so nothing can be shown here without inventing it. The written synthesis is the record.</p>'),
+    if consensus is None:
+        slides.append(
+            _slide(
+                kind="contest",
+                eyebrow="Where the meeting split",
+                title="Contested",
+                body='<p class="empty">The chair reported no structured consensus, so nothing can be shown here without inventing it. The written synthesis is the record.</p>',
+                note_id="contested",
+                note_label="Contested",
+            )
         )
-    )
+    elif not consensus.disagreements:
+        slides.append(
+            _slide(
+                kind="contest",
+                eyebrow="Where the meeting split",
+                title="Contested",
+                body=_disagreement_body(consensus),
+                note_id="contested",
+                note_label="Contested",
+            )
+        )
+    else:
+        slides.extend(
+            _paged_slides(
+                kind="contest",
+                eyebrow="Where the meeting split",
+                title="Contested",
+                items=list(consensus.disagreements[:MAX_DISAGREEMENTS]),
+                per_page=CARDS_PER_SLIDE,
+                body_of=_disagreement_cards,
+                empty="The chair recorded no disagreement.",
+                note_label="Contested",
+                note_prefix="contested",
+            )
+        )
     cards = _decision_cards(decision_request) if decision_request is not None and decision_request.renders_as_cards else ""
     free_text = _decision_text(clarification_question) if surface_mode == "chair_feedback" and clarification_question.strip() and not cards else ""
     if cards or free_text or decisions:
@@ -697,15 +962,69 @@ def render_council_deck(
                 kind="decide",
                 eyebrow="Only you can settle these",
                 title="Needs your decision",
-                body=cards + free_text + (_list_body(remaining, empty="") if remaining else ""),
+                body=cards + free_text + _open_question_boxes(remaining),
+                # The chair's own question already carries a control, and every
+                # other open item now carries its own; a slide-level box on top
+                # would ask the same person the same thing twice.
+                note_id="",
             )
         )
     if summary:
-        paragraphs = "".join(f"<p>{html.escape(part.strip())}</p>" for part in summary.split("\n") if part.strip())
-        slides.append(_slide(kind="synthesis", eyebrow="The chair's synthesis", title="Where this lands", body=paragraphs))
-    limitations = _bullets(list(chair.get("limitations") or []))
+        paragraphs = [part.strip() for part in summary.split("\n") if part.strip()]
+        slides.extend(
+            _paged_slides(
+                kind="synthesis",
+                eyebrow="The chair's synthesis",
+                title="Conclusions",
+                items=paragraphs,
+                per_page=PARAGRAPHS_PER_SLIDE,
+                body_of=lambda page: "".join(f"<p>{html.escape(str(part))}</p>" for part in page),
+                empty="",
+                note_label="Conclusions",
+                note_prefix="conclusions",
+            )
+        )
+    limitations = _bullets(list(chair.get("limitations") or []), limit=MAX_SECTION_ITEMS)
     if limitations:
-        slides.append(_slide(kind="limits", eyebrow="Read the synthesis against these", title="Limitations", body=_list_body(limitations, empty="")))
+        slides.extend(
+            _paged_slides(
+                kind="limits",
+                eyebrow="Read the conclusions against these",
+                title="Limitations",
+                items=limitations,
+                per_page=BULLETS_PER_SLIDE,
+                body_of=lambda page: _list_body([str(item) for item in page], empty=""),
+                empty="",
+                note_label="Limitations",
+                note_prefix="limitations",
+            )
+        )
+    next_actions = _bullets(list(chair.get("recommended_next_actions") or []), limit=MAX_SECTION_ITEMS)
+    footer = f'<p class="stamp">Full review package: {html.escape(package_path)}</p>' if package_path else ""
+    slides.extend(
+        _paged_slides(
+            kind="next",
+            eyebrow="Recommended, not decided",
+            title="Next",
+            items=next_actions,
+            per_page=BULLETS_PER_SLIDE,
+            body_of=lambda page: _list_body([str(item) for item in page], empty=""),
+            empty="The chair recommended no next action.",
+            note_label="Next steps",
+            note_prefix="next",
+        )
+    )
+    # The deck must say what it is not, on the way to the one slide that
+    # records something. Losing this sentence when the gate moved would have
+    # left a reader to infer that reaching the end is itself an approval.
+    closing = '<p class="gate">Nothing here approves anything merely by opening the deck. The final slide is where a verdict is recorded.</p>' + footer
+    # Ahead of the reader's own box, not after it: the box is the last thing on
+    # the slide because it is the reader's turn.
+    anchor = '<div class="note"' if '<div class="note"' in slides[-1] else "</section>"
+    slides[-1] = slides[-1].replace(anchor, closing + anchor, 1)
+    # The gate goes last, after everything it is a verdict on. A reviewer who
+    # reaches it has passed every slide their notes are attached to, and the
+    # deck ends on the one screen that records something.
     if surface_mode == "stage_review":
         normalized_stage = (stage or "design").strip().lower()
         slides.append(
@@ -713,19 +1032,12 @@ def render_council_deck(
                 kind="review",
                 eyebrow="Human gate",
                 title=f"Review the {normalized_stage.title()}",
-                body=(_review_controls(consensus, transition_gate) if normalized_stage == "design" else _stage_review_controls(normalized_stage, transition_gate)),
+                body=(
+                    '<p class="gate">Your notes from the earlier slides are sent with this decision.</p>'
+                    + (_review_controls(consensus, transition_gate) if normalized_stage == "design" else _stage_review_controls(normalized_stage, transition_gate))
+                ),
             )
         )
-    next_actions = _bullets(list(chair.get("recommended_next_actions") or []))
-    footer = f'<p class="stamp">Full review package: {html.escape(package_path)}</p>' if package_path else ""
-    slides.append(
-        _slide(
-            kind="next",
-            eyebrow="Recommended, not decided",
-            title="Next",
-            body=_list_body(next_actions, empty="The chair recommended no next action.") + '<p class="gate">Nothing here approves anything merely by opening the deck. Use the Human gate slide to submit and record a verdict.</p>' + footer,
-        )
-    )
 
     return render_design_deck_shell(
         title=html.escape(f"{cycle_title or 'Design meeting'} — {stage_title}"),
@@ -778,6 +1090,30 @@ _DECK_TEMPLATE = """<!doctype html>
   ul {{ margin: 0; padding-left: 1.15rem; }}
   li {{ margin: .55rem 0; font-size: 1.08rem; }}
   .empty {{ color: var(--muted); font-style: italic; }}
+  /* Fewer things per screen, each one larger: what makes the deck read as a
+     summary is the pacing, not a shorter sentence the renderer invented. */
+  .slide--agree li, .slide--limits li, .slide--next li {{ font-size: 1.16rem; margin: .95rem 0; padding-left: .2rem; }}
+  .slide--agree li::marker {{ color: var(--accent); }}
+  .statement {{ font-size: 1.32rem; line-height: 1.45; max-width: 46rem; margin: 0 0 1rem; }}
+  .source {{ margin: 0 0 .6rem; color: var(--muted); font: .72rem/1.6 ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    letter-spacing: .12em; text-transform: uppercase; }}
+  .slide--synthesis p {{ font-size: 1.14rem; line-height: 1.62; max-width: 46rem; margin: 0 0 1rem; }}
+  .more {{ margin: 1rem 0 0; color: var(--muted); font-size: .88rem; font-style: italic; }}
+  /* The reader's own box. Dashed while inert so an untouched deck does not
+     look like a form somebody abandoned half-filled. */
+  .note {{ display: grid; gap: .3rem; margin: 1.9rem 0 0; padding-top: 1.1rem; border-top: 1px solid var(--line); }}
+  .note label {{ font: .72rem/1.6 ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }}
+  .note textarea {{ width: 100%; resize: vertical; border: 1px dashed var(--line); border-radius: 8px;
+    padding: .6rem .7rem; color: var(--fg); background: transparent; font: inherit; }}
+  .note textarea:not([disabled]) {{ border-style: solid; background: var(--bg); }}
+  .note textarea:focus-visible {{ outline: 3px solid var(--accent); outline-offset: 3px; }}
+  .note textarea[disabled] {{ opacity: .6; }}
+  .open-questions {{ display: grid; gap: 1.4rem; margin-top: .4rem; }}
+  .open-question-text {{ margin: 0 0 .1rem; font-size: 1.1rem; font-weight: 600; line-height: 1.4; }}
+  /* Its own box sits under its own question, so the two read as one item
+     rather than as a list followed by a form. */
+  .open-question .note {{ margin-top: .5rem; padding-top: 0; border-top: 0; }}
   .contested-grid {{ display: grid; gap: .9rem; }}
   .contested {{ border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0; padding: 1rem 1.15rem; background: var(--card); }}
   .contested h3 {{ margin: 0 0 .5rem; font-size: 1.05rem; }}
@@ -849,6 +1185,9 @@ _DECK_TEMPLATE = """<!doctype html>
     .deck {{ display: block; height: auto; padding: 0; }}
     .slide, .slide.is-active {{ display: block; page-break-after: always; padding: 2.5rem; }}
     .decision .comment, .review .comment, .submit-row, .review-actions, [data-deck-status] {{ display: none !important; }}
+    /* An empty box prints as a blank rectangle; on paper it is a place to
+       write, so it keeps its border and loses only the disabled styling. */
+    .note textarea {{ opacity: 1; min-height: 4.5rem; }}
     .decision input, .review input {{ display: none; }}
     .bar {{ display: none; }}
   }}

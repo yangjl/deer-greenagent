@@ -174,7 +174,7 @@ class TestFallbackAndOrdering:
     def test_the_decision_slide_sits_between_contested_and_synthesis(self) -> None:
         html = _deck(decision=_request())
 
-        assert html.index(">Contested<") < html.index(">Needs your decision<") < html.index(">Where this lands<")
+        assert html.index(">Contested<") < html.index(">Needs your decision<") < html.index(">Conclusions<")
 
     def test_the_same_inputs_render_the_same_bytes(self) -> None:
         """The deck is hashed and bound to a review, so it must be stable."""

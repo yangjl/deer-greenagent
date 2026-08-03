@@ -117,7 +117,7 @@ class TestStageSpecRegistry:
         assert current_spec_keys() == (
             "generic:design:v2",
             "generic:reconciliation:v1",
-            "generic:build:v6",
+            "generic:build:v7",
             "generic:test:v3",
             "generic:learn:v1",
         )
@@ -758,6 +758,56 @@ class TestWorkerResultContract:
 
         assert result.artifact_refs == ("/mnt/user-data/outputs/validation-report.md",)
 
+    def test_design_chair_preserves_a_result_with_a_workspace_reference_shaped_artifact(self) -> None:
+        payload = _valid_payload(
+            summary="The chair preserved its synthesis.",
+            artifact_refs=[
+                {
+                    "kind": "workspace_file",
+                    "reference": "/mnt/user-data/DATA_NOTES.md",
+                }
+            ],
+        )
+
+        result = parse_worker_result(
+            payload,
+            capability="design_council_chair",
+            agent_name="general-purpose",
+            stage="design",
+        )
+
+        assert result.summary == "The chair preserved its synthesis."
+        assert result.artifact_refs == ("/mnt/user-data/DATA_NOTES.md",)
+
+    @pytest.mark.parametrize(
+        ("capability", "stage", "reference"),
+        [
+            ("design_red_team", "design", "/mnt/user-data/DATA_NOTES.md"),
+            ("design_council_chair", "build", "/mnt/user-data/DATA_NOTES.md"),
+            ("design_council_chair", "design", "dataset-1"),
+        ],
+    )
+    def test_workspace_reference_artifact_normalization_stays_narrow(
+        self,
+        capability: str,
+        stage: str,
+        reference: str,
+    ) -> None:
+        with pytest.raises(WorkerResultRejected, match="non-empty string 'path'"):
+            parse_worker_result(
+                _valid_payload(
+                    artifact_refs=[
+                        {
+                            "kind": "workspace_file",
+                            "reference": reference,
+                        }
+                    ]
+                ),
+                capability=capability,
+                agent_name="general-purpose",
+                stage=stage,
+            )
+
     def test_ambiguous_artifact_objects_and_quality_statuses_are_still_rejected(self) -> None:
         for alias_field in ("id", "name"):
             with pytest.raises(WorkerResultRejected, match=f"'{alias_field}'.*non-empty string"):
@@ -1059,16 +1109,16 @@ class TestBuildRecordsRerunInformationRatherThanProvingIt:
         assert "recorded_rerun_procedure" in BUILD_SPEC_V4.validity_gates
         assert "server_bound_input_lineage" in BUILD_SPEC_V4.validity_gates
 
-    def test_build_v6_is_current_and_meters_without_stage_level_caps(self) -> None:
-        from deerflow.dbtl.stage_spec import BUILD_SPEC_V5, BUILD_SPEC_V6
+    def test_build_v7_is_current_and_restores_a_roomy_enforced_ceiling(self) -> None:
+        from deerflow.dbtl.stage_spec import BUILD_SPEC_V6, BUILD_SPEC_V7
 
-        assert resolve_stage_spec("build").spec_key == "generic:build:v6"
-        assert BUILD_SPEC_V6.required_inputs == BUILD_SPEC_V5.required_inputs
-        assert BUILD_SPEC_V6.validity_gates == BUILD_SPEC_V5.validity_gates
-        assert BUILD_SPEC_V6.budget.max_turns == 10_000
-        assert BUILD_SPEC_V6.budget.max_tokens == 1_000_000
-        assert BUILD_SPEC_V6.budget.token_limit_enforced is False
-        assert BUILD_SPEC_V6.budget.timeout_seconds == 900
+        assert resolve_stage_spec("build").spec_key == "generic:build:v7"
+        assert BUILD_SPEC_V7.required_inputs == BUILD_SPEC_V6.required_inputs
+        assert BUILD_SPEC_V7.validity_gates == BUILD_SPEC_V6.validity_gates
+        assert BUILD_SPEC_V7.budget.max_turns == 450
+        assert BUILD_SPEC_V7.budget.max_tokens == 120_000
+        assert BUILD_SPEC_V7.budget.token_limit_enforced is True
+        assert BUILD_SPEC_V7.budget.timeout_seconds == 900
 
     def test_the_older_build_contracts_are_unchanged(self) -> None:
         from deerflow.dbtl.stage_spec import BUILD_SPEC_V2, BUILD_SPEC_V3, BUILD_SPEC_V4

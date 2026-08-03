@@ -542,6 +542,98 @@ def step_failure_request(
     )
 
 
+def execution_preflight_request(
+    *,
+    cycle_id: str,
+    stage_attempt_id: str,
+    workflow_spec_key: str,
+    cycle_revision: int = 0,
+    missing_tool: str = "bash",
+) -> BuildControlRequest:
+    """Pause before planning when Build cannot execute its own work.
+
+    Replanning cannot add a server capability, and sending the same request
+    back to a worker cannot make a missing tool appear.  The only productive
+    retry is after an administrator changes the runtime; the card says that
+    explicitly and otherwise offers a durable Hold.
+    """
+    tool = _text(missing_tool, limit=80) or "execution tool"
+    return BuildControlRequest(
+        kind=BuildControlKind.STEP_FAILURE,
+        question="Build cannot start because its execution preflight failed. What next?",
+        rationale=(f"The Build worker does not have the required {tool!r} tool. No planner or Build worker ran. Enable the tool for this runtime, then retry."),
+        error_code="execution_tool_unavailable",
+        cycle_id=cycle_id,
+        stage_attempt_id=stage_attempt_id,
+        workflow_spec_key=workflow_spec_key,
+        step_key="execution_preflight",
+        cycle_revision=cycle_revision,
+        input_digest=f"execution-preflight:{tool}",
+        recommended_option_id="retry",
+        options=(
+            _option(
+                "retry",
+                "Retry preflight",
+                BuildControlAction.RETRY_STEP,
+                "Checks the runtime again. No worker starts unless the execution tool is now available.",
+            ),
+            _HOLD,
+        ),
+    )
+
+
+def paused_build_recovery_request(
+    *,
+    previous: Mapping[str, Any],
+    cycle_revision: int,
+    requested_action: str = "",
+) -> BuildControlRequest:
+    """Open a fresh control after a prior Hold released the conversation.
+
+    The previous card remains an immutable record of the decision to hold.  A
+    later explicit “start/retry/replan Build” therefore raises a new row rather
+    than mutating or silently overriding that answer.
+    """
+    requested = _text(requested_action, limit=40).lower()
+    recommended = "replan" if requested in {"replan", "restart"} else "retry"
+    previous_id = _text(previous.get("id"), limit=120) or _text(previous.get("request_id"), limit=120)
+    return BuildControlRequest(
+        kind=BuildControlKind.STEP_FAILURE,
+        question="This Build was paused. What should happen next?",
+        rationale="The earlier Hold remains recorded. Choose a new governed action; nothing starts from these words alone.",
+        error_code="paused_build_reopened",
+        cycle_id=_text(previous.get("cycle_id"), limit=160),
+        stage_attempt_id=_text(previous.get("stage_attempt_id"), limit=160),
+        workflow_spec_key=_text(previous.get("workflow_spec_key"), limit=160),
+        step_key=_text(previous.get("step_key"), limit=160) or "execute_phases",
+        cycle_revision=cycle_revision,
+        plan_digest=_text(previous.get("plan_digest"), limit=200),
+        input_digest=f"resume-after:{previous_id}",
+        recommended_option_id=recommended,
+        options=(
+            _option(
+                "retry",
+                "Retry the stopped step",
+                BuildControlAction.RETRY_STEP,
+                "Reuses every committed predecessor and runs only the stopped step again.",
+            ),
+            _option(
+                "replan",
+                "Replan the build",
+                BuildControlAction.REPLAN_BUILD,
+                "Keeps the approved design but discards phases from the old plan and draws a new one.",
+            ),
+            _option(
+                "restart",
+                "Restart the build",
+                BuildControlAction.RESTART_BUILD,
+                "Starts again at the approved design and reuses none of this Build attempt.",
+            ),
+            _HOLD,
+        ),
+    )
+
+
 def no_presentable_results_request(
     *,
     cycle_id: str,

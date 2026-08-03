@@ -120,7 +120,7 @@ describe("exactly one thing moves", () => {
       { renderSheet: true },
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Activity · 3 steps/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Activity · 1 run/ }));
     expect(
       screen.getByRole("dialog").querySelectorAll(".animate-spin").length,
     ).toBe(1);
@@ -257,11 +257,11 @@ describe("the expand control", () => {
     expect((button as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("counts the steps recorded so far", () => {
+  it("counts runs rather than lifecycle transitions", () => {
     renderBlock([
       event(),
       event({ transition: "updated", state: "computing" }),
     ]);
-    expect(screen.getByRole("button", { name: /2 steps/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /1 run/ })).toBeTruthy();
   });
 });

@@ -167,77 +167,29 @@ def _exploratory_actions(surface_stage: str) -> list[str]:
     return ["learn_exploratory"]
 
 
-async def _post_design_meeting_progress(
+async def _post_design_meeting_turn(
     request: Request,
     *,
-    project_id: str,
-    cycle_id: str,
     thread_id: str,
     run_id: str,
     surface_id: str,
     design_round: int,
     choice_label: str,
     comment: str,
-    prior_workers: list[dict[str, Any]],
 ) -> None:
-    """Put the deck-started meeting back into the primary chat channel."""
+    """Put a deck-started meeting into normal transcript order.
+
+    This is deliberately an ordinary assistant message, not a bespoke dynamic
+    card. Its run id binds the message to the background round, whose ordinary
+    reply and successor deck then follow beneath it.
+    """
     recorded = f"Recorded decision: **{choice_label}**."
     if comment:
         recorded += f"\n\nComment: {comment}"
-    participants: list[dict[str, Any]] = []
-    prior_chair: dict[str, Any] | None = None
-    for worker in prior_workers:
-        result = worker.get("result") if isinstance(worker.get("result"), dict) else {}
-        capability = str(worker.get("capability") or "")
-        if capability == "design_council_chair":
-            prior_chair = worker
-            continue
-        role = "red_team" if capability == "design_red_team" else "position"
-        participants.append(
-            {
-                "id": str(worker.get("unit_id") or worker.get("id") or uuid4()),
-                "role": role,
-                "role_label": "Red team" if role == "red_team" else "Independent position",
-                "agent_name": str(worker.get("agent_name") or "Design participant"),
-                "via_generalist": bool(worker.get("via_generalist")),
-                "model": str((result.get("execution") or {}).get("model") or ""),
-                "status": "failed" if worker.get("status") == "failed" else "completed",
-                "summary": str(result.get("summary") or "")[:600],
-                "total_tokens": int((result.get("token_usage") or {}).get("total_tokens") or 0),
-            }
-        )
-    prior_chair_result = prior_chair.get("result") if prior_chair and isinstance(prior_chair.get("result"), dict) else {}
-    participants.append(
-        {
-            "id": str((prior_chair or {}).get("unit_id") or f"dbtl-meeting-chair__{surface_id}"),
-            "role": "chair",
-            "role_label": "Chair",
-            "agent_name": str((prior_chair or {}).get("agent_name") or "Design chair"),
-            "via_generalist": bool((prior_chair or {}).get("via_generalist")),
-            "model": str((prior_chair_result.get("execution") or {}).get("model") or ""),
-            "status": "in_progress",
-            "summary": "Revisiting the synthesis with the project owner’s recorded decision.",
-            "total_tokens": 0,
-        }
-    )
-    meeting_snapshot = {
-        "version": 1,
-        "project_id": project_id,
-        "cycle_id": cycle_id,
-        "surface_id": surface_id,
-        "run_id": run_id,
-        "round": design_round,
-        "state": "synthesizing",
-        "choice_label": choice_label,
-        "comment": comment,
-        "prior_chair_unit_id": str((prior_chair or {}).get("unit_id") or ""),
-        "participants": participants,
-    }
     message = AIMessage(
-        id=f"dbtl-meeting-progress__{surface_id}__{run_id}",
-        content=(f"The Design meeting is continuing.\n\n{recorded}\n\nThe chair is working on the synthesis. I’ll post the follow-up deck in this conversation when it is ready."),
+        id=f"dbtl-meeting-turn__{surface_id}__{run_id}",
+        content=(f"**Design meeting · Round {design_round}**\n\n{recorded}\n\nThe chair is revisiting the recorded positions and will place the follow-up slide deck below this meeting."),
         additional_kwargs={
-            "dbtl_meeting_progress": meeting_snapshot,
             "design_feedback_surface_id": surface_id,
             "run_id": run_id,
         },
@@ -251,15 +203,36 @@ async def _post_design_meeting_progress(
             content=message.model_dump(),
             metadata={
                 "caller": "lead_agent",
-                "dbtl_meeting_progress": True,
+                "dbtl_meeting_turn": True,
             },
         )
     except Exception:  # noqa: BLE001 - the admitted chair run must not be rolled back
         logger.exception(
-            "Failed to publish Design meeting progress to thread %s for run %s",
+            "Failed to publish Design meeting turn to thread %s for run %s",
             thread_id,
             run_id,
         )
+
+
+def _latest_worker_failure_detail(
+    workers: list[dict[str, Any]],
+    *,
+    capability: str,
+) -> str:
+    """Return the newest bounded worker refusal a person can act on."""
+    prefix = "The worker's result did not satisfy the stage contract: "
+    for worker in reversed(workers):
+        if str(worker.get("capability") or "") != capability:
+            continue
+        if str(worker.get("status") or "") != "failed":
+            continue
+        result = worker.get("result")
+        summary = str(result.get("summary") or "").strip() if isinstance(result, dict) else ""
+        if summary.startswith(prefix):
+            summary = summary[len(prefix) :]
+        if summary:
+            return summary[:800]
+    return ""
 
 
 def _next_open_stage(cycle: dict[str, Any], approved_stage: str) -> str | None:
@@ -721,7 +694,28 @@ async def _design_feedback_read_model(
         run_status = str(getattr(raw_status, "value", raw_status) or "")
         if run_status in {"success", "error", "timeout", "interrupted"}:
             round_label = "Design chair" if surface["mode"] == "chair_feedback" else f"{surface_stage.title()} review meeting"
-            message = f"The {round_label} could not produce a follow-up deck from that run. Your recorded choice is still here; try sending it again."
+            failure_detail = ""
+            if surface["mode"] == "chair_feedback":
+                try:
+                    workers = await repo.list_worker_runs(
+                        resolved_cycle_id,
+                        project_id=project_id,
+                        stage="design",
+                    )
+                    failure_detail = _latest_worker_failure_detail(
+                        workers,
+                        capability="design_council_chair",
+                    )
+                except Exception:  # noqa: BLE001 - the generic refusal still reopens the deck
+                    logger.warning(
+                        "Could not read the rejected Design chair result for feedback surface %s",
+                        surface_id,
+                        exc_info=True,
+                    )
+            if failure_detail:
+                message = f"The {round_label}'s response was rejected: {failure_detail} Edit your answer if needed, then send it again."
+            else:
+                message = f"The {round_label} ended without a follow-up deck. Edit your answer if needed, then send it again."
             latest_action = await repo.update_stage_feedback_action(
                 str(latest_action["client_submission_id"]),
                 project_id=project_id,
@@ -731,6 +725,7 @@ async def _design_feedback_read_model(
                     "run_id": latest_action.get("run_id"),
                     "run_status": run_status,
                     "message": message,
+                    **({"failure_detail": failure_detail} if failure_detail else {}),
                 },
                 failure_code="resume_no_feedback_surface",
             )
@@ -1460,11 +1455,6 @@ async def apply_design_feedback_action(
             visible_answer = answer
             if body.action.kind == "chair_option" and body.comment.strip():
                 visible_answer = f"{answer}\n\nComment: {body.comment.strip()}"
-            prior_workers = await repo.list_worker_runs(
-                cycle_id,
-                project_id=project_id,
-                stage="design",
-            )
             record = await start_run(
                 RunCreateRequest(
                     input={
@@ -1496,23 +1486,22 @@ async def apply_design_feedback_action(
                 request,
             )
             choice_label = str((option or {}).get("label") or answer) if body.action.kind == "chair_option" else answer
-            await _post_design_meeting_progress(
+            await _post_design_meeting_turn(
                 request,
-                project_id=project_id,
-                cycle_id=cycle_id,
                 thread_id=body.originating_thread_id,
                 run_id=record.run_id,
                 surface_id=surface_id,
                 design_round=int(surface.get("design_round") or 1),
                 choice_label=choice_label,
                 comment=body.comment.strip(),
-                prior_workers=prior_workers,
             )
+            failed_attempts = receipt.get("failed_attempts")
             receipt = {
                 "kind": body.action.kind,
                 "run_id": record.run_id,
                 "originating_thread_id": body.originating_thread_id,
                 "message": "Recorded. The Design chair is resuming in the originating conversation.",
+                **({"failed_attempts": failed_attempts} if isinstance(failed_attempts, list) else {}),
             }
             updated = await repo.update_stage_feedback_action(
                 action_id,

@@ -432,7 +432,7 @@ class TestTheWriterAndTheReadModelAgree:
         dispatcher = _ObservingDispatcher()
         await _run_build(repo, root, dispatcher=dispatcher)
 
-        assert events[0] == ("pin", "generic:build:v6")
+        assert events[0] == ("pin", "generic:build:v7")
         assert events[1][0] == "dispatch"
 
     async def test_a_successful_build_records_a_complete_chain(self, project) -> None:
@@ -1080,6 +1080,38 @@ class TestWorkflowPersistenceIsAuthoritative:
 
 
 class TestAPhaseSucceedsOnlyOnceItsOutputsArePublished:
+    async def test_a_missing_artifact_is_named_as_missing_not_outside(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        class _NamesAFileItNeverWrote(_WritingDispatcher):
+            async def __call__(self, units, *, budget):
+                if units[0].role == "phase":
+                    self.phase_units.append(units[0])
+                    missing = _grant_from_prompt(units[0].prompt) / "never-created.bin"
+                    text = _build_result(
+                        artifact=_virtual(missing),
+                        figure=_virtual(missing),
+                    )
+                    return [DispatchOutcome(unit_id=units[0].unit_id, text=text)]
+                return await super().__call__(units, budget=budget)
+
+        await _run_build(
+            repo,
+            root,
+            dispatcher=_NamesAFileItNeverWrote(plan=SINGLE_PHASE_PLAN),
+        )
+
+        phases = (
+            await repo.build_workflow_view(
+                project_id="project-1",
+                stage_attempt_id=stage_attempt_id,
+            )
+        )["phases"]
+        assert "does not exist" in phases[0]["error_summary"]
+        assert "outside this worker" not in phases[0]["error_summary"]
+
     async def test_an_escaped_artifact_leaves_no_reusable_success(self, project) -> None:
         """Recording success from the worker's own JSON was the ordering bug.
 

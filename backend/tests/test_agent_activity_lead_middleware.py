@@ -102,6 +102,25 @@ class TestAnOrdinaryRunIsVisible:
 
         assert writer.frames[-1]["state"] == ActivityState.COMPUTING.value
 
+    async def test_nested_ordinary_branch_recovers_the_outer_run_id(self, writer, monkeypatch):
+        middleware = _middleware()
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.agent_activity_middleware.get_config",
+            lambda: {
+                "configurable": {
+                    "context": {"run_id": "run-supervised-ordinary"},
+                }
+            },
+        )
+        runtime = SimpleNamespace(context={})
+
+        await middleware.abefore_agent({}, runtime)
+        await middleware.aafter_agent({}, runtime)
+
+        assert [frame["transition"] for frame in writer.frames] == ["started", "completed"]
+        assert {frame["run_id"] for frame in writer.frames} == {"run-supervised-ordinary"}
+        assert {frame["display_name"] for frame in writer.frames} == {"Lead agent"}
+
     async def test_no_tool_name_reaches_the_projection(self, writer):
         middleware = _middleware()
         await middleware.abefore_agent({}, _runtime())

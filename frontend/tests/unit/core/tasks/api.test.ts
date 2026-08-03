@@ -188,19 +188,15 @@ describe("fetchStageWorkers", () => {
     expect(mockedFetch.mock.calls[0]![0] as string).toContain(
       "/backend/api/threads/thread%201/stage-worker-events?limit=2",
     );
-    expect(mockedFetch.mock.calls[1]![0] as string).toContain(
-      "before_seq=20",
-    );
+    expect(mockedFetch.mock.calls[1]![0] as string).toContain("before_seq=20");
   });
 
   test("keeps a persisted meeting seat, tagged so the stage lane can skip it", async () => {
-    /* Dropping seats here is what made a meeting unrecoverable: it exists in
-     * the database, and the one path that reads the database threw it away on
-     * the grounds that the live-only DebatePanel would draw it. A reload, a
-     * deck-started round, or any run the browser did not watch then had
-     * nothing to render. The record now carries its seat identity and the
-     * stage lane filters on that (`stageWorkGroups` already excludes any task
-     * with a `councilSeat`), so one participant is still never drawn twice. */
+    /* A meeting seat remains part of the durable task ledger even though chat
+     * now presents the meeting as ordinary assistant turns followed by its
+     * deck. Activity and audit consumers still need the seat identity, while
+     * `stageWorkGroups` excludes it from the generic stage lane so it is not
+     * projected into chat as a second meeting surface. */
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, {
         events: [

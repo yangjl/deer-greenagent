@@ -640,28 +640,44 @@ class DesignFeedbackOpsMixin:
                     raise DesignFeedbackConflict("A progressive route action cannot select issue cards.")
 
             if existing is not None:
-                same_failed_retry = bool(
-                    action_group == "chair_response"
-                    and existing.status == "failed"
-                    and existing.id == submission_id
-                    and existing.action_kind == action_kind
-                    and list(existing.selected_card_ids or []) == card_ids
-                    and (existing.human_comment or "") == comment
-                    and existing.expected_evidence == expected_evidence
-                    and existing.expected_deck_hash == expected_deck_hash
-                )
-                if same_failed_retry:
+                editable_failed_chair_retry = bool(action_group == "chair_response" and existing.status == "failed" and existing.id == submission_id and existing.expected_deck_hash == expected_deck_hash)
+                if editable_failed_chair_retry:
                     # A resumed chair worker is itself durable audit work, so a
                     # failed attempt advances the cycle revision even though it
-                    # produces no successor deck. Retrying the exact same
-                    # payload under the same client submission id may bind to
-                    # that freshly-read revision; changing the answer, deck,
-                    # evidence, or id is still a conflict. This is a retry of
-                    # one decision, not a second answer or a stale rebase.
+                    # produces no successor deck. A contract rejection is not
+                    # transient: byte-identical input is guaranteed to fail
+                    # again, so this unanswered surface may replace its draft
+                    # before retrying. The failed payload stays in the receipt's
+                    # bounded attempt history; the deck and action identity
+                    # stay fixed, and a successful response remains immutable.
+                    previous_attempts = existing_receipt.get("failed_attempts")
+                    failed_attempts = list(previous_attempts) if isinstance(previous_attempts, list) else []
+                    failed_attempts.append(
+                        {
+                            "action_kind": existing.action_kind,
+                            "selected_card_ids": list(existing.selected_card_ids or []),
+                            "human_comment": existing.human_comment or "",
+                            "expected_db_revision": existing.expected_db_revision,
+                            "payload_hash": existing.payload_hash,
+                            "run_id": existing.run_id,
+                            "failure_code": existing.failure_code,
+                            "receipt": {key: value for key, value in existing_receipt.items() if key != "failed_attempts"},
+                        }
+                    )
+                    existing.action_kind = action_kind
                     existing.payload_hash = payload_hash
+                    existing.selected_card_ids = card_ids
+                    existing.human_comment = comment or None
                     existing.expected_db_revision = expected_db_revision
+                    existing.expected_evidence = expected_evidence
                     existing.status = "pending"
+                    existing.run_id = None
                     existing.failure_code = None
+                    existing.receipt = {
+                        "kind": action_kind,
+                        "failed_attempts": failed_attempts[-20:],
+                        "message": "The edited chair answer is being sent to a new attempt.",
+                    }
                     await session.commit()
                     return self._surface_payload(surface), self._action_payload(existing), True
                 if existing.payload_hash != payload_hash:

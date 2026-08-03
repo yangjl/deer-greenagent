@@ -11,6 +11,8 @@ from deerflow.dbtl.build_control import (
     BuildControlOption,
     BuildControlRequest,
     change_plan_request,
+    execution_preflight_request,
+    paused_build_recovery_request,
     phase_pause_request,
     plan_confirmation_request,
     plan_rows,
@@ -137,6 +139,36 @@ class TestTheRequestStatesItsBindings:
 
 
 class TestEveryOptionSaysWhatChoosingItCosts:
+    def test_execution_preflight_offers_no_replan_that_cannot_add_a_tool(self) -> None:
+        card = execution_preflight_request(**BINDINGS).as_card()
+
+        assert card["error_code"] == "execution_tool_unavailable"
+        assert [option["id"] for option in card["options"]] == ["retry", "hold"]
+        assert "No planner or Build worker ran" in card["rationale"]
+
+    def test_reopening_a_held_build_mints_a_new_bound_exchange(self) -> None:
+        card = paused_build_recovery_request(
+            previous={
+                "id": "dbc-old",
+                "cycle_id": "cycle-1",
+                "stage_attempt_id": "sa-1",
+                "workflow_spec_key": "generic:build-workflow:v1",
+                "step_key": "execute_phases",
+                "plan_digest": "plan-1",
+            },
+            cycle_revision=8,
+            requested_action="replan",
+        ).as_card()
+
+        assert card["input_digest"] == "resume-after:dbc-old"
+        assert card["recommended_option_id"] == "replan"
+        assert [option["id"] for option in card["options"]] == [
+            "retry",
+            "replan",
+            "restart",
+            "hold",
+        ]
+
     def test_replan_states_that_finished_phases_are_discarded(self) -> None:
         card = step_failure_request(
             step_key="execute_phases",

@@ -587,6 +587,69 @@ class TestPayloadBoundActions:
                 }
             )
 
+    async def test_a_failed_chair_answer_can_be_edited_under_the_same_action_id(self, tmp_path: Path) -> None:
+        repo = await _repo(tmp_path)
+        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert cycle is not None
+        surface = await _register(
+            repo,
+            human_input_request_id="dbtl-design__request-editable-retry",
+            decision_request={
+                "question": "Which split?",
+                "options": [
+                    {"id": "family", "label": "Family", "value": "Use families."},
+                    {"id": "site", "label": "Site", "value": "Hold out a site."},
+                ],
+            },
+        )
+        first_kwargs = {
+            "project_id": "project-1",
+            "cycle_id": "cycle-1",
+            "surface_id": surface["surface_id"],
+            "originating_thread_id": "thread-1",
+            "action_kind": "chair_option",
+            "selected_card_ids": ["family"],
+            "human_comment": "Use the first draft.",
+            "client_submission_id": "submission-editable-retry",
+            "expected_db_revision": int(cycle["db_revision"]),
+            "expected_evidence": None,
+            "expected_deck_hash": DECK_HASH,
+        }
+        _surface, first, replayed = await repo.reserve_design_feedback_action(**first_kwargs)
+        assert replayed is False
+        await repo.update_design_feedback_action(
+            first["client_submission_id"],
+            project_id="project-1",
+            status="failed",
+            run_id="run-rejected-1",
+            receipt={
+                "message": "The chair response was rejected.",
+                "failure_detail": "Malformed artifact reference.",
+            },
+            failure_code="resume_no_feedback_surface",
+        )
+
+        _surface, retried, reused = await repo.reserve_design_feedback_action(
+            **{
+                **first_kwargs,
+                "selected_card_ids": ["site"],
+                "human_comment": "Use the edited site-aware answer.",
+            }
+        )
+
+        assert reused is True
+        assert retried["client_submission_id"] == first["client_submission_id"]
+        assert retried["status"] == "pending"
+        assert retried["run_id"] is None
+        assert retried["selected_card_ids"] == ["site"]
+        assert retried["human_comment"] == "Use the edited site-aware answer."
+        assert retried["failure_code"] is None
+        previous = retried["receipt"]["failed_attempts"][-1]
+        assert previous["selected_card_ids"] == ["family"]
+        assert previous["human_comment"] == "Use the first draft."
+        assert previous["run_id"] == "run-rejected-1"
+        assert previous["receipt"]["failure_detail"] == "Malformed artifact reference."
+
     async def test_a_chair_option_must_come_from_the_recorded_result(self, tmp_path: Path) -> None:
         repo = await _repo(tmp_path)
         cycle = await repo.get_cycle("cycle-1", project_id="project-1")

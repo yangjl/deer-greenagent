@@ -32,6 +32,30 @@
   ul { margin: 0; padding-left: 1.15rem; }
   li { margin: .55rem 0; font-size: 1.08rem; }
   .empty { color: var(--muted); font-style: italic; }
+  /* Fewer things per screen, each one larger: what makes the deck read as a
+     summary is the pacing, not a shorter sentence the renderer invented. */
+  .slide--agree li, .slide--limits li, .slide--next li { font-size: 1.16rem; margin: .95rem 0; padding-left: .2rem; }
+  .slide--agree li::marker { color: var(--accent); }
+  .statement { font-size: 1.32rem; line-height: 1.45; max-width: 46rem; margin: 0 0 1rem; }
+  .source { margin: 0 0 .6rem; color: var(--muted); font: .72rem/1.6 ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    letter-spacing: .12em; text-transform: uppercase; }
+  .slide--synthesis p { font-size: 1.14rem; line-height: 1.62; max-width: 46rem; margin: 0 0 1rem; }
+  .more { margin: 1rem 0 0; color: var(--muted); font-size: .88rem; font-style: italic; }
+  /* The reader's own box. Dashed while inert so an untouched deck does not
+     look like a form somebody abandoned half-filled. */
+  .note { display: grid; gap: .3rem; margin: 1.9rem 0 0; padding-top: 1.1rem; border-top: 1px solid var(--line); }
+  .note label { font: .72rem/1.6 ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .note textarea { width: 100%; resize: vertical; border: 1px dashed var(--line); border-radius: 8px;
+    padding: .6rem .7rem; color: var(--fg); background: transparent; font: inherit; }
+  .note textarea:not([disabled]) { border-style: solid; background: var(--bg); }
+  .note textarea:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  .note textarea[disabled] { opacity: .6; }
+  .open-questions { display: grid; gap: 1.4rem; margin-top: .4rem; }
+  .open-question-text { margin: 0 0 .1rem; font-size: 1.1rem; font-weight: 600; line-height: 1.4; }
+  /* Its own box sits under its own question, so the two read as one item
+     rather than as a list followed by a form. */
+  .open-question .note { margin-top: .5rem; padding-top: 0; border-top: 0; }
   .contested-grid { display: grid; gap: .9rem; }
   .contested { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0; padding: 1rem 1.15rem; background: var(--card); }
   .contested h3 { margin: 0 0 .5rem; font-size: 1.05rem; }
@@ -103,13 +127,16 @@
     .deck { display: block; height: auto; padding: 0; }
     .slide, .slide.is-active { display: block; page-break-after: always; padding: 2.5rem; }
     .decision .comment, .review .comment, .submit-row, .review-actions, [data-deck-status] { display: none !important; }
+    /* An empty box prints as a blank rectangle; on paper it is a place to
+       write, so it keeps its border and loses only the disabled styling. */
+    .note textarea { opacity: 1; min-height: 4.5rem; }
     .decision input, .review input { display: none; }
     .bar { display: none; }
   }
 </style>
 </head>
 <body>
-<main class="deck"><section class="slide slide--title"><p class="eyebrow">Design meeting · Round 1</p><h2>Simulate a maize breeding population</h2><p class="lede">What the participants agreed, where they split, and what still needs your decision.</p><p class="stamp">2026-07-29 01:50 UTC</p></section><section class="slide slide--agree"><p class="eyebrow">Where the meeting agreed</p><h2>Agreed</h2><ul><li>The family is biparental and the trait is flowering time.</li></ul></section><section class="slide slide--contest"><p class="eyebrow">Where the meeting split</p><h2>Contested</h2><div class="contested-grid"><article class="contested"><h3>Which base the acceptance checks are evaluated against</h3><ul class="positions"><li>Against the founder haplotypes</li><li>Against the realized F2 sample</li></ul><p class="verdict verdict--open"><span>Not resolved</span> still open for the project owner.</p></article></div></section><section class="slide slide--decide"><p class="eyebrow">Only you can settle these</p><h2>Needs your decision</h2><fieldset class="decision" disabled><legend>Should the RIL family be produced by selfing to F5/F6, or by doubled-haploid production?</legend><div class="options"><div class="option"><input type="radio" id="inbreeding-route--selfing_f5_f6" name="inbreeding-route" value="selfing_f5_f6" disabled><label for="inbreeding-route--selfing_f5_f6"><span class="option-label">Selfing to F5/F6<span class="badge">Recommended</span></span><span class="option-value">Produce the RIL family by single-seed descent to F5/F6.</span><span class="option-detail">Residual heterozygosity around 3-6%; the segregation checks stay as written.</span></label></div><div class="option"><input type="radio" id="inbreeding-route--doubled_haploid" name="inbreeding-route" value="doubled_haploid" disabled><label for="inbreeding-route--doubled_haploid"><span class="option-label">Doubled-haploid production</span><span class="option-value">Produce the family by doubled-haploid production.</span><span class="option-detail">Fully homozygous lines, but induction rate biases which families survive.</span></label></div></div><div class="comment"><label for="inbreeding-route--comment">Add a comment (optional)</label><textarea id="inbreeding-route--comment" data-deck-comment rows="3" disabled></textarea></div></fieldset><p class="recommendation"><span>Why the chair leans this way</span> The owner said &#x27;biparental&#x27; without an inbreeding route, and selfing keeps the stated map-length check valid.</p><div class="submit-row"><button type="button" data-deck-submit disabled>Send to the meeting</button><p class="inert" data-deck-status role="status" aria-live="polite">Open this deck in DeerFlow to respond.</p></div><ul><li>Which base the acceptance checks are evaluated against</li><li>How many seasons and replicates?</li></ul></section><section class="slide slide--synthesis"><p class="eyebrow">The chair&#x27;s synthesis</p><h2>Where this lands</h2><p>Simulate the biparental family under an additive-plus-dominance model, then validate against the stated criteria.</p></section><section class="slide slide--limits"><p class="eyebrow">Read the synthesis against these</p><h2>Limitations</h2><ul><li>Generation rules stay unfrozen until the route is settled.</li></ul></section><section class="slide slide--next"><p class="eyebrow">Recommended, not decided</p><h2>Next</h2><ul><li>Freeze the generation rules once the route is chosen.</li></ul><p class="gate">Nothing here approves anything merely by opening the deck. Use the Human gate slide to submit and record a verdict.</p><p class="stamp">Full review package: /mnt/user-data/outputs/dbtl/x/design/design-review-rev1-fb18c0.md</p></section></main>
+<main class="deck"><section class="slide slide--title"><p class="eyebrow">Design meeting · Round 1</p><h2>Simulate a maize breeding population</h2><p class="lede">What the participants agreed, where they split, and what still needs your decision.</p><p class="stamp">2026-07-29 01:50 UTC</p></section><section class="slide slide--agree"><p class="eyebrow">Where the meeting agreed</p><h2>Agreed</h2><ul><li>The family is biparental and the trait is flowering time.</li></ul><div class="note" data-note-for="agreed"><label for="note-agreed">Your note on agreed <span class="option-detail">travels with your decision</span></label><textarea id="note-agreed" data-deck-note data-note-label="Agreed" rows="2" disabled></textarea></div></section><section class="slide slide--contest"><p class="eyebrow">Where the meeting split</p><h2>Contested</h2><div class="contested-grid"><article class="contested"><h3>Which base the acceptance checks are evaluated against</h3><ul class="positions"><li>Against the founder haplotypes</li><li>Against the realized F2 sample</li></ul><p class="verdict verdict--open"><span>Not resolved</span> still open for the project owner.</p></article></div><div class="note" data-note-for="contested"><label for="note-contested">Your note on contested <span class="option-detail">travels with your decision</span></label><textarea id="note-contested" data-deck-note data-note-label="Contested" rows="2" disabled></textarea></div></section><section class="slide slide--decide"><p class="eyebrow">Only you can settle these</p><h2>Needs your decision</h2><fieldset class="decision" disabled><legend>Should the RIL family be produced by selfing to F5/F6, or by doubled-haploid production?</legend><div class="options"><div class="option"><input type="radio" id="inbreeding-route--selfing_f5_f6" name="inbreeding-route" value="selfing_f5_f6" disabled><label for="inbreeding-route--selfing_f5_f6"><span class="option-label">Selfing to F5/F6<span class="badge">Recommended</span></span><span class="option-value">Produce the RIL family by single-seed descent to F5/F6.</span><span class="option-detail">Residual heterozygosity around 3-6%; the segregation checks stay as written.</span></label></div><div class="option"><input type="radio" id="inbreeding-route--doubled_haploid" name="inbreeding-route" value="doubled_haploid" disabled><label for="inbreeding-route--doubled_haploid"><span class="option-label">Doubled-haploid production</span><span class="option-value">Produce the family by doubled-haploid production.</span><span class="option-detail">Fully homozygous lines, but induction rate biases which families survive.</span></label></div></div><div class="comment"><label for="inbreeding-route--comment">Add a comment (optional)</label><textarea id="inbreeding-route--comment" data-deck-comment rows="3" disabled></textarea></div></fieldset><p class="recommendation"><span>Why the chair leans this way</span> The owner said &#x27;biparental&#x27; without an inbreeding route, and selfing keeps the stated map-length check valid.</p><div class="submit-row"><button type="button" data-deck-submit disabled>Send to the meeting</button><p class="inert" data-deck-status role="status" aria-live="polite">Open this deck in DeerFlow to respond.</p></div><div class="open-questions"><div class="open-question"><p class="open-question-text">Which base the acceptance checks are evaluated against</p><div class="note" data-note-for="open-1"><label for="note-open-1">Your note on which base the acceptance checks are evaluated against <span class="option-detail">travels with your decision</span></label><textarea id="note-open-1" data-deck-note data-note-label="Which base the acceptance checks are evaluated against" rows="2" disabled></textarea></div></div><div class="open-question"><p class="open-question-text">How many seasons and replicates?</p><div class="note" data-note-for="open-2"><label for="note-open-2">Your note on how many seasons and replicates? <span class="option-detail">travels with your decision</span></label><textarea id="note-open-2" data-deck-note data-note-label="How many seasons and replicates?" rows="2" disabled></textarea></div></div></div></section><section class="slide slide--synthesis"><p class="eyebrow">The chair&#x27;s synthesis</p><h2>Conclusions</h2><p>Simulate the biparental family under an additive-plus-dominance model, then validate against the stated criteria.</p><div class="note" data-note-for="conclusions"><label for="note-conclusions">Your note on conclusions <span class="option-detail">travels with your decision</span></label><textarea id="note-conclusions" data-deck-note data-note-label="Conclusions" rows="2" disabled></textarea></div></section><section class="slide slide--limits"><p class="eyebrow">Read the conclusions against these</p><h2>Limitations</h2><ul><li>Generation rules stay unfrozen until the route is settled.</li></ul><div class="note" data-note-for="limitations"><label for="note-limitations">Your note on limitations <span class="option-detail">travels with your decision</span></label><textarea id="note-limitations" data-deck-note data-note-label="Limitations" rows="2" disabled></textarea></div></section><section class="slide slide--next"><p class="eyebrow">Recommended, not decided</p><h2>Next</h2><ul><li>Freeze the generation rules once the route is chosen.</li></ul><p class="gate">Nothing here approves anything merely by opening the deck. The final slide is where a verdict is recorded.</p><p class="stamp">Full review package: /mnt/user-data/outputs/dbtl/x/design/design-review-rev1-fb18c0.md</p><div class="note" data-note-for="next"><label for="note-next">Your note on next steps <span class="option-detail">travels with your decision</span></label><textarea id="note-next" data-deck-note data-note-label="Next steps" rows="2" disabled></textarea></div></section></main>
 <nav class="bar">
   <button type="button" data-step="-1" aria-label="Previous slide">&larr;</button>
   <button type="button" data-step="1" aria-label="Next slide">&rarr;</button>
@@ -189,9 +216,32 @@
   var choices = Array.prototype.slice.call(
     document.querySelectorAll('fieldset.decision input[type="radio"], fieldset.review input[type="radio"], [data-deck-issue]')
   );
+  // One box per content slide. They are drafts, not a second record: whatever
+  // is in them is folded into the comment of the decision actually taken, so a
+  // note can never be stored as a verdict nobody gave.
+  var notes = Array.prototype.slice.call(document.querySelectorAll('[data-deck-note]'));
+  var NOTE_LIMIT = 1000;
   var GATE_KINDS = ['advance', 'approve', 'request_changes', 'park'];
 
   function say(text) { if (status) { status.textContent = text; } }
+
+  function withNotes(text) {
+    var parts = [];
+    notes.forEach(function (note) {
+      var value = (note.value || '').trim();
+      if (!value) { return; }
+      var label = note.getAttribute('data-note-label') || 'Note';
+      parts.push('[' + label + '] ' + value.slice(0, NOTE_LIMIT));
+    });
+    if (!parts.length) { return text; }
+    // Notes first, then the verdict's own words: the reader of the record
+    // works through the deck in the order the reviewer did.
+    return text ? parts.join('\n') + '\n---\n' + text : parts.join('\n');
+  }
+
+  function clearNotes() {
+    notes.forEach(function (note) { note.value = ''; });
+  }
 
   function send(type, extra) {
     var payload = { source: SOURCE, protocol: PROTOCOL, surfaceId: SURFACE_ID, type: type };
@@ -220,6 +270,9 @@
         || allowed.indexOf(kind) === -1;
     });
     if (comment) { comment.disabled = !on; }
+    // A note box carries its own `disabled` for the same reason every other
+    // control does, so activation has to clear each one individually.
+    notes.forEach(function (note) { note.disabled = !on; });
     // Every option ships individually disabled so the persisted file is inert
     // wherever it is opened. An enabled fieldset does not re-enable a control
     // that carries its own `disabled`, so activation has to clear each one --
@@ -250,7 +303,7 @@
       // the person had typed rather than asking them to retype it.
       send('submit_intent', {
         action: { kind: 'chair_option', optionIds: [option] },
-        comment: comment ? comment.value : ''
+        comment: withNotes(comment ? comment.value : '')
       });
     });
   }
@@ -267,7 +320,10 @@
         : value === 'park' ? 'park'
         : (allowed.indexOf('advance') !== -1 ? 'advance' : 'approve');
       if (allowed.indexOf(kind) === -1) { say('That choice is not available right now.'); return; }
-      var text = comment ? comment.value.trim() : '';
+      // Validate what is actually recorded. A reviewer who wrote their reasons
+      // on the slide the reasons are about has written them down; refusing the
+      // verdict because the last box is empty would be asking twice.
+      var text = withNotes(comment ? comment.value.trim() : '').trim();
       var effective = assessment ? assessment.dataset.assessedDifficulty : 'standard';
       if (kind === 'request_changes' && !text) {
         say('Describe what should change before sending the Design back.'); return;
@@ -293,7 +349,7 @@
       if (kind === 'request_changes') {
         optionIds = Array.prototype.slice.call(document.querySelectorAll('[data-deck-issue]:checked')).map(function (item) { return item.value; });
       }
-      var text = comment ? comment.value.trim() : '';
+      var text = withNotes(comment ? comment.value.trim() : '').trim();
       if ((kind === 'chair_text' || kind === 'reject') && !text) {
         say('Add a rationale before recording this decision.'); return;
       }
@@ -337,6 +393,11 @@
       }
       if (comment && typeof data.comment === 'string') {
         comment.value = data.comment;
+        // A restored comment is one this deck already folded its notes into,
+        // so the boxes are cleared rather than merged a second time. The
+        // reviewer's words are not lost -- they are in the comment now, which
+        // is the field the record actually keeps.
+        if (data.comment) { clearNotes(); }
       }
       submitting = false;
       var live = !!channel && allowed.length > 0;

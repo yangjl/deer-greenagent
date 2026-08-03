@@ -3,10 +3,7 @@
 import { Loader2Icon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import {
-  fetchStageWorkers,
-  StageWorkerFetchError,
-} from "@/core/tasks/api";
+import { fetchStageWorkers, StageWorkerFetchError } from "@/core/tasks/api";
 import { useReconcileSubtasks, useSubtaskContext } from "@/core/tasks/context";
 import {
   stageLabel,
@@ -40,9 +37,9 @@ function shouldRetryHydration(error: unknown): boolean {
  *
  * Deliberately composition around the existing `SubtaskCard` rather than a
  * second step renderer: the same expansion, the same tool disclosure, the same
- * backfill on reload. Design meeting seats are excluded here because
- * `DebatePanel` already renders them with their role and round; the two
- * surfaces must never show one participant twice.
+ * backfill on reload. Design meeting seats are excluded here because the
+ * run-scoped Meeting card renders them in transcript order; activity remains
+ * the deeper audit surface.
  */
 export function StageWorkPanel({
   className,
@@ -58,8 +55,8 @@ export function StageWorkPanel({
   const { tasks: taskMap } = useSubtaskContext();
   const reconcileSubtasks = useReconcileSubtasks();
   const groups = useMemo(
-    () => stageWorkGroups(Object.values(taskMap)),
-    [taskMap],
+    () => stageWorkGroups(Object.values(taskMap), runId),
+    [taskMap, runId],
   );
 
   // Rebuild stage work for a page that missed the stream and reconcile a

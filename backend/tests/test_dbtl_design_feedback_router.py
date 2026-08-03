@@ -365,18 +365,14 @@ def test_a_recorded_chair_option_starts_one_originating_thread_run(
             user_id=str(_USER_ID),
         )
     )
-    progress = messages[-1]["content"]
-    assert progress["id"].startswith("dbtl-meeting-progress__")
-    assert "Design meeting is continuing" in progress["content"]
-    assert "Recorded decision: **Family holdout**." in progress["content"]
-    assert "Keep one site external." in progress["content"]
-    meeting = progress["additional_kwargs"]["dbtl_meeting_progress"]
-    assert meeting["project_id"] == project_id
-    assert meeting["cycle_id"] == cycle["id"]
-    assert meeting["state"] == "synthesizing"
-    assert meeting["choice_label"] == "Family holdout"
-    assert meeting["participants"][-1]["role"] == "chair"
-    assert meeting["participants"][-1]["status"] == "in_progress"
+    meeting_turn = messages[-1]["content"]
+    assert meeting_turn["id"].startswith("dbtl-meeting-turn__")
+    assert "Design meeting · Round 1" in meeting_turn["content"]
+    assert "Recorded decision: **Family holdout**." in meeting_turn["content"]
+    assert "Keep one site external." in meeting_turn["content"]
+    assert "follow-up slide deck below this meeting" in meeting_turn["content"]
+    assert meeting_turn["additional_kwargs"]["run_id"] == "run-resume-1"
+    assert "dbtl_meeting_progress" not in meeting_turn["additional_kwargs"]
 
 
 def test_a_terminal_chair_resume_without_a_followup_surface_reopens_the_same_answer(
@@ -440,6 +436,17 @@ def test_a_terminal_chair_resume_without_a_followup_surface_reopens_the_same_ans
         assert started.status_code == 200
         assert started.json()["status"] == "resume_started"
 
+        cycle_repo.list_worker_runs = AsyncMock(
+            return_value=[
+                {
+                    "unit_id": "chair-rejected",
+                    "capability": "design_council_chair",
+                    "status": "failed",
+                    "result": {"summary": ("The worker's result did not satisfy the stage contract: Each artifact reference object must contain a non-empty string 'path'.")},
+                }
+            ]
+        )
+
         reopened = client.get(f"{_url(project_id, cycle['id'], surface['surface_id'])}?viewer_thread_id=thread-1")
 
     assert reopened.status_code == 200
@@ -448,7 +455,10 @@ def test_a_terminal_chair_resume_without_a_followup_surface_reopens_the_same_ans
     assert body["allowed_actions"] == ["chair_option"]
     assert body["receipt"]["status"] == "failed"
     assert body["receipt"]["failure_code"] == "resume_no_feedback_surface"
-    assert "try sending it again" in body["note"]
+    assert "response was rejected" in body["note"]
+    assert "artifact reference object" in body["note"]
+    assert "Edit your answer" in body["note"]
+    assert body["receipt"]["receipt"]["failure_detail"] == "Each artifact reference object must contain a non-empty string 'path'."
 
     with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
         client.app.state.thread_store.get = AsyncMock(return_value={"thread_id": "thread-1", "project_id": project_id})
@@ -457,7 +467,7 @@ def test_a_terminal_chair_resume_without_a_followup_surface_reopens_the_same_ans
             json={
                 "version": 1,
                 "action": {"kind": "chair_option", "option_ids": ["family"]},
-                "comment": "",
+                "comment": "Use family holdout, but keep one site external.",
                 "client_submission_id": "submission-retry",
                 "originating_thread_id": "thread-1",
                 "expected_db_revision": body["current_db_revision"],
@@ -468,6 +478,11 @@ def test_a_terminal_chair_resume_without_a_followup_surface_reopens_the_same_ans
 
     assert retried.status_code == 200
     assert retried.json()["status"] == "resume_started"
+    assert retried.json()["selected_card_ids"] == ["family"]
+    assert retried.json()["human_comment"] == "Use family holdout, but keep one site external."
+    previous_attempt = retried.json()["receipt"]["failed_attempts"][-1]
+    assert previous_attempt["human_comment"] == ""
+    assert "artifact reference object" in previous_attempt["receipt"]["failure_detail"]
     assert started_runs == ["started", "started"]
 
 

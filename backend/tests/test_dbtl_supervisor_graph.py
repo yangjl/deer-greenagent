@@ -820,7 +820,7 @@ class TestStageStubCannotDoScience:
         )
 
         answer = final["messages"][-1].content
-        assert "cyc-1" in answer
+        assert "recorded" in answer.lower()
         # The user must not be able to read this as work having been done.
         assert "nothing has been recorded" in answer.lower()
 
@@ -1559,7 +1559,11 @@ class TestCouncilPreflight:
         assert len(executed) == 1
         assert executed[0]["cycle_id"] == "cyc-1"
         assert executed[0]["request_text"] == kickoff
-        assert final["messages"][-1].content == ("This request is scoped to cyc-1.\n\nran\n\nThis run cannot satisfy a review gate by itself. Use the project's server-owned human review record to submit and decide the stage.")
+        # The cycle id is gone from the reply on purpose: it identifies the
+        # record for a machine and led every sentence a person read.
+        content = final["messages"][-1].content
+        assert content == "ran\n\nNothing here decides the stage. The design is recorded and waiting for your review."
+        assert "cyc-1" not in content
 
     @staticmethod
     def _human_input_adapter(executed):
@@ -1874,6 +1878,8 @@ class TestLiveStageBranch:
             "okay, let's Test",
             "can we go to Test stage?",
             "Retry Build using the approved design",
+            "Replan the build",
+            "Okay, let's start to build following this new plan",
         ],
     )
     @pytest.mark.asyncio
@@ -1931,6 +1937,81 @@ class TestLiveStageBranch:
         assert "build is in progress" in receipt
         assert "test is locked" in receipt
         assert "no stage worker ran" in receipt
+
+    @pytest.mark.asyncio
+    async def test_explicit_build_command_after_hold_opens_a_new_governed_control(self):
+        lead_calls = []
+        recovered = []
+
+        class Adapter:
+            async def active_cycle_status(self, *, project_id):
+                return [
+                    {
+                        "cycle_id": "cyc-1",
+                        "title": "Maize simulation",
+                        "state": "ready_for_build",
+                        "parked": False,
+                        "stages": {"build": "in_progress"},
+                    }
+                ]
+
+            async def recover_paused_build_control(self, **kwargs):
+                recovered.append(kwargs)
+                return {
+                    "clarification_type": "dbtl_build_control",
+                    "request_id": "dbtl-build__resume-1",
+                    "collaboration_id": "dbc-new",
+                    "build_control_kind": "step_failure",
+                    "dbtl_cycle_id": "cyc-1",
+                    "cycle_revision": 4,
+                    "stage_attempt_id": "sa-1",
+                    "workflow_spec_key": "generic:build-workflow:v1",
+                    "step_key": "execute_phases",
+                    "plan_digest": "plan-1",
+                    "input_digest": "resume-after:dbc-old",
+                    "error_code": "paused_build_reopened",
+                    "question": "This Build was paused. What should happen next?",
+                    "rationale": "The earlier Hold remains recorded.",
+                    "recommended_option_id": "replan",
+                    "input_mode": "single_choice",
+                    "options": [
+                        {
+                            "id": "replan",
+                            "label": "Replan the build",
+                            "value": "replan_build",
+                            "description": "Draw a new plan.",
+                        }
+                    ],
+                }
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent(lead_calls),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id=None,
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [HumanMessage(content="Replan the build", id="replan-after-hold")],
+            },
+            config={
+                "configurable": {"thread_id": "replan-after-hold"},
+                "context": {"run_id": "run-replan-after-hold"},
+            },
+        )
+
+        assert lead_calls == []
+        assert recovered, final["messages"][-1]
+        assert recovered[0]["cycle_id"] == "cyc-1"
+        card = final["messages"][-1]
+        assert isinstance(card, ToolMessage)
+        assert card.artifact["human_input"]["request_id"] == "dbtl-build__resume-1"
 
     @pytest.mark.parametrize(
         "text",
@@ -2040,7 +2121,10 @@ class TestLiveStageBranch:
         assert calls[0]["request_text"] == "run the design stage"
         answer = final["messages"][-1].content
         assert "Recorded one bounded Design worker" in answer
-        assert "cannot satisfy a review gate" in answer
+        # Says what is true without naming an internal record the reader
+        # cannot see.
+        assert "waiting for your review" in answer
+        assert "server-owned" not in answer
 
     @pytest.mark.asyncio
     async def test_design_council_clarification_is_a_human_input_card(self):

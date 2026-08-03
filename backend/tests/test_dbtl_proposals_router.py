@@ -113,6 +113,21 @@ def test_a_research_request_produces_a_no_record_proposal(tmp_path: Path) -> Non
         assert "target trait" in proposal["missing_fields"]
 
 
+def test_a_data_request_produces_a_high_confidence_proposal(tmp_path: Path) -> None:
+    workspace_repo, evaluation_repo, _ = anyio.run(_make_repos, tmp_path)
+    with TestClient(_make_app(workspace_repo, evaluation_repo)) as client:
+        project_id = _seed_project(client)
+        body = _evaluate(
+            client,
+            project_id,
+            text=("Can plant height and leaf count predict grain yield well enough to pre-screen genotypes before harvest? Data is trial_2025_yield.csv."),
+            idempotency_key="data-request",
+        )
+
+        assert body["route_kind"] == "proposal"
+        assert body["proposal"] is not None
+
+
 def test_fresh_project_prior_is_reflected_in_shadow_evaluation(tmp_path: Path) -> None:
     workspace_repo, evaluation_repo, _ = anyio.run(_make_repos, tmp_path)
     with TestClient(_make_app(workspace_repo, evaluation_repo)) as client:

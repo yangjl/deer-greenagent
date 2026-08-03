@@ -642,7 +642,7 @@ applies, and a property of the rail rather than of either feature. `movingRow`
 returns a single key rather than a per-row flag, so two spinners are
 unrepresentable rather than merely unlikely, and the icon is keyed by phase so a
 state change updates the row without remounting and restarting the rotation.
-Tone pairs are reused from `STATUS_MARK` (no new hue family); the *keys* differ
+Tone pairs are reused from `STATUS_MARK` (no new hue family); the _keys_ differ
 because these are step states, not DBTL stage statuses.
 
 The plan supplies phases that have not started — a rail that could only show
@@ -662,7 +662,7 @@ collapsed line beneath the Build plan, which is the plan's own stated fallback.
 `src/core/activity/` owns the rail's live presence-and-lineage projection, and
 it is **pure and React-free** except for `context.tsx`. `reducer.ts` restates
 the three rules the backend reducer enforces rather than trusting them from
-upstream, because the browser sees a *different* stream — one that reconnects,
+upstream, because the browser sees a _different_ stream — one that reconnects,
 replays, and joins mid-flight: replay is not new information (folding twice, or
 a prefix then the whole thing, gives the same rows), a settled row is closed for
 good (later frames including another `started` are refused), and a row must be
@@ -684,7 +684,7 @@ leaf (deepest actor genuinely working, ties broken by highest sequence), its
 dispatcher chain, its siblings, and one of five modes. `live` / `waiting` /
 `settled` / `idle` / `unavailable` replace the old static green dot, which
 looked like proof the Lead Agent was active. `waiting` is only honest when
-*nothing* is working — one actor waiting on a person while another computes is
+_nothing_ is working — one actor waiting on a person while another computes is
 still a live run — and `unavailable` is never guessed as active: the in-memory
 run-event backend loses rows on restart, which the rail states rather than
 papering over.
@@ -701,7 +701,7 @@ distinct from the transient `waiting` state used while an actor is still live.
 
 `ThreadScopedActivityProvider` is mounted beside `ThreadScopedSubtasksProvider`
 in `ChatProviders`, keyed the same way. Two keys, and conflating them is a bug:
-the *provider* is scoped to the conversation, which is what gets torn down,
+the _provider_ is scoped to the conversation, which is what gets torn down,
 while an activity's identity is `(run_id, activity_id)`, which dedupes rows
 inside it. On mount, replay gaps, stream errors, and terminal runs, the provider
 reconciles the live tail with `GET /api/threads/{thread_id}/activity`. Live
@@ -727,7 +727,7 @@ leaf. Ancestors are static, `dispatching` uses a static glyph, and every
 animated indicator carries `motion-reduce:animate-none`. Colour is never the
 only signal: each state has a distinct icon shape and its word is always
 present, and the tone pairs are reused from `STATUS_MARK` (no new hue family) —
-but those keys are DBTL *stage statuses* and these are *activity states*, so
+but those keys are DBTL _stage statuses_ and these are _activity states_, so
 reuse the tones, not the key names. This applies to the expanded sheet as well
 as the compact block: every active row is visible there, but only the leaf
 selected by `activityView` animates.
@@ -748,6 +748,12 @@ Tree indentation caps at three levels. Every child row explicitly names its
 immediate dispatcher with `Dispatched by …`, not only rows beyond the depth cap:
 settled parents are filtered from the live view, so indentation alone can make
 an active worker appear to have been dispatched by the wrong visible ancestor.
+Completed history is run-level, not transition-level: `activityFootprints`
+collapses Routing → Dispatching → Done into one row, prefers the stage
+coordinator for governed work and the Lead agent for ordinary work, and keeps
+the Cycle supervisor as secondary `via …` provenance. The compact block counts
+runs for the same reason. Transition rows remain durable for replay/recovery;
+condensation is a read projection and never discards audit data.
 
 Gated by `useAgentActivityFeature()` → `/api/features -> agent_activity`, which
 carries `enabled` (rollout) and `durable` (false on the in-memory run-event
@@ -760,18 +766,16 @@ Note for tests that mock `react`: `core/threads/hooks.ts` imports
 `useActivityContext` from `@/core/activity/context`, so a node test mocking
 React must mock that module the same way it already mocks `@/core/tasks/context`.
 
-## Design council debate view
+## Design meeting chat sequence
 
-`src/core/tasks/council-seat.ts` is the pure layer for the live Design meeting
-view, and `src/components/workspace/messages/debate-panel.tsx` renders it. Its position comes from
-`message-list.tsx::debatePanelPosition` + `insertDebatePanel` (both exported and
-unit-tested): **bottom of the transcript while the run is in flight**, and
-**immediately above the closing answer once it settles**, so the conclusion
-reads below the meeting that produced it. The panel still belongs to the run
-rather than to a message; only its placement is anchored. Do not anchor it to
-the _request_ instead — that puts it above the preflight card, far up a long
-transcript, where it is mounted and streaming but effectively invisible.
-Out-of-range positions clamp rather than dropping the panel.
+Design meetings surface in chat as one durable, run-scoped `DebatePanel`, then
+the run's ordinary assistant conclusion or `present_files` output. A successful
+round anchors the panel immediately above its files so the Design slide deck is
+always below the meeting; a failed round anchors it above the assistant's
+refusal so the failed participant remains visible instead of collapsing into a
+generic sentence. `MessageList` does not restore the old checkpoint-derived
+`DesignMeetingProgressCard`: the durable participant ledger is the single
+meeting footprint, and agent activity remains the deeper audit surface.
 
 The task ledger is **conversation-scoped**, even though project layouts persist
 while navigating between conversations. `ChatProviders` keys
@@ -780,12 +784,10 @@ remains visible when its conversation is reopened but cannot render over
 `/workspace/<project>/new` or another thread. The native-history transition
 from a new-chat route to the UUID created by its first send can leave Next's
 route param as `"new"`; `useThreadStream` therefore also clears the ledger when
-its canonical `currentViewThreadId` changes. `MessageList` refuses to mount a
-debate panel with zero transcript groups, preventing even a one-frame stale
-paint on a blank chat. Do not move the unkeyed `SubtasksProvider` back to
-project scope: it makes a clean new-chat transcript display the previous
-conversation's debate panel and can make its pending decision look
-project-global.
+its canonical `currentViewThreadId` changes. Do not move the unkeyed
+`SubtasksProvider` back to project scope: it makes a clean new-chat transcript
+inherit the previous conversation's worker activity and can make its pending
+decision look project-global.
 
 Each participant lane is clickable and opens
 `meeting-participant-inspector.tsx`, a right-side sheet showing that
@@ -808,7 +810,7 @@ the only honest join; the recorded step shape carries a tool name but no call
 id), keeping a result whose requesting turn was compacted away, and marking a
 still-running call `pending` rather than rendering it as an empty success. Its
 one option, `dropTrailingAnswer`, removes a completed task's closing turn (which
-the caller already renders as `task.result`) *before* pairing, so the tool-call
+the caller already renders as `task.result`) _before_ pairing, so the tool-call
 turns it depends on are still intact — the meeting inspector deliberately does
 not use it, because a participant's final position is part of its transcript.
 `meeting-transcript.ts` keeps the meeting's own vocabulary and appends the
@@ -907,8 +909,8 @@ person typed.
 `core/tasks/lifecycle.ts` owns all four custom-event transitions. A council
 `task_started` creates an in-progress seat; `task_completed` and `task_failed`
 are terminal and preserve result/error, cap reason, and seat identity. The
-debate panel shows the current round, reported-seat count, bounded latest
-argument summary, and counts from the chair's recorded `consensus` object.
+run-scoped meeting panel projects that durable ledger into chat; task events do
+not create a second checkpoint-derived card.
 
 `core/dbtl/design-consensus-view.ts` reads the machine package filename from the
 bound review Markdown and parses only the chair's recorded consensus. The stage
@@ -1005,7 +1007,7 @@ card and `hasOpenHumanInputRequest` leaves the ordinary composer unlocked.
 **A surface id does not by itself mean the deck owns the card.**
 `isDeckOwnedHumanInputRequest` is the single predicate for that suppression, and
 it keys on `clarification_type`, not on the mere presence of
-`design_feedback_surface_id`. On a Design decision the deck *is* the input
+`design_feedback_surface_id`. On a Design decision the deck _is_ the input
 surface. On a `dbtl_stage_handoff` the surface id is only an audit binding —
 which approval opened this stage — and the deck holds no Start/Hold control that
 could answer it, so suppressing it rendered the card as nothing at all: the
@@ -1041,6 +1043,9 @@ plain-composer compatibility guess is cleared if the server re-delivers it.
 Both `dbtl_stage_handoff` and `dbtl_build_control` route back through the cycle.
 
 `StageWorkPanel` converges from the thread-scoped stage-worker lifecycle read
+and filters that ledger by the run owning the transcript anchor. A historical
+Build card must never appear below a later ordinary Lead Agent turn; if the
+latest run has no stage worker, it has no stage-work panel.
 after a run settles, even when a partial live task already exists. Async
 terminal hydration uses eager batch reconciliation rather than the
 render-deferred ToolMessage path. Live custom `task_completed` and
@@ -1081,7 +1086,7 @@ renders unanchored, which is worse than being in the right place and far better
 than vanishing.
 
 **Durability is the other half, and it was the actual bug.** `fetchStageWorkers`
-used to *discard* every persisted meeting seat, on the grounds that the debate
+used to _discard_ every persisted meeting seat, on the grounds that the debate
 panel already drew them — but that panel read only the live stream, so the
 seats sat in the database and the one path that reads them threw them away. A
 reload, a deck-started round, or any background run therefore showed no meeting

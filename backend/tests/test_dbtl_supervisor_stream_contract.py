@@ -206,7 +206,9 @@ class TestTerminalBranchesStreamAtRoot:
         assert frames
         assert all(not ns for ns, _ in frames), "a terminal branch must not be namespaced"
         final = frames[-1][1]["messages"][-1]
-        assert "cyc-1" in final.content
+        # The branch reply no longer names the cycle id; what matters to this
+        # contract is that the terminal frame carries the branch's own text.
+        assert "Stage execution is not enabled yet" in final.content
 
 
 class TestSupervisorActivityUsesTheRealNodeConfigShape:

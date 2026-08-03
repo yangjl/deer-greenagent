@@ -78,8 +78,10 @@ Design–Build–Test–Learn (DBTL) governance.
   path, and host-rooted filesystem MCP tools are kept out of virtual stage
   workspaces even when their configured names change. Current Build phases use
   a compact, hash-bound context, a server-created workspace layout, and a
-  metered, non-enforced token/tool-call allowance with a high emergency runtime
-  ceiling; completed phases are replayed while only a failed phase is retried.
+  bounded token/tool-call allowance; completed phases are replayed while only a
+  failed phase is retried. The isolated manual DBTL profile explicitly enables
+  local Bash so Build can execute and verify what it authors; production
+  profiles keep their own sandbox policy.
   Direct callbacks and subagent usage reports share
   one model-call identity, so the run ledger cannot count the same tokens twice.
 - **Human-controlled automation** — AI may recommend or route DBTL work, but it

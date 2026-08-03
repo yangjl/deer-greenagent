@@ -87,7 +87,9 @@ from deerflow.dbtl.build_control import (
     BuildControlAnswer,
     BuildControlKind,
     change_plan_request,
+    execution_preflight_request,
     no_presentable_results_request,
+    paused_build_recovery_request,
     phase_pause_request,
     plan_confirmation_request,
     step_failure_request,
@@ -111,6 +113,7 @@ from deerflow.dbtl.council import (
     plan_from_proposal,
     recommend_depth,
 )
+from deerflow.dbtl.council_deck import chair_result as _chair_result_of
 from deerflow.dbtl.council_deck import render_council_deck
 from deerflow.dbtl.council_proposal import (
     CouncilProposal,
@@ -391,7 +394,26 @@ def _token_limit_for_worker(unit: WorkUnit, budget: WorkerBudget) -> int | None:
     """Resolve an enforced ceiling, or ``None`` for metered-only execution."""
     if not budget.token_limit_enforced:
         return None
-    return unit.max_tokens or budget.max_tokens
+    return min(unit.max_tokens, budget.max_tokens) if unit.max_tokens else budget.max_tokens
+
+
+def _effective_dispatch_budget(stage: str, budget: WorkerBudget) -> WorkerBudget:
+    """Apply the operational safety ceiling to legacy uncapped Build specs.
+
+    Existing stage attempts stay pinned to the version they started under, so
+    publishing V7 alone would leave the exact V6 attempt that exposed this bug
+    able to spend another 300k tokens.  This is an executor safety boundary,
+    not a changed evidence contract: old attempts remain labelled V6 while no
+    single worker may exceed the current operational ceiling.
+    """
+    if stage != "build" or budget.token_limit_enforced:
+        return budget
+    return replace(
+        budget,
+        max_turns=min(budget.max_turns, 450),
+        max_tokens=min(budget.max_tokens, 120_000),
+        token_limit_enforced=True,
+    )
 
 
 def _light_pilot_chair_fallback(
@@ -2298,6 +2320,11 @@ def _write_council_deck(
             surface_mode=surface_mode,
             transition_gate=transition_gate,
             stage=stage,
+            # Background and Objectives are the cycle's own words, quoted from
+            # the record it was opened with. The deck authors nothing here.
+            research_question=str(cycle.get("research_question") or ""),
+            objective=str(cycle.get("objective") or ""),
+            success_criteria=cycle.get("success_criteria") or (),
         ).encode("utf-8")
     except Exception:  # noqa: BLE001 - a presentation must not break the record
         logger.warning("Could not render the design meeting slide deck.", exc_info=True)
@@ -2473,7 +2500,13 @@ def _publish_build_worker_artifacts(
                             raise ValueError("artifact path contains a symlink")
                     source = candidate.resolve(strict=True)
                     source.relative_to(workspace_host)
-                except (OSError, ValueError):
+                except FileNotFoundError:
+                    failure = f"Build artifact {reference!r} does not exist in this worker's isolated workspace."
+                    break
+                except OSError:
+                    failure = f"Build artifact {reference!r} could not be read from this worker's isolated workspace."
+                    break
+                except ValueError:
                     failure = f"Build artifact {reference!r} is outside this worker's isolated workspace."
                     break
                 if not source.is_file() or source.is_symlink():
@@ -3031,6 +3064,93 @@ class LiveStageAdapter:
             )
         return live
 
+    async def recover_paused_build_control(
+        self,
+        *,
+        project_id: str | None,
+        cycle_id: str | None,
+        requested_action: str,
+        config: RunnableConfig,
+    ) -> dict[str, Any] | None:
+        """Raise a new governed choice after an earlier Build Hold.
+
+        This is deliberately not a free-text command executor.  It turns an
+        explicit Build command into a fresh server-owned card, preserving the
+        earlier Hold and requiring the next state-changing action to be one of
+        the options the server actually emitted.
+        """
+        if not project_id or not cycle_id:
+            return None
+        cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
+        if cycle is None or _executable_stage(cycle) != "build":
+            return None
+        attempt = _stage_attempt(cycle, "build") or {}
+        stage_attempt_id = str(attempt.get("id") or "")
+        if not stage_attempt_id or str(attempt.get("status") or "") not in {
+            StageStatus.IN_PROGRESS.value,
+            StageStatus.CHANGES_REQUESTED.value,
+        }:
+            return None
+        latest = await self._repo.latest_build_collaboration(
+            project_id=project_id,
+            stage_attempt_id=stage_attempt_id,
+            lifecycle=None,
+        )
+        if not isinstance(latest, dict) or str(latest.get("lifecycle") or "") not in {
+            "held",
+            "answered",
+        }:
+            return None
+        runtime = self._runtime(config)
+        gate = BuildControlGate(
+            repo=self._repo,
+            project_id=project_id,
+            cycle_id=cycle_id,
+            stage_attempt_id=stage_attempt_id,
+            thread_id=str(runtime.get("thread_id") or ""),
+            run_id=str(runtime.get("run_id") or ""),
+            responder_user_id=str(runtime.get("user_id") or ""),
+        )
+        return await gate.raise_control(
+            paused_build_recovery_request(
+                previous=latest,
+                cycle_revision=int(cycle.get("db_revision") or 0),
+                requested_action=requested_action,
+            )
+        )
+
+    def _build_execution_preflight_error(
+        self,
+        *,
+        config: RunnableConfig,
+        stage_workspace: str | None,
+    ) -> str:
+        """Return a refusal before planning when no executable shell exists."""
+        if self._dispatcher is not None:
+            # An injected dispatcher is itself the execution boundary used by
+            # tests and alternate runtimes; its capabilities are not described
+            # by the production tool registry.
+            return ""
+        from deerflow.tools import get_available_tools
+
+        metadata = dict(config.get("metadata", {}) or {})
+        try:
+            tools = get_available_tools(
+                model_name=str(metadata.get("model_name") or "") or None,
+                groups=metadata.get("tool_groups"),
+                subagent_enabled=False,
+                include_upload_tool=False,
+                app_config=self._app_config,
+            )
+            tools = _tools_for_virtual_workspace(tools, writable_workspace=stage_workspace)
+        except Exception:  # noqa: BLE001 - preflight fails closed before spend
+            logger.warning("Could not inspect the Build worker toolset.", exc_info=True)
+            return "The Build worker toolset could not be inspected. No planner or Build worker ran."
+        names = {str(getattr(tool, "name", "")).strip() for tool in tools}
+        if "bash" not in names:
+            return "The Build worker has no Bash execution tool. No planner or Build worker ran. Enable Bash for this sandbox, then retry the preflight."
+        return ""
+
     async def parked_design_context(
         self,
         *,
@@ -3479,14 +3599,16 @@ class LiveStageAdapter:
                     text=None,
                     error=f"Selected subagent {unit.agent_name!r} is no longer registered.",
                 )
-            uncapped_build = stage == "build" and not budget.token_limit_enforced
-            worker_config = _stage_worker_config(base_config, budget)
-            if uncapped_build:
-                # Build v6 deliberately removes both sides of the earlier
-                # stage-level allowance: keeping the agent's 150-superstep
-                # default here would still stop its tool loop after roughly
-                # twelve model calls even though this rollout is uncapped.
-                worker_config = replace(worker_config, max_turns=budget.max_turns)
+            dispatch_budget = _effective_dispatch_budget(stage, budget)
+            worker_config = _stage_worker_config(base_config, dispatch_budget)
+            if stage == "build":
+                # Build's versioned ceiling is intentionally roomier than the
+                # general subagent default; otherwise the generic 150-step
+                # clamp recreates the premature-finalization bug V7 replaced.
+                worker_config = replace(
+                    worker_config,
+                    max_turns=dispatch_budget.max_turns,
+                )
             parent_model = metadata.get("model_name")
             # A seat that named its own model wins over the composer's. The name
             # was validated against the configured set when the roster was
@@ -3525,7 +3647,7 @@ class LiveStageAdapter:
                 include_upload_tool=False,
                 app_config=self._app_config,
             )
-            tools = _tools_for_unit(_tools_for_stage_budget(tools, budget), unit)
+            tools = _tools_for_unit(_tools_for_stage_budget(tools, dispatch_budget), unit)
             tools = _tools_for_virtual_workspace(tools, writable_workspace=unit_workspace)
             trace_id = str(metadata.get("trace_id") or "") or None
             # A stage worker is graded on its final message, but the turn budget
@@ -3533,21 +3655,14 @@ class LiveStageAdapter:
             # loop — so a worker that spends its budget could never land the JSON
             # its result is parsed from. The deadline reserves the last few model
             # calls for writing that answer.
-            # V6 Build work has no stage-level model/tool-call deadline. The
-            # six-call V5 deadline made a worker finalize after authoring two
-            # setup files, and the generic contract then mistook that partial
-            # report for a finished phase. Other stages retain their bounded
-            # finalization path; Build still has a deliberately high emergency
-            # recursion ceiling and the stage timeout.
-            deadline = (
-                None
-                if uncapped_build
-                else FinalizationDeadlineMiddleware(
-                    # Config may impose a lower per-agent turn limit than the
-                    # versioned stage budget. Derive the deadline from the limit
-                    # the executor will actually enforce.
-                    max_model_calls=_model_call_budget(worker_config.max_turns),
-                )
+            # Reserve the final model calls for the structured result. V7's
+            # roomy ceiling avoids V5's premature six-call finalization while
+            # still preventing a tool loop from consuming an unbounded run.
+            deadline = FinalizationDeadlineMiddleware(
+                # Config may impose a lower per-agent turn limit than the
+                # versioned stage budget. Derive the deadline from the limit
+                # the executor will actually enforce.
+                max_model_calls=_model_call_budget(worker_config.max_turns),
             )
             executor = SubagentExecutor(
                 config=worker_config,
@@ -3572,13 +3687,9 @@ class LiveStageAdapter:
                 # Council token use is metered rather than capped. When the
                 # depth disables enforcement, even a stale participant edit
                 # must not quietly turn the kill switch back on.
-                token_budget_max_tokens=_token_limit_for_worker(unit, budget),
-                # The V6 Build rollout is metered but uncapped: omit both the
-                # token hard-stop and repetitive-tool frequency hard-stop. All
-                # sandbox, authorization, stage-output, and timeout controls
-                # remain in place.
-                token_budget_enabled=False if uncapped_build else None,
-                loop_detection_enabled=False if uncapped_build else None,
+                token_budget_max_tokens=_token_limit_for_worker(unit, dispatch_budget),
+                token_budget_enabled=None,
+                loop_detection_enabled=None,
                 dbtl_writable_paths=(() if unit.role in _READ_ONLY_ROLES else ((unit_workspace,) if unit_workspace else ())),
                 thinking_enabled=unit.reasoning == REASONING_EXTENDED,
                 extra_middlewares=([deadline] if deadline is not None else []),
@@ -3985,6 +4096,28 @@ class LiveStageAdapter:
             if result is None or not result.is_trustworthy or not phase_published:
                 stopped = "; ".join(phase_outcome.rejected) or f"Phase {assignment.phase.title!r} produced no output the server could verify."
                 failure_code = BuildErrorCode.EXECUTION_OUTPUT_MISSING
+                # The worker's structured JSON passed before the server
+                # inspected its artifact references, so the dispatcher already
+                # emitted task_completed. Verification is authoritative; emit
+                # the correcting terminal event under the same task id so the
+                # UI cannot keep claiming a missing artifact completed.
+                try:
+                    from langgraph.config import get_stream_writer
+
+                    from deerflow.utils.custom_events import aemit_custom_event
+
+                    await aemit_custom_event(
+                        {
+                            "type": "task_failed",
+                            "task_id": unit.unit_id,
+                            "error": stopped,
+                            "display_summary": "Build output verification failed.",
+                            "dbtl_stage": "build",
+                        },
+                        writer=get_stream_writer(),
+                    )
+                except RuntimeError:
+                    pass
                 await recorder.fail(handle, failure_code, stopped)
                 break
 
@@ -5173,6 +5306,36 @@ class LiveStageAdapter:
                     asked = str((answered_control or {}).get("question") or "")
                     worker_answer = "\n\n".join(part for part in (f"You asked: {asked}" if asked else "", f"The project owner answered: {settled.comment}") if part)
                     worker_answer_step = settled.step_key
+
+            # Execution is part of the Build contract, so prove the worker can
+            # do it before spending even the planner's tokens.  The observed
+            # failure spent ~382k tokens authoring files in a runtime where the
+            # Bash tool had been removed by configuration; no decomposition or
+            # retry could make that run executable.
+            preflight_error = self._build_execution_preflight_error(
+                config=config,
+                stage_workspace=stage_workspace,
+            )
+            if preflight_error:
+                control = await control_gate.raise_control(
+                    execution_preflight_request(
+                        cycle_id=cycle_id,
+                        stage_attempt_id=stage_attempt_row_id,
+                        workflow_spec_key=resolve_build_workflow().spec_key,
+                        cycle_revision=int(cycle.get("db_revision") or 0),
+                    )
+                )
+                if stage_activity is not None:
+                    await stage_activity.settle(
+                        ActivityState.PAUSED,
+                        operation="stage.preflight_failed",
+                    )
+                return LiveStageResult(
+                    stage=stage,
+                    cycle_id=cycle_id,
+                    note=preflight_error,
+                    control_request=control,
+                )
             build_recorder = await make_build_step_recorder(
                 self._repo,
                 RecorderRequest(
@@ -6334,6 +6497,7 @@ class LiveStageAdapter:
             elif build_plan_incomplete or not produced_usable_evidence:
                 await stage_activity.settle(ActivityState.FAILED)
 
+        _summary_chair = _chair_result_of(results) or {}
         return LiveStageResult(
             stage=stage,
             cycle_id=cycle_id,
@@ -6347,4 +6511,10 @@ class LiveStageAdapter:
             test_assessment=test_assessment,
             review_meeting_requirement=review_meeting_requirement,
             control_request=control_request,
+            # Inputs for the one sentence that introduces this round in chat.
+            # Taken from the same chair result the deck is rendered from, so the
+            # reply and the deck can never describe different meetings.
+            research_question=str(cycle.get("research_question") or ""),
+            chair_summary=str(_summary_chair.get("summary") or ""),
+            chair_consensus=_summary_chair.get("consensus"),
         )

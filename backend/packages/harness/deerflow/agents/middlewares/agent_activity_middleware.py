@@ -33,11 +33,13 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import ToolMessage
+from langgraph.config import get_config
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from deerflow.runtime.activity.emitter import ActivityHandle, make_activity_handle
 from deerflow.runtime.activity.lineage import lead_activity_id
+from deerflow.runtime.activity.spans import run_id_from_config
 from deerflow.runtime.activity.vocabulary import ActivityState, ActorKind
 
 logger = logging.getLogger(__name__)
@@ -57,7 +59,21 @@ _MAX_TRACKED_RUNS = 64
 def _run_id(runtime: Runtime | None) -> str | None:
     context = getattr(runtime, "context", None)
     value = context.get("run_id") if isinstance(context, dict) else getattr(context, "run_id", None)
-    return value if isinstance(value, str) and value else None
+    if isinstance(value, str) and value:
+        return value
+
+    # A compiled lead graph invoked as the supervisor's ordinary branch gets a
+    # fresh Runtime whose context may omit the outer run id even though the
+    # server-owned RunnableConfig still carries it. This is the same relocated
+    # config shape used by supervisor and stage instrumentation. Without the
+    # fallback, the activity feed reports only Cycle supervisor and hides the
+    # actor that read files, called tools, and wrote the answer.
+    try:
+        return run_id_from_config(get_config())
+    except RuntimeError:
+        # Outside a graph there is no ambient config. A row keyed to no run is
+        # still worse than silence, so retain the existing fail-soft boundary.
+        return None
 
 
 class AgentActivityMiddleware(AgentMiddleware[AgentState]):

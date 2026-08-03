@@ -30,3 +30,4 @@ export {
   type ActorKind,
 } from "./types";
 export { activityView, type ActivityMode, type ActivityView } from "./view";
+export { activityFootprints, type ActivityFootprint } from "./footprints";

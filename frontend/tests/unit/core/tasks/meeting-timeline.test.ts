@@ -17,7 +17,10 @@
 
 import { describe, expect, it } from "@rstest/core";
 
-import { meetingsByRun } from "@/core/tasks/meeting-timeline";
+import {
+  meetingAnchorIndices,
+  meetingsByRun,
+} from "@/core/tasks/meeting-timeline";
 import type { Subtask } from "@/core/tasks/types";
 
 function seat(
@@ -45,6 +48,29 @@ function councilSeat(
     ...extra,
   });
 }
+
+describe("meetingAnchorIndices", () => {
+  it("anchors a failed meeting above its ordinary assistant conclusion", () => {
+    expect([
+      ...meetingAnchorIndices([{ runId: "run-1", type: "assistant" }]),
+    ]).toEqual([0]);
+  });
+
+  it("prefers the files group so a successful meeting stays above its deck", () => {
+    expect([
+      ...meetingAnchorIndices([
+        { runId: "run-1", type: "assistant" },
+        { runId: "run-1", type: "assistant:present-files" },
+      ]),
+    ]).toEqual([1]);
+  });
+
+  it("does not let a human group claim a meeting that is still unanchored", () => {
+    expect([
+      ...meetingAnchorIndices([{ runId: "run-1", type: "human" }]),
+    ]).toEqual([]);
+  });
+});
 
 describe("meetingsByRun", () => {
   it("keeps two meetings in one conversation apart", () => {

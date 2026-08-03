@@ -193,4 +193,98 @@ test.describe("design deck bridge", () => {
 
     expect(await controlsEnabled(page)).toBe(false);
   });
+
+  // `comment` arrives as unknown across the postMessage boundary; a note that
+  // came back as a non-string is a failure to report, not one to stringify.
+  const commentOf = (intent: { comment?: unknown } | undefined): string => {
+    expect(intent).toBeTruthy();
+    const value = intent!.comment;
+    expect(typeof value).toBe("string");
+    return value as string;
+  };
+
+  // The per-slide note boxes are the redesign's only new path to a durable
+  // record. A note that silently failed to travel would look identical to a
+  // reviewer who simply wrote nothing, so these drive the real DOM.
+  test("note boxes stay inert until a parent activates them", async ({ page }) => {
+    await openDeck(page);
+
+    const disabledBefore = await page.evaluate(() => {
+      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
+      const notes = Array.from(doc.querySelectorAll<HTMLTextAreaElement>("[data-deck-note]"));
+      return { count: notes.length, allDisabled: notes.every((note) => note.disabled) };
+    });
+    expect(disabledBefore.count).toBeGreaterThan(0);
+    expect(disabledBefore.allDisabled).toBe(true);
+
+    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"] }));
+
+    // An enabled fieldset does not clear a control's own `disabled`, which is
+    // exactly how the option radios were once left unusable while live.
+    const enabledAfter = await page.evaluate(() => {
+      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
+      return Array.from(doc.querySelectorAll<HTMLTextAreaElement>("[data-deck-note]")).every((note) => !note.disabled);
+    });
+    expect(enabledAfter).toBe(true);
+  });
+
+  test("a slide note is folded into the comment of the decision actually taken", async ({ page }) => {
+    await openDeck(page);
+    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"] }));
+
+    await page.evaluate(() => {
+      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
+      const note = doc.querySelector<HTMLTextAreaElement>("[data-deck-note]")!;
+      note.value = "the held-out split has to be by genotype";
+      doc.querySelectorAll<HTMLInputElement>('fieldset.decision input[type="radio"]')[1]!.checked = true;
+      const comment = doc.querySelector<HTMLTextAreaElement>("[data-deck-comment]");
+      if (comment) comment.value = "going with this";
+      doc.querySelector<HTMLButtonElement>("[data-deck-submit]")!.click();
+    });
+    await page.waitForTimeout(50);
+
+    const submit = (await intents(page)).find((item) => item.type === "submit_intent");
+    expect(submit).toBeTruthy();
+    const comment = commentOf(submit);
+    expect(comment).toContain("the held-out split has to be by genotype");
+    // Labelled, so a reader of the record knows which slide the note is about,
+    // and the verdict's own words are still distinguishable from it.
+    expect(comment).toMatch(/^\[[^\]]+]/);
+    expect(comment).toContain("going with this");
+  });
+
+  test("a restored comment clears the boxes so a retry cannot fold the note twice", async ({ page }) => {
+    await openDeck(page);
+    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"] }));
+
+    await page.evaluate(() => {
+      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
+      doc.querySelector<HTMLTextAreaElement>("[data-deck-note]")!.value = "one note";
+      doc.querySelectorAll<HTMLInputElement>('fieldset.decision input[type="radio"]')[1]!.checked = true;
+      doc.querySelector<HTMLButtonElement>("[data-deck-submit]")!.click();
+    });
+    await page.waitForTimeout(50);
+
+    const firstComment = commentOf((await intents(page)).find((item) => item.type === "submit_intent"));
+    await send(page, envelope({ type: "failed", note: "Network error." }));
+    // The parent replays the comment it captured, which already contains the note.
+    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"], comment: firstComment }));
+
+    const boxesCleared = await page.evaluate(() => {
+      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
+      return Array.from(doc.querySelectorAll<HTMLTextAreaElement>("[data-deck-note]")).every((note) => note.value === "");
+    });
+    expect(boxesCleared).toBe(true);
+
+    await page.evaluate(() => {
+      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
+      doc.querySelectorAll<HTMLInputElement>('fieldset.decision input[type="radio"]')[1]!.checked = true;
+      doc.querySelector<HTMLButtonElement>("[data-deck-submit]")!.click();
+    });
+    await page.waitForTimeout(50);
+
+    const retried = (await intents(page)).filter((item) => item.type === "submit_intent");
+    const retryComment = commentOf(retried[retried.length - 1]);
+    expect(retryComment.match(/one note/g)).toHaveLength(1);
+  });
 });

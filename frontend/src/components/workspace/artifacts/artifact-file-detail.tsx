@@ -1321,25 +1321,20 @@ export function ArtifactFilePreview({
                 deckSubmissionIdRef.current =
                   refreshed.receipt.client_submission_id;
               }
-              // A failed chair run may be retried only with the exact audited
-              // answer. Restore it from the authenticated action ledger
-              // instead of leaving a changed draft trapped in a permanent
-              // payload-conflict loop.
+              // The failed attempt remains audited, but it did not answer the
+              // chair's question. Keep the draft currently in the iframe so
+              // the person can correct a contract-rejected answer; restoring
+              // the old bytes here would guarantee the next run fails the
+              // same contract again.
               send(surfaceId, channel, {
                 type: "initialize",
                 allowedActions: refreshed.allowed_actions,
-                selectedOptionIds: refreshed.receipt?.selected_card_ids ?? [],
-                comment: refreshed.receipt?.human_comment ?? "",
-                note:
-                  error.message +
-                  " The original recorded answer has been restored for retry.",
+                note: error.message + " Edit the answer and send it again.",
               });
               setDeckProgress({
                 surfaceId,
                 state: "failed",
-                note:
-                  error.message +
-                  " The original recorded answer has been restored for retry.",
+                note: error.message + " Edit the answer and send it again.",
               });
               return;
             }
