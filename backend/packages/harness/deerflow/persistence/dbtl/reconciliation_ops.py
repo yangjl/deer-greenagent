@@ -603,13 +603,9 @@ class ReconciliationOpsMixin:
             reviewed_artifact_revision,
             reviewed_artifact_content_hash,
         )
-        if any(value is not None for value in reviewed_values) and not all(
-            value is not None for value in reviewed_values
-        ):
+        if any(value is not None for value in reviewed_values) and not all(value is not None for value in reviewed_values):
             raise ValueError("A review meeting must bind the reviewed artifact id, revision, and content hash together.")
-        if reviewed_artifact_content_hash is not None and not _is_sha256(
-            reviewed_artifact_content_hash
-        ):
+        if reviewed_artifact_content_hash is not None and not _is_sha256(reviewed_artifact_content_hash):
             raise ValueError("Reviewed evidence requires a lowercase SHA-256 hash.")
         if reviewed_artifact_id is not None and artifact_type != f"{stage}_review_meeting":
             raise ValueError("Only a stage review-meeting artifact may carry a reviewed-evidence binding.")
@@ -673,14 +669,8 @@ class ReconciliationOpsMixin:
                         DbtlArtifactRow.stage_attempt_id == attempt.id,
                     )
                 )
-                if (
-                    reviewed is None
-                    or reviewed.revision != reviewed_artifact_revision
-                    or reviewed.content_hash != reviewed_artifact_content_hash
-                ):
-                    raise DbtlWorkflowRefused(
-                        "The review meeting's evidence binding no longer matches this stage attempt."
-                    )
+                if reviewed is None or reviewed.revision != reviewed_artifact_revision or reviewed.content_hash != reviewed_artifact_content_hash:
+                    raise DbtlWorkflowRefused("The review meeting's evidence binding no longer matches this stage attempt.")
 
             attempt.stage_spec_key = stage_spec_key
             # A unit is recorded once per stage attempt — that is what the unique

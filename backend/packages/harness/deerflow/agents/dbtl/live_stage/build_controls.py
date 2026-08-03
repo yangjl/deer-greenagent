@@ -96,9 +96,7 @@ class BuildControlGate:
         if not self.enabled:
             return card
         if not self.available:
-            raise BuildControlNotRecorded(
-                "Build paused because its human-input request could not be recorded. Nothing was dispatched; try again after persistence is available."
-            )
+            raise BuildControlNotRecorded("Build paused because its human-input request could not be recorded. Nothing was dispatched; try again after persistence is available.")
         try:
             recorded = await self.repo.open_build_collaboration(  # type: ignore[union-attr]
                 project_id=self.project_id,
@@ -110,9 +108,7 @@ class BuildControlGate:
             )
         except Exception as exc:  # noqa: BLE001 - translated to a bounded workflow refusal
             logger.warning("Could not record the Build control for stage attempt %s.", self.stage_attempt_id, exc_info=True)
-            raise BuildControlNotRecorded(
-                "Build paused because its human-input request could not be recorded. Nothing was dispatched; try again after persistence is available."
-            ) from exc
+            raise BuildControlNotRecorded("Build paused because its human-input request could not be recorded. Nothing was dispatched; try again after persistence is available.") from exc
         # The card names the row it came from. Without it a redelivered answer
         # to an *earlier* emission would settle the control now open — and for
         # Replan and Restart that moves the digest chain a second time, silently
@@ -136,9 +132,7 @@ class BuildControlGate:
         if not self.enabled or not answer.request_id:
             return None
         if not self.available:
-            raise BuildControlNotRecorded(
-                f"The decision to {answer.action.value.replace('_', ' ')} could not be recorded, so nothing was changed or dispatched. Try again."
-            )
+            raise BuildControlNotRecorded(f"The decision to {answer.action.value.replace('_', ' ')} could not be recorded, so nothing was changed or dispatched. Try again.")
         try:
             return await self.repo.answer_build_collaboration(  # type: ignore[union-attr]
                 project_id=self.project_id,
@@ -152,9 +146,7 @@ class BuildControlGate:
             )
         except Exception as exc:  # noqa: BLE001 - translated to a bounded workflow refusal
             logger.warning("Could not record the answer to Build control %s.", answer.request_id, exc_info=True)
-            raise BuildControlNotRecorded(
-                f"The decision to {answer.action.value.replace('_', ' ')} could not be recorded, so nothing was changed or dispatched. Try again."
-            ) from exc
+            raise BuildControlNotRecorded(f"The decision to {answer.action.value.replace('_', ' ')} could not be recorded, so nothing was changed or dispatched. Try again.") from exc
 
     async def plan_is_confirmed(self, plan_digest: str) -> bool:
         """Has a person already agreed to run *this* plan?

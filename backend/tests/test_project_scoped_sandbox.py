@@ -56,11 +56,7 @@ class TestProjectScopedWorkspace:
             )
         )
         assert sandbox is not None
-        mapping = next(
-            item
-            for item in sandbox.path_mappings
-            if item.container_path == "/mnt/user-data/outputs/dbtl"
-        )
+        mapping = next(item for item in sandbox.path_mappings if item.container_path == "/mnt/user-data/outputs/dbtl")
         assert mapping.local_path == str(project_root / "outputs" / "dbtl")
         assert mapping.read_only is True
 

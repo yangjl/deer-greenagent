@@ -358,7 +358,6 @@ class TestAgentConstruction:
             "deferred_setup": None,
             "agent_name": "test-agent",
             "token_budget_max_tokens": 123_456,
-
             "available_skills": set(),
             "user_id": "default",
             "authorization_provider": provider,

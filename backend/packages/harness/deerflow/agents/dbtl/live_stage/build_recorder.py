@@ -152,9 +152,7 @@ class BuildStepRecorder:
             exc_info=exc,
         )
         self._enabled = False
-        raise BuildStepRecordingError(
-            f"Build paused because its durable {step.value!r} step could not be recorded. No review evidence was attached; retry after persistence is available."
-        ) from exc
+        raise BuildStepRecordingError(f"Build paused because its durable {step.value!r} step could not be recorded. No review evidence was attached; retry after persistence is available.") from exc
 
     async def begin(self, step: BuildStepKey, **overrides: Any) -> StepHandle:
         """Open an attempt at `step`, or replay the one already committed.
@@ -373,9 +371,7 @@ async def make_build_step_recorder(repo: _StepRepository | None, request: Record
     if not request.enabled:
         return DISABLED_RECORDER
     if repo is None or not (request.project_id and request.cycle_id and request.stage_attempt_id):
-        raise BuildStepRecordingError(
-            "Build paused because its durable workflow could not be initialized. No worker was dispatched; retry after persistence is available."
-        )
+        raise BuildStepRecordingError("Build paused because its durable workflow could not be initialized. No worker was dispatched; retry after persistence is available.")
     try:
         material = await repo.build_step_material_for(
             project_id=request.project_id,
@@ -384,9 +380,7 @@ async def make_build_step_recorder(repo: _StepRepository | None, request: Record
         )
     except Exception as exc:  # noqa: BLE001 - translated to a bounded workflow refusal
         logger.error("Could not read Build workflow step material for stage attempt %s; governed Build progression stopped.", request.stage_attempt_id, exc_info=True)
-        raise BuildStepRecordingError(
-            "Build paused because its durable workflow could not be initialized. No worker was dispatched; retry after persistence is available."
-        ) from exc
+        raise BuildStepRecordingError("Build paused because its durable workflow could not be initialized. No worker was dispatched; retry after persistence is available.") from exc
     store = StepOutputStore(project_root=request.project_root, stage_attempt_id=request.stage_attempt_id) if request.project_root else None
     return BuildStepRecorder(
         repo,

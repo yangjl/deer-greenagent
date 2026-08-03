@@ -29,21 +29,11 @@ def stage_output_isolation(sandbox_provider: str, *, allow_host_bash: bool) -> t
     else:
         isolated = _provider_enforces_output_isolation(sandbox_provider)
     if isolated:
-        detail = (
-            "Agent file tools enforce a read-only DBTL output mapping and local host bash is disabled."
-            if local_provider
-            else "The configured provider proves enforced nested read-only DBTL output mounts."
-        )
+        detail = "Agent file tools enforce a read-only DBTL output mapping and local host bash is disabled." if local_provider else "The configured provider proves enforced nested read-only DBTL output mounts."
     elif local_provider:
-        detail = (
-            "LocalSandboxProvider has sandbox.allow_host_bash=true. Host bash can bypass DBTL output ownership; "
-            "disable it before cutover."
-        )
+        detail = "LocalSandboxProvider has sandbox.allow_host_bash=true. Host bash can bypass DBTL output ownership; disable it before cutover."
     else:
-        detail = (
-            "This sandbox provider does not prove enforced nested read-only DBTL output mounts; "
-            "strict stage-output ownership cannot be claimed."
-        )
+        detail = "This sandbox provider does not prove enforced nested read-only DBTL output mounts; strict stage-output ownership cannot be claimed."
     return isolated, detail
 
 

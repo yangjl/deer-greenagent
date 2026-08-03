@@ -117,9 +117,7 @@ async def test_parent_success_without_a_successor_is_announced() -> None:
     )
 
     assert announced is True
-    assert "success_without_follow_up" in str(
-        event_store.events[0]["content"]["content"]
-    )
+    assert "success_without_follow_up" in str(event_store.events[0]["content"]["content"])
 
 
 async def test_parent_success_with_a_successor_stays_silent() -> None:

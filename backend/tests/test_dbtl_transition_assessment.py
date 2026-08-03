@@ -17,9 +17,7 @@ from deerflow.dbtl.transition_assessment import (
 
 
 def test_parses_a_bounded_model_assessment() -> None:
-    assessment = parse_transition_assessment(
-        '{"difficulty":"high_stakes","rationale":"The field intervention is irreversible."}'
-    )
+    assessment = parse_transition_assessment('{"difficulty":"high_stakes","rationale":"The field intervention is irreversible."}')
 
     assert assessment.difficulty is TransitionDifficulty.HIGH_STAKES
     assert assessment.rationale == "The field intervention is irreversible."
@@ -82,9 +80,7 @@ def test_design_click_may_satisfy_only_the_design_approval_gate_reason() -> None
             "gate": {
                 "ready": False,
                 "blocking_rows": [],
-                "reasons": [
-                    "The Design stage has not been approved, so there is nothing to reconcile against."
-                ],
+                "reasons": ["The Design stage has not been approved, so there is nothing to reconcile against."],
             }
         }
     )
