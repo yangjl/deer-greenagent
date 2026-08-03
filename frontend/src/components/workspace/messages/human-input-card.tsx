@@ -600,7 +600,13 @@ export function HumanInputCard({
                 <Button
                   key={option.id}
                   className={cn(
-                    "min-h-11 w-full justify-start rounded-md px-3 py-2 text-left leading-5 whitespace-normal",
+                    // `h-auto` replaces the button size's fixed `h-9` through
+                    // tailwind-merge, so a described option is as tall as its
+                    // own text; `min-h-11` survives in its own group and keeps
+                    // the touch-target floor. Without it every multi-line
+                    // description spilled out of its border onto the option
+                    // below.
+                    "h-auto min-h-11 w-full justify-start rounded-md px-3 py-2 text-left leading-5 whitespace-normal",
                     isCouncilPreflight &&
                       effectiveCouncilOptionId === option.id &&
                       "border-primary/40 bg-primary/10",

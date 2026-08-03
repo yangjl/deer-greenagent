@@ -23,7 +23,12 @@ export type StageStatus =
   | "awaiting_review"
   | "changes_requested"
   | "approved"
-  | "rejected";
+  | "rejected"
+  // A stage a person chose not to run. Deliberately distinct from both
+  // "locked" (still blocked) and "approved" (a review happened), because a
+  // reader has to be able to tell "we decided not to validate this" from
+  // "this passed".
+  | "skipped";
 
 export type CycleState =
   | "design"
@@ -181,6 +186,7 @@ export const STATUS_LABELS: Record<StageStatus, string> = {
   changes_requested: "Changes requested",
   approved: "Approved",
   rejected: "Rejected",
+  skipped: "Skipped \u2014 not validated",
 };
 
 export const CYCLE_STATE_LABELS: Record<CycleState, string> = {

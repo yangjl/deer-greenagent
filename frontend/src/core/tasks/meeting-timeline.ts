@@ -1,0 +1,116 @@
+/**
+ * Meetings as durable entries in a conversation, one per run that held one.
+ *
+ * The debate panel used to fold every council seat in the thread into a single
+ * block, splice it into the transcript at a computed index, and bind it to
+ * `latestRunId`. That produced three failures at once: a second meeting merged
+ * into the first's rounds, starting any new run moved the panel off the meeting
+ * it described, and a meeting the browser never watched live left nothing to
+ * render.
+ *
+ * The run is the identity that fixes all three. A meeting already has one —
+ * `subagent.start` records it, so it survives a reload and a background run —
+ * and the transcript is ordered by it, so a meeting can sit where it actually
+ * happened instead of floating at the end.
+ *
+ * Pure and side-effect free: the rendering layer decides what to show, this
+ * decides what a meeting *is*.
+ */
+
+import { debateRounds } from "./council-seat";
+import type { Subtask } from "./types";
+
+export interface Meeting {
+  /** The run that held it. `""` for a seat that arrived without one. */
+  runId: string;
+  /** The DBTL stage it belongs to, when its seats agree on one. */
+  stage?: string;
+  rounds: { round: number; seats: Subtask[] }[];
+  seats: Subtask[];
+  /** Seats that have finished, however they finished. */
+  reported: number;
+  total: number;
+  isRunning: boolean;
+}
+
+/**
+ * Every meeting in the conversation, ordered by first appearance.
+ *
+ * First appearance rather than run id or timestamp: the caller renders each
+ * meeting inside its own run's message group, so this order only has to agree
+ * with the order the seats arrived in — which is the order the transcript
+ * already shows.
+ *
+ * A seat carrying no run id is kept under an empty-string bucket rather than
+ * dropped. It cannot be anchored to a message group, so it renders unanchored,
+ * which is worse than being in the right place and much better than vanishing —
+ * silently losing evidence that a meeting happened is the failure this module
+ * exists to end.
+ */
+export function meetingsByRun(tasks: readonly Subtask[]): Meeting[] {
+  const byRun = new Map<string, Subtask[]>();
+  for (const task of tasks) {
+    if (!task.councilSeat) {
+      continue;
+    }
+    const runId = task.runId ?? "";
+    const seats = byRun.get(runId);
+    if (seats) {
+      seats.push(task);
+    } else {
+      byRun.set(runId, [task]);
+    }
+  }
+
+  return [...byRun.entries()].map(([runId, seats]) => {
+    const rounds = debateRounds(seats);
+    const ordered = rounds.flatMap((round) => round.seats);
+    const reported = ordered.filter(
+      (task) => task.status !== "in_progress",
+    ).length;
+    return {
+      runId,
+      stage: meetingStage(ordered),
+      rounds,
+      seats: ordered,
+      reported,
+      total: ordered.length,
+      isRunning: reported < ordered.length,
+    };
+  });
+}
+
+/** The stage its seats agree on, or undefined when they do not. */
+function meetingStage(seats: readonly Subtask[]): string | undefined {
+  const stages = new Set(
+    seats
+      .map((task) => task.councilSeat?.stage)
+      .filter((stage): stage is string => typeof stage === "string" && !!stage),
+  );
+  return stages.size === 1 ? [...stages][0] : undefined;
+}
+
+/** The meetings anchored to one run, for rendering inside its message group. */
+export function meetingsForRun(
+  meetings: readonly Meeting[],
+  runId: string | undefined,
+): Meeting[] {
+  if (!runId) {
+    return [];
+  }
+  return meetings.filter((meeting) => meeting.runId === runId);
+}
+
+/**
+ * Meetings no message group will claim, so nothing is lost off the end.
+ *
+ * A meeting whose run has no group yet is the live case: the seats stream
+ * before the run's first message lands. Rendering those at the tail is what
+ * keeps a meeting visible while it argues.
+ */
+export function unanchoredMeetings(
+  meetings: readonly Meeting[],
+  anchoredRunIds: ReadonlySet<string>,
+): Meeting[] {
+  return meetings.filter((meeting) => !anchoredRunIds.has(meeting.runId));
+}

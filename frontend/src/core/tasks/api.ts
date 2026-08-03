@@ -2,7 +2,9 @@ import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { normalizeTokenUsage, type TokenUsage } from "../messages/usage";
 
+import { readCouncilSeat } from "./council-seat";
 import { eventsToSteps, type SubtaskStep } from "./steps";
+import type { CouncilSeatIdentity } from "./types";
 
 /** Default per-request page size; matches the events endpoint's default. */
 const SUBTASK_STEPS_PAGE_SIZE = 500;
@@ -76,6 +78,8 @@ export async function fetchSubtaskSteps(
 export interface StageWorkerRecord {
   taskId: string;
   runId: string;
+  /** Present when this worker was a meeting participant. */
+  councilSeat?: CouncilSeatIdentity;
   description: string;
   dbtlStage: string;
   status: "in_progress" | "completed" | "failed";
@@ -151,17 +155,16 @@ export async function fetchStageWorkers(
         // from, and adopting it here would render it twice.
         continue;
       }
-      // Design meeting seats share the stage marker but already have their
-      // own DebatePanel. The persisted seat marker keeps reload behavior
-      // identical to the live stream instead of drawing the participant twice.
-      if (
-        content.council_seat &&
-        typeof content.council_seat === "object" &&
-        !Array.isArray(content.council_seat)
-      ) {
-        continue;
-      }
+      // A meeting seat is kept, carrying its identity. Dropping it here is
+      // what made a meeting unrecoverable: the seats are in the database, and
+      // this is the only path that reads them, so discarding them on the
+      // grounds that the live-only debate panel would draw them left a reload
+      // — or any run the browser never watched — with nothing to render.
+      // Drawing one participant twice is still prevented, one layer down:
+      // `stageWorkGroups` excludes every task carrying a `councilSeat`.
+      const councilSeat = readCouncilSeat(content.council_seat) ?? undefined;
       started.set(key, {
+        councilSeat,
         taskId,
         runId,
         description:

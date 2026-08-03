@@ -67,7 +67,11 @@ import {
   type SidecarContext,
 } from "@/core/sidecar";
 import type { Subtask } from "@/core/tasks";
-import { useUpdateSubtask } from "@/core/tasks/context";
+import { useSubtaskContext, useUpdateSubtask } from "@/core/tasks/context";
+import {
+  meetingsByRun,
+  unanchoredMeetings,
+} from "@/core/tasks/meeting-timeline";
 import {
   derivePendingSubtaskStatus,
   parseSubtaskResult,
@@ -224,47 +228,45 @@ type SelectionToolbarState = {
 };
 
 /**
- * Where the debate panel sits in the transcript.
+ * Meetings no turn has claimed yet, rendered at the tail.
  *
- * While the meeting runs it belongs at the very bottom, where the reader is
- * already watching; once the run settles it belongs immediately above the
- * assistant's closing answer, so the conclusion reads below the meeting that
- * produced it. Anchoring it to the *request* instead put it above the
- * preflight card, far up a long transcript — mounted, streaming, and
- * effectively invisible.
+ * A meeting's seats stream before its run's first message lands, so during the
+ * live round there is no group to sit inside. Rendering here keeps it visible
+ * while it argues; once the turn appears, `anchoredRunIds` contains its run and
+ * the meeting moves into that turn instead. Nothing is ever shown twice, and
+ * nothing falls off the end.
  */
-export function debatePanelPosition({
-  groupCount,
-  isLoading,
+function UnanchoredMeetings({
+  anchoredRunIds,
+  threadId,
 }: {
-  groupCount: number;
-  isLoading: boolean;
-}): number {
-  if (isLoading || groupCount <= 1) {
-    return groupCount;
+  anchoredRunIds: ReadonlySet<string>;
+  threadId?: string;
+}) {
+  const { tasks: taskMap } = useSubtaskContext();
+  const pending = useMemo(
+    () =>
+      unanchoredMeetings(
+        meetingsByRun(Object.values(taskMap)),
+        anchoredRunIds,
+      ),
+    [anchoredRunIds, taskMap],
+  );
+  if (pending.length === 0) {
+    return null;
   }
-  return groupCount - 1;
-}
-
-/**
- * Splice the panel in at `insertAt`, leaving the group map untouched.
- *
- * The panel still belongs to the run rather than to any one message; this only
- * decides where it lands. Out-of-range positions clamp instead of dropping the
- * panel — an invisible debate is the failure this replaced.
- */
-export function insertDebatePanel(
-  nodes: ReactNode[],
-  insertAt: number,
-  panel: ReactNode,
-): ReactNode[] {
-  const at = Math.max(0, Math.min(insertAt, nodes.length));
-  return [...nodes.slice(0, at), panel, ...nodes.slice(at)];
-}
-
-/** A run panel needs a transcript anchor; a blank chat owns no prior run. */
-export function shouldRenderDebatePanel(groupCount: number): boolean {
-  return groupCount > 0;
+  return (
+    <>
+      {pending.map((meeting) => (
+        <DebatePanel
+          key={meeting.runId === "" ? "unanchored-meeting" : meeting.runId}
+          className="w-full"
+          runId={meeting.runId}
+          threadId={threadId}
+        />
+      ))}
+    </>
+  );
 }
 
 function LoadMoreHistoryIndicator({
@@ -537,13 +539,26 @@ export function MessageList({
   }, [groupedMessages]);
   const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
-  // Bottom of the transcript while the meeting runs; directly above the
-  // closing answer once it settles, so the conclusion reads below the meeting
-  // that produced it.
-  const debatePanelIndex = debatePanelPosition({
-    groupCount: groupedMessages.length,
-    isLoading: thread.isLoading,
-  });
+  // Which run each group belongs to, so a meeting renders inside the turn that
+  // held it rather than floating at a computed index bound to `latestRunId`.
+  const groupRunIds = useMemo(
+    () =>
+      groupedMessages.map((group) => {
+        for (const message of group.messages) {
+          const runId = (message as { run_id?: string } | undefined)?.run_id;
+          if (typeof runId === "string" && runId) {
+            return runId;
+          }
+        }
+        return undefined;
+      }),
+    [groupedMessages],
+  );
+  const anchoredRunIds = useMemo(
+    () => new Set(groupRunIds.filter((runId): runId is string => !!runId)),
+    [groupRunIds],
+  );
+
   // The run whose subagent steps the debate panel can backfill on reload.
   const latestRunId = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -1100,7 +1115,7 @@ export function MessageList({
             hasMore={hasMoreHistory}
             loadMore={loadMoreHistory}
           />
-          {insertDebatePanel(
+          {(
             groupedMessages.map((group, groupIndex) => {
             const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
             const groupIsLoading =
@@ -1418,6 +1433,14 @@ export function MessageList({
               group,
               groupIndex,
               <div className="w-full">
+                {/* Above the answer, so the conclusion reads below the meeting
+                    that produced it — and inside this turn, so a later run
+                    cannot move it. */}
+                <DebatePanel
+                  className="mb-4 w-full"
+                  runId={groupRunIds[groupIndex]}
+                  threadId={threadId}
+                />
                 <MessageGroup
                   messages={group.messages}
                   isLoading={groupIsLoading}
@@ -1435,17 +1458,16 @@ export function MessageList({
                 })}
               </div>,
             );
-            }),
-            debatePanelIndex,
-            shouldRenderDebatePanel(groupedMessages.length) ? (
-              <DebatePanel
-                key="debate-panel"
-                className="w-full"
-                runId={latestRunId}
-                threadId={threadId}
-              />
-            ) : null,
+            })
           )}
+          {/* A meeting whose run has no message group yet: the seats stream
+              before the run's first message lands, so this is what keeps a
+              live meeting visible while it argues. Once its turn appears the
+              meeting moves into it and stays there. */}
+          <UnanchoredMeetings
+            anchoredRunIds={anchoredRunIds}
+            threadId={threadId}
+          />
           <StageWorkPanel
             className="w-full"
             isLoading={thread.isLoading}

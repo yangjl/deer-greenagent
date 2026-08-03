@@ -20,10 +20,10 @@ import {
   consensusSnapshot,
   consensusState,
   councilSeatSummary,
-  debateRounds,
   type ConsensusState,
   type ConsensusSnapshot,
 } from "@/core/tasks/council-seat";
+import { meetingsByRun, meetingsForRun } from "@/core/tasks/meeting-timeline";
 import { meetingTranscript } from "@/core/tasks/meeting-transcript";
 import type { CouncilSeatIdentity, Subtask } from "@/core/tasks/types";
 import { cn } from "@/lib/utils";
@@ -51,18 +51,31 @@ export function DebatePanel({
 }) {
   const { tasks: taskMap } = useSubtaskContext();
   const tasks = useMemo(() => Object.values(taskMap), [taskMap]);
-  const rounds = useMemo(() => debateRounds(tasks), [tasks]);
-  const state = useMemo(() => consensusState(tasks), [tasks]);
-  const snapshot = useMemo(() => consensusSnapshot(tasks), [tasks]);
+  // One meeting, not every seat in the thread. Folding the whole conversation
+  // into one block merged a second meeting into the first's rounds and pinned
+  // the result to whichever run happened to be latest.
+  const meeting = useMemo(
+    () => meetingsForRun(meetingsByRun(tasks), runId)[0] ?? null,
+    [runId, tasks],
+  );
+  const state = useMemo(
+    () => consensusState(meeting?.seats ?? []),
+    [meeting],
+  );
+  const snapshot = useMemo(
+    () => consensusSnapshot(meeting?.seats ?? []),
+    [meeting],
+  );
   const [inspectedId, setInspectedId] = useState<string | null>(null);
   const inspected = inspectedId ? (taskMap[inspectedId] ?? null) : null;
 
-  if (rounds.length === 0) {
+  if (!meeting || meeting.rounds.length === 0) {
     return null;
   }
-  const seats = rounds.flatMap((round) => round.seats);
-  const reported = seats.filter((seat) => seat.status !== "in_progress").length;
-  const progress = Math.round((reported / seats.length) * 100);
+  const rounds = meeting.rounds;
+  const seats = meeting.seats;
+  const reported = meeting.reported;
+  const progress = Math.round((reported / meeting.total) * 100);
   const currentRound = Math.max(...rounds.map((round) => round.round));
   const totalTokens = seats.reduce(
     (total, seat) => total + (seat.usage?.totalTokens ?? 0),

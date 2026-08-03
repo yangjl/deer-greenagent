@@ -92,6 +92,10 @@ export function StageWorkPanel({
             status: worker.status,
             description: worker.description,
             dbtlStage: worker.dbtlStage,
+            // Carried so a reloaded page can rebuild the *meeting* too, not
+            // just the stage lane. `stageWorkGroups` filters seats out of this
+            // panel, so nothing is drawn twice.
+            councilSeat: worker.councilSeat,
             subagent_type: "subagent",
             prompt: "",
             runId: worker.runId,

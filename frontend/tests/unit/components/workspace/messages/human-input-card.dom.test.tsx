@@ -199,3 +199,68 @@ describe("HumanInputCard meeting setup (DOM)", () => {
     });
   });
 });
+
+/**
+ * An option box has to be as tall as what is written in it.
+ *
+ * The shadcn `Button` default size sets a fixed `h-9`, and `min-h-11` only
+ * raises the floor — it does not let the box grow. Every depth option carries
+ * a two-line description, so each one rendered ~2.75rem tall with its text
+ * spilling out of the border and landing on top of the option below it: the
+ * meeting setup card, which is the one screen where a person is deciding how
+ * much a meeting may spend, was unreadable.
+ *
+ * `h-auto` is the fix rather than a taller fixed height, because the
+ * descriptions are server-owned copy and any fixed value is one wording change
+ * from overlapping again. It replaces `h-9` through tailwind-merge while
+ * `min-h-11` survives in its own group, so the touch target keeps its floor.
+ *
+ * Asserted as a class rather than a measurement because happy-dom has no
+ * layout engine — `offsetHeight` is 0 for everything, so a real overlap check
+ * would pass against the broken markup.
+ */
+describe("HumanInputCard option layout (DOM)", () => {
+  it("lets a multi-line option grow instead of clipping it", () => {
+    render(
+      <I18nContext.Provider
+        value={{ locale: "en-US", setLocale: () => undefined }}
+      >
+        <HumanInputCard
+          request={{
+            version: 1,
+            kind: "human_input_request",
+            source: "ask_clarification",
+            request_id: "clarification:call-options",
+            question: "How much debate should this design get?",
+            input_mode: "single_choice",
+            options: [
+              {
+                id: "light",
+                label: "Light debate",
+                value: "light",
+                description:
+                  "One concise position, one focused challenge, one synthesis. A quick pilot with token use recorded, not capped; not a workspace-wide research pass.",
+              },
+              {
+                id: "medium",
+                label: "Medium debate",
+                value: "medium",
+                description:
+                  "Up to two independent positions before the challenge and synthesis. The default for ordinary cycle work.",
+              },
+            ],
+          }}
+          onSubmit={() => undefined}
+        />
+      </I18nContext.Provider>,
+    );
+
+    for (const label of ["Light debate", "Medium debate"]) {
+      const option = screen.getByRole("button", { name: new RegExp(label) });
+      expect(option.className).toContain("h-auto");
+      expect(option.className).not.toContain("h-9");
+      // The floor stays: an option is still a comfortable touch target.
+      expect(option.className).toContain("min-h-11");
+    }
+  });
+});

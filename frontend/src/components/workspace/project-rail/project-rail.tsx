@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleDashed,
+  CircleSlash,
   ListChecks,
   Lock,
   MessageSquarePlus,
@@ -135,6 +136,9 @@ const STATUS_MARK: Record<string, { icon: typeof Lock; tone: string }> = {
     tone: "text-emerald-700 dark:text-emerald-400",
   },
   rejected: { icon: AlertTriangle, tone: "text-destructive" },
+  // Muted rather than green: the stage was dealt with, but nothing about it
+  // was validated, and a success tone here would say otherwise.
+  skipped: { icon: CircleSlash, tone: "text-muted-foreground" },
 };
 
 /** One stage row: an icon, a name, and its status **in words**, never colour alone. */

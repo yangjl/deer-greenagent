@@ -193,7 +193,14 @@ describe("fetchStageWorkers", () => {
     );
   });
 
-  test("excludes persisted Design meeting seats from the stage-work lane", async () => {
+  test("keeps a persisted meeting seat, tagged so the stage lane can skip it", async () => {
+    /* Dropping seats here is what made a meeting unrecoverable: it exists in
+     * the database, and the one path that reads the database threw it away on
+     * the grounds that the live-only DebatePanel would draw it. A reload, a
+     * deck-started round, or any run the browser did not watch then had
+     * nothing to render. The record now carries its seat identity and the
+     * stage lane filters on that (`stageWorkGroups` already excludes any task
+     * with a `councilSeat`), so one participant is still never drawn twice. */
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, {
         events: [
@@ -208,7 +215,66 @@ describe("fetchStageWorkers", () => {
               council_seat: {
                 stage: "design",
                 role: "chair",
+                role_label: "Chair",
+                agent_name: "general-purpose",
+                round: 1,
               },
+            },
+          },
+        ],
+        next_before_seq: null,
+      }),
+    );
+
+    const workers = await fetchStageWorkers("thread-1");
+
+    expect(workers).toHaveLength(1);
+    expect(workers[0]!.taskId).toBe("chair-1");
+    expect(workers[0]!.runId).toBe("run-design");
+    expect(workers[0]!.councilSeat?.role).toBe("chair");
+  });
+
+  test("shows an unreadable seat as stage work rather than losing it", async () => {
+    /* `readCouncilSeat` is strict (a seat needs a role and an agent). A seat
+     * it cannot read used to be discarded with every other seat; it now falls
+     * through to the stage lane, because a worker in the wrong lane is
+     * recoverable and a worker nobody can see is not. */
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        events: [
+          {
+            seq: 1,
+            run_id: "run-design",
+            event_type: "subagent.start",
+            content: {
+              task_id: "broken-1",
+              description: "Malformed seat",
+              dbtl_stage: "design",
+              council_seat: { role: "chair" },
+            },
+          },
+        ],
+        next_before_seq: null,
+      }),
+    );
+
+    const workers = await fetchStageWorkers("thread-1");
+
+    expect(workers).toHaveLength(1);
+    expect(workers[0]!.councilSeat).toBeUndefined();
+  });
+
+  test("still ignores an ordinary delegated subtask with no stage", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        events: [
+          {
+            seq: 1,
+            run_id: "run-design",
+            event_type: "subagent.start",
+            content: {
+              task_id: "chair-1",
+              description: "Chair synthesis",
             },
           },
         ],
