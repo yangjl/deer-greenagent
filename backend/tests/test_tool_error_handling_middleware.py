@@ -354,15 +354,9 @@ def test_dbtl_stage_grant_selects_a_process_isolation_policy() -> None:
     app_config.sandbox.use = "deerflow.sandbox.local:LocalSandboxProvider"
     middlewares = build_subagent_runtime_middlewares(
         app_config=app_config,
-        dbtl_writable_paths=(
-            "/mnt/user-data/outputs/.dbtl-stage-work/attempt-1/build/unit-1",
-        ),
+        dbtl_writable_paths=("/mnt/user-data/outputs/.dbtl-stage-work/attempt-1/build/unit-1",),
     )
-    policy = next(
-        middleware
-        for middleware in middlewares
-        if isinstance(middleware, DbtlOutputPolicyMiddleware)
-    )
+    policy = next(middleware for middleware in middlewares if isinstance(middleware, DbtlOutputPolicyMiddleware))
 
     assert policy._shell_isolation == ("sandbox-exec" if sys.platform == "darwin" else "deny")
 
@@ -698,6 +692,24 @@ def test_subagent_runtime_middlewares_honor_a_stage_token_budget(monkeypatch):
     token_budget = next(item for item in middlewares if isinstance(item, TokenBudgetMiddleware))
     assert token_budget._config.enabled is True
     assert token_budget._config.max_tokens == 400_000
+
+
+def test_subagent_runtime_middlewares_can_meter_without_resource_kill_switches(monkeypatch):
+    from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+    from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
+
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(
+        app_config=app_config,
+        model_name="test-model",
+        token_budget_enabled=False,
+        loop_detection_enabled=False,
+    )
+
+    assert not any(isinstance(item, TokenBudgetMiddleware) for item in middlewares)
+    assert not any(isinstance(item, LoopDetectionMiddleware) for item in middlewares)
 
 
 def test_subagent_runtime_middlewares_place_loop_detection_before_safety_finish(monkeypatch):

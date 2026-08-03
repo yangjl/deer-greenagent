@@ -106,6 +106,16 @@ class BuildReviewPackage:
         chosen = {item.figure.path for item in self.selected_figures}
         return sum(1 for figure in self.all_figures if figure.path not in chosen)
 
+    @property
+    def has_slide_results(self) -> bool:
+        """Whether this package has verified result evidence worth presenting.
+
+        Prose about phases, limitations, or rerun instructions is useful audit
+        context, but it is not a Build result. The review surface opens only
+        when the execution supplied a measured outcome or a published figure.
+        """
+        return bool(self.key_outcomes or self.all_figures)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "headline": self.headline,
@@ -216,6 +226,12 @@ def parse_build_summary(raw: str, *, bundle: BuildExecutionBundle) -> SummaryPar
     notes = tuple(PhaseNote(title=_text(item.get("title"), limit=160), text=_text(item.get("text") or item.get("summary"))) for item in (payload.get("phases") or []) if isinstance(item, Mapping) and _text(item.get("title"), limit=160))[
         :MAX_PHASE_NOTES
     ]
+
+    # Selection is presentational, not evidentiary. If the summarizer omits a
+    # verified figure list, show the first bounded set rather than generating a
+    # deck that claims figures exist but displays none.
+    if not selected and bundle.figures:
+        selected.extend(SelectedFigure(figure=figure) for figure in bundle.figures[:MAX_SUMMARY_FIGURES])
 
     package = BuildReviewPackage(
         headline=headline,

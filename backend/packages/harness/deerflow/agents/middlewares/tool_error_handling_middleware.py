@@ -342,6 +342,8 @@ def build_subagent_runtime_middlewares(
     user_id: str | None = None,
     authorization_provider=None,
     token_budget_max_tokens: int | None = None,
+    token_budget_enabled: bool | None = None,
+    loop_detection_enabled: bool | None = None,
     dbtl_writable_paths: tuple[str, ...] = (),
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
@@ -425,7 +427,7 @@ def build_subagent_runtime_middlewares(
     # chain (``lead_agent/agent.py``). Phase 1 of #3875; a deterministic
     # turn/token budget with lead-visible stop reason is Phase 2.
     loop_detection_config = app_config.loop_detection
-    if loop_detection_config.enabled:
+    if loop_detection_config.enabled and loop_detection_enabled is not False:
         from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 
         middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
@@ -463,7 +465,7 @@ def build_subagent_runtime_middlewares(
                 "max_tokens": token_budget_max_tokens,
             }
         )
-    if token_budget_config.enabled:
+    if token_budget_config.enabled and token_budget_enabled is not False:
         from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
 
         middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))

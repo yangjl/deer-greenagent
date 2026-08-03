@@ -4,10 +4,10 @@ The design states the constraint plainly: "free-form text alone cannot satisfy a
 stage contract". That is not a formatting preference. A stage attempt ends in a
 human review, and a reviewer asked to approve a paragraph has no way to tell
 which claims are backed by which artifact, what the worker could not do, or
-whether it ran out of budget halfway and summarised anyway. Every one of those
-is a separate field here, and a result missing them is *rejected* rather than
-coerced — a half-parsed result that still reads fluently is the failure mode
-worth preventing.
+whether it ran out of budget halfway and summarised anyway. This boundary keeps
+those semantic guarantees strict while normalizing lossless JSON variations —
+field aliases, exact boolean spellings, and equivalent path objects — so a
+model's envelope choice does not discard work whose meaning is unambiguous.
 
 ``stop_reason`` matters as much as ``status``. ``SubagentExecutor`` reports a
 turn, token, or loop cap as a *completed* run carrying a partial answer
@@ -213,7 +213,10 @@ class StageWorkerResult:
 def _string_tuple(raw: object, field_name: str) -> tuple[str, ...]:
     if raw is None:
         return ()
-    if isinstance(raw, str) or not isinstance(raw, Sequence):
+    if isinstance(raw, str):
+        text = raw.strip()
+        return (text[:MAX_ITEM_CHARS],) if text else ()
+    if not isinstance(raw, Sequence):
         raise WorkerResultRejected(f"{field_name!r} must be a list of strings.")
     items: list[str] = []
     for entry in raw[:MAX_ITEMS]:
@@ -226,12 +229,13 @@ def _string_tuple(raw: object, field_name: str) -> tuple[str, ...]:
 
 
 def _artifact_tuple(raw: object) -> tuple[tuple[str, ...], dict[str, str]]:
-    """Normalize canonical paths or the common explicit ``id``/``path`` form.
+    """Normalize canonical paths or explicit named-path objects.
 
     The identifier is only an alias inside this one worker result; the server
     still validates and remaps the resulting workspace path later. Requiring
-    both recognized fields avoids stringifying arbitrary metadata objects into
-    paths that look reviewable.
+    a recognized ``path`` avoids stringifying arbitrary metadata objects into
+    paths that look reviewable. ``id`` and ``name`` are optional local aliases;
+    when supplied, they are equivalent only if they do not conflict.
     """
     if raw is None:
         return (), {}
@@ -244,11 +248,20 @@ def _artifact_tuple(raw: object) -> tuple[tuple[str, ...], dict[str, str]]:
             path = entry.strip()
             alias = ""
         elif isinstance(entry, Mapping):
-            raw_alias = entry.get("id")
+            raw_id = entry.get("id")
+            raw_name = entry.get("name")
             raw_path = entry.get("path")
-            if not isinstance(raw_alias, str) or not raw_alias.strip() or not isinstance(raw_path, str) or not raw_path.strip():
-                raise WorkerResultRejected("Each artifact reference object must contain non-empty string 'id' and 'path' fields.")
-            alias = raw_alias.strip()[:MAX_ITEM_CHARS]
+            artifact_id = raw_id.strip() if isinstance(raw_id, str) else ""
+            artifact_name = raw_name.strip() if isinstance(raw_name, str) else ""
+            if raw_id is not None and not artifact_id:
+                raise WorkerResultRejected("An artifact reference 'id' must be a non-empty string when provided.")
+            if raw_name is not None and not artifact_name:
+                raise WorkerResultRejected("An artifact reference 'name' must be a non-empty string when provided.")
+            if artifact_id and artifact_name and artifact_id != artifact_name:
+                raise WorkerResultRejected("An artifact reference cannot provide conflicting 'id' and 'name' aliases.")
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                raise WorkerResultRejected("Each artifact reference object must contain a non-empty string 'path'.")
+            alias = (artifact_id or artifact_name)[:MAX_ITEM_CHARS]
             path = raw_path.strip()
         else:
             raise WorkerResultRejected("'artifact_refs' must contain only path strings or named path objects.")
@@ -346,6 +359,9 @@ def _evidence_items(
     ids: dict[str, EvidenceRef] = {}
     aliases = artifact_aliases or {}
     for entry in raw[:MAX_ITEMS]:
+        if stage == "build" and isinstance(entry, str) and entry.strip().startswith("/mnt/user-data/"):
+            refs.append(EvidenceRef(kind="workspace_file", reference=entry.strip()[:MAX_ITEM_CHARS]))
+            continue
         if not isinstance(entry, Mapping):
             raise WorkerResultRejected("Each evidence reference must be an object with 'kind' and 'reference'.")
         raw_id = entry.get("id")
@@ -377,6 +393,12 @@ def _evidence_items(
             candidate = entry.get(field_name)
             if isinstance(candidate, str) and candidate.strip():
                 locators.append((inferred_kind, candidate.strip()))
+        if len(locators) > 1:
+            distinct_references = {reference for _kind, reference in locators}
+            inferred_kinds = {item_kind for item_kind, _reference in locators if item_kind is not None}
+            if len(distinct_references) == 1 and len(inferred_kinds) <= 1:
+                inferred = next(iter(inferred_kinds), None)
+                locators = [(inferred, next(iter(distinct_references)))]
         if len(locators) != 1:
             raise WorkerResultRejected("Each evidence reference must provide exactly one locator: reference, path, artifact_ref, dataset_ref, external_ref, or url.")
 
@@ -388,8 +410,11 @@ def _evidence_items(
                 inferred_kind = "workspace_file"
         if inferred_kind is not None:
             if kind and kind != inferred_kind:
-                raise WorkerResultRejected(f"Evidence kind {kind!r} conflicts with its {inferred_kind!r} locator.")
+                if not (stage == "build" and inferred_kind == "workspace_file" and reference.startswith("/mnt/user-data/")):
+                    raise WorkerResultRejected(f"Evidence kind {kind!r} conflicts with its {inferred_kind!r} locator.")
             kind = inferred_kind
+        if stage == "build" and not kind and reference.startswith("/mnt/user-data/"):
+            kind = "workspace_file"
         # Build workers create several concrete implementation file types and
         # models naturally label them by role (``manifest``, ``execution_log``,
         # ``test_suite``, ``implementation``) even though the shared contract
@@ -440,7 +465,7 @@ def _quality_tuple(raw: object, *, stage: str | None = None) -> tuple[QualityChe
         for raw_name, value in list(raw.items())[:MAX_ITEMS]:
             if not isinstance(raw_name, str) or not raw_name.strip():
                 raise WorkerResultRejected("A Build quality-check map must use non-empty string names.")
-            if isinstance(value, bool):
+            if isinstance(value, bool) or (isinstance(value, str) and value.strip().lower() in {"true", "false"}):
                 normalized.append({"name": raw_name, "passed": value})
             elif isinstance(value, Mapping):
                 normalized.append({**value, "name": raw_name})
@@ -466,7 +491,9 @@ def _quality_tuple(raw: object, *, stage: str | None = None) -> tuple[QualityChe
                 raise WorkerResultRejected(f"Quality check {entry.get('name')!r} has an unknown 'status'.")
         if passed is None:
             passed = status_passed
-        elif isinstance(passed, bool) and status_passed is not None and passed is not status_passed:
+        elif isinstance(passed, str) and passed.strip().lower() in {"true", "false"}:
+            passed = passed.strip().lower() == "true"
+        if isinstance(passed, bool) and status_passed is not None and passed is not status_passed:
             raise WorkerResultRejected(f"Quality check {entry.get('name')!r} reports conflicting 'passed' and 'status' verdicts.")
         if not isinstance(passed, bool):
             # Refused rather than coerced: a truthy string here would turn an
@@ -508,6 +535,118 @@ def extract_result_payload(text: str) -> Mapping[str, Any]:
     return payload
 
 
+def _render_summary_mapping(summary: Mapping[str, Any]) -> str:
+    """Render a Build worker's metrics object as one readable line per field.
+
+    Rendered rather than JSON-dumped because a reviewer reads this: the values
+    are the worker's own, and nothing is added, dropped, or reinterpreted.
+    """
+    lines: list[str] = []
+    for key, value in summary.items():
+        name = str(key).strip()
+        if not name:
+            continue
+        if isinstance(value, Mapping) or (isinstance(value, Sequence) and not isinstance(value, (str, bytes))):
+            rendered = json.dumps(value, ensure_ascii=False, default=str)
+        else:
+            rendered = str(value)
+        lines.append(f"{name}: {rendered}")
+    return "\n".join(lines)
+
+
+def _summary_text(summary: Any, *, stage: str | None) -> str:
+    """The worker's summary as prose, or a refusal that says what was wrong.
+
+    Build alone accepts a mapping, for the same reason it already accepts
+    descriptive artifact `kind` labels and a compact boolean `quality_checks`
+    map: a validation phase that passed every check and reported its findings as
+    an object is real work, and discarding it costs far more than rendering it.
+    The compatibility cannot manufacture anything -- a summary carries no claim,
+    check, or evidence reference, so the worst a rendered one can do is read
+    like machine output.
+
+    Every other stage still requires prose. And the refusal distinguishes an
+    absent summary from a wrongly typed one, because reporting a field that is
+    plainly present as missing sends a reader looking for the wrong thing.
+    """
+    if isinstance(summary, str):
+        return summary
+    if summary is None:
+        raise WorkerResultRejected("The worker's result must report a 'summary'.")
+    if stage == "build" and isinstance(summary, Mapping):
+        rendered = _render_summary_mapping(summary)
+        if rendered:
+            return rendered
+        raise WorkerResultRejected("The worker's 'summary' object was empty; report what the phase found.")
+    raise WorkerResultRejected(f"The worker's 'summary' must be text, but it was a {type(summary).__name__}.")
+
+
+_BUILD_FIELD_ALIASES: Mapping[str, tuple[str, ...]] = {
+    "summary": ("headline", "result", "rationale", "message"),
+    "artifact_refs": ("artifacts", "outputs", "files"),
+    "evidence_refs": ("evidence",),
+    "claims": ("findings",),
+    "limitations": ("caveats",),
+    "quality_checks": ("checks", "validation_checks"),
+    "recommended_next_actions": ("next_actions", "recommendations"),
+}
+
+_STATUS_ALIASES: Mapping[str, WorkerStatus] = {
+    "complete": WorkerStatus.COMPLETED,
+    "done": WorkerStatus.COMPLETED,
+    "ok": WorkerStatus.COMPLETED,
+    "passed": WorkerStatus.COMPLETED,
+    "success": WorkerStatus.COMPLETED,
+    "succeeded": WorkerStatus.COMPLETED,
+    "awaiting_input": WorkerStatus.NEEDS_INPUT,
+    "needs_clarification": WorkerStatus.NEEDS_INPUT,
+    "waiting_for_input": WorkerStatus.NEEDS_INPUT,
+    "error": WorkerStatus.FAILED,
+    "errored": WorkerStatus.FAILED,
+    "failure": WorkerStatus.FAILED,
+}
+
+
+def _compatible_payload(payload: Mapping[str, Any], *, stage: str | None) -> dict[str, Any]:
+    """Normalize only variations that preserve the worker's reported meaning.
+
+    Build is the long-running stage where throwing away a valid result is most
+    expensive, so its common field-name aliases are accepted. Status aliases
+    are exact vocabulary mappings for every stage. A missing Build status is
+    inferred only from the server-required phase completion check (or from an
+    explicit clarification question); prose, artifacts, or token spend alone
+    can never manufacture completion.
+    """
+    normalized = dict(payload)
+    if stage == "build":
+        for canonical, aliases in _BUILD_FIELD_ALIASES.items():
+            if canonical in normalized:
+                continue
+            for alias in aliases:
+                if alias in normalized:
+                    normalized[canonical] = normalized[alias]
+                    break
+
+    raw_status = normalized.get("status")
+    if isinstance(raw_status, str):
+        status_alias = _STATUS_ALIASES.get(raw_status.strip().lower())
+        if status_alias is not None:
+            normalized["status"] = status_alias.value
+    elif raw_status is None and stage == "build":
+        question = normalized.get("clarification_question")
+        if isinstance(question, str) and question.strip():
+            normalized["status"] = WorkerStatus.NEEDS_INPUT.value
+        else:
+            try:
+                checks = _quality_tuple(normalized.get("quality_checks"), stage="build")
+            except WorkerResultRejected:
+                checks = ()
+            completion = next((item for item in checks if item.name == "phase_done_condition"), None)
+            if completion is not None:
+                normalized["status"] = (WorkerStatus.COMPLETED if completion.passed else WorkerStatus.FAILED).value
+    return normalized
+
+
 def parse_worker_result(
     payload: Mapping[str, Any],
     *,
@@ -524,6 +663,7 @@ def parse_worker_result(
     it exercised would let a selection failure look like a satisfied
     requirement.
     """
+    payload = _compatible_payload(payload, stage=stage)
     raw_status = payload.get("status")
     if not isinstance(raw_status, str):
         raise WorkerResultRejected("The worker's result must report a 'status'.")
@@ -533,9 +673,7 @@ def parse_worker_result(
         allowed = ", ".join(item.value for item in WorkerStatus)
         raise WorkerResultRejected(f"Unknown worker status {raw_status!r}; expected one of: {allowed}") from exc
 
-    summary = payload.get("summary")
-    if not isinstance(summary, str):
-        raise WorkerResultRejected("The worker's result must report a 'summary'.")
+    summary = _summary_text(payload.get("summary"), stage=stage)
 
     provenance = payload.get("provenance") or {}
     if not isinstance(provenance, Mapping):

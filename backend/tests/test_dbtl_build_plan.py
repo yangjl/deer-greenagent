@@ -13,6 +13,7 @@ import json
 
 import pytest
 
+from deerflow.agents.dbtl.live_stage.build_phases import planner_unit
 from deerflow.dbtl.build_plan import (
     BuildPhase,
     BuildPhasePlan,
@@ -23,6 +24,7 @@ from deerflow.dbtl.build_plan import (
 )
 from deerflow.dbtl.build_workflow import MAX_BUILD_PHASES
 from deerflow.dbtl.capabilities import Capability
+from deerflow.dbtl.stage_runner import BUILD_PLAN_OUTPUT
 
 ENGINEERING = Capability.SOFTWARE_ENGINEERING.value
 
@@ -42,6 +44,11 @@ def _plan(*phases: dict, **overrides) -> str:
 
 
 class TestAPlanIsData:
+    def test_the_planner_declares_its_non_stage_worker_output_contract(self) -> None:
+        unit = planner_unit(attempt_id="attempt-1", agent_name="general-purpose", context="bundle")
+
+        assert unit.output_contract == BUILD_PLAN_OUTPUT
+
     def test_a_decomposition_is_read_in_order(self) -> None:
         parsed = parse_build_plan(_plan(_phase(1), _phase(2)), objective="Fit a model.")
 

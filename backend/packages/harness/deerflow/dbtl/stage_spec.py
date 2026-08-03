@@ -433,6 +433,37 @@ BUILD_SPEC_V5 = StageSpec(
 )
 
 
+BUILD_SPEC_V6 = StageSpec(
+    stage="build",
+    domain_profile=GENERIC_PROFILE,
+    version=6,
+    title=BUILD_SPEC_V5.title,
+    purpose=BUILD_SPEC_V5.purpose,
+    cycle_classes=BUILD_SPEC_V5.cycle_classes,
+    cycle_weights=BUILD_SPEC_V5.cycle_weights,
+    required_inputs=BUILD_SPEC_V5.required_inputs,
+    required_artifact_types=BUILD_SPEC_V5.required_artifact_types,
+    output_schema="build_package.v6",
+    required_capabilities=BUILD_SPEC_V5.required_capabilities,
+    optional_capabilities=BUILD_SPEC_V5.optional_capabilities,
+    validity_gates=BUILD_SPEC_V5.validity_gates,
+    memory_write_policy=BUILD_SPEC_V5.memory_write_policy,
+    # V5's six-call finalization deadline caused workers to stop after creating
+    # only a configuration and lock file, then let that partial phase count as
+    # complete. V6 removes the Build-stage token kill switch, repetitive-tool
+    # hard stop, and stage-level turn clamp. A deliberately unreachable
+    # practical recursion ceiling and this timeout remain operational
+    # safeguards; usage is still metered.
+    budget=WorkerBudget(
+        max_workers=3,
+        max_turns=10_000,
+        max_tokens=1_000_000,
+        timeout_seconds=900,
+        token_limit_enforced=False,
+    ),
+)
+
+
 TEST_SPEC_V1 = StageSpec(
     stage="test",
     domain_profile=GENERIC_PROFILE,
@@ -587,6 +618,7 @@ _REGISTRY: dict[str, StageSpec] = {
         BUILD_SPEC_V3,
         BUILD_SPEC_V4,
         BUILD_SPEC_V5,
+        BUILD_SPEC_V6,
         TEST_SPEC_V1,
         TEST_SPEC_V2,
         TEST_SPEC_V3,
@@ -604,7 +636,7 @@ _CURRENT: MappingProxyType[tuple[str, str], int] = MappingProxyType(
     {
         (GENERIC_PROFILE, "design"): DESIGN_SPEC_V2.version,
         (GENERIC_PROFILE, "reconciliation"): RECONCILIATION_SPEC_V1.version,
-        (GENERIC_PROFILE, "build"): BUILD_SPEC_V5.version,
+        (GENERIC_PROFILE, "build"): BUILD_SPEC_V6.version,
         (GENERIC_PROFILE, "test"): TEST_SPEC_V3.version,
         (GENERIC_PROFILE, "learn"): LEARN_SPEC_V1.version,
     }

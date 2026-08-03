@@ -1,12 +1,30 @@
 from __future__ import annotations
 
+from deerflow.agents.dbtl.live_stage.adapter import _review_meeting_units
 from deerflow.config.dbtl_config import DbtlConfig
+from deerflow.dbtl.agent_selector import Assignment
+from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_meetings import (
     MeetingRequirement,
     attach_meeting_to_core_evidence,
     meeting_gate,
 )
 from deerflow.dbtl.stage_spec import resolve_review_stage_spec
+
+
+def test_every_review_meeting_seat_receives_the_contract_its_collector_enforces() -> None:
+    units = _review_meeting_units(
+        stage="build",
+        attempt_id="attempt-1",
+        assignment=Assignment(capability=Capability.SOFTWARE_ENGINEERING, agent_name="general-purpose", via_generalist=True),
+        model="gpt-5.6-sol",
+        evidence_uri="/mnt/user-data/outputs/build-review.md",
+        evidence_hash="a" * 64,
+        context={"cycle_id": "cycle-1", "cycle_title": "Pilot"},
+    )
+
+    assert all('"status": "completed" | "needs_input" | "blocked" | "failed"' in unit.prompt for unit in units)
+    assert all('"quality_checks"' in unit.prompt for unit in units)
 
 
 def test_review_specs_are_pinned_for_each_stage() -> None:

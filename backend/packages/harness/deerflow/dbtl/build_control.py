@@ -542,6 +542,54 @@ def step_failure_request(
     )
 
 
+def no_presentable_results_request(
+    *,
+    cycle_id: str,
+    stage_attempt_id: str,
+    workflow_spec_key: str,
+    cycle_revision: int = 0,
+    plan_digest: str = "",
+    completed_phases: int = 0,
+    plan: Any = None,
+) -> BuildControlRequest:
+    """Ask how to recover when Build produced no reviewable result evidence.
+
+    Retrying the summarizer cannot manufacture a missing measurement or plot,
+    so this card intentionally omits that looping option. It is the only human
+    surface emitted in this state: there is no empty deck beside it.
+    """
+    kept = f" {completed_phases} finished phase{'s' if completed_phases != 1 else ''} remain recorded for audit." if completed_phases else ""
+    return BuildControlRequest(
+        kind=BuildControlKind.STEP_FAILURE,
+        question="The Build finished without verified outcomes or figures. What should happen next?",
+        rationale="There is no trustworthy result to present in a review deck. Choose how the result-producing work should be redone.",
+        error_code="execution_output_missing",
+        cycle_id=cycle_id,
+        stage_attempt_id=stage_attempt_id,
+        workflow_spec_key=workflow_spec_key,
+        step_key="summarize_results",
+        cycle_revision=cycle_revision,
+        plan_digest=plan_digest,
+        plan_rows=plan_rows(plan) if plan is not None else (),
+        recommended_option_id="replan",
+        options=(
+            _option(
+                "replan",
+                "Replan the build",
+                BuildControlAction.REPLAN_BUILD,
+                f"Draws a new plan that must produce measurable outcomes or figures.{kept}",
+            ),
+            _option(
+                "restart",
+                "Restart the build",
+                BuildControlAction.RESTART_BUILD,
+                "Starts again from the approved design. Nothing from this attempt is reused.",
+            ),
+            _HOLD,
+        ),
+    )
+
+
 def worker_question_request(
     *,
     question: str,

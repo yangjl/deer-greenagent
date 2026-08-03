@@ -720,6 +720,16 @@ def _design_inputs_acknowledgement(state: dict) -> str | None:
     Terminal on purpose. The cycle already exists — the authenticated action
     created it at approval — so there is nothing left to confirm, and falling
     through would ask someone to approve what they just approved.
+
+    It must not send the owner to a refusal. Automatic Design-meeting kickoff is
+    written only by the project-rail creation endpoints, so a cycle created
+    through *this* branch reaches `design` with no worker runs and no artifact —
+    and `submit_stage_for_review` refuses precisely that ("Stage 'design' has no
+    artifact to review; attach evidence first."). Telling someone to review and
+    submit here named the one action guaranteed to fail, and omitted the step
+    that produces a package at all. This is the only sentence standing between
+    the owner and an apparently dead cycle, so it says what actually happens
+    next.
     """
     answered = _card_answer(state, SETUP_CLARIFICATION_PREFIX)
     if answered is None:
@@ -727,7 +737,13 @@ def _design_inputs_acknowledgement(state: dict) -> str | None:
     request_id, _answer = answered
     if _emitted_card_request(state, request_id) is None:
         return None
-    return "Recorded your design inputs for this cycle. Open it in the project rail to review the Design stage and submit it for approval — that authenticated review is what satisfies the gate, not this conversation."
+    return (
+        "Recorded your design inputs for this cycle. Nothing has been designed yet — "
+        "the design meeting has not run. Send your next request with this cycle selected "
+        "in the composer to hold it; the meeting writes the design package, and you review "
+        "and approve that in the project rail, which is what satisfies the gate rather than "
+        "this conversation."
+    )
 
 
 def _setup_confirmation_acknowledgement(state: dict) -> str | None:
@@ -745,9 +761,29 @@ def _setup_confirmation_acknowledgement(state: dict) -> str | None:
     return "No DBTL cycle was created."
 
 
-def _render_continuation(decision: BranchDecision, note: str) -> str:
+def _render_continuation(
+    decision: BranchDecision,
+    note: str,
+    *,
+    stage: str | None = None,
+    review_deck_presented: bool = False,
+) -> str:
     cycle = decision.cycle_id or "the selected cycle"
-    return f"This request is scoped to {cycle}.\n\n{note}\n\nThis run cannot satisfy a review gate. Design and Data reconciliation advance only through the project's human review records."
+    normalized_stage = (stage or "").strip().lower()
+    if review_deck_presented and normalized_stage == "build":
+        gate_guidance = (
+            "This run produced Build evidence but did not approve it. Open the second presented file—the Build HTML review deck—"
+            "and go to its Human gate slide. Submit the package for review, then record Approve, Revise here, or Reject. "
+            "An approval surfaces a Start Test / Hold here card in this conversation."
+        )
+    elif review_deck_presented and normalized_stage:
+        stage_label = normalized_stage.title()
+        gate_guidance = f"This run produced {stage_label} evidence but did not approve it. Open the presented HTML review deck and use its Human gate slide to record the next human decision for {stage_label}."
+    elif normalized_stage in {"build", "test", "learn"}:
+        gate_guidance = f"This run cannot approve {normalized_stage.title()} by itself. Use the server-owned review controls in the stage sheet in the project rail to submit and record the next human decision."
+    else:
+        gate_guidance = "This run cannot satisfy a review gate by itself. Use the project's server-owned human review record to submit and decide the stage."
+    return f"This request is scoped to {cycle}.\n\n{note}\n\n{gate_guidance}"
 
 
 #: The preflight option that is not a depth. Choosing it asks what should
@@ -1080,6 +1116,7 @@ def _present_artifact_messages(
     artifact_uri: str,
     request_nonce: str,
     deck_uri: str | None = None,
+    stage: str | None = None,
 ) -> tuple[AIMessage, ToolMessage]:
     """Use the same present-files turn shape as the lead agent.
 
@@ -1099,7 +1136,12 @@ def _present_artifact_messages(
     return (
         AIMessage(
             id=f"{tool_call_id}:call",
-            content=_render_continuation(decision, note),
+            content=_render_continuation(
+                decision,
+                note,
+                stage=stage,
+                review_deck_presented=bool(deck_uri),
+            ),
             tool_calls=[tool_call],
         ),
         ToolMessage(
@@ -1356,7 +1398,12 @@ def build_supervisor_graph(
         decision = decide(state)
         acknowledgement = _setup_confirmation_acknowledgement(state) or _design_inputs_acknowledgement(state)
         if acknowledgement is not None:
-            return {"messages": [AIMessage(content=acknowledgement)]}
+            # A receipt, not a bare turn: no model call sits behind this reply,
+            # so without the marker it lives in the checkpoint alone. Someone
+            # answered the Design setup questions and the conversation went
+            # silent -- the sentence telling them where to review the Design was
+            # written and never saved.
+            return {"messages": [receipt_message(acknowledgement)]}
         source_request, _choice, _cycle_id = _routing_input(state)
         raw_context = request_context(config)
         request_nonce = str(raw_context.get("run_id") or "")
@@ -1584,11 +1631,22 @@ def build_supervisor_graph(
                             artifact_uri=artifact_uri,
                             request_nonce=str(request_context(config).get("run_id") or ""),
                             deck_uri=deck_uri,
+                            stage=review_meeting_stage,
                         )
                     ),
                     "artifacts": [path for path in (artifact_uri, deck_uri) if path],
                 }
-            return {"messages": [AIMessage(content=_render_continuation(decision, result.note))]}
+            return {
+                "messages": [
+                    receipt_message(
+                        _render_continuation(
+                            decision,
+                            result.note,
+                            stage=review_meeting_stage,
+                        )
+                    )
+                ]
+            }
         if authored_design is not None:
             execute_kwargs["authored_design"] = authored_design
         if adjustment is not None:
@@ -1749,6 +1807,7 @@ def build_supervisor_graph(
                     artifact_uri=artifact_uri,
                     request_nonce=request_nonce,
                     deck_uri=deck_uri,
+                    stage=getattr(result, "stage", None),
                 )
             )
             if getattr(result, "stage", None) == "test":
@@ -1775,7 +1834,17 @@ def build_supervisor_graph(
                 "messages": presented,
                 "artifacts": [path for path in (artifact_uri, deck_uri) if path],
             }
-        return {"messages": [AIMessage(content=_render_continuation(decision, result.note))]}
+        return {
+            "messages": [
+                receipt_message(
+                    _render_continuation(
+                        decision,
+                        result.note,
+                        stage=getattr(result, "stage", None),
+                    )
+                )
+            ]
+        }
 
     async def ordinary(state: dict, config: RunnableConfig) -> dict:
         """Delegate ordinary work, adding DBTL orientation only for this call.

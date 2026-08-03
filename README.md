@@ -57,9 +57,17 @@ Design–Build–Test–Learn (DBTL) governance.
   `manifest`, `execution_log`, and `test_suite`: project-virtual paths carrying
   those labels are normalized to `workspace_file` before the usual containment,
   publication, and hashing checks. A Build worker's compact boolean
-  `quality_checks` map is likewise normalized to named check rows; Test still
-  owns the verdict. Other stages, non-file references, and non-boolean check
-  values remain strict, so compatibility cannot manufacture evidence. Local
+  `quality_checks` map is likewise normalized to named check rows; exact
+  `"true"`/`"false"` spellings, path-only artifact objects, identical redundant
+  evidence locators, and common Build field names are accepted without changing
+  their meaning. A missing Build status can be recovered only from the
+  server-required `phase_done_condition` check or an explicit clarification
+  question. Test still owns the verdict. Other stages, non-file references,
+  ambiguous values, unsupported prose, untraceable claims, and failed checks
+  remain strict, so compatibility cannot manufacture evidence. Build's planner,
+  result summarizer, and advisory work meeting declare their own output
+  contracts; the activity feed no longer re-grades those typed answers against
+  the generic stage-worker schema. Local
   Build shell execution preserves virtual paths only in positively recognized,
   non-expanding data heredocs (for example JSON written by `cat`/`tee`). Python
   and stored-code heredocs still undergo path translation and host-path audits;
@@ -70,8 +78,9 @@ Design–Build–Test–Learn (DBTL) governance.
   path, and host-rooted filesystem MCP tools are kept out of virtual stage
   workspaces even when their configured names change. Current Build phases use
   a compact, hash-bound context, a server-created workspace layout, and a
-  six-call/120K-token envelope; completed phases are replayed while only a
-  failed phase is retried. Direct callbacks and subagent usage reports share
+  metered, non-enforced token/tool-call allowance with a high emergency runtime
+  ceiling; completed phases are replayed while only a failed phase is retried.
+  Direct callbacks and subagent usage reports share
   one model-call identity, so the run ledger cannot count the same tokens twice.
 - **Human-controlled automation** — AI may recommend or route DBTL work, but it
   cannot satisfy scientific gates or create authoritative results by itself.
@@ -139,6 +148,13 @@ Design–Build–Test–Learn (DBTL) governance.
   council progress remains available through its task timeline. Shadow
   proposal evaluation records telemetry only; it does not mount a second card
   beside the composer.
+- **One Build review surface** — a completed Build presents its reviewed
+  Markdown first and a result deck in the same visual/navigation template as
+  Design second. Its final **Human gate** slide submits the package and records
+  the verdict; no parallel review card competes with that deck. The resulting
+  **Start Test / Hold here** handoff remains a separate transition decision. If
+  Build recorded no server-verified outcome or figure, no empty review deck is
+  created: chat shows one recovery Human Input Card instead.
 - **Inspectable Design debate** — before a council runs, chat shows its roster,
   depth choices, stand-ins, and recommendation. Choosing a depth first updates
   the visible participant list; a separate confirmation starts exactly that

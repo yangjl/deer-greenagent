@@ -28,13 +28,14 @@ from deerflow.agents.dbtl.live_stage.workspace import STAGE_UNIT_WORKSPACE_PLACE
 from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.build_plan import PLANNER_CONTRACT, BuildPhase, BuildPhasePlan
 from deerflow.dbtl.capabilities import Capability
-from deerflow.dbtl.stage_runner import WorkUnit
+from deerflow.dbtl.stage_runner import BUILD_PLAN_OUTPUT, WorkUnit
 from deerflow.dbtl.stage_spec import StageSpec
 
 #: The seat that draws the plan. Read-only by role, like the summarizer: it
 #: writes nothing, runs nothing, and dispatches nobody.
 PLANNER_ROLE = "planner"
 PHASE_ROLE = "phase"
+PHASE_DONE_CHECK = "phase_done_condition"
 
 GENERALIST = "general-purpose"
 
@@ -101,6 +102,7 @@ def planner_unit(
         prompt=prompt,
         role=PLANNER_ROLE,
         model=model,
+        output_contract=BUILD_PLAN_OUTPUT,
     )
 
 
@@ -160,8 +162,21 @@ def phase_unit(
         "to restate it.",
         "",
         "This phase reports; it does not grade itself. A check you ran and that failed is a",
-        "recorded failed check with its detail — not a reason to withhold the phase. Report",
-        "status=failed only when the work could not be done at all.",
+        "recorded failed check with its detail — not a reason to hide the work.",
+        *(
+            [
+                f"You MUST include exactly one quality check named {PHASE_DONE_CHECK!r}.",
+                "Set it to passed=true only after the phase's declared Done when condition is met",
+                "and every expected output exists. If either is incomplete, set it to false,",
+                "and do not set it true while another implementation quality check is false.",
+                "A failed repeat-run/reproducibility check is the sole exception: record that as",
+                "a limitation because Test and the human reviewer own that verdict.",
+                "report status=failed, name the missing work in its detail, and stop. Partial files",
+                "remain auditable, but they cannot advance this build plan.",
+            ]
+            if spec.version >= 6
+            else ["Report status=failed only when the work could not be done at all."]
+        ),
         "",
         result_contract,
     ]
@@ -172,6 +187,7 @@ def phase_unit(
         prompt="\n".join(line for line in lines if line is not None),
         via_generalist=assignment.via_generalist,
         role=PHASE_ROLE,
+        completion_check=PHASE_DONE_CHECK if spec.version >= 6 else "",
     )
 
 

@@ -218,6 +218,30 @@ describe("subtaskNotification", () => {
     ).toBe("deferred");
   });
 
+  it("eagerly publishes a terminal transition received from the async stream", () => {
+    expect(
+      subtaskNotification(
+        { id: "t1", status: "completed" },
+        { becameTerminal: true, changed: true },
+        "eager",
+      ),
+    ).toBe("eager");
+  });
+
+  it("eagerly publishes terminal metadata convergence from the async stream", () => {
+    expect(
+      subtaskNotification(
+        {
+          id: "t1",
+          status: "completed",
+          displaySummary: "Build phase complete",
+        },
+        { becameTerminal: false, changed: true },
+        "eager",
+      ),
+    ).toBe("eager");
+  });
+
   it("eagerly reflects a live SSE update that actually changed", () => {
     expect(
       subtaskNotification(

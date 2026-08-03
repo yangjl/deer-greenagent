@@ -117,7 +117,7 @@ class TestStageSpecRegistry:
         assert current_spec_keys() == (
             "generic:design:v2",
             "generic:reconciliation:v1",
-            "generic:build:v5",
+            "generic:build:v6",
             "generic:test:v3",
             "generic:learn:v1",
         )
@@ -361,6 +361,27 @@ class TestWorkerResultContract:
 
         assert [item.kind for item in result.evidence_refs] == ["workspace_file"] * 3
 
+    def test_build_accepts_redundant_identical_evidence_locators(self) -> None:
+        path = "/mnt/user-data/outputs/.dbtl-stage-work/run/logs/run.log"
+        result = parse_worker_result(
+            _valid_payload(
+                evidence_refs=[
+                    {
+                        "kind": "execution_log",
+                        "reference": path,
+                        "path": path,
+                        "description": "Execution log.",
+                    }
+                ]
+            ),
+            capability="software_engineering",
+            agent_name="general-purpose",
+            stage="build",
+        )
+
+        assert result.evidence_refs[0].kind == "workspace_file"
+        assert result.evidence_refs[0].reference == path
+
     def test_descriptive_file_kinds_remain_strict_outside_build(self) -> None:
         payload = _valid_payload(
             evidence_refs=[
@@ -398,6 +419,24 @@ class TestWorkerResultContract:
                 quality_checks={
                     "implementation_written": True,
                     "complete_simulation_executed": False,
+                }
+            ),
+            capability="software_engineering",
+            agent_name="general-purpose",
+            stage="build",
+        )
+
+        assert [(item.name, item.passed) for item in result.quality_checks] == [
+            ("implementation_written", True),
+            ("complete_simulation_executed", False),
+        ]
+
+    def test_exact_boolean_strings_are_losslessly_normalized(self) -> None:
+        result = parse_worker_result(
+            _valid_payload(
+                quality_checks={
+                    "implementation_written": "true",
+                    "complete_simulation_executed": "false",
                 }
             ),
             capability="software_engineering",
@@ -523,9 +562,51 @@ class TestWorkerResultContract:
         with pytest.raises(WorkerResultRejected, match="status"):
             parse_worker_result(payload, capability="c", agent_name="a")
 
+    def test_build_may_infer_missing_status_only_from_the_required_completion_check(self) -> None:
+        payload = _valid_payload(
+            quality_checks=[
+                {"name": "phase_done_condition", "passed": True, "detail": "Every expected output exists."},
+            ]
+        )
+        del payload["status"]
+
+        result = parse_worker_result(payload, capability="software_engineering", agent_name="general-purpose", stage="build")
+
+        assert result.status is WorkerStatus.COMPLETED
+
+    def test_build_field_aliases_keep_the_reported_values(self) -> None:
+        payload = _valid_payload()
+        payload.pop("summary")
+        payload.pop("artifact_refs", None)
+        payload.pop("evidence_refs")
+        payload.pop("claims")
+        payload.pop("quality_checks")
+        payload.update(
+            {
+                "headline": "Built and checked the pilot.",
+                "outputs": [{"path": "/mnt/user-data/outputs/pilot.json"}],
+                "evidence": ["/mnt/user-data/outputs/pilot.json"],
+                "findings": ["The pilot output was generated."],
+                "checks": {"phase_done_condition": "true"},
+            }
+        )
+
+        result = parse_worker_result(payload, capability="software_engineering", agent_name="general-purpose", stage="build")
+
+        assert result.summary == "Built and checked the pilot."
+        assert result.artifact_refs == ("/mnt/user-data/outputs/pilot.json",)
+        assert result.evidence_refs[0].reference == "/mnt/user-data/outputs/pilot.json"
+        assert result.claims == ("The pilot output was generated.",)
+
     def test_an_unknown_status_is_rejected(self) -> None:
         with pytest.raises(WorkerResultRejected, match="Unknown worker status"):
             parse_worker_result(_valid_payload(status="mostly_fine"), capability="c", agent_name="a")
+
+    @pytest.mark.parametrize("reported", ["complete", "done", "ok", "passed", "success", "succeeded"])
+    def test_unambiguous_completed_status_aliases_are_normalized(self, reported: str) -> None:
+        result = parse_worker_result(_valid_payload(status=reported), capability="c", agent_name="a")
+
+        assert result.status is WorkerStatus.COMPLETED
 
     def test_an_empty_summary_is_rejected(self) -> None:
         with pytest.raises(WorkerResultRejected, match="summary"):
@@ -642,10 +723,67 @@ class TestWorkerResultContract:
         ]
         assert [item.passed for item in result.quality_checks] == [True, False]
 
+    def test_named_artifact_objects_accept_the_models_common_name_path_shape(self) -> None:
+        result = parse_worker_result(
+            _valid_payload(
+                artifact_refs=[
+                    {
+                        "name": "validation_report",
+                        "path": "/mnt/user-data/outputs/validation-report.md",
+                    }
+                ],
+                evidence_refs=[
+                    {
+                        "artifact_ref": "validation_report",
+                        "description": "Independent validation report",
+                    }
+                ],
+            ),
+            capability="validity_assessment",
+            agent_name="general-purpose",
+            stage="build",
+        )
+
+        assert result.artifact_refs == ("/mnt/user-data/outputs/validation-report.md",)
+        assert result.evidence_refs[0].reference == "/mnt/user-data/outputs/validation-report.md"
+        assert result.evidence_refs[0].kind == "workspace_file"
+
+    def test_path_only_artifact_objects_are_accepted_without_inventing_an_alias(self) -> None:
+        result = parse_worker_result(
+            _valid_payload(artifact_refs=[{"path": "/mnt/user-data/outputs/validation-report.md"}]),
+            capability="validity_assessment",
+            agent_name="general-purpose",
+            stage="build",
+        )
+
+        assert result.artifact_refs == ("/mnt/user-data/outputs/validation-report.md",)
+
     def test_ambiguous_artifact_objects_and_quality_statuses_are_still_rejected(self) -> None:
-        with pytest.raises(WorkerResultRejected, match="'id' and 'path'"):
+        for alias_field in ("id", "name"):
+            with pytest.raises(WorkerResultRejected, match=f"'{alias_field}'.*non-empty string"):
+                parse_worker_result(
+                    _valid_payload(
+                        artifact_refs=[
+                            {
+                                alias_field: "  ",
+                                "path": "/mnt/user-data/outputs/spec.json",
+                            }
+                        ]
+                    ),
+                    capability="c",
+                    agent_name="a",
+                )
+        with pytest.raises(WorkerResultRejected, match="conflicting 'id' and 'name'"):
             parse_worker_result(
-                _valid_payload(artifact_refs=[{"path": "/mnt/user-data/outputs/spec.json"}]),
+                _valid_payload(
+                    artifact_refs=[
+                        {
+                            "id": "specification",
+                            "name": "validation_report",
+                            "path": "/mnt/user-data/outputs/spec.json",
+                        }
+                    ]
+                ),
                 capability="c",
                 agent_name="a",
             )
@@ -667,6 +805,17 @@ class TestWorkerResultContract:
         with pytest.raises(WorkerResultRejected, match="Duplicate artifact"):
             parse_worker_result(
                 _valid_payload(artifact_refs=[artifact, artifact]),
+                capability="c",
+                agent_name="a",
+            )
+        with pytest.raises(WorkerResultRejected, match="Duplicate artifact"):
+            parse_worker_result(
+                _valid_payload(
+                    artifact_refs=[
+                        artifact,
+                        {"name": "spec", "path": "/mnt/user-data/outputs/validation.json"},
+                    ]
+                ),
                 capability="c",
                 agent_name="a",
             )
@@ -881,6 +1030,17 @@ class TestStageFanOut:
         plan = plan_stage(RECONCILIATION_SPEC_V1, self._candidates(), attempt_id="a1")
         json.dumps(collect_results(plan, []).as_dict())
 
+    def test_the_generic_collector_refuses_a_unit_owned_by_another_parser(self) -> None:
+        from dataclasses import replace
+
+        from deerflow.dbtl.stage_runner import BUILD_SUMMARY_OUTPUT
+
+        plan = plan_stage(RECONCILIATION_SPEC_V1, self._candidates(), attempt_id="a1")
+        typed = replace(plan, units=(replace(plan.units[0], output_contract=BUILD_SUMMARY_OUTPUT),))
+
+        with pytest.raises(ValueError, match="typed output must be handled by its owning parser"):
+            collect_results(typed, [])
+
 
 class TestBuildRecordsRerunInformationRatherThanProvingIt:
     """Reproducibility is Test's question and a human's verdict, not Build's gate.
@@ -899,15 +1059,16 @@ class TestBuildRecordsRerunInformationRatherThanProvingIt:
         assert "recorded_rerun_procedure" in BUILD_SPEC_V4.validity_gates
         assert "server_bound_input_lineage" in BUILD_SPEC_V4.validity_gates
 
-    def test_build_v5_is_current_with_a_smaller_execution_envelope(self) -> None:
-        from deerflow.dbtl.stage_spec import BUILD_SPEC_V4, BUILD_SPEC_V5
+    def test_build_v6_is_current_and_meters_without_stage_level_caps(self) -> None:
+        from deerflow.dbtl.stage_spec import BUILD_SPEC_V5, BUILD_SPEC_V6
 
-        assert resolve_stage_spec("build").spec_key == "generic:build:v5"
-        assert BUILD_SPEC_V5.required_inputs == BUILD_SPEC_V4.required_inputs
-        assert BUILD_SPEC_V5.validity_gates == BUILD_SPEC_V4.validity_gates
-        assert BUILD_SPEC_V5.budget.max_turns == 77
-        assert BUILD_SPEC_V5.budget.max_tokens == 120_000
-        assert BUILD_SPEC_V5.budget.timeout_seconds == 600
+        assert resolve_stage_spec("build").spec_key == "generic:build:v6"
+        assert BUILD_SPEC_V6.required_inputs == BUILD_SPEC_V5.required_inputs
+        assert BUILD_SPEC_V6.validity_gates == BUILD_SPEC_V5.validity_gates
+        assert BUILD_SPEC_V6.budget.max_turns == 10_000
+        assert BUILD_SPEC_V6.budget.max_tokens == 1_000_000
+        assert BUILD_SPEC_V6.budget.token_limit_enforced is False
+        assert BUILD_SPEC_V6.budget.timeout_seconds == 900
 
     def test_the_older_build_contracts_are_unchanged(self) -> None:
         from deerflow.dbtl.stage_spec import BUILD_SPEC_V2, BUILD_SPEC_V3, BUILD_SPEC_V4

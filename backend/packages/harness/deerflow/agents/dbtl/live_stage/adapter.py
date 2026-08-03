@@ -87,11 +87,13 @@ from deerflow.dbtl.build_control import (
     BuildControlAnswer,
     BuildControlKind,
     change_plan_request,
+    no_presentable_results_request,
     phase_pause_request,
     plan_confirmation_request,
     step_failure_request,
     worker_question_request,
 )
+from deerflow.dbtl.build_deck import BUILD_DECK_SURFACE_VERSION
 from deerflow.dbtl.build_execution import BuildExecutionBundle
 from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError, restore_build_input_bundle
 from deerflow.dbtl.build_plan import BuildPhasePlan, parse_build_plan, restore_build_plan, single_phase_plan
@@ -141,6 +143,9 @@ from deerflow.dbtl.stage_meetings import (
 )
 from deerflow.dbtl.stage_routes import RouteContext, compute_stage_routes
 from deerflow.dbtl.stage_runner import (
+    BUILD_PLAN_OUTPUT,
+    BUILD_SUMMARY_OUTPUT,
+    BUILD_WORK_MEETING_OUTPUT,
     RESULT_CONTRACT,
     WORKSPACE_PATH_NOTE,
     AsyncWorkerDispatcher,
@@ -171,6 +176,7 @@ from deerflow.dbtl.validity import (
     ValidityCheckName,
 )
 from deerflow.dbtl.worker_result import (
+    MAX_SUMMARY_CHARS,
     EvidenceRef,
     QualityCheck,
     StageWorkerResult,
@@ -611,12 +617,11 @@ def _terminal_seat_event(
             "error": outcome.error or "The worker returned no output.",
             "stop_reason": outcome.stop_reason,
         }
-    # The Build planner has its own typed contract (``feasibility`` and
-    # ``phases``), not the stage-worker ``status`` contract.  It completed its
-    # job when that plan parses, even when the plan says human input is needed.
-    # Validating it as StageWorkerResult made the live task lane report failure
-    # while the adapter consumed the same output successfully.
-    if unit.role == "planner":
+    # Typed helper workers are deliberately not StageWorkerResult producers.
+    # Their owning parser is the authority; applying the generic schema here
+    # created a second, contradictory gate that could mark a successfully
+    # consumed result as failed in the live lane.
+    if unit.output_contract == BUILD_PLAN_OUTPUT:
         planned = parse_build_plan(outcome.text, objective="Build the approved design.")
         if "unparseable_plan" in planned.reasons:
             return {
@@ -642,6 +647,74 @@ def _terminal_seat_event(
             "display_summary": _build_plan_display_summary(planned.plan),
             "stop_reason": outcome.stop_reason,
         }
+    if unit.output_contract == BUILD_SUMMARY_OUTPUT:
+        try:
+            payload = extract_result_payload(outcome.text)
+        except WorkerResultRejected as exc:
+            return {
+                "type": "task_failed",
+                **base,
+                "error": f"The Build result synthesis was unreadable: {exc}",
+                "stop_reason": outcome.stop_reason,
+            }
+        question = payload.get("clarification_question")
+        question = question.strip() if isinstance(question, str) else ""
+        status = str(payload.get("status") or "").strip().lower()
+        if status == WorkerStatus.NEEDS_INPUT.value or question:
+            if not question:
+                return {
+                    "type": "task_failed",
+                    **base,
+                    "error": "The Build result synthesis asked for input without stating a question.",
+                    "stop_reason": outcome.stop_reason,
+                }
+            return {
+                "type": "task_completed",
+                **base,
+                "result": json.dumps(payload, ensure_ascii=False),
+                "display_summary": question,
+                "stop_reason": outcome.stop_reason,
+            }
+        headline = payload.get("headline") or payload.get("summary")
+        headline = headline.strip() if isinstance(headline, str) else ""
+        if not headline:
+            return {
+                "type": "task_failed",
+                **base,
+                "error": "The Build result synthesis did not state what the build produced.",
+                "stop_reason": outcome.stop_reason,
+            }
+        return {
+            "type": "task_completed",
+            **base,
+            "result": json.dumps(payload, ensure_ascii=False),
+            "display_summary": headline,
+            "stop_reason": outcome.stop_reason,
+        }
+    if unit.output_contract == BUILD_WORK_MEETING_OUTPUT:
+        if unit.role != "chair":
+            return {
+                "type": "task_completed",
+                **base,
+                "result": outcome.text,
+                "display_summary": outcome.text.strip()[:MAX_SUMMARY_CHARS],
+                "stop_reason": outcome.stop_reason,
+            }
+        recommendation = parse_recommendation(outcome.text)
+        if recommendation.refusal:
+            return {
+                "type": "task_failed",
+                **base,
+                "error": recommendation.refusal,
+                "stop_reason": outcome.stop_reason,
+            }
+        return {
+            "type": "task_completed",
+            **base,
+            "result": json.dumps(recommendation.as_dict(), ensure_ascii=False),
+            "display_summary": recommendation.summary or recommendation.outcome.replace("_", " ").title(),
+            "stop_reason": outcome.stop_reason,
+        }
     try:
         parsed = parse_worker_result(
             extract_result_payload(outcome.text),
@@ -655,6 +728,14 @@ def _terminal_seat_event(
             "type": "task_failed",
             **base,
             "error": (f"The worker's result did not satisfy the stage contract: {exc}"),
+            "stop_reason": outcome.stop_reason,
+        }
+    completion_error = _completion_check_error(parsed, unit.completion_check)
+    if completion_error:
+        return {
+            "type": "task_failed",
+            **base,
+            "error": completion_error,
             "stop_reason": outcome.stop_reason,
         }
     if parsed.status in {WorkerStatus.FAILED, WorkerStatus.BLOCKED} or (parsed.was_capped and parsed.status is not WorkerStatus.NEEDS_INPUT):
@@ -675,6 +756,35 @@ def _terminal_seat_event(
         "display_summary": parsed.summary,
         "stop_reason": outcome.stop_reason,
     }
+
+
+def _completion_check_error(result: StageWorkerResult, required_name: str) -> str:
+    """Explain why a server-required unit completion assertion did not pass."""
+    if not required_name or result.status is not WorkerStatus.COMPLETED:
+        return ""
+    checks = [item for item in result.quality_checks if item.name.strip() == required_name]
+    if len(checks) != 1:
+        return f"The worker must return exactly one {required_name!r} quality check before this phase can finish."
+    if not checks[0].passed:
+        detail = checks[0].detail.strip()
+        return detail or f"The worker reported that {required_name!r} was not satisfied."
+    # The completion marker cannot override the worker's own contrary evidence.
+    # Build deliberately does not require a demonstrated repeat run (Test owns
+    # reproducibility), but every other check the implementation worker chose
+    # to run must pass before the phase may advance. This catches the observed
+    # config/lock-only result whose marker said complete while simulator
+    # execution and implementation tests both said false.
+    contradictions = [item for item in result.quality_checks if item.name.strip() != required_name and not item.passed and not _is_non_gating_build_check(item.name)]
+    if contradictions:
+        names = ", ".join(item.name.strip() for item in contradictions[:4])
+        return f"The phase reported {required_name!r} as complete, but these implementation checks failed: {names}."
+    return ""
+
+
+def _is_non_gating_build_check(name: str) -> bool:
+    """The one failed check Build records for Test rather than self-grading."""
+    normalized = " ".join(name.lower().replace("_", " ").replace("-", " ").split())
+    return "reproduc" in normalized or "repeat run" in normalized or "rerun" in normalized
 
 
 def _build_plan_display_summary(plan: BuildPhasePlan) -> str:
@@ -1369,6 +1479,78 @@ def _bind_stage_unit_workspaces(
     )
 
 
+def _directory_input_artifacts(
+    *,
+    relative: str,
+    path: Path,
+    project_root: str,
+    pre_run_files: Mapping[str, tuple[int, int]],
+    published_hashes: Mapping[str, str],
+    required: bool,
+) -> list[str]:
+    """Expand a declared input directory into exact, hash-bound files.
+
+    Workers naturally cite an earlier phase's output directory. The publisher
+    records its files individually, so treating the directory as one missing
+    file rejected valid sequential builds. Expansion is strict: every current
+    file must belong either to the pre-run snapshot or this run's published
+    index, and every byte/metadata binding is checked again.
+    """
+    prefix = relative.rstrip("/") + "/"
+    try:
+        current: dict[str, Path] = {}
+        root = Path(project_root).resolve()
+        for child in path.rglob("*"):
+            if not child.is_file():
+                continue
+            try:
+                child_relative = child.relative_to(root).as_posix()
+            except ValueError:
+                child_relative = ""
+            resolved = _workspace_relative_path(f"/mnt/user-data/{child_relative}", project_root=project_root) if child_relative else None
+            if resolved is None or child.is_symlink():
+                raise ValueError(f"Build input directory {relative!r} contains a file outside the governed workspace.")
+            current[resolved[0]] = resolved[1]
+    except OSError:
+        if required:
+            raise ValueError(f"Build input directory {relative!r} is no longer readable.") from None
+        return []
+
+    published = {name: digest for name, digest in published_hashes.items() if name.startswith(prefix)}
+    # A broad directory may legitimately contain unchanged source files and
+    # outputs published by an earlier phase. The two authorities are additive,
+    # with same-run publication winning on the impossible-but-safe overlap.
+    snapshotted = {name: metadata for name, metadata in pre_run_files.items() if name.startswith(prefix) and name not in published}
+    known = set(published) | set(snapshotted)
+    if not known and required:
+        raise ValueError(f"Build input directory {relative!r} was not present when this Build run started or published by an earlier phase.")
+    if not known:
+        return []
+    if set(current) != known:
+        raise ValueError(f"Build input directory {relative!r} changed during execution; rerun Build from unchanged source files and phase outputs.")
+
+    artifacts: list[str] = []
+    for name in sorted(published):
+        try:
+            digest = _sha256_file(current[name])
+        except OSError:
+            raise ValueError(f"Build input {name!r} is no longer readable.") from None
+        if digest != published[name]:
+            raise ValueError(f"Build input {name!r} changed after this run published it; rerun Build from an unchanged source file.")
+        artifacts.append(f"workspace_file:{name}:sha256:{digest}")
+
+    for name in sorted(snapshotted):
+        try:
+            stat = current[name].stat()
+            digest = _sha256_file(current[name])
+        except OSError:
+            raise ValueError(f"Build input {name!r} is no longer readable.") from None
+        if (stat.st_size, stat.st_mtime_ns) != snapshotted[name]:
+            raise ValueError(f"Build input {name!r} changed during execution; rerun Build from an unchanged source file.")
+        artifacts.append(f"workspace_file:{name}:sha256:{digest}")
+    return artifacts
+
+
 def _build_input_artifacts(
     *,
     datasets: Sequence[Mapping[str, Any]],
@@ -1431,6 +1613,18 @@ def _build_input_artifacts(
                 raise ValueError(f"Build input {reference!r} is not a contained workspace file.")
             continue
         relative, path = resolved
+        if path.is_dir():
+            artifacts.extend(
+                _directory_input_artifacts(
+                    relative=relative,
+                    path=path,
+                    project_root=project_root,
+                    pre_run_files=pre_run_files,
+                    published_hashes=published_hashes,
+                    required=required,
+                )
+            )
+            continue
         published_hash = published_hashes.get(relative)
         if published_hash is not None:
             # An earlier phase's output. Already hashed by the publisher into a
@@ -1909,7 +2103,11 @@ def _review_meeting_units(
         "",
         brief,
         "",
-        CONSENSUS_CONTRACT if stage else "",
+        "Report your review using the stage-worker contract below. Claims must point to the recorded evidence URI above; this meeting annotates that evidence and cannot replace it.",
+        RESULT_CONTRACT,
+        "",
+        "The chair may additionally report structured consensus:",
+        CONSENSUS_CONTRACT,
     ]
     units: list[WorkUnit] = []
     for role, slug, instruction in _REVIEW_MEETING_ROLES:
@@ -2050,14 +2248,15 @@ class _FeedbackSurfacePlan:
         a disabled one: the safest version of "this file cannot answer" is a
         file containing no code that could.
         """
-        # Design still uses its registered feedback deck during the migration
-        # window. Build/Test/Learn decisions now live in chat cards; their
-        # decks remain useful evidence but must contain no bridge that can turn
-        # the right-side artifact viewer into a second authority surface.
-        return self.stage == "design" and self.mode in {
-            "chair_feedback",
-            "stage_review",
-        }
+        # Design owns both chair questions and its review gate. Build's
+        # result-specific deck owns its review gate too: unlike Test, no typed
+        # chat review card currently exists for Build, and registering a
+        # ``stage_review`` surface while stripping its bridge leaves the cycle
+        # with no human control at all. Test remains card-owned; Learn keeps its
+        # specialized review surface during that migration.
+        if self.stage == "design":
+            return self.mode in {"chair_feedback", "stage_review"}
+        return self.stage == "build" and self.mode == "stage_review"
 
 
 @dataclass(frozen=True, slots=True)
@@ -2671,6 +2870,9 @@ def _restore_phase(
         context="",
         result_contract="",
     )
+    if _completion_check_error(result, unit.completion_check):
+        logger.warning("A recorded Build phase no longer satisfies its pinned completion contract; the phase will run again.")
+        return None
     # The recorded bindings travel out too: Build lineage is assembled from what
     # each phase actually read, and a replayed phase that contributed nothing
     # would quietly drop its inputs from the provenance record.
@@ -3272,7 +3474,14 @@ class LiveStageAdapter:
                     text=None,
                     error=f"Selected subagent {unit.agent_name!r} is no longer registered.",
                 )
+            uncapped_build = stage == "build" and not budget.token_limit_enforced
             worker_config = _stage_worker_config(base_config, budget)
+            if uncapped_build:
+                # Build v6 deliberately removes both sides of the earlier
+                # stage-level allowance: keeping the agent's 150-superstep
+                # default here would still stop its tool loop after roughly
+                # twelve model calls even though this rollout is uncapped.
+                worker_config = replace(worker_config, max_turns=budget.max_turns)
             parent_model = metadata.get("model_name")
             # A seat that named its own model wins over the composer's. The name
             # was validated against the configured set when the roster was
@@ -3319,11 +3528,21 @@ class LiveStageAdapter:
             # loop — so a worker that spends its budget could never land the JSON
             # its result is parsed from. The deadline reserves the last few model
             # calls for writing that answer.
-            deadline = FinalizationDeadlineMiddleware(
-                # Config may impose a lower per-agent turn limit than the
-                # versioned stage budget. Derive the deadline from the limit
-                # the executor will actually enforce.
-                max_model_calls=_model_call_budget(worker_config.max_turns),
+            # V6 Build work has no stage-level model/tool-call deadline. The
+            # six-call V5 deadline made a worker finalize after authoring two
+            # setup files, and the generic contract then mistook that partial
+            # report for a finished phase. Other stages retain their bounded
+            # finalization path; Build still has a deliberately high emergency
+            # recursion ceiling and the stage timeout.
+            deadline = (
+                None
+                if uncapped_build
+                else FinalizationDeadlineMiddleware(
+                    # Config may impose a lower per-agent turn limit than the
+                    # versioned stage budget. Derive the deadline from the limit
+                    # the executor will actually enforce.
+                    max_model_calls=_model_call_budget(worker_config.max_turns),
+                )
             )
             executor = SubagentExecutor(
                 config=worker_config,
@@ -3349,9 +3568,15 @@ class LiveStageAdapter:
                 # depth disables enforcement, even a stale participant edit
                 # must not quietly turn the kill switch back on.
                 token_budget_max_tokens=_token_limit_for_worker(unit, budget),
+                # The V6 Build rollout is metered but uncapped: omit both the
+                # token hard-stop and repetitive-tool frequency hard-stop. All
+                # sandbox, authorization, stage-output, and timeout controls
+                # remain in place.
+                token_budget_enabled=False if uncapped_build else None,
+                loop_detection_enabled=False if uncapped_build else None,
                 dbtl_writable_paths=(() if unit.role in _READ_ONLY_ROLES else ((unit_workspace,) if unit_workspace else ())),
                 thinking_enabled=unit.reasoning == REASONING_EXTENDED,
-                extra_middlewares=[deadline],
+                extra_middlewares=([deadline] if deadline is not None else []),
             )
             # One activity row per real work unit, opened after the guards above
             # so a worker that never ran does not appear to have started. A
@@ -3437,7 +3662,7 @@ class LiveStageAdapter:
                     unit_id=unit.unit_id,
                     text=result.result,
                     stop_reason=result.stop_reason,
-                    forced_finalization=deadline.forced_any(),
+                    forced_finalization=deadline.forced_any() if deadline is not None else False,
                     token_usage=token_usage,
                 )
                 terminal_event = _terminal_seat_event(
@@ -3726,6 +3951,15 @@ class LiveStageAdapter:
             if result is None or not result.is_trustworthy:
                 results.extend(phase_outcome.results)
                 stopped = "; ".join(phase_outcome.rejected) or f"Phase {assignment.phase.title!r} returned no usable result."
+                failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
+                await recorder.fail(handle, failure_code, stopped)
+                break
+
+            completion_error = _completion_check_error(result, unit.completion_check)
+            if completion_error:
+                results.extend(phase_outcome.results)
+                rejected.append(completion_error)
+                stopped = completion_error
                 failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
                 await recorder.fail(handle, failure_code, stopped)
                 break
@@ -4103,12 +4337,15 @@ class LiveStageAdapter:
             # document nobody confirmed this deck was rendered from.
             mode = "read_only"
 
-        # The stage is deliberately absent from the digest: Design ids were
-        # derived before stages were a parameter, and adding one would move
-        # every already-registered Design surface off the row a retry must
-        # land back on. One execution never spans two stages, so the attempt
-        # id inside ``execution_key`` already separates them.
-        digest = hashlib.sha256("\x1f".join((execution_key, mode, str(round_number))).encode("utf-8")).hexdigest()
+        # Design ids predate the stage parameter and stay byte-for-byte stable.
+        # Build includes the renderer's surface version: its deck now embeds a
+        # live bridge, so reusing an id from bridge-less bytes would make the
+        # repository rename the new row *after* rendering and leave the id
+        # inside the file pointing at the stale descriptor.
+        identity = (execution_key, mode, str(round_number))
+        if stage == "build":
+            identity = (*identity, stage, BUILD_DECK_SURFACE_VERSION)
+        digest = hashlib.sha256("\x1f".join(identity).encode("utf-8")).hexdigest()
         return _FeedbackSurfacePlan(
             surface_id=f"dfs-{digest[:32]}",
             mode=mode,
@@ -5604,6 +5841,7 @@ class LiveStageAdapter:
         build_package = None
         summary_refusal = ""
         summary_question = ""
+        no_slide_results = False
         #: What a later run rebuilds this write-up from instead of paying for a
         #: second synthesis. `None` for a replay, which wrote nothing new.
         summary_payload: dict[str, Any] | None = None
@@ -5634,9 +5872,18 @@ class LiveStageAdapter:
                 else None
             )
             if restored_summary is not None:
-                build_package = restored_summary.package
-                artifact_uri, artifact_hash, artifact_digest = restored_summary.uri, restored_summary.content_hash, restored_summary.package.headline
-                artifact_type = spec.required_artifact_types[0]
+                if restored_summary.package.has_slide_results:
+                    build_package = restored_summary.package
+                    artifact_uri, artifact_hash, artifact_digest = restored_summary.uri, restored_summary.content_hash, restored_summary.package.headline
+                    artifact_type = spec.required_artifact_types[0]
+                else:
+                    # Older workflow rows may have committed a prose-only
+                    # package before the result-evidence rule existed. Do not
+                    # replay it into an empty, answerable deck.
+                    no_slide_results = True
+                    summary_refusal = "The Build finished, but it recorded no verified numeric outcomes or figures to present."
+                    produced_usable_evidence = False
+                    summary_handle = await build_recorder.reopen(summary_handle)
             else:
                 if summary_handle.replayed:
                     # Committed, but unusable. Re-running is right; re-running
@@ -5653,6 +5900,10 @@ class LiveStageAdapter:
                     answer=worker_answer if worker_answer_step == BuildStepKey.SUMMARIZE_RESULTS.value else "",
                 )
                 build_package, summary_refusal, summary_question = summary.package, summary.refusal, summary.question
+                if build_package is not None and not build_package.has_slide_results:
+                    no_slide_results = True
+                    summary_refusal = "The Build finished, but it recorded no verified numeric outcomes or figures to present."
+                    build_package = None
                 written = (
                     await asyncio.to_thread(
                         write_build_review,
@@ -5699,6 +5950,24 @@ class LiveStageAdapter:
                     summary_handle,
                     state=StepState.NEEDS_INPUT,
                     summary=summary_question,
+                    human_input_request_id=str(summary_control.get("request_id") or ""),
+                )
+            elif no_slide_results:
+                summary_control = await control_gate.raise_control(
+                    no_presentable_results_request(
+                        cycle_id=cycle_id,
+                        stage_attempt_id=str((attempt or {}).get("id") or ""),
+                        workflow_spec_key=build_recorder.spec_key,
+                        cycle_revision=int(cycle.get("db_revision") or 0),
+                        plan_digest=str(getattr(build_plan, "digest", "") or ""),
+                        completed_phases=(phase_run.completed_count if phase_run is not None else 0),
+                        plan=build_plan,
+                    )
+                )
+                await build_recorder.settle(
+                    summary_handle,
+                    state=StepState.NEEDS_INPUT,
+                    summary=summary_refusal,
                     human_input_request_id=str(summary_control.get("request_id") or ""),
                 )
             else:
@@ -5907,6 +6176,8 @@ class LiveStageAdapter:
                     cycle=cycle,
                     package=build_package,
                     package_path=artifact_uri or "",
+                    surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
+                    transition_gate=transition_gate,
                 )
                 deck = RenderedDeck(uri=rendered[0], content_hash=rendered[1]) if rendered is not None else None
             else:

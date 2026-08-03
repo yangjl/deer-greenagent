@@ -20,7 +20,13 @@ from deerflow.agents.dbtl.live_stage.adapter import (
     _seat_identity,
     _terminal_seat_event,
 )
-from deerflow.dbtl.stage_runner import DispatchOutcome, WorkUnit
+from deerflow.dbtl.stage_runner import (
+    BUILD_PLAN_OUTPUT,
+    BUILD_SUMMARY_OUTPUT,
+    BUILD_WORK_MEETING_OUTPUT,
+    DispatchOutcome,
+    WorkUnit,
+)
 
 
 def _unit(**overrides) -> WorkUnit:
@@ -98,7 +104,7 @@ class TestSeatDescription:
 class TestTerminalSeatEvent:
     def test_a_build_planner_uses_the_plan_contract_in_the_live_lane(self):
         event = _terminal_seat_event(
-            _unit(role="planner", capability="software_engineering"),
+            _unit(role="planner", capability="software_engineering", output_contract=BUILD_PLAN_OUTPUT),
             DispatchOutcome(
                 unit_id="dbtl-build-plan",
                 text=json.dumps(
@@ -122,7 +128,7 @@ class TestTerminalSeatEvent:
 
     def test_an_unreadable_build_plan_reports_the_recorded_fallback_as_completed(self):
         event = _terminal_seat_event(
-            _unit(role="planner", capability="software_engineering"),
+            _unit(role="planner", capability="software_engineering", output_contract=BUILD_PLAN_OUTPUT),
             DispatchOutcome(unit_id="dbtl-build-plan", text="not a plan"),
             model="gpt-5.6-sol",
             meeting_stage=None,
@@ -132,6 +138,75 @@ class TestTerminalSeatEvent:
         assert event["degraded"] is True
         assert event["result"] == "not a plan"
         assert "one recorded fallback phase" in event["display_summary"]
+
+    def test_the_live_build_summary_contract_does_not_require_stage_worker_status(self):
+        live_payload = {
+            "headline": "The build produced a reproducible pilot population and independently validated its artifacts.",
+            "figures": [],
+            "phases": [{"title": "Specification", "text": "Defined the baseline."}],
+            "deviations": [],
+            "limitations": [],
+        }
+
+        event = _terminal_seat_event(
+            _unit(role="summarizer", capability="build_result_synthesis", output_contract=BUILD_SUMMARY_OUTPUT),
+            DispatchOutcome(unit_id="dbtl-build-summary", text=json.dumps(live_payload)),
+            model="gpt-5.6-sol",
+            meeting_stage=None,
+            stage="build",
+        )
+
+        assert event["type"] == "task_completed"
+        assert event["display_summary"] == live_payload["headline"]
+        assert json.loads(event["result"]) == live_payload
+
+    def test_a_build_summary_question_uses_its_own_contract(self):
+        event = _terminal_seat_event(
+            _unit(role="summarizer", capability="build_result_synthesis", output_contract=BUILD_SUMMARY_OUTPUT),
+            DispatchOutcome(
+                unit_id="dbtl-build-summary",
+                text=json.dumps({"status": "needs_input", "clarification_question": "Which result should lead?"}),
+            ),
+            model="gpt-5.6-sol",
+            meeting_stage=None,
+            stage="build",
+        )
+
+        assert event["type"] == "task_completed"
+        assert event["display_summary"] == "Which result should lead?"
+
+    def test_build_work_meeting_positions_may_use_their_advisory_prose_contract(self):
+        event = _terminal_seat_event(
+            _unit(role="position", capability="build_work_meeting_implementation", output_contract=BUILD_WORK_MEETING_OUTPUT),
+            DispatchOutcome(unit_id="dbtl-build-meeting-position", text="Use the vectorized implementation because it preserves the recorded model."),
+            model="gpt-5.6-sol",
+            meeting_stage="build",
+            stage="build",
+        )
+
+        assert event["type"] == "task_completed"
+        assert "vectorized implementation" in event["display_summary"]
+
+    def test_build_work_meeting_chairs_use_the_recommendation_contract(self):
+        payload = {
+            "outcome": "recommendation_ready",
+            "summary": "Two implementation choices remain.",
+            "options": [{"label": "vectorized", "consequence": "Runs quickly", "evidence": "Recorded benchmark"}],
+            "recommended": "vectorized",
+            "reasoning": "It preserves the model and finishes in time.",
+            "cannot_decide": [],
+        }
+        event = _terminal_seat_event(
+            _unit(role="chair", capability="build_work_meeting_chair", output_contract=BUILD_WORK_MEETING_OUTPUT),
+            DispatchOutcome(unit_id="dbtl-build-meeting-chair", text=json.dumps(payload)),
+            model="gpt-5.6-sol",
+            meeting_stage="build",
+            stage="build",
+        )
+
+        assert event["type"] == "task_completed"
+        assert event["display_summary"] == payload["summary"]
+        assert json.loads(event["result"])["outcome"] == "recommendation_ready"
 
     def test_contract_valid_output_completes_the_live_lane(self):
         event = _terminal_seat_event(
@@ -153,6 +228,50 @@ class TestTerminalSeatEvent:
         assert event["council_seat"]["role"] == "chair"
         assert event["display_summary"] == "Use two seasons."
         assert json.loads(event["result"])["summary"] == "Use two seasons."
+
+    def test_a_build_phase_with_an_unmet_done_condition_fails_the_live_lane(self):
+        event = _terminal_seat_event(
+            _unit(role="phase", completion_check="phase_done_condition"),
+            DispatchOutcome(
+                unit_id="dbtl-build-1",
+                text=(
+                    '{"status":"completed","summary":"Only setup files were written.",'
+                    '"artifact_refs":[],"claims":[],"evidence_refs":[],"limitations":[],'
+                    '"quality_checks":[{"name":"phase_done_condition","passed":false,'
+                    '"detail":"The simulator and dataset are missing."}],'
+                    '"recommended_next_actions":[],"provenance":{}}'
+                ),
+            ),
+            model="gpt-5.6-sol",
+            meeting_stage=None,
+            stage="build",
+        )
+
+        assert event["type"] == "task_failed"
+        assert event["error"] == "The simulator and dataset are missing."
+
+    def test_a_true_done_marker_cannot_hide_a_failed_implementation_check_live(self):
+        event = _terminal_seat_event(
+            _unit(role="phase", completion_check="phase_done_condition"),
+            DispatchOutcome(
+                unit_id="dbtl-build-1",
+                text=(
+                    '{"status":"completed","summary":"Only setup files were written.",'
+                    '"artifact_refs":[],"claims":[],"evidence_refs":[],"limitations":[],'
+                    '"quality_checks":['
+                    '{"name":"phase_done_condition","passed":true,"detail":"Done."},'
+                    '{"name":"Automated implementation tests","passed":false,'
+                    '"detail":"The simulator is missing."}],'
+                    '"recommended_next_actions":[],"provenance":{}}'
+                ),
+            ),
+            model="gpt-5.6-sol",
+            meeting_stage=None,
+            stage="build",
+        )
+
+        assert event["type"] == "task_failed"
+        assert "Automated implementation tests" in event["error"]
 
     def test_a_valid_result_wrapped_in_prose_is_normalized_for_the_live_view(self):
         event = _terminal_seat_event(

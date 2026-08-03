@@ -8,6 +8,7 @@ import {
 } from "react";
 
 import { computeNextSubtask, subtaskNotification } from "./subtask-update";
+import type { TerminalPublication } from "./subtask-update";
 import type { Subtask } from "./types";
 
 export interface SubtaskContextValue {
@@ -89,7 +90,10 @@ export function useUpdateSubtask() {
   });
 
   const updateSubtask = useCallback(
-    (task: Partial<Subtask> & { id: string }) => {
+    (
+      task: Partial<Subtask> & { id: string },
+      options: { terminalPublication?: TerminalPublication } = {},
+    ) => {
       // Read the *latest* state via the ref, never a `tasks` snapshot captured in
       // this callback's closure. Without this, an in-flight
       // fetchSubtaskSteps().then(updateSubtask) resolving late would write a stale
@@ -108,7 +112,11 @@ export function useUpdateSubtask() {
       // reference each render — an infinite loop. `subtaskNotification` routes a
       // terminal transition through the deferred (after-render) path and skips
       // no-op re-parses entirely.
-      const notify = subtaskNotification(task, { becameTerminal, changed });
+      const notify = subtaskNotification(
+        task,
+        { becameTerminal, changed },
+        options.terminalPublication,
+      );
       if (notify === "eager") {
         setTasks({ ...current });
       } else if (notify === "deferred") {

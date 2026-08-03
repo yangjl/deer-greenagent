@@ -194,4 +194,5 @@ async def test_selected_cycle_runs_workers_and_persists_review_evidence(
     # The deck is a presentation of the record and is never registered as part
     # of it, or a gate could end up bound to a summary of its own evidence.
     assert [item["uri"] for item in cycle["artifacts"]] == [cycle["artifacts"][0]["uri"]]
-    assert "cannot satisfy a review gate" in final["messages"][-2].content
+    assert "produced Design evidence but did not approve it" in final["messages"][-2].content
+    assert "Human gate slide" in final["messages"][-2].content

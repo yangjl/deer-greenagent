@@ -84,6 +84,11 @@ def _slide(*, kind: str, title: str, body: str, eyebrow: str = "") -> str:
     return f'<section class="slide slide--{kind}">{eyebrow_html}<h2>{html.escape(title)}</h2>{body}</section>'
 
 
+def render_design_deck_slide(*, kind: str, title: str, body: str, eyebrow: str = "") -> str:
+    """Render one slide with the canonical Design-deck structure."""
+    return _slide(kind=kind, title=title, body=body, eyebrow=eyebrow)
+
+
 def _list_body(items: Sequence[str], *, empty: str) -> str:
     if not items:
         return f'<p class="empty">{html.escape(empty)}</p>'
@@ -328,6 +333,19 @@ def _stage_review_controls(
     )
 
 
+def render_stage_review_controls(
+    stage: str,
+    transition_gate: Mapping[str, object] | None = None,
+) -> str:
+    """Return the inert, authenticated-parent-owned controls for a stage deck.
+
+    Result-specific deck renderers (currently Build) use this public boundary
+    instead of copying the review vocabulary or bridge selectors.  The controls
+    still ship disabled; rendering them grants no authority.
+    """
+    return _stage_review_controls(stage, transition_gate)
+
+
 def _bridge_script(surface_id: str) -> str:
     """The deck's half of the handshake, or nothing at all.
 
@@ -363,6 +381,11 @@ def _bridge_script_for_stage(surface_id: str, stage: str) -> str:
     for before, after in replacements.items():
         script = script.replace(before, after)
     return script
+
+
+def render_stage_feedback_bridge(surface_id: str, stage: str) -> str:
+    """Return the authenticated iframe bridge for a registered stage surface."""
+    return _bridge_script_for_stage(surface_id, stage)
 
 
 _BRIDGE_TEMPLATE = """
@@ -698,11 +721,20 @@ def render_council_deck(
         )
     )
 
-    return _DECK_TEMPLATE.format(
+    return render_design_deck_shell(
         title=html.escape(f"{cycle_title or 'Design meeting'} — {stage_title}"),
+        slides=slides,
+        bridge=_bridge_script_for_stage(surface_id, stage),
+    )
+
+
+def render_design_deck_shell(*, title: str, slides: Sequence[str], bridge: str = "") -> str:
+    """Place evidence slides in the canonical Design navigation and theme."""
+    return _DECK_TEMPLATE.format(
+        title=title,
         slides="".join(slides),
         count=len(slides),
-        bridge=_bridge_script_for_stage(surface_id, stage),
+        bridge=bridge,
     )
 
 

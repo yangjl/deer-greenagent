@@ -45,7 +45,10 @@ export function computeNextSubtask(
   } as Subtask;
 
   if (task.steps) {
-    next.steps = mergeSteps(isNewExecution ? [] : (previous?.steps ?? []), task.steps);
+    next.steps = mergeSteps(
+      isNewExecution ? [] : (previous?.steps ?? []),
+      task.steps,
+    );
   }
 
   // Usage events are cumulative snapshots. A delayed older frame must never
@@ -135,6 +138,7 @@ function usageEquals(a: Subtask["usage"], b: Subtask["usage"]): boolean {
 }
 
 export type SubtaskNotification = "eager" | "deferred" | "none";
+export type TerminalPublication = "deferred" | "eager";
 
 /**
  * Decide how `useUpdateSubtask` should publish a computed transition.
@@ -151,9 +155,20 @@ export type SubtaskNotification = "eager" | "deferred" | "none";
 export function subtaskNotification(
   task: Partial<Subtask> & { id: string },
   transition: { becameTerminal: boolean; changed: boolean },
+  terminalPublication: TerminalPublication = "deferred",
 ): SubtaskNotification {
+  // A live terminal frame may enrich a terminal state reconstructed from
+  // history (for example with the bounded display summary) without changing
+  // `status` a second time. It is still an async state change and must render.
+  if (
+    terminalPublication === "eager" &&
+    isTerminalSubtaskStatus(task.status) &&
+    transition.changed
+  ) {
+    return "eager";
+  }
   if (transition.becameTerminal) {
-    return "deferred";
+    return terminalPublication;
   }
   if (
     transition.changed &&

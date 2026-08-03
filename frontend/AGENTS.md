@@ -484,6 +484,16 @@ designNotes` and are handed to the council as the owner's decisions rather
   the first offers or requires the configured review meeting, and the second
   offers only routes allowed by the server-computed outcome. Status always has
   a text label and never depends on colour alone.
+  Build uses its registered result deck as its only review channel. The deck
+  reuses the Design deck's exact shell and its final slide carries
+  Submit/Approve/Revise/Reject controls; no parallel review card is mounted in
+  chat. It ships inert on disk and becomes interactive only after the artifact
+  parent verifies the surface, project, conversation, evidence hash, and
+  current stage revision. A Build deck registered as `stage_review` must
+  therefore contain that bridge; stripping it while leaving the surface
+  actionable strands the cycle with no review control. When Build has no
+  verified numeric outcome or figure, the backend creates no deck/surface and
+  chat receives one recovery Human Input Card instead. Test remains card-owned.
   A deck approval that opens another stage uses the same generic card renderer:
   the backend posts a `dbtl_stage_handoff` single-choice request with **Start
   &lt;next stage&gt;** and **Hold here**. The frontend does not infer or persist a
@@ -1014,7 +1024,10 @@ Both `dbtl_stage_handoff` and `dbtl_build_control` route back through the cycle.
 `StageWorkPanel` converges from the thread-scoped stage-worker lifecycle read
 after a run settles, even when a partial live task already exists. Async
 terminal hydration uses eager batch reconciliation rather than the
-render-deferred ToolMessage path. Governed cards render `displaySummary` (or a
+render-deferred ToolMessage path. Live custom `task_completed` and
+`task_failed` events likewise publish terminal state eagerly; only terminal
+ToolMessages parsed during `MessageList` render use the after-render path.
+Governed cards render `displaySummary` (or a
 safe legacy structured summary), never raw contract JSON. The Build rail
 projects an open collaboration as **Waiting for you**. Its parent Build stage
 row also follows a terminal workflow phase: failed and cancelled phase attempts

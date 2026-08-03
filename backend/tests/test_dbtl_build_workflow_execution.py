@@ -86,7 +86,10 @@ def _build_result(*, artifact: str, figure: str) -> str:
             "claims": ["The pipeline runs end to end on the declared inputs."],
             "evidence_refs": [{"kind": "workspace_file", "reference": artifact, "description": "Fitted model."}],
             "limitations": [],
-            "quality_checks": [{"name": "execution completed", "passed": True, "detail": ""}],
+            "quality_checks": [
+                {"name": "execution completed", "passed": True, "detail": ""},
+                {"name": "phase_done_condition", "passed": True, "detail": "Every expected output exists."},
+            ],
             "recommended_next_actions": ["Review the build."],
             "figures": [{"path": figure, "caption": "Held-out accuracy", "shows": "Predicted against observed yield."}],
             "key_outcomes": [{"name": "Held-out accuracy", "value": 0.62, "unit": "r"}],
@@ -108,13 +111,14 @@ class _WritingDispatcher:
     would be noticed.
     """
 
-    def __init__(self, *, summary: str | None = None, plan: str | None = None) -> None:
+    def __init__(self, *, summary: str | None = None, plan: str | None = None, presentable_results: bool = True) -> None:
         self.calls: list[tuple] = []
         self.summarizer_units: list = []
         self.planner_units: list = []
         self.phase_units: list = []
         self._summary = summary
         self._plan = plan
+        self._presentable_results = presentable_results
 
     async def __call__(self, units, *, budget):
         self.calls.append((tuple(units), budget))
@@ -135,11 +139,17 @@ class _WritingDispatcher:
             produced = grant / "model.bin"
             produced.write_text("fitted", encoding="utf-8")
             plot = grant / "accuracy.png"
-            plot.write_bytes(PNG)
+            if self._presentable_results:
+                plot.write_bytes(PNG)
+            payload = json.loads(_build_result(artifact=_virtual(produced), figure=_virtual(plot)))
+            if not self._presentable_results:
+                payload["artifact_refs"] = [_virtual(produced)]
+                payload["figures"] = []
+                payload["key_outcomes"] = []
             outcomes.append(
                 DispatchOutcome(
                     unit_id=unit.unit_id,
-                    text=_build_result(artifact=_virtual(produced), figure=_virtual(plot)),
+                    text=json.dumps(payload),
                 )
             )
         return outcomes
@@ -422,7 +432,7 @@ class TestTheWriterAndTheReadModelAgree:
         dispatcher = _ObservingDispatcher()
         await _run_build(repo, root, dispatcher=dispatcher)
 
-        assert events[0] == ("pin", "generic:build:v5")
+        assert events[0] == ("pin", "generic:build:v6")
         assert events[1][0] == "dispatch"
 
     async def test_a_successful_build_records_a_complete_chain(self, project) -> None:
@@ -605,6 +615,7 @@ class TestTheSummarizerWritesTheReviewedDocument:
         "summary" into a second execution nobody hashed.
         """
         from deerflow.agents.dbtl.live_stage.adapter import _READ_ONLY_ROLES, _READ_ONLY_TOOL_NAMES, _tools_for_unit
+        from deerflow.dbtl.stage_runner import BUILD_SUMMARY_OUTPUT
 
         repo, root = project
         await _ready_for_build(repo)
@@ -612,6 +623,7 @@ class TestTheSummarizerWritesTheReviewedDocument:
         (unit,) = dispatcher.summarizer_units
 
         assert unit.role in _READ_ONLY_ROLES
+        assert unit.output_contract == BUILD_SUMMARY_OUTPUT
         tools = [SimpleNamespace(name=name) for name in ("read_file", "bash", "write_file", "str_replace", "grep")]
         assert {tool.name for tool in _tools_for_unit(tools, unit)} == {"read_file", "grep"} <= _READ_ONLY_TOOL_NAMES
 
@@ -641,9 +653,33 @@ class TestTheSummarizerWritesTheReviewedDocument:
         deck = (root / result.deck_uri[len("/mnt/user-data/") :]).read_text(encoding="utf-8")
         assert "data:image/png;base64," in deck
         assert "Key outcomes" in deck
+        assert "Human gate" in deck
+        assert 'data-deck-action="submit_for_review" disabled' in deck
+        assert "send('ready')" in deck
+        assert 'class="track"' in deck
+        assert 'data-step="-1"' in deck
         # The Build deck, not the meeting deck: a Build result nobody argued
         # about has no positions to render.
         assert "participants" not in deck.lower()
+
+    async def test_no_result_evidence_surfaces_one_card_and_no_deck(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        result, _dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(presentable_results=False))
+
+        assert not result.produced_usable_evidence
+        assert result.artifact_uri is None
+        assert result.deck_uri is None
+        assert result.feedback_surface_id is None
+        assert result.control_request is not None
+        assert "without verified outcomes or figures" in result.control_request["question"]
+        assert {option["value"] for option in result.control_request["options"]} == {
+            "replan_build",
+            "restart_build",
+            "hold_here",
+        }
+        assert await repo.latest_stage_feedback_surface(cycle_id="cycle-1", project_id="project-1", stage="build") is None
 
 
 class TestABuildStopsBeingOneOpaqueWorker:
@@ -1226,6 +1262,73 @@ class _SecondPhaseReadsTheFirst(_WritingDispatcher):
         return outcomes
 
 
+class _SecondPhaseReadsTheFirstDirectory(_SecondPhaseReadsTheFirst):
+    """Declare the prior phase's directory, as real workers commonly do."""
+
+    async def __call__(self, units, *, budget):
+        outcomes = []
+        for unit in units:
+            if unit.role != "phase" or "This is the first phase" in unit.prompt:
+                outcomes.extend(await _WritingDispatcher.__call__(self, (unit,), budget=budget))
+                continue
+            self.phase_units.append(unit)
+            preceding = json.loads(unit.prompt.split("they are inputs, hash-bound like any other.\n", 1)[1].split("\n", 1)[0])
+            upstream_file = preceding[0]["outputs"][0]
+            upstream_directory = upstream_file.rsplit("/", 1)[0]
+            self.declared.append(upstream_directory)
+            grant = _grant_from_prompt(unit.prompt)
+            grant.mkdir(parents=True, exist_ok=True)
+            produced = grant / "model.bin"
+            produced.write_text("fitted", encoding="utf-8")
+            plot = grant / "accuracy.png"
+            plot.write_bytes(PNG)
+            payload = json.loads(_build_result(artifact=_virtual(produced), figure=_virtual(plot)))
+            payload["provenance"]["inputs_examined"] = [upstream_directory]
+            outcomes.append(DispatchOutcome(unit_id=unit.unit_id, text=json.dumps(payload)))
+        return outcomes
+
+
+class _IncompletePhaseDispatcher(_WritingDispatcher):
+    """A worker that claims completed while admitting its done condition failed."""
+
+    async def __call__(self, units, *, budget):
+        outcomes = await super().__call__(units, budget=budget)
+        revised = []
+        for unit, outcome in zip(units, outcomes, strict=True):
+            if unit.role != "phase" or not outcome.text:
+                revised.append(outcome)
+                continue
+            payload = json.loads(outcome.text)
+            marker = next(item for item in payload["quality_checks"] if item["name"] == "phase_done_condition")
+            marker.update(passed=False, detail="The simulator and generated dataset are still missing.")
+            revised.append(DispatchOutcome(unit_id=outcome.unit_id, text=json.dumps(payload)))
+        return revised
+
+
+class _ContradictoryPhaseDispatcher(_IncompletePhaseDispatcher):
+    """Claims done while its own implementation test says the opposite."""
+
+    async def __call__(self, units, *, budget):
+        outcomes = await super().__call__(units, budget=budget)
+        revised = []
+        for unit, outcome in zip(units, outcomes, strict=True):
+            if unit.role != "phase" or not outcome.text:
+                revised.append(outcome)
+                continue
+            payload = json.loads(outcome.text)
+            marker = next(item for item in payload["quality_checks"] if item["name"] == "phase_done_condition")
+            marker.update(passed=True, detail="Done.")
+            payload["quality_checks"].append(
+                {
+                    "name": "Automated implementation tests",
+                    "passed": False,
+                    "detail": "The simulator and generated dataset are still missing.",
+                }
+            )
+            revised.append(DispatchOutcome(unit_id=outcome.unit_id, text=json.dumps(payload)))
+        return revised
+
+
 class TestAPhaseMayBuildOnThePhaseBeforeIt:
     """The pre-run snapshot cannot contain what the run itself published.
 
@@ -1260,6 +1363,100 @@ class TestAPhaseMayBuildOnThePhaseBeforeIt:
         bound = view["build_lineage"]["input_artifacts"]
         upstream_relative = dispatcher.declared[0][len("/mnt/user-data/") :]
         assert any(entry.startswith(f"workspace_file:{upstream_relative}:sha256:") for entry in bound), bound
+
+    async def test_a_prior_phase_directory_expands_to_its_published_files(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        result, dispatcher = await _run_build(repo, root, dispatcher=_SecondPhaseReadsTheFirstDirectory(plan=TWO_PHASE_PLAN))
+
+        view = await repo.build_test_view("cycle-1", project_id="project-1")
+        assert result.produced_usable_evidence, result.note
+        prefix = dispatcher.declared[0][len("/mnt/user-data/") :] + "/"
+        bound = [entry for entry in view["build_lineage"]["input_artifacts"] if entry.startswith(f"workspace_file:{prefix}")]
+        assert len(bound) == 2, bound
+
+    async def test_a_directory_can_mix_pre_run_and_prior_phase_files(self, project) -> None:
+        _repo, root = project
+        directory = root / "mixed-inputs"
+        directory.mkdir()
+        source = directory / "source.csv"
+        source.write_text("source", encoding="utf-8")
+        source_stat = source.stat()
+        generated = directory / "generated.csv"
+        generated.write_text("generated", encoding="utf-8")
+        generated_hash = hashlib.sha256(generated.read_bytes()).hexdigest()
+
+        artifacts = adapter_module._directory_input_artifacts(
+            relative="mixed-inputs",
+            path=directory,
+            project_root=str(root),
+            pre_run_files={"mixed-inputs/source.csv": (source_stat.st_size, source_stat.st_mtime_ns)},
+            published_hashes={"mixed-inputs/generated.csv": generated_hash},
+            required=True,
+        )
+
+        assert {entry.split(":sha256:")[0] for entry in artifacts} == {
+            "workspace_file:mixed-inputs/source.csv",
+            "workspace_file:mixed-inputs/generated.csv",
+        }
+
+    async def test_a_directory_hash_read_error_becomes_a_recorded_refusal(self, project, monkeypatch) -> None:
+        _repo, root = project
+        directory = root / "source-inputs"
+        directory.mkdir()
+        source = directory / "source.csv"
+        source.write_text("source", encoding="utf-8")
+        source_stat = source.stat()
+
+        def unreadable(_path):
+            raise OSError("unreadable")
+
+        monkeypatch.setattr(adapter_module, "_sha256_file", unreadable)
+
+        with pytest.raises(ValueError, match="no longer readable"):
+            adapter_module._directory_input_artifacts(
+                relative="source-inputs",
+                path=directory,
+                project_root=str(root),
+                pre_run_files={"source-inputs/source.csv": (source_stat.st_size, source_stat.st_mtime_ns)},
+                published_hashes={},
+                required=True,
+            )
+
+
+class TestAPartialPhaseCannotAdvanceThePlan:
+    async def test_a_failed_done_condition_stops_before_the_next_phase(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+        dispatcher = _IncompletePhaseDispatcher(plan=TWO_PHASE_PLAN)
+
+        result, _ = await _run_build(repo, root, dispatcher=dispatcher)
+
+        assert not result.produced_usable_evidence
+        assert len(dispatcher.phase_units) == 1
+        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        assert [entry["phase_key"] for entry in view["phases"]] == ["simulate"]
+        assert view["phases"][0]["status"] == StepState.FAILED.value
+        assert view["phases"][0]["error_code"] == BuildErrorCode.EXECUTION_CONTRACT_REJECTED.value
+        assert "simulator and generated dataset" in result.note
+        assert view["next_step"] == BuildStepKey.EXECUTE_PHASES.value
+
+    async def test_a_true_done_marker_cannot_override_a_failed_implementation_check(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+        dispatcher = _ContradictoryPhaseDispatcher(plan=TWO_PHASE_PLAN)
+
+        result, _ = await _run_build(repo, root, dispatcher=dispatcher)
+
+        assert not result.produced_usable_evidence
+        assert len(dispatcher.phase_units) == 1
+        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        assert view["phases"][0]["status"] == StepState.FAILED.value
+        assert "Automated implementation tests" in result.note
+        assert view["next_step"] == BuildStepKey.EXECUTE_PHASES.value
 
 
 class TestAPhaseDoesNotPayForTheDesignOnEveryTurn:

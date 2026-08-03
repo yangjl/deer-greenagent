@@ -37,6 +37,11 @@ from deerflow.dbtl.worker_result import (
 
 logger = logging.getLogger(__name__)
 
+STAGE_WORKER_OUTPUT = "stage_worker"
+BUILD_PLAN_OUTPUT = "build_plan"
+BUILD_SUMMARY_OUTPUT = "build_summary"
+BUILD_WORK_MEETING_OUTPUT = "build_work_meeting"
+
 
 @dataclass(frozen=True, slots=True)
 class WorkUnit:
@@ -67,6 +72,15 @@ class WorkUnit:
     #: ``reasoning`` is ``"extended"`` to enable extended thinking.
     max_tokens: int | None = None
     reasoning: str = ""
+    #: A server-owned completion assertion this unit must return as a passing
+    #: quality check before its terminal event or durable step can be called
+    #: complete. Empty for contracts that predate phase-level completion.
+    completion_check: str = ""
+    #: Which parser owns this unit's final answer. Build has several typed
+    #: helper seats that intentionally do not return ``StageWorkerResult``.
+    #: The live event layer must not grade those answers against the generic
+    #: schema before their owning parser sees them.
+    output_contract: str = STAGE_WORKER_OUTPUT
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +149,7 @@ class StageExecutionPlan:
                     "capability": unit.capability,
                     "agent_name": unit.agent_name,
                     "via_generalist": unit.via_generalist,
+                    "output_contract": unit.output_contract,
                 }
                 for unit in self.units
             ],
@@ -208,7 +223,7 @@ Answer with a single JSON object and nothing else:
 {
   "status": "completed" | "needs_input" | "blocked" | "failed",
   "summary": "what you did and what you found",
-  "artifact_refs": ["workspace/output paths you created"],
+  "artifact_refs": ["workspace/output paths you created", {"name": "stable_alias", "path": "workspace/output path"}],
   "claims": ["each specific finding, one per entry"],
   "evidence_refs": [{"kind": "workspace_file" | "dataset" | "artifact" | "external",
                      "reference": "path or id", "description": "what it shows"}],
@@ -223,8 +238,8 @@ Every claim must be traceable to an entry in evidence_refs. If you could not
 verify something, say so in limitations rather than asserting it. Report
 status "blocked" when the data or the design prevents the work, not when you
 merely found a negative answer. Use the exact field shapes above: artifact_refs
-contains path strings, evidence_refs uses kind/reference, and quality_checks
-uses a boolean passed field.
+contains path strings or named-path objects, evidence_refs uses kind/reference,
+and quality_checks uses a boolean passed field.
 """.strip()
 
 
@@ -333,6 +348,10 @@ def collect_results(plan: StageExecutionPlan, outcomes: Sequence[DispatchOutcome
     three different ways to end up with nothing usable, all of which the
     reviewer needs to be able to tell apart from success.
     """
+    typed_units = [unit.unit_id for unit in plan.units if unit.output_contract != STAGE_WORKER_OUTPUT]
+    if typed_units:
+        raise ValueError(f"collect_results only accepts {STAGE_WORKER_OUTPUT!r} units; typed output must be handled by its owning parser: {', '.join(typed_units)}")
+
     by_unit = {item.unit_id: item for item in outcomes}
     results: list[StageWorkerResult] = []
     rejected: list[str] = []

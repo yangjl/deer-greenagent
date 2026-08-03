@@ -24,17 +24,17 @@ import hashlib
 import json
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, replace
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from deerflow.agents.dbtl.live_stage.workspace import WORKSPACE_VIRTUAL_ROOT, workspace_relative_path
 from deerflow.dbtl.build_deck import render_build_deck
-from deerflow.dbtl.build_execution import BuildExecutionBundle, parse_execution_bundle
+from deerflow.dbtl.build_execution import MAX_FIGURES, BuildExecutionBundle, BuildFigure, parse_execution_bundle
 from deerflow.dbtl.build_input import BuildInputBundle
 from deerflow.dbtl.build_summary import BuildReviewPackage, parse_build_summary, render_summary_markdown
 from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
-from deerflow.dbtl.stage_runner import WorkUnit
+from deerflow.dbtl.stage_runner import BUILD_SUMMARY_OUTPUT, WorkUnit
 from deerflow.dbtl.worker_result import StageWorkerResult
 from deerflow.projects.storage import ensure_project_dirs, project_outputs_dir
 
@@ -108,7 +108,30 @@ def execution_bundle(
         if uri:
             published_map.setdefault(uri, uri)
     hashes = {str(item.get("uri") or ""): str(item.get("content_hash") or "") for item in published if item.get("uri")}
-    return parse_execution_bundle([result.as_dict() for result in results], published=published_map, hashes=hashes)
+    bundle = parse_execution_bundle([result.as_dict() for result in results], published=published_map, hashes=hashes)
+
+    # A published image is already governed evidence even when a worker forgot
+    # the optional ``figures`` declaration. Recover that presentational hint
+    # deterministically from the server-owned publication record; never infer
+    # a scientific reading or a numeric outcome from the filename.
+    figures = list(bundle.figures)
+    known = {figure.path for figure in figures}
+    for item in published:
+        uri = str(item.get("uri") or "").strip()
+        if not uri or uri in known or not uri.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")):
+            continue
+        stem = PurePosixPath(uri).stem.replace("_", " ").replace("-", " ").strip()
+        figures.append(
+            BuildFigure(
+                path=uri,
+                caption=stem or PurePosixPath(uri).name,
+                content_hash=hashes.get(uri, ""),
+            )
+        )
+        known.add(uri)
+        if len(figures) >= MAX_FIGURES:
+            break
+    return replace(bundle, figures=tuple(figures))
 
 
 def summarizer_unit(
@@ -144,6 +167,7 @@ def summarizer_unit(
         prompt=prompt,
         role=SUMMARIZER_ROLE,
         model=model,
+        output_contract=BUILD_SUMMARY_OUTPUT,
     )
 
 
@@ -209,6 +233,8 @@ def write_build_deck(
     cycle: Mapping[str, Any],
     package: BuildReviewPackage,
     package_path: str,
+    surface_id: str = "",
+    transition_gate: Mapping[str, object] | None = None,
 ) -> tuple[str, str] | None:
     """Render and write the Build deck; return ``(uri, content_hash)``.
 
@@ -233,6 +259,8 @@ def write_build_deck(
             subtitle=f"Revision {cycle.get('db_revision')}",
             package_path=package_path,
             read_figure=_read,
+            surface_id=surface_id,
+            transition_gate=transition_gate,
         ).encode("utf-8")
     except Exception:  # noqa: BLE001 - a presentation must not break the record
         logger.warning("Could not render the Build review deck.", exc_info=True)

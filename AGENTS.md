@@ -189,7 +189,11 @@ Breeding-workspace note:
   leaving Learn unavailable for Phase 8. Build can start only at
   `ready_for_build`; every reviewable Build records the approved dataset
   fingerprint, code/config revisions, environment, versioned outputs,
-  deviations, and logs. Test stores headline metrics separately from a
+  deviations, and logs. A reviewable Build uses the canonical Design deck
+  shell and keeps its Submit/Approve/Revise/Reject Human gate on the final
+  slide; it does not duplicate that gate in chat. If no verified numeric
+  outcome or published figure exists, the server emits one recovery Human
+  Input Card and creates no deck or feedback surface. Test stores headline metrics separately from a
   versioned validity pack. Its outcome is computed as `supported`,
   `not_supported`, `inconclusive`, or `invalidated`; a generic stage approval
   cannot bypass that computation. Leakage, broken folds, structure artifacts,

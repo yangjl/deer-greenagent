@@ -15,7 +15,11 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 
+import pytest
+
+from deerflow.agents.dbtl.live_stage.build_review import execution_bundle
 from deerflow.dbtl.build_deck import MAX_FIGURE_BYTES, embed_figures, render_build_deck
 from deerflow.dbtl.build_execution import BuildExecutionBundle, BuildFigure, KeyOutcome, parse_execution_bundle
 from deerflow.dbtl.build_summary import MAX_SUMMARY_FIGURES, BuildReviewPackage, SelectedFigure, parse_build_summary, render_summary_markdown
@@ -42,6 +46,18 @@ def _bundle(**overrides) -> BuildExecutionBundle:
 
 
 class TestDeclarationsAreVerifiedNotTrusted:
+    def test_a_published_image_is_recovered_when_the_worker_omits_figure_metadata(self) -> None:
+        bundle = execution_bundle(
+            (),
+            published=(
+                {"uri": ROC, "content_hash": "a" * 64},
+                {"uri": "/mnt/user-data/outputs/dbtl/c1/build/model.bin", "content_hash": "b" * 64},
+            ),
+        )
+
+        assert [figure.path for figure in bundle.figures] == [ROC]
+        assert bundle.figures[0].content_hash == "a" * 64
+
     def test_a_figure_the_server_never_published_does_not_exist(self) -> None:
         bundle = parse_execution_bundle(
             [{"figures": [{"path": "figs/roc.png", "caption": "ROC"}, {"path": "figs/imaginary.png", "caption": "Nope"}]}],
@@ -107,6 +123,16 @@ class TestTheSummarizerCannotCiteWhatDoesNotExist:
 
         assert parsed.ok
         assert parsed.package.selected_figures == ()
+
+    def test_verified_figures_are_selected_when_the_summarizer_omits_them(self) -> None:
+        parsed = parse_build_summary(json.dumps({"headline": "Fitted."}), bundle=_bundle())
+
+        assert [item.figure.path for item in parsed.package.selected_figures] == [ROC, RESID]
+
+    def test_slide_results_require_a_measurement_or_verified_figure(self) -> None:
+        assert not BuildReviewPackage(headline="Only prose.").has_slide_results
+        assert BuildReviewPackage(headline="Measured.", key_outcomes=(KeyOutcome(name="r", value="0.62"),)).has_slide_results
+        assert BuildReviewPackage(headline="Plotted.", all_figures=(BuildFigure(path=ROC),)).has_slide_results
 
     def test_selection_is_capped(self) -> None:
         figures = tuple(BuildFigure(path=f"/pub/f{index}.png") for index in range(MAX_SUMMARY_FIGURES + 4))
@@ -288,6 +314,8 @@ class TestTheDeckEmbedsWhatItCanAndNamesWhatItCannot:
 
 class TestTheDeckHasNoSentenceOfItsOwn:
     def _render(self, package: BuildReviewPackage) -> str:
+        if not package.has_slide_results:
+            package = replace(package, key_outcomes=(KeyOutcome(name="Recorded result", value="1"),))
         return render_build_deck(package, title="Cycle 01 — Build", package_path="/mnt/user-data/outputs/build.md", read_figure=lambda _p: (_png(64), "image/png"))
 
     def test_slide_order_puts_caveats_before_the_rerun_notes(self) -> None:
@@ -308,10 +336,19 @@ class TestTheDeckHasNoSentenceOfItsOwn:
         assert "http://" not in html and "https://" not in html
         assert "<script" in html and 'src="http' not in html
 
-    def test_a_build_with_no_figures_renders_a_statement_not_an_empty_gallery(self) -> None:
-        html = self._render(BuildReviewPackage(headline="Fitted."))
+    def test_a_build_with_no_figures_renders_its_numeric_result_without_a_gallery(self) -> None:
+        html = self._render(BuildReviewPackage(headline="Fitted.", key_outcomes=(KeyOutcome(name="Accuracy", value="0.62"),)))
 
-        assert "This build produced no figures to show." in html
+        assert "Accuracy" in html
+        assert "<img" not in html
+
+    def test_a_prose_only_package_cannot_become_a_result_deck(self) -> None:
+        with pytest.raises(ValueError, match="verified numeric outcome or figure"):
+            render_build_deck(
+                BuildReviewPackage(headline="Only prose."),
+                title="Cycle 01 — Build",
+                read_figure=lambda _p: None,
+            )
 
     def test_package_content_is_escaped(self) -> None:
         html = self._render(BuildReviewPackage(headline="<script>alert(1)</script>"))
@@ -330,3 +367,40 @@ class TestTheDeckHasNoSentenceOfItsOwn:
 
         assert "Other figures produced" in html
         assert RESID in html
+
+    def test_a_registered_build_surface_contains_an_inert_human_gate_and_bridge(self) -> None:
+        html = render_build_deck(
+            BuildReviewPackage(headline="Fitted.", key_outcomes=(KeyOutcome(name="Accuracy", value="0.62"),)),
+            title="Cycle 01 — Build",
+            package_path="/mnt/user-data/outputs/build.md",
+            read_figure=lambda _p: None,
+            surface_id="dfs-build-1",
+            transition_gate={
+                "stage": "build",
+                "assessment": {
+                    "difficulty": "standard",
+                    "rationale": "The recorded checks are routine.",
+                    "source": "deterministic",
+                },
+                "routes": [],
+            },
+        )
+
+        assert "Human gate" in html
+        assert "Move this Build evidence through its human gate" in html
+        assert 'data-deck-action="submit_for_review" disabled' in html
+        assert 'data-deck-action="approve" disabled' in html
+        assert 'var SURFACE_ID = "dfs-build-1"' in html
+        assert "send('ready')" in html
+        assert "The recorded checks are routine." in html
+        # Build uses the Design deck shell rather than maintaining a second
+        # presentation system for the same governed review interaction.
+        assert 'class="track"' in html
+        assert 'data-step="-1"' in html
+        assert "data-deck-position" not in html
+
+    def test_an_unregistered_build_deck_does_not_claim_to_have_a_gate(self) -> None:
+        html = self._render(BuildReviewPackage(headline="Fitted."))
+
+        assert "Human gate" not in html
+        assert "send('ready')" not in html

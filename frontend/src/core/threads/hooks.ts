@@ -1778,10 +1778,24 @@ export function useThreadStream({
         // Stamp the run this task was observed in. Without it a card can only
         // guess, and the thread's latest run is the wrong guess for every task
         // from an earlier turn.
-        updateSubtask({
-          ...taskUpdate,
-          ...(activeRunIdRef.current ? { runId: activeRunIdRef.current } : {}),
-        });
+        updateSubtask(
+          {
+            ...taskUpdate,
+            ...(activeRunIdRef.current
+              ? { runId: activeRunIdRef.current }
+              : {}),
+          },
+          {
+            // Custom events arrive from the async stream, not while MessageList
+            // is rendering a historical ToolMessage. Publish their terminal
+            // state now; deferring it lets an intervening render overwrite the
+            // ref and leave a completed worker spinning indefinitely.
+            terminalPublication:
+              eventType === "task_completed" || eventType === "task_failed"
+                ? "eager"
+                : undefined,
+          },
+        );
       }
 
       if (eventType === "task_running") {

@@ -36,7 +36,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from deerflow.dbtl.stage_runner import WorkUnit
+from deerflow.dbtl.stage_runner import BUILD_WORK_MEETING_OUTPUT, WorkUnit
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +281,7 @@ def meeting_units(
             role=role,
             focus=instruction.split(".")[0].lower(),
             round=1,
+            output_contract=BUILD_WORK_MEETING_OUTPUT,
         )
         for role, slug, instruction in MEETING_ROLES
     )

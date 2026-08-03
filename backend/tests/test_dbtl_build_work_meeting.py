@@ -12,6 +12,7 @@ from deerflow.agents.dbtl.live_stage.build_meeting import (
     meeting_units,
     parse_recommendation,
 )
+from deerflow.dbtl.stage_runner import BUILD_WORK_MEETING_OUTPUT
 
 CONTEXT = MeetingContext(
     question="Should the holdout be by family or by year?",
@@ -49,6 +50,7 @@ class TestTheMeetingIsThreeSeatsNotOneReviewer:
         units = meeting_units(attempt_id="a1", agent_name="general-purpose", model="m", via_generalist=True, context=CONTEXT)
 
         assert [unit.role for unit in units] == ["position", "red_team", "chair"]
+        assert {unit.output_contract for unit in units} == {BUILD_WORK_MEETING_OUTPUT}
 
     def test_every_seat_reads_the_same_question(self) -> None:
         units = meeting_units(attempt_id="a1", agent_name="general-purpose", model="m", via_generalist=True, context=CONTEXT)

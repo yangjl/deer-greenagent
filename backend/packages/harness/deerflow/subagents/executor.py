@@ -456,6 +456,8 @@ class SubagentExecutor:
         project_id: str | None = None,
         project_root: str | None = None,
         token_budget_max_tokens: int | None = None,
+        token_budget_enabled: bool | None = None,
+        loop_detection_enabled: bool | None = None,
         dbtl_writable_paths: Sequence[str] | None = None,
         extra_middlewares: Sequence[Any] | None = None,
         thinking_enabled: bool = False,
@@ -518,6 +520,12 @@ class SubagentExecutor:
         self.project_id = project_id
         self.project_root = project_root
         self.token_budget_max_tokens = token_budget_max_tokens
+        # `None` inherits the application's normal safety policy. Governed
+        # callers may explicitly disable these two resource kill switches for
+        # one executor without weakening authorization, sandbox, or output
+        # policy middleware.
+        self.token_budget_enabled = token_budget_enabled
+        self.loop_detection_enabled = loop_detection_enabled
         # Empty for every ordinary subagent. Only the DBTL stage adapter passes
         # an attempt-scoped path, which the shared output policy treats as the
         # worker's sole writable DBTL staging area.
@@ -588,6 +596,10 @@ class SubagentExecutor:
         }
         if self.token_budget_max_tokens is not None:
             middleware_kwargs["token_budget_max_tokens"] = self.token_budget_max_tokens
+        if self.token_budget_enabled is not None:
+            middleware_kwargs["token_budget_enabled"] = self.token_budget_enabled
+        if self.loop_detection_enabled is not None:
+            middleware_kwargs["loop_detection_enabled"] = self.loop_detection_enabled
         if self.dbtl_writable_paths:
             middleware_kwargs["dbtl_writable_paths"] = self.dbtl_writable_paths
         authz_provider = getattr(self, "_authz_provider", None)

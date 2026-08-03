@@ -627,7 +627,14 @@ class TestSetupClarificationIsACard:
 
         answer = final["messages"][-1]
         assert isinstance(answer, AIMessage), "the questions must not be re-raised as a card"
-        assert "review the Design stage" in answer.content
+        # It acknowledges and points forward. This used to pin the words "review
+        # the Design stage", which named an action the repository refuses while
+        # the stage holds no artifact -- and a chat-created cycle has none.
+        assert "Recorded your design inputs" in answer.content
+        assert "submit" not in answer.content.lower()
+        # Authored by the graph with no model call, so it needs the receipt
+        # marker or it never reaches the thread's durable feed.
+        assert answer.additional_kwargs.get("deerflow_graph_receipt") is True
         assert marker == []
 
     @pytest.mark.asyncio
@@ -1552,7 +1559,7 @@ class TestCouncilPreflight:
         assert len(executed) == 1
         assert executed[0]["cycle_id"] == "cyc-1"
         assert executed[0]["request_text"] == kickoff
-        assert final["messages"][-1].content == "This request is scoped to cyc-1.\n\nran\n\nThis run cannot satisfy a review gate. Design and Data reconciliation advance only through the project's human review records."
+        assert final["messages"][-1].content == ("This request is scoped to cyc-1.\n\nran\n\nThis run cannot satisfy a review gate by itself. Use the project's server-owned human review record to submit and decide the stage.")
 
     @staticmethod
     def _human_input_adapter(executed):
@@ -2110,6 +2117,52 @@ class TestLiveStageBranch:
         assert presented.tool_calls[0]["name"] == "present_files"
         assert presented.tool_calls[0]["args"]["filepaths"] == ["/mnt/user-data/outputs/dbtl/design.json"]
         assert final["artifacts"][-1] == "/mnt/user-data/outputs/dbtl/design.json"
+
+    @pytest.mark.asyncio
+    async def test_build_package_names_the_presented_human_gate_and_test_handoff(self):
+        class Adapter:
+            async def execute(self, **kwargs):
+                return SimpleNamespace(
+                    stage="build",
+                    note="The Build package is ready for human review.",
+                    artifact_uri="/mnt/user-data/outputs/dbtl/build-review.md",
+                    deck_uri="/mnt/user-data/outputs/dbtl/build-slides.html",
+                    clarification_question=None,
+                    satisfies_gate=False,
+                )
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id="cyc-1",
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [HumanMessage(content="continue the build", id="human-1")],
+            },
+            config={
+                "configurable": {"thread_id": "build-artifact"},
+                "context": {"run_id": "run-build-artifact"},
+            },
+        )
+
+        presented = final["messages"][-2]
+        assert isinstance(presented, AIMessage)
+        assert "second presented file—the Build HTML review deck" in presented.content
+        assert "Human gate slide" in presented.content
+        assert "Submit the package for review" in presented.content
+        assert "Start Test / Hold here" in presented.content
+        assert presented.tool_calls[0]["args"]["filepaths"] == [
+            "/mnt/user-data/outputs/dbtl/build-review.md",
+            "/mnt/user-data/outputs/dbtl/build-slides.html",
+        ]
 
     @pytest.mark.asyncio
     async def test_the_slide_deck_is_shown_before_the_question_it_needs_answered(self):

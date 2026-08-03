@@ -2175,6 +2175,40 @@ the questions card rather than the approval because `_card_answer` reads only
 the newest message; falling through would ask someone to approve what they just
 approved.
 
+**A deterministic supervisor reply is a receipt or it is nothing.** These
+replies are authored by the graph with no model call behind them, so no LLM
+callback exists to persist them: without the server-owned
+`deerflow_graph_receipt` marker they live in the checkpoint alone — streamed
+once, gone on refresh, absent from the thread's durable feed. Three nodes built
+them as bare `AIMessage(content=...)`: `cycle_setup`'s acknowledgement and both
+`cycle_continuation` stage-note replies. So someone answered the Design setup
+questions and the conversation went silent — the sentence telling them where to
+review the Design was written, held in graph state, and never saved, which from
+the chat side is indistinguishable from a stalled cycle. All three now use
+`receipt_message`, which also mints the id reconciliation identifies a message
+by. `tests/test_dbtl_supervisor_receipts.py` reads `supervisor.py` and refuses
+any `AIMessage` built without either `additional_kwargs` or `tool_calls`,
+mirroring `RunJournal._should_reconcile`: the marker *or* an allowlisted
+`ask_clarification`/`present_files` tool call is what makes a graph-authored
+turn durable, so the `present_files` pair is legitimately not an offender.
+
+**And the acknowledgement has to name an action that exists.** A cycle created
+through this chat setup branch does **not** convene the Design meeting:
+automatic kickoff is written by the project-rail creation endpoints alone
+(`dbtl_design_kickoff` in `app/gateway/routers/dbtl_cycles.py`), so a
+chat-started cycle reaches `design` with no worker runs and **no artifact**. The
+acknowledgement told its owner to "review the Design stage and submit it for
+approval", which is exactly what `submit_stage_for_review` refuses in that
+state — *"Stage 'design' has no artifact to review; attach evidence first."* So
+the one sentence standing between the owner and an apparently dead cycle named
+the single action guaranteed to fail and never mentioned the step that produces
+a package. It now says the meeting has not run and that the composer's
+per-request cycle scope is how to run it. Restoring a message's delivery is not
+enough when what it says cannot be done, which is why the two fixes ship
+together. Tests: `tests/test_dbtl_supervisor_receipts.py`, plus the wording
+assertions in `tests/test_dbtl_supervisor_graph.py` — the old ones pinned the
+refused instruction.
+
 **The questions are written by a model, not by the rule table.** The card used
 to list the classifier's unmatched regex fields ("target trait", "season
 range") as bullets — rule names rather than questions, identical in every
@@ -2574,7 +2608,7 @@ the same request.
 
 **Build records how to re-run its work; Test and the human decide whether it
 is reproducible.** V4 introduced the current scientific contract and remains
-resolvable; `generic:build:v5` is the current execution contract. V1–V3
+resolvable; `generic:build:v6` is the current execution contract. V1–V3
 carried a `reproducible_execution` validity gate, which asked Build to *prove*
 a repeat run — so a worker that wrote a complete, correct implementation but
 could not run it twice marked its own result `failed`, and the whole attempt
@@ -2600,6 +2634,21 @@ instead of generic stage history, and the server creates `src/`, `tests/`,
 workers to file tools for authoring and reserves Bash for short execution and
 verification commands. A retry still resolves the spec recorded on the stage
 attempt, so a V4 attempt never changes budget or output schema halfway through.
+V6 removes V5's Build-stage token kill switch, repetitive-tool frequency hard
+stop, and six-call finalization
+deadline after a live run finalized a partial configuration as a successful
+phase. Provider usage remains metered, a deliberately high emergency recursion
+ceiling and 15-minute timeout remain safeguards, and each phase must return a
+passing `phase_done_condition` quality check before its terminal event or
+durable workflow row can say complete. That marker cannot contradict another
+failed implementation check; only repeat-run/reproducibility checks are
+non-gating here because Test owns that verdict. A failed or missing assertion stops at
+that phase, so recovery replays earlier committed phases and retries the first
+unfinished phase rather than validating missing outputs downstream. Declared
+prior-phase directories are expanded over the union of unchanged pre-run files
+and server-published file hashes;
+they are no longer rejected merely because the pre-run snapshot could not have
+contained same-run output.
 Tests:
 `tests/test_dbtl_stage_contracts.py::TestBuildRecordsRerunInformationRatherThanProvingIt`.
 
@@ -2626,6 +2675,24 @@ numbers, empty names, and non-Build mappings remain rejected. A false check is
 recorded rather than converted into a failed Build result because Build records
 what ran and Test decides validity. Live events, authoritative collection, and
 replay all receive the same `stage="build"` context.
+
+That boundary now also covers a `summary` reported as a **metrics object**.
+A validation phase returned 28 of 28 mandatory fidelity checks passed, claims
+bound to evidence, and artifacts written, then reported its summary as an
+object rather than a sentence — and the entire phase was discarded, 344,504
+input tokens of sandbox work thrown away over the JSON type of one field.
+`_summary_text` renders a Build mapping as one `name: value` line per field
+(nested values as compact JSON), preserving the worker's own numbers and adding
+nothing: a summary carries no claim, check, or evidence reference, so the worst
+a rendered one can do is read like machine output, while the refusal it replaces
+cost real work. Every other stage still requires prose, a list is still refused
+on Build (no field names, so its numbers could not be attributed), and an empty
+object is refused rather than letting a phase satisfy the contract by saying
+nothing. The refusal also stopped misdiagnosing itself: a *missing* summary
+still reports "must report a 'summary'", while a wrongly typed one names the
+type it got — reporting a field that is plainly present as absent sends a reader
+looking for the wrong thing. Tests:
+`tests/test_dbtl_worker_summary_shape.py`.
 
 `generic:test:v3` retains that allowance and pins
 `generic-predictive:v2`, its exact required-check list, optional-Reconciliation
@@ -3427,6 +3494,25 @@ same switch:
   checks the durable workflow projection too: a Build whose required steps or
   registered review deck are incomplete cannot enter human review merely
   because an artifact row exists.
+* **A finished Build has one review channel.** The review Markdown still leads
+  the `present_files` payload so evidence binding remains unambiguous, and the
+  authenticated HTML deck remains second. Build evidence slides use the exact
+  Design deck shell—theme, navigation, motion, print behaviour, and bridge
+  slot—and its final **Human gate** slide owns Submit/Approve/Revise/Reject. No
+  parallel chat review card is emitted. The deterministic supervisor completion
+  text tells the owner to use that slide and then answer the distinct **Start
+  Test / Hold here** transition card.
+  The Build renderer itself carries the shared inert stage-review controls and
+  authenticated feedback bridge whenever its preplanned surface is an
+  answerable `stage_review`. Registration without that bridge is forbidden in
+  practice: it advertises an actionable surface whose persisted HTML cannot
+  emit an intent. Test remains owned by its typed chat cards; this Build
+  exception does not move Test authority back into a deck.
+  `BUILD_DECK_SURFACE_VERSION` participates in Build's deterministic surface
+  id and must be bumped when the bridge-bearing Build deck structure changes.
+  Design ids deliberately retain their older derivation. This prevents a
+  re-render from embedding an id already bound to legacy bytes and then having
+  persistence suffix the row id after the file has been written.
 * **A read-only summarizer writes the reviewed document, and writes only prose.**
   The `summarizer` and `planner` roles are withheld execution and write tools and
   granted no writable path (`_tools_for_unit`), so "read-only" is a property of
@@ -3440,10 +3526,29 @@ same switch:
   recorded ones rather than replacing them. Each of those was `parsed or
   bundle.<field>`, the single edit that turns a caveat the work reported about
   itself into a caveat nobody ever mentioned. `deerflow/dbtl/build_deck.py` then
-  renders a self-contained deck with figures embedded as `data:` URIs under
-  per-figure and per-deck byte caps; a format it cannot inline is named and
-  skipped, and a build with no figures says so rather than rendering an empty
-  gallery.
+  renders those contents through the canonical Design shell, with figures
+  embedded as `data:` URIs under per-figure and per-deck byte caps; a format it
+  cannot inline is named and skipped. Published image artifacts are recovered
+  deterministically when a worker omitted optional figure metadata. If neither
+  a verified numeric outcome nor a verified figure exists, the runtime writes
+  no review package, deck, or feedback surface and emits one recovery Human
+  Input Card offering replan, restart, or hold; retrying a summarizer cannot
+  manufacture evidence.
+
+**One worker has one output-contract owner.** `WorkUnit.output_contract`
+distinguishes the shared `StageWorkerResult` schema from Build's plan, result
+summary, and advisory work-meeting contracts. The live task projection selects
+that declared parser instead of assuming every final answer has `status` and
+`summary`; the generic `collect_results` boundary refuses typed helper units so
+a future caller cannot silently restore the duplicate gate. Review-meeting
+units do use `StageWorkerResult`, so their prompts include the same result
+contract their collector enforces. For long-running Build phases,
+`worker_result._compatible_payload` accepts only meaning-preserving drift:
+common field aliases, exact status/boolean aliases, path-only artifact objects,
+identical redundant evidence locators, and a missing status backed by either an
+explicit clarification or the server-required `phase_done_condition`. It never
+relaxes workspace containment/publication, claim-to-evidence traceability,
+failed quality checks, capped-run handling, phase completion, or human gates.
 
 **A committed step is replayed, not re-run** (`live_stage/step_store.py`). The
 step table records that a step succeeded and what its output digest was, which

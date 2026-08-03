@@ -60,10 +60,12 @@ class _FakeExecutor:
 
     steps: list[dict] = []
     answer = '{"status": "completed", "summary": "done"}'
+    last_kwargs: dict = {}
 
     def __init__(self, **kwargs) -> None:
         self.trace_id = "trace"
         self.kwargs = kwargs
+        type(self).last_kwargs = kwargs
 
     def execute(self, prompt: str, holder):
         for step in self.steps:
@@ -103,11 +105,11 @@ def dispatch(monkeypatch):
     tools_module.get_available_tools = lambda **kwargs: []
     monkeypatch.setitem(sys.modules, "deerflow.tools", tools_module)
 
-    async def run(units, *, stage="build", meeting=False):
+    async def run(units, *, stage="build", meeting=False, budget=None):
         adapter = adapter_module.LiveStageAdapter(repo=object(), app_config=None)
         outcomes = await adapter._dispatch_units(
             units,
-            budget=WorkerBudget(),
+            budget=budget or WorkerBudget(),
             config={},
             state={},
             runtime={"run_id": "run-1", "thread_id": "thread-1"},
@@ -129,6 +131,23 @@ def _unit(unit_id: str = "unit-1") -> WorkUnit:
 
 
 class TestAStageWorkerReportsItsSteps:
+    async def test_uncapped_build_omits_all_resource_kill_switches(self, dispatch):
+        budget = WorkerBudget(
+            max_workers=3,
+            max_turns=10_000,
+            max_tokens=1_000_000,
+            timeout_seconds=900,
+            token_limit_enforced=False,
+        )
+
+        await dispatch([_unit()], budget=budget)
+
+        assert _FakeExecutor.last_kwargs["config"].max_turns == 10_000
+        assert _FakeExecutor.last_kwargs["token_budget_max_tokens"] is None
+        assert _FakeExecutor.last_kwargs["token_budget_enabled"] is False
+        assert _FakeExecutor.last_kwargs["loop_detection_enabled"] is False
+        assert _FakeExecutor.last_kwargs["extra_middlewares"] == []
+
     async def test_each_captured_step_becomes_a_running_event(self, dispatch):
         _FakeExecutor.steps = [
             {"type": "ai", "content": "Reading the inputs", "tool_calls": [{"name": "read_file", "args": {"path": "/mnt/user-data/x.csv"}}]},
