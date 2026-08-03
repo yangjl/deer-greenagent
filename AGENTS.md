@@ -343,6 +343,21 @@ artifact` is server-owned in full and is now stripped from external run input:
   Markdown) says "meeting"/"participants", while internal identifiers
   (`council_preflight`, `dbtl-council__`, `council_plan`, module names) keep
   the council vocabulary so the protocol and history stay stable.
+- **An unscoped request in the conversation that opened a cycle can still
+  reach it.** The composer's cycle scope is next-request-only by design, so the
+  *second* consecutive cycle request arrives unscoped and the routing ladder had
+  nothing to continue: it fell through to the classifier, which read "run the
+  meeting again" as ordinary chat. The lead agent then read the trial data
+  itself, wrote a file named like a design package into `outputs/`, and answered
+  — no meeting, no worker rows, no artifact, and a Design stage that looked
+  answered while its gate had not moved. Nothing was *recorded*, but the person
+  received a stage deliverable from the one actor that must never produce one.
+  A conversation's own live cycle is now recovered server-side from
+  `dbtl_cycles.originating_thread_id` when the request deterministically names
+  another round. It stays narrow rather than becoming a sticky scope: only the
+  re-run phrases, only in the conversation that opened the cycle, only while
+  that cycle is live, and an explicit `ordinary` choice still wins. See
+  [backend/AGENTS.md](backend/AGENTS.md) for the rung and its failure mode.
 - **A meeting is convened when a person asks for one, and only then.** Three
   rules in `deerflow.agents.dbtl.stage_execution` replace the old "any Design
   request runs the whole council". (1) *Hold*: a Design stage stays
@@ -375,6 +390,24 @@ artifact` is server-owned in full and is now stripped from external run input:
   agent. Parking the cycle from the deck inverts this — parked cycles send
   ordinary cycle-scoped requests to the lead agent with the design brief
   carried hash-bound and explicitly marked unapproved.
+- **A re-run is a new meeting, so it is set up like one.** The preflight card
+  asks how much debate, which seats, and each participant's model, reasoning
+  strength, and instructions — and is deliberately once-only per cycle, which
+  is right for every turn belonging to the meeting it opened. A deliberate
+  re-run arrives with that guard already tripped, so a second council's budget
+  was spent with nobody asked; and because the readers for depth, roster, and
+  participant dials are all scoped to the turn that *answers* a card, a re-run
+  answered nothing and the server re-derived all three. Asking again in the
+  same words therefore produced a different number of participants, on
+  different agents, on different models, with the owner's per-seat instructions
+  gone. A re-run now raises the card again — no worker may be dispatched until
+  a person answers it — opened on the setup last confirmed, since "again" means
+  again. The approved roster is reused rather than rewritten, which is what
+  changed the seats. It is still a proposal: anything on it can be changed, and
+  "Adjust the roster first" deliberately recovers nothing, because asking for a
+  different roster is the opposite of reusing the old one. The guard is
+  positional rather than phrase-only, so the card cannot re-raise forever —
+  including when a stale client answers with a depth the server cannot read.
 - **Every round with a real chair outcome ends with a slide deck.**
   `deerflow.dbtl.council_deck` renders a trustworthy completed chair result or
   an uncapped `needs_input` result as one self-contained HTML deck (inline
@@ -596,6 +629,14 @@ artifact` is server-owned in full and is now stripped from external run input:
   note states which route it took and why: the failure this replaces was
   silence, where four workers ran, three died on an expired credential, and the
   only visible symptom was a review card that never came back.
+  **A roster somebody confirmed outranks that route.** `chair_only` is the right
+  default for an unattended refinement and the wrong answer to a person who has
+  just read a roster of three and pressed **Start meeting** — the card described
+  a council and one chair ran, which is the failure the roster proposal exists
+  to prevent arriving by the route that avoids its cost. An approved proposal
+  therefore suppresses the chair-only branch; the objection is not lost with the
+  route, since it still travels into the round as the change request, so the
+  seats argue the reviewer's point rather than the original question.
 
   **Build, Test, and Learn receive the approved design.** `_approved_design_brief`
   puts the human-approved Design package into `stage_context` with its content
@@ -608,6 +649,38 @@ artifact` is server-owned in full and is now stripped from external run input:
   run request carries `context` at the top level, but LangGraph relocates it to
   `configurable["context"]` before a node sees it, so code running on both sides
   must look in both places or silently read nothing on one of them.
+- **Test can be a required gate or a decision the reviewer takes.**
+  `dbtl.conditional_test` (default **false**) keeps today's rule: an approved
+  Build always opens Test, and Learn waits for a human-owned validity
+  assessment. Turn it on and an approved Build offers a second route —
+  *Learn from this exploration* — which records Test as explicitly **skipped**
+  and opens Learn directly. The switch exists because one predictive check
+  pack is pinned to the Test *stage* rather than to the claim a Build made, so
+  the ordinary deliverable here — a population-structure PCA, a QC
+  distribution, a trait correlation plot — has no folds, no holdout, and no
+  predictive ceiling, scores four of seven required checks as not-applicable,
+  and lands on `inconclusive`, which cannot reach Learn at all. An exploratory
+  pilot should not have to fail a confirmatory contract it never claimed to
+  satisfy.
+  Skipping is never silent success, and four rules make that true rather than
+  aspirational. `skipped` is **its own** `StageStatus`, distinct from `locked`
+  (still blocked) and `approved` (a review happened), because collapsing it
+  into either is how "we chose not to validate this" becomes
+  indistinguishable from "this passed". Only a human choice may skip: the
+  typed `BuildDisposition` is accepted only on an approved Build, refused on
+  any other stage or verdict rather than ignored, and refused outright once
+  Test has started — skipping in-flight work would discard what nobody agreed
+  to discard. The deployment rule is enforced at the **write boundary**, not
+  only in the UI, since a frontend that can skip Test while persistence still
+  treats the result as validated is the one failure this path exists to
+  prevent. And an exploratory Learn may synthesize but **cannot create a
+  knowledge candidate**, which makes the promotion block structural: no
+  candidate means no claim, so promotion and publication have nothing to act
+  on rather than relying on a downstream check somebody must remember. The
+  skip is deliberately **not** a new table — the decision is already durable
+  as the review row plus an append-only `learn_exploratory` transition row
+  bound to the Build evidence hash and the reviewer, and a third record of the
+  same act could only drift from those two.
 - **Data Reconciliation can be a required gate or an optional stage.**
   `dbtl.reconciliation_required` (default **true**) keeps today's rule: an
   approved Design opens Reconciliation, and Build waits for a settled matrix.

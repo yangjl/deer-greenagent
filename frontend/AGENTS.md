@@ -249,6 +249,13 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
   `/api/projects/{id}/dbtl/*` calls, and `cycle-hooks.ts` the TanStack hooks.
   Controls are derived from the server's stage status alone — the client never
   decides that a gate is open, it only renders what the durable record says.
+  `StageStatus` carries a seventh value, `skipped`, for a stage a person chose
+  not to run (currently only Test, under `dbtl.conditional_test`). It reads
+  **"Skipped — not validated"** and takes a muted `CircleSlash`, never the
+  approved tone: the stage was dealt with, but nothing about it was validated,
+  and a success colour would say otherwise. `learn_exploratory` joins
+  `DeckActionKind`/`DesignFeedbackActionKind`; like every deck intent the
+  parent forwards it only when the server's read model lists it.
   Cycle creation records both class and workflow weight. A project may run
   several live top-level cycles at once (backend migration 0018 dropped the
   single-active-cycle rule), so the dialog must not gate creation on an
@@ -858,6 +865,18 @@ redesign removes. `partial` is distinct too: the chair reported, but at least
 one non-chair participant failed, so its output must not be presented as a
 successful discussion. Status always carries a word, never colour alone.
 
+**A described option is as tall as its description.** The option buttons carry
+`h-auto` beside `min-h-11`: the shadcn `Button` default size sets a fixed `h-9`
+and `min-h-11` only raises the floor, so every depth option rendered at ~2.75rem
+with its two-line description spilling out of the border onto the option below —
+on the one screen where a person decides how much a meeting may spend. `h-auto`
+replaces `h-9` through tailwind-merge while `min-h-11` survives in its own group
+and keeps the touch target. Do not swap it for a taller fixed height: the
+descriptions are server-owned copy, and any fixed value is one wording change
+from overlapping again. Pinned by `human-input-card.dom.test.tsx` as a class
+assertion rather than a measurement, because happy-dom has no layout engine and
+an `offsetHeight` check would pass against the broken markup.
+
 The native council preflight uses `input_mode=single_choice`; every option has
 an `id`, `label`, and `value`, with optional description, and
 `recommended_option_id` names the server recommendation. Keep this aligned with
@@ -1038,3 +1057,40 @@ A cycle may name its immutable `originating_thread_id`. The expanded rail links
 it only when that conversation remains in the authenticated project list; the
 link clears cycle selection and never arms request scope. Missing origins stay
 visible as unavailable provenance.
+
+## A meeting stays in the turn that held it
+
+`core/tasks/meeting-timeline.ts` groups council seats **by run**, and each
+meeting renders inside that run's own message group. It replaces one
+thread-wide `DebatePanel` that folded every seat in the conversation into a
+single block, spliced it into the transcript at a computed index, and bound it
+to `latestRunId`. Three failures came out of that shape and the run fixes all
+three: a second meeting merged into the first's rounds; starting any new run
+moved the panel off the meeting it described; and a meeting the browser never
+watched live had nothing to render. The run is the identity a meeting already
+has (`subagent.start` records it), it is what the transcript is ordered by, and
+it survives a reload.
+
+The panel is drawn above its turn's answer, so a conclusion reads below the
+debate that produced it. `UnanchoredMeetings` renders at the tail the meetings
+whose run has no message group yet — the live case, where seats stream before
+the run's first message lands; once the turn appears the meeting moves into it,
+so nothing is shown twice and nothing falls off the end. A seat carrying no run
+id at all keeps its own empty-string bucket rather than being dropped: it
+renders unanchored, which is worse than being in the right place and far better
+than vanishing.
+
+**Durability is the other half, and it was the actual bug.** `fetchStageWorkers`
+used to *discard* every persisted meeting seat, on the grounds that the debate
+panel already drew them — but that panel read only the live stream, so the
+seats sat in the database and the one path that reads them threw them away. A
+reload, a deck-started round, or any background run therefore showed no meeting
+at all. The record now carries `councilSeat` and the stage-work reconcile passes
+it into the task context; one participant is still never drawn twice because
+`stageWorkGroups` excludes any task carrying a seat. A seat `readCouncilSeat`
+cannot parse falls through to the stage lane instead of being dropped — a worker
+in the wrong lane is recoverable, a worker nobody can see is not.
+`debatePanelPosition` / `insertDebatePanel` / `shouldRenderDebatePanel` are
+gone with the splice they served. Tests:
+`tests/unit/core/tasks/meeting-timeline.test.ts`, plus the fold cases in
+`tests/unit/core/tasks/api.test.ts`.

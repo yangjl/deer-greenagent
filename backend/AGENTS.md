@@ -615,6 +615,21 @@ filesystem cleanup, so the raw value is never interpolated into a host path;
 new runs, workspace/sandbox operations, and other state-producing mutations
 remain blocked.
 
+**A file has one canonical virtual path, so where roots nest the most specific
+one owns it.** `scan_workspace_roots` keys its result map by virtual path and
+walks each root independently, which is safe for a thread (workspace, uploads,
+and outputs are siblings under `user-data/`) and wrong for a project, where the
+workspace *is* the project folder and `outputs/` sits inside it. One host file
+was therefore recorded twice — `/mnt/user-data/workspace/outputs/report.md` and
+`/mnt/user-data/outputs/report.md` — and a single write reported as "Edited 2
+files" listing the same name twice. The walk now prunes any other root nested
+strictly inside the one being scanned, comparing resolved paths so a symlinked
+or non-normalized configuration still matches. Pruning rather than dropping the
+parent root, because the project folder legitimately holds files nothing else
+would reach (a trial CSV, data notes) — those are only visible through the
+workspace root. Tests:
+`tests/test_workspace_changes.py::TestOverlappingRootsAreScannedOnce`.
+
 **Workspace change review**: `packages/harness/deerflow/workspace_changes/`
 captures a pre-run and post-run snapshot of the thread-owned `workspace` and
 `outputs` directories. `runtime/runs/worker.py` performs the filesystem scan via
@@ -1760,6 +1775,25 @@ places that must stay aligned:
    both alias it in the sandbox), with `uploads/` and `outputs/` as plain
    visible subfolders. `project_folder_name` keeps folder names human-readable
    but path-safe; `resolve_project_virtual_path` enforces containment.
+   **The sandbox's `PathMapping` table is not the only place that aliasing has
+   to hold.** Tool calls resolve virtual paths through
+   `sandbox/tools.py::replace_virtual_path`, whose
+   `_thread_virtual_to_actual_mappings` built its `/mnt/user-data` root entry
+   only when workspace, uploads, and outputs shared a common parent — true of a
+   thread sandbox, where the three are siblings under `user-data/`, and false
+   of a project, where the workspace *is* the parent of the other two. The root
+   mapping was therefore silently absent, a project file at the root
+   (`/mnt/user-data/trial.csv`) came back unresolved, and
+   `_validate_resolved_user_data_path` then rejected the literal virtual path
+   as traversal. Both layouts are now recognized. The failure was invisible
+   until DBTL, because `_project_manifest` emits exactly
+   `/mnt/user-data/<relative>` for project files: a design meeting reported
+   every read denied, its red team returned `blocked`, and the round produced
+   no evidence at all — while the same file read fine through
+   `/mnt/user-data/workspace/…`, and everything under `uploads/` or `outputs/`
+   was unaffected. When a mapping table and a resolver both claim to know where
+   a virtual path lives, they need one test that agrees; tests:
+   `tests/test_project_scoped_sandbox.py::TestFilesAtTheProjectRootAreReadable`.
    `LocalSandboxProvider.acquire(..., project_id=..., project_root=...)` maps
    the whole `/mnt/user-data` tree there; the Gateway upload path
    (`get_uploads_dir(..., project_root=...)`), `ThreadDataMiddleware` /
@@ -2802,6 +2836,31 @@ read was denied", each returned no result, and the chair could only record that
 it had nothing to synthesize from. The manifest is where most workers learn a
 path exists, so it has to name the path they can actually open.
 
+**Routing rung 2b: a conversation recovers the cycle it opened.** The
+composer's cycle scope is next-request-only, so the second consecutive cycle
+request arrives unscoped and `route_request` had nothing to continue — it fell
+through to the classifier, which read "run the meeting again" as ordinary chat
+and handed it to the lead agent, which then read the trial data and wrote the
+design package itself: no meeting, no worker rows, no artifact, and a Design
+stage that looked answered while its gate had not moved.
+`RoutingRequest.thread_cycle_id` is resolved server-side from
+`dbtl_cycles.originating_thread_id` — never accepted from the caller, because it
+decides which research record a request may touch — and continues that cycle
+when `wants_new_debate` matches. Narrow by construction: only the deterministic
+re-run phrases, only in the originating conversation, only while the cycle is
+live, and an explicit `ordinary` choice still wins, because that is a person
+saying "not the cycle" and a phrase match must not argue with them. It recovers
+a cycle and never invents one. The resolver is fail-soft, so an unreadable
+repository costs the recovery rather than the turn, and `cycle_continuation`
+re-resolves rather than carrying the value: nodes are scheduled separately, and
+a branch chosen on a recovered cycle whose handler cannot see it would route to
+continuation and then find nothing to continue. The phrase table moved to
+`deerflow.dbtl.meeting_intent`, below both routing and the stage adapter (which
+re-exports it under its original private names), because routing must answer the
+same question one step earlier and two regexes that agree today drift apart the
+first time either is edited. Tests:
+`tests/test_dbtl_conversation_cycle_routing.py`.
+
 Current Design attempts resolve to `generic:design:v2`. The adapter supplies a
 bounded metadata-only project workspace manifest and up to four compact prior
 Design chair syntheses (never the full accumulated worker payloads),
@@ -2880,6 +2939,34 @@ Three additional rules live in
   never depends on provider health and a misread costs one rephrase, never a
   council's budget. The deterministic match is checked first and skips the
   model call entirely.
+  **A re-run is a new meeting, so it is set up like one.** The preflight card is
+  once-only per cycle, which is right for every turn belonging to the meeting it
+  opened and wrong for a deliberate re-run: that request arrives with the guard
+  already tripped, so nobody was asked before a second council's budget was
+  spent — and none of the confirmed settings could be read back either, because
+  `confirmed_council_depth`, `confirmed_council_proposal`, and
+  `confirmed_participant_settings` are scoped to the turn that *answers* a card
+  and a re-run answers nothing. The server re-derived everything: a different
+  number of participants, on different agents, on different models, with the
+  owner's per-seat instructions gone. `rerun_requested_after_preflight` raises
+  the card again and `prior_council_setup` opens it on the setup last confirmed
+  (depth, approved roster, participant dials), which `preview_council` now
+  accepts as `depth`/`proposal`/`participant_settings` — a supplied proposal is
+  used as-is rather than written again, since re-writing it is what changed the
+  seats. The guard is **positional**, not phrase-only: once emitted the card is
+  newer than the request that asked for it, so the answering turn dispatches
+  instead of asking forever — which also covers a stale client sending a depth
+  the server cannot read, where a phrase-only guard would loop. An adjustment
+  redraw recovers nothing by the same rule, because asking for a different
+  roster is the opposite of reusing the old one.
+  **And the roster on the card is the roster that runs.** An
+  `approved_council_proposal` suppresses the `_resumed_chair_unit` revision
+  branch: folding an objection into the existing synthesis is the right default
+  for an unattended refinement and the wrong answer to a person who read a
+  roster of three and pressed Start meeting, where the card described a council
+  and one chair ran. The objection is not lost with the route — it still travels
+  into the round as `human_change_request`. Tests:
+  `tests/test_dbtl_meeting_rerun_settings.py`.
 - `_resumed_chair_unit` **resumes**: an answer to the chair's own `needs_input`
   question dispatches the chair alone over `_prior_positions` (the durable
   worker runs), carrying the question and the owner's words verbatim, and skips
@@ -3200,6 +3287,80 @@ labelled server projection with `rationale_source: server_projection`, so a
 reader can always tell the server's sentence from the reviewer's. A **rejection
 still requires the reviewer's own words** (422 otherwise) — it ends the attempt,
 and a generated sentence there tells the next reader nothing.
+
+**Conditional Test: an approved Build may close to Learn instead of qualifying**
+(`dbtl.conditional_test`, default false; plan:
+`docs/plans/2026-08-02-research-dbtl-conditional-test-plan.md`, debate:
+`docs/plans/2026-08-02-dbtl-test-stage-debate.md`). The rule lives where the
+other optional-stage rules live — `deerflow.dbtl.reconciliation_policy.
+conditional_test_enabled()`, fail-safe to **mandatory Test**, because a
+deployment that cannot read its own rule has not asked for the looser one.
+
+`cycle_state.BuildDisposition` is the typed answer to "what is this finished
+Build for?": `keep_and_validate` (byte-identical to passing nothing) or
+`learn_exploratory`. `apply_review(..., build_disposition=...)` accepts it
+**only** on an approved Build and raises `TransitionRefused` anywhere else,
+because silently dropping it would skip Test for a reason nobody recorded. The
+skip itself is refused unless Test is still `LOCKED` (`_SKIPPABLE_FROM`):
+skipping an in-flight Test discards work nobody agreed to discard, and skipping
+an approved one retroactively unmakes a qualification that already happened.
+
+Three pure-layer changes carry it. `StageStatus.SKIPPED` is a **seventh member**,
+not a flavour of `LOCKED` or `APPROVED`. `_settled()` sits beside `_approved()`
+and accepts a skip only for `_SKIPPABLE_STAGES` (`{"test"}`), so a skip cannot
+walk past a stage that never offered the choice. And `next_cycle_state` steps
+**over** a skipped target rather than entering it, while `can_enter_stage` opens
+Learn from `build` only when Test itself carries the skip — the shortcut is
+keyed on the recorded status, never on the stage pair.
+
+`stage_routes.RouteSlug.LEARN_EXPLORATORY` is the edge. `RouteContext.
+conditional_test` defaults **false** for the same reason `reconciliation_required`
+defaults true: a route menu is a safety surface, and the forgiving default
+belongs on the other side. `transition_target` refuses the route from any stage
+but Build. The route is offered *beside* `advance`, never instead of it — the
+point is that a person chooses between qualifying and not, and a menu showing
+one option has taken the decision for them.
+
+Persistence adds **no table**. `review_stage(..., build_disposition=...)` folds
+the decision into the existing aggregate: the disposition joins the replay
+`expected_payload` (a replay carrying a different disposition is a different
+decision, not the same one twice), `_parse_build_disposition` enforces the
+deployment switch at the write boundary, and `_append_stage_transition` records
+`chosen_route="learn_exploratory"` rather than the `approve` verdict behind it,
+so the append-only path history shows the Build → Learn edge with its evidence
+hash and reviewer. A `dbtl_build_dispositions` table was considered and
+rejected: the review row and the transition row already bind reviewer, evidence
+id/revision/hash, and route, and a third record of one act can only drift from
+the other two.
+
+`knowledge_ops.record_learn_synthesis` now runs on **either** authority — a
+human-owned validity assessment, or a human-owned decision that this Build was
+not worth qualifying — and refuses a cycle carrying neither, so the absent
+assessment stays meaningful. On the exploratory path it accepts a synthesis and
+**refuses any candidate**. That is the promotion block, and it is structural
+rather than a downstream rule: no candidate means no claim, so promotion and
+publication have nothing to act on. Both `learn.synthesized` events carry
+`retention_status` (`not_validated` / `qualified`) and a nullable
+`test_outcome`.
+
+Wiring: `stage_feedback.STAGE_ALLOWED_INTENTS["build"]` gains
+`learn_exploratory`; `design_feedback_ops._ACTION_GROUP` maps it to
+`stage_review`, because the exploratory closeout **is** the Build verdict and a
+reviewer records one decision about a Build, not an approval plus a second
+thought. The router refuses it from any stage but Build and from any deployment
+that did not enable it (so the deck is told why rather than getting a generic
+workflow error), then calls `review_stage(decision="approve",
+build_disposition="learn_exploratory")` — it is still an approval of the Build;
+what differs is what the reviewer decided it was for. `_exploratory_actions` is
+deliberately independent of the progressive-transition gate: whether a Build is
+worth qualifying is a question about the research, not about how much ceremony
+the next transition needs. The Build deck renders the control unconditionally
+and disabled (`BUILD_DECK_SURFACE_VERSION` bumped to
+`build-review-surface-v4-exploratory-closeout`, since the deck's exact bytes are
+hash-registered); the server's read model is what enables it. Tests:
+`tests/test_dbtl_conditional_test.py` (pure),
+`tests/test_dbtl_conditional_test_repository.py` (real SQL), plus the
+`mandatory_test` pinning fixture in `tests/conftest.py`.
 
 **Progressive-gate Phases 0-1: the cycle is a recorded walk over a D/B/T/L stage
 graph** (plan: `docs/plans/2026-07-29-progressive-dbtl-gate-plan.md`).
