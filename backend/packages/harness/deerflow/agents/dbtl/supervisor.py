@@ -95,6 +95,12 @@ from deerflow.agents.dbtl.supervisor_support.card_history import (
     pending_stage_handoff_control as _pending_stage_handoff_control,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
+    prior_council_setup as _prior_council_setup,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
+    rerun_requested_after_preflight as _rerun_requested_after_preflight,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
     resumed_council_setup as _resumed_council_setup,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
@@ -141,6 +147,7 @@ from deerflow.dbtl.council import (
     COUNCIL_DEPTH_CONTEXT_KEY,
     DEPTH_INTENT_INSTRUCTION,
     CouncilDepth,
+    DepthRecommendation,
     council_depth_from_config,
     depth_policy,
     interpret_depth,
@@ -795,6 +802,8 @@ COUNCIL_ADJUST_OPTION = "adjust"
 _ADJUST_QUESTION = "What should the meeting do differently? Name the participants to add, drop, or re-aim — your words go to the roster writer exactly as you type them."
 _ADJUST_NOTE = "Nothing has been dispatched. The roster is redrawn from what you write here, and you will see it again before anyone runs."
 
+_RERUN_DEPTH_REASON = "This opens on the setup you confirmed for the last meeting on this design — change anything you want before it runs."
+
 
 def _render_council_roster(plan) -> str:
     """The roster as a person reads it, not as JSON.
@@ -1240,6 +1249,7 @@ def build_supervisor_graph(
     stage_adapter: StageExecutionPort,
     question_writer=None,
     depth_interpreter=None,
+    thread_cycle_resolver=None,
     principal_request_context: Mapping[str, Any] | None = None,
 ) -> StateGraph:
     """Build (but do not compile) the supervisor graph.
@@ -1263,7 +1273,7 @@ def build_supervisor_graph(
     writer = question_writer or _make_llm_question_writer(context, principal_request_context)
     depth_reader = depth_interpreter or make_llm_depth_interpreter(principal_request_context)
 
-    def decide(state: dict) -> BranchDecision:
+    def decide(state: dict, thread_cycle_id: str | None = None) -> BranchDecision:
         text, recovered_choice, recovered_cycle_id = _routing_input(state)
         # The recovered choice wins over the request's own. Answering a card is
         # not choosing a scope: the client sends a scope with every request and
@@ -1277,8 +1287,27 @@ def build_supervisor_graph(
             selected_cycle_id=recovered_cycle_id or context.selected_cycle_id,
             explicit_choice=recovered_choice if recovered_choice is not None else context.explicit_choice,
             is_new_conversation=_is_new_conversation(state),
+            thread_cycle_id=thread_cycle_id or context.thread_cycle_id,
         )
         return resolve_branch(text, active)
+
+    async def _conversation_cycle_id(config: RunnableConfig) -> str | None:
+        """The live cycle this conversation opened, or ``None``.
+
+        Fail-soft on purpose: an unreadable repository must cost the recovery
+        of an unscoped request, never the turn. Falling back means the request
+        routes exactly as it did before this existed.
+        """
+        if thread_cycle_resolver is None or not context.project_id:
+            return context.thread_cycle_id
+        thread_id = (config.get("configurable", {}) or {}).get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id:
+            return context.thread_cycle_id
+        try:
+            return await thread_cycle_resolver(project_id=context.project_id, thread_id=thread_id)
+        except Exception:  # noqa: BLE001 - see the docstring
+            logger.warning("DBTL routing: could not resolve this conversation's cycle", exc_info=True)
+            return context.thread_cycle_id
 
     async def route(state: dict, config: RunnableConfig) -> str:
         """Report the supervisor's presence, then resolve the branch.
@@ -1329,7 +1358,7 @@ def build_supervisor_graph(
         if _confirmation_answer(state) == "create_cycle" and not _has_emitted_card(state, SETUP_CLARIFICATION_PREFIX):
             return SupervisorBranch.CLARIFICATION.value
 
-        decision = decide(state)
+        decision = decide(state, await _conversation_cycle_id(config))
         if decision.branch is SupervisorBranch.ORDINARY and context.project_id and context.selected_cycle_id is None and _stage_control_intent(_latest_user_text(state)) is not None:
             return SupervisorBranch.CYCLE_CONTINUATION.value
         # An unanswered control outranks the parked-Design route below. Parking
@@ -1422,7 +1451,10 @@ def build_supervisor_graph(
         state: dict,
         config: RunnableConfig,
     ) -> dict:
-        decision = decide(state)
+        # Resolved again rather than carried: nodes are scheduled separately,
+        # and a branch chosen on a recovered cycle whose handler cannot see it
+        # would route to continuation and then find nothing to continue.
+        decision = decide(state, await _conversation_cycle_id(config))
         latest_text = _latest_user_text(state)
         unscoped_stage_intent = _stage_control_intent(latest_text) if decision.branch is SupervisorBranch.ORDINARY and context.selected_cycle_id is None else None
         active_cycles: list[dict[str, Any]] = []
@@ -1574,7 +1606,21 @@ def build_supervisor_graph(
         # bypass the once-only guard: the whole point is to show the roster
         # again, changed.
         answered_adjustment = _card_answer(state, COUNCIL_ADJUST_PREFIX) is not None
-        if review_meeting_stage is None and authored_design is None and council_depth_from_config(config) is None and (answered_adjustment or not _has_emitted_card(state, COUNCIL_PREFLIGHT_PREFIX)):
+        # A deliberate re-run is a new meeting, so it is asked about like one.
+        # The once-only guard was written for the turns that belong to the
+        # meeting a card already opened, not for a request to hold another —
+        # and under it a re-run dispatched a second council nobody confirmed.
+        rerun = _rerun_requested_after_preflight(state)
+        if review_meeting_stage is None and authored_design is None and council_depth_from_config(config) is None and (answered_adjustment or rerun or not _has_emitted_card(state, COUNCIL_PREFLIGHT_PREFIX)):
+            offered_models = _adapter_known_models(stage_adapter)
+            # "Again" means again: the card opens on the setup confirmed last
+            # time rather than on a freshly derived one, which is what silently
+            # changed the seats, the models, and the owner's instructions
+            # between two meetings asked for in the same words. An adjustment
+            # redraw recovers nothing by construction — its card is newer than
+            # the request, so ``rerun`` is false and the roster is rewritten,
+            # which is exactly what asking for a different one means.
+            prior_depth, prior_proposal, prior_participants = _prior_council_setup(state, offered_models) if rerun else (None, None, {})
             preview = getattr(stage_adapter, "preview_council", None)
             plan = None
             if callable(preview):
@@ -1584,18 +1630,22 @@ def build_supervisor_graph(
                     request_text=request_text,
                     config=config,
                     adjustment=adjustment,
+                    depth=prior_depth,
+                    proposal=prior_proposal,
+                    participant_settings=prior_participants,
                 )
                 if isawaitable(plan):
                     plan = await plan
             if plan is not None and plan.dispatchable:
+                recommendation = DepthRecommendation(depth=prior_depth, reason=_RERUN_DEPTH_REASON) if prior_depth is not None else await interpret_depth(request_text, interpreter=depth_reader)
                 return {
                     "messages": list(
                         _council_preflight_message(
                             decision,
                             plan,
-                            await interpret_depth(request_text, interpreter=depth_reader),
+                            recommendation,
                             request_nonce=request_nonce,
-                            model_options=_adapter_known_models(stage_adapter),
+                            model_options=offered_models,
                         )
                     )
                 }
@@ -1994,6 +2044,7 @@ def make_project_supervisor(config: RunnableConfig):
         make_llm_roster_writer,
         make_llm_transition_assessor,
     )
+    from deerflow.dbtl.cycle_state import TERMINAL_CYCLE_STATES
     from deerflow.persistence.dbtl import DbtlCycleRepository
     from deerflow.persistence.engine import get_session_factory
 
@@ -2007,6 +2058,24 @@ def make_project_supervisor(config: RunnableConfig):
     from deerflow.agents.dbtl.model_access import principal_context
 
     run_principal_context = principal_context(config)
+
+    async def _resolve_conversation_cycle(*, project_id: str, thread_id: str) -> str | None:
+        """The live cycle this conversation opened, from the durable record.
+
+        Read server-side rather than accepted from the caller: it decides which
+        research record an unscoped request may touch. Only *live* cycles count
+        — a completed or abandoned one is not something "run the meeting again"
+        can mean — and when a conversation opened several, the most recent is
+        the one it is still working on.
+        """
+        cycles = await DbtlCycleRepository(session_factory).list_cycles(project_id)
+        mine = [cycle for cycle in cycles if cycle.get("originating_thread_id") == thread_id and cycle.get("state") not in TERMINAL_CYCLE_STATES]
+        if not mine:
+            return None
+        newest = max(mine, key=lambda cycle: str(cycle.get("created_at") or ""))
+        cycle_id = newest.get("id")
+        return str(cycle_id) if cycle_id else None
+
     graph = build_supervisor_graph(
         lead_agent=lead_agent,
         context=supervisor_context_from_config(config),
@@ -2020,6 +2089,7 @@ def make_project_supervisor(config: RunnableConfig):
             revision_interpreter=make_llm_revision_interpreter(run_principal_context),
             transition_assessor=make_llm_transition_assessor(run_principal_context),
         ),
+        thread_cycle_resolver=_resolve_conversation_cycle,
         principal_request_context=run_principal_context,
     )
     return graph.compile()

@@ -30,6 +30,7 @@ from deerflow.dbtl.classifier import (
     ClassifierResult,
     classify_request,
 )
+from deerflow.dbtl.meeting_intent import wants_new_debate
 
 
 class RouteKind(StrEnum):
@@ -51,6 +52,7 @@ class RouteSource(StrEnum):
     EXPLICIT_CHOICE = "explicit_choice"
     EXPLICIT_REQUEST = "explicit_request"
     SELECTED_CYCLE = "selected_cycle"
+    THREAD_CYCLE = "thread_cycle"
     NO_PROJECT = "no_project"
     CLASSIFIER = "classifier"
 
@@ -74,6 +76,11 @@ class RoutingRequest:
     is_new_conversation: bool = False
     project_cycle_count: int | None = None
     has_unfinished_cycles: bool | None = None
+    #: The live cycle this conversation itself opened, resolved server-side
+    #: from ``dbtl_cycles.originating_thread_id``. Never client-supplied: it
+    #: decides which research record a request may touch, so it is derived
+    #: from the durable record rather than accepted from the caller.
+    thread_cycle_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +135,26 @@ def route_request(request: RoutingRequest) -> RoutingDecision:
     # 2. A typed request to start, still deterministic.
     if is_explicit_start_request(request.text):
         return RoutingDecision(kind=RouteKind.CYCLE_SETUP, source=RouteSource.EXPLICIT_REQUEST)
+
+    # 2b. The conversation that opened a cycle can be asked, in words, to run
+    # its stage work. The composer's scope is next-request-only by design, so
+    # the second consecutive cycle request arrives unscoped — and before this
+    # rung it fell through to the classifier, which read "run the meeting
+    # again" as ordinary chat and handed it to the lead agent, which then
+    # wrote the design package itself.
+    #
+    # Deliberately narrow, so this does not become a sticky scope by the back
+    # door: only the deterministic re-run phrases the stage adapter itself
+    # uses, only in the conversation that opened the cycle, and only while
+    # that cycle is live. It recovers a cycle; it never invents one. The same
+    # principle already governs Human Input cards, whose replies recover their
+    # cycle from the request the server emitted.
+    if request.thread_cycle_id and wants_new_debate(request.text):
+        return RoutingDecision(
+            kind=RouteKind.CYCLE_CONTINUATION,
+            source=RouteSource.THREAD_CYCLE,
+            cycle_id=request.thread_cycle_id,
+        )
 
     # 3. An open cycle continues, but it is not permission to run a stage in
     # response to a read-only follow-up. This distinction matters after Design:

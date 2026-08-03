@@ -126,6 +126,9 @@ from deerflow.dbtl.council_settings import (
 )
 from deerflow.dbtl.cycle_state import TERMINAL_CYCLE_STATES, StageStatus, stage_for_state
 from deerflow.dbtl.decision_request import DECISION_REQUEST_CONTRACT, DecisionRequest
+from deerflow.dbtl.meeting_intent import _NEW_DEBATE_PATTERN as _shared_new_debate_pattern
+from deerflow.dbtl.meeting_intent import _RESTART_TYPOS as _shared_restart_typos
+from deerflow.dbtl.meeting_intent import wants_new_debate
 from deerflow.dbtl.reconciliation_policy import reconciliation_required
 from deerflow.dbtl.review_markdown import render_review_markdown, render_stage_digest
 from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
@@ -1235,32 +1238,16 @@ def _refinement_positions(max_positions: int, *, change_request: str | None) -> 
 #: recognized the same narrow way the classifier recognizes "similate": each is
 #: an enumerated literal, never a fuzzy match, so the trigger stays auditable.
 #: "restate" is deliberately absent — it is a real word asking to rephrase.
-_RESTART_TYPOS = r"restat|restar|restrat|retsart|rstart|resart|retart"
-
-#: Ways of asking for the meeting to be held again. Deterministic, like every
-#: other DBTL routing signal: the person whose request was read as "convene four
-#: workers" deserves to see the words that did it.
-_NEW_DEBATE_PATTERN = re.compile(
-    r"\b(?:re-?run|re-?open|re-?start|re-?try|re-?launch|re-?convene|re-?do|repeat|rehold|" + _RESTART_TYPOS + r")\b[^.\n]{0,40}\b(?:meeting|debate|discussion|council|round)\b"
-    r"|\b(?:run|hold|convene|start|open|schedule)\b[^.\n]{0,40}\b(?:another|a new|a second|again)\b[^.\n]{0,20}\b(?:meeting|debate|discussion|council|round)\b"
-    r"|\b(?:another|a second|a new|one more)\s+(?:round|meeting|debate|discussion)\b"
-    r"|\b(?:meet|debate|discuss|argue)\s+(?:it\s+)?again\b"
-    r"|\b(?:meeting|debate|discussion|council)\s+again\b",
-    re.IGNORECASE,
-)
-
-
-def _wants_new_debate(request_text: str) -> bool:
-    """Whether the request asks for the meeting to be convened again.
-
-    The default is *not* to convene. A Design stage stays ``in_progress`` until
-    a person submits it for review, so before this rule every later message in
-    the cycle re-ran the whole meeting — the owner would answer one question and
-    watch four fresh workers argue the design they had just been handed.
-    Convening several workers is expensive and slow enough that it should be
-    something a person asked for.
-    """
-    return bool(_NEW_DEBATE_PATTERN.search((request_text or "").strip()))
+#:
+#: The pattern and its predicate now live in ``deerflow.dbtl.meeting_intent``,
+#: below both this adapter and the routing ladder. Routing has to answer the
+#: same question one step earlier — should this request reach stage execution
+#: at all — and two regexes that agree today drift apart the first time either
+#: is edited. Re-exported here under the original private names so the existing
+#: call sites and their tests keep reading the way they did.
+_RESTART_TYPOS = _shared_restart_typos
+_NEW_DEBATE_PATTERN = _shared_new_debate_pattern
+_wants_new_debate = wants_new_debate
 
 
 #: The refinement round the review endpoint dispatches for the reviewer, sent
@@ -3226,6 +3213,9 @@ class LiveStageAdapter:
         request_text: str,
         config: RunnableConfig,
         adjustment: str | None = None,
+        depth: CouncilDepth | None = None,
+        proposal: CouncilProposal | None = None,
+        participant_settings: Mapping[str, ParticipantSettings] | None = None,
     ) -> CouncilPlan | None:
         """The roster this request would convene, without convening it.
 
@@ -3234,6 +3224,12 @@ class LiveStageAdapter:
         stage other than Design. The caller shows a card only when this returns
         a plan, so a preflight can never appear in front of work it does not
         describe.
+
+        ``depth``, ``proposal``, and ``participant_settings`` open the card on a
+        setup somebody already confirmed — a re-run of the same meeting. A
+        supplied proposal is used as-is rather than written again: re-writing it
+        is what silently changed the seats and the models between two meetings
+        that were asked for in the same words.
         """
         if not project_id or not cycle_id:
             return None
@@ -3252,24 +3248,31 @@ class LiveStageAdapter:
             config=config,
             request_text=request_text,
             attempt_id="preview",
+            depth=depth,
         )
         if plan.human_authored or not plan.dispatchable:
             # Nothing to propose for: one is a deliberate choice to seat nobody,
             # the other cannot run at all. Asked before ``dispatchable`` because
             # they are false for opposite reasons.
             return plan
-        # The preview *is* the proposal. Building the card from capability
-        # selection while dispatch used a proposed roster meant the card
-        # described a council that never convened — and in a generalist-only
-        # deployment (the common one) selection shows one undifferentiated seat
-        # where four differentiated ones then ran.
-        proposal = await self._propose_roster(
-            request_text=request_text,
-            stage_context=_preview_context(cycle),
-            max_positions=depth_policy(plan.depth).max_positions,
-            adjustment=adjustment,
-        )
-        return plan if proposal is None else plan_from_proposal(plan, proposal)
+        if proposal is None:
+            # The preview *is* the proposal. Building the card from capability
+            # selection while dispatch used a proposed roster meant the card
+            # described a council that never convened — and in a generalist-only
+            # deployment (the common one) selection shows one undifferentiated
+            # seat where four differentiated ones then ran.
+            proposal = await self._propose_roster(
+                request_text=request_text,
+                stage_context=_preview_context(cycle),
+                max_positions=depth_policy(plan.depth).max_positions,
+                adjustment=adjustment,
+            )
+        if proposal is not None:
+            plan = plan_from_proposal(plan, proposal)
+        # Applied to the previewed plan, not only at dispatch: the card is drawn
+        # from this plan, so a dial that lands later is one the person cannot see
+        # and cannot tell was kept.
+        return apply_participant_settings(plan, participant_settings)
 
     def _plan_council(
         self,
@@ -3278,11 +3281,13 @@ class LiveStageAdapter:
         config: RunnableConfig,
         request_text: str,
         attempt_id: str,
+        depth: CouncilDepth | None = None,
     ) -> CouncilPlan:
         """The roster this Design run will use.
 
         Depth comes from the human's confirmed choice when there is one, and
-        otherwise from the request itself. An unrecognized value degrades to the
+        otherwise from the request itself. An explicit *depth* is a choice
+        recovered from an earlier meeting's card, and outranks both. An unrecognized value degrades to the
         recommendation rather than raising: a stale client losing a preference
         is a much smaller failure than a cycle that cannot be designed.
 
@@ -3293,7 +3298,7 @@ class LiveStageAdapter:
         workers to argue on. A seat that names its own model still wins, and the
         setup card can still override any of them.
         """
-        depth = council_depth_from_config(config) or recommend_depth(request_text).depth
+        depth = depth or council_depth_from_config(config) or recommend_depth(request_text).depth
         metadata = dict(config.get("metadata", {}) or {})
         model = self._council_model() or str(metadata.get("model_name") or "").strip() or "inherited"
         return plan_council(
@@ -5549,7 +5554,16 @@ class LiveStageAdapter:
                 settings=participant_settings,
                 prior_execution=_prior_chair_execution(prior_design_runs),
             )
-        elif stage == "design" and council_plan is not None and revision_verdict is not None and not revision_verdict.reconvenes and revision_positions:
+        # A roster somebody just confirmed outranks the cheap revision route.
+        # Folding an objection into the existing synthesis is the right default
+        # for an unattended refinement — reconvening spends a second meeting
+        # re-arguing what the reviewer accepted — but it is the wrong answer to
+        # a person who read a roster of three and pressed Start meeting: the
+        # card described a council and one chair ran, which is the failure the
+        # roster proposal exists to prevent, arriving by the route that avoids
+        # its cost. The objection is not lost with the route; it travels into
+        # the round as the change request either way.
+        elif stage == "design" and council_plan is not None and approved_proposal is None and revision_verdict is not None and not revision_verdict.reconvenes and revision_positions:
             chair_positions = revision_positions
             resumed_chair = _resumed_chair_unit(
                 council_plan,

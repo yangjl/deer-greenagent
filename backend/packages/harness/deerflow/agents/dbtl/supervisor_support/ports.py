@@ -42,6 +42,9 @@ class StageExecutionPort(Protocol):
         request_text: str,
         config: RunnableConfig,
         adjustment: str | None,
+        depth: CouncilDepth | None = None,
+        proposal: CouncilProposal | None = None,
+        participant_settings: Mapping[str, ParticipantSettings] | None = None,
     ) -> CouncilPlan | None: ...
 
     async def execute(

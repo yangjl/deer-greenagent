@@ -73,6 +73,11 @@ class SupervisorContext:
     is_new_conversation: bool = False
     project_cycle_count: int | None = None
     has_unfinished_cycles: bool | None = None
+    #: The live cycle this conversation opened, resolved server-side from the
+    #: durable record. Lets an unscoped "run the meeting again" reach the stage
+    #: it obviously means, without making the composer's one-request scope
+    #: sticky. See :mod:`deerflow.dbtl.routing` rung 2b.
+    thread_cycle_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +116,7 @@ def resolve_branch(text: str, context: SupervisorContext) -> BranchDecision:
             is_new_conversation=context.is_new_conversation,
             project_cycle_count=context.project_cycle_count,
             has_unfinished_cycles=context.has_unfinished_cycles,
+            thread_cycle_id=context.thread_cycle_id,
         )
     )
 

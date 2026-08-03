@@ -17,6 +17,7 @@ from deerflow.dbtl.build_control import BuildControlAnswer, resolve_answer
 from deerflow.dbtl.council import CouncilDepth
 from deerflow.dbtl.council_proposal import CouncilProposal, proposal_from_dict
 from deerflow.dbtl.council_settings import ParticipantSettings, parse_participant_settings
+from deerflow.dbtl.meeting_intent import wants_new_debate
 from deerflow.dbtl.routing import ExplicitChoice
 from deerflow.utils.messages import message_content_to_text
 
@@ -441,6 +442,72 @@ def latest_answered_council_preflight(state: dict) -> tuple[dict[str, Any], dict
         if request is not None:
             return request, raw
     return None
+
+
+def rerun_requested_after_preflight(state: dict) -> bool:
+    """True when someone asked for another meeting after the last preflight.
+
+    The preflight is once-only per meeting, which is right for every turn that
+    belongs to the meeting it opened — re-asking on the answering turn would
+    argue with the person who just answered. A deliberate re-run is a *new*
+    meeting spending another meeting's budget, and it arrives with that guard
+    already tripped, so nobody is asked and none of the confirmed settings can
+    be read back.
+
+    Anchored on position rather than on the phrase alone, because the phrase
+    stays in history: once the card is emitted it is newer than the request
+    that asked for it, so the answering turn dispatches instead of asking the
+    same question forever. That also covers an answer the server cannot read —
+    a stale client sending an unknown depth must not trap the cycle in a loop.
+    """
+    messages = list(state.get("messages") or [])
+    last_card = -1
+    for index, message in enumerate(messages):
+        if not isinstance(message, ToolMessage):
+            continue
+        artifact = getattr(message, "artifact", None)
+        payload = artifact.get("human_input") if isinstance(artifact, dict) else None
+        if isinstance(payload, dict) and str(payload.get("request_id") or "").startswith(COUNCIL_PREFLIGHT_PREFIX):
+            last_card = index
+    if last_card < 0:
+        return False
+    for index in range(len(messages) - 1, last_card, -1):
+        message = messages[index]
+        if not isinstance(message, HumanMessage):
+            continue
+        extra = getattr(message, "additional_kwargs", None) or {}
+        if extra.get("hide_from_ui") or read_human_input_response(extra) is not None:
+            continue
+        # Only the newest visible request counts, matching how the stage adapter
+        # decides whether a held design should be argued again.
+        return wants_new_debate(message_content_to_text(message.content) or "")
+    return False
+
+
+def prior_council_setup(
+    state: dict,
+    known_models: Sequence[str],
+) -> tuple[CouncilDepth | None, CouncilProposal | None, dict[str, ParticipantSettings]]:
+    """The setup confirmed for the last meeting, for a re-run to open on.
+
+    Read from the newest *answered* preflight anywhere in history rather than
+    from the answering turn, because a re-run answers nothing. Any part that
+    cannot be recovered falls back to being derived fresh — an "adjust" reply
+    carries no depth, and an older card carried no participant dials at all.
+    """
+    answered = latest_answered_council_preflight(state)
+    if answered is None:
+        return None, None, {}
+    request, raw = answered
+    try:
+        depth = CouncilDepth(str(raw.get("value") or "").strip().lower())
+    except ValueError:
+        depth = None
+    return (
+        depth,
+        proposal_from_dict(request.get("council_proposal")),
+        parse_participant_settings(raw.get("participants"), known_models=known_models),
+    )
 
 
 def resumed_council_setup(state: dict, known_models: Sequence[str]) -> tuple[CouncilProposal | None, dict[str, ParticipantSettings]]:
