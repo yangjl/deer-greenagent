@@ -45,6 +45,26 @@ class DbtlConfig(BaseModel):
             "before anyone is interrupted by a card — the human exit review approves thresholds and wording before this is turned on."
         ),
     )
+    conversational_discovery: bool = Field(
+        default=False,
+        description=("Route explicit new-cycle requests into a durable, read-only conversation before cycle creation. This interaction switch does not grant workflow authority and requires graph_enabled."),
+    )
+    discovery_global_memory: bool = Field(
+        default=False,
+        description="Allow separately labelled user-global memory retrieval during conversational discovery.",
+    )
+    discovery_project_history: bool = Field(
+        default=False,
+        description="Allow bounded authorized prior-thread summaries during conversational discovery.",
+    )
+    discovery_classifier_entry: bool = Field(
+        default=False,
+        description=("Route classifier suggestions into conversational discovery after deterministic routing and suppression checks. Explicit cycle-start requests remain controlled by conversational_discovery."),
+    )
+    discovery_auto_offer: bool = Field(
+        default=False,
+        description=("Automatically append a start card when classifier-entered discovery becomes ready. Explicitly requested discovery may always show its review card."),
+    )
     design_deck_feedback: bool = Field(
         default=True,
         description=("Use authenticated Design feedback decks for chair answers and Design review. Set false to restore the visible Design Human Input card and Design stage sheet without deleting surfaces, actions, reviews, or artifacts."),
@@ -167,6 +187,10 @@ class DbtlConfig(BaseModel):
     @property
     def graph_execution_enabled(self) -> bool:
         return self.mode == "graph_enabled"
+
+    @property
+    def conversational_discovery_enabled(self) -> bool:
+        return self.graph_execution_enabled and self.conversational_discovery
 
     @property
     def proposals_enabled(self) -> bool:

@@ -28,6 +28,7 @@ from .human_input_protocol import (
     COUNCIL_PREFLIGHT_PREFIX,
     DESIGN_AUTHORING_PREFIX,
     DESIGN_CLARIFICATION_PREFIX,
+    DISCOVERY_START_PREFIX,
     SETUP_CLARIFICATION_PREFIX,
     SETUP_CONFIRMATION_PREFIX,
     STAGE_HANDOFF_PREFIX,
@@ -71,6 +72,11 @@ def latest_cycle_request_text(state: dict) -> str:
         response = read_human_input_response(extra)
         if response and response.get("source") == "ask_clarification" and str(response.get("request_id") or "").startswith(DESIGN_CLARIFICATION_PREFIX):
             return str(response.get("value") or "")
+        if response and response.get("source") == "ask_clarification" and str(response.get("request_id") or "").startswith(COUNCIL_PREFLIGHT_PREFIX):
+            request = emitted_card_request(state, str(response.get("request_id") or ""))
+            bound_request = str((request or {}).get("dbtl_request_text") or "").strip()
+            if bound_request:
+                return bound_request
         if response is not None:
             continue
         if extra.get("dbtl_design_kickoff") is True:
@@ -312,6 +318,11 @@ def stage_handoff_marker(request: dict[str, Any]) -> dict[str, Any]:
 
 def routing_input(state: dict) -> tuple[str, ExplicitChoice | None, str | None]:
     """Return routing text and any scope recovered from an answered card."""
+    discovery = card_answer(state, DISCOVERY_START_PREFIX)
+    if discovery is not None:
+        request = emitted_card_request(state, discovery[0])
+        if request is not None and request.get("clarification_type") == "dbtl_discovery_start":
+            return str(request.get("source_request") or ""), ExplicitChoice.START_CYCLE, None
     confirmed = card_answer(state, SETUP_CONFIRMATION_PREFIX)
     if confirmed is not None:
         request = emitted_card_request(state, confirmed[0])

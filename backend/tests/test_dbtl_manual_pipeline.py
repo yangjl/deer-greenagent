@@ -112,6 +112,11 @@ def test_profile_is_isolated_and_disables_background_writers(tmp_path: Path) -> 
     assert generated["projects"]["root"] == str((manual_root / "live" / "projects").resolve())
     assert generated["dbtl"]["mode"] == "graph_enabled"
     assert generated["dbtl"]["design_deck_feedback"] is True
+    assert generated["dbtl"]["conversational_discovery"] is True
+    assert generated["dbtl"]["discovery_project_history"] is True
+    assert generated["dbtl"]["discovery_global_memory"] is False
+    assert generated["dbtl"]["discovery_classifier_entry"] is False
+    assert generated["dbtl"]["discovery_auto_offer"] is False
     assert generated["memory"]["enabled"] is False
     assert generated["memory"]["injection_enabled"] is False
     assert generated["scheduler"]["enabled"] is False

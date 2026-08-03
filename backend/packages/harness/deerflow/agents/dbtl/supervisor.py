@@ -38,6 +38,7 @@ never loops between branches, so one request cannot silently become several, and
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from collections.abc import Mapping, Sequence
@@ -123,6 +124,7 @@ from deerflow.agents.dbtl.supervisor_support.human_input_protocol import (
     COUNCIL_PREFLIGHT_PREFIX,
     DESIGN_AUTHORING_PREFIX,
     DESIGN_CLARIFICATION_PREFIX,
+    DISCOVERY_START_PREFIX,
     PRESENT_ARTIFACT_PREFIX,
     SETUP_CLARIFICATION_PREFIX,
     SETUP_CONFIRMATION_PREFIX,
@@ -137,6 +139,7 @@ from deerflow.agents.dbtl.supervisor_support.human_input_protocol import (
     MAX_CARD_REQUEST_ID_CHARS as _MAX_CARD_REQUEST_ID_CHARS,
 )
 from deerflow.agents.dbtl.supervisor_support.ports import StageExecutionPort, compatible_stage_port
+from deerflow.agents.middlewares.dbtl_discovery_policy_middleware import DBTL_DISCOVERY_CONTEXT_KEY
 from deerflow.dbtl.branches import (
     BranchDecision,
     SupervisorBranch,
@@ -160,7 +163,19 @@ from deerflow.dbtl.council_proposal import (
 from deerflow.dbtl.council_settings import (
     participants_payload,
 )
-from deerflow.dbtl.routing import ExplicitChoice
+from deerflow.dbtl.discovery import (
+    DiscoveryAction,
+    DiscoveryDraft,
+    DiscoveryProvenance,
+    DiscoveryStatus,
+    DiscoveryTrigger,
+    DiscoveryValue,
+    assess_discovery_readiness,
+    build_discovery_package,
+    discovery_card_request,
+    wants_discovery_offer,
+)
+from deerflow.dbtl.routing import ExplicitChoice, RouteKind, RouteSource, RoutingDecision
 from deerflow.dbtl.setup_questions import (
     SetupQuestion,
     build_questions_prompt,
@@ -436,11 +451,12 @@ def _setup_clarification_message(
     source_request: str,
     request_nonce: str,
     questions: Sequence[SetupQuestion],
+    cycle_id: str | None = None,
 ) -> tuple[AIMessage, ToolMessage]:
     """Ask the post-approval design questions as a Human Input Card.
 
-    This runs *after* the human approved the cycle, so the framing is "the
-    record is being created, here is what Design still needs" rather than a
+    This runs *after* the human approved and the server created the cycle, so
+    the framing is "the record exists, here is what Design still needs" rather than a
     gate standing in front of the offer.
 
     The originating request is stored on the card because the answer has to be
@@ -464,6 +480,7 @@ def _setup_clarification_message(
         "input_mode": "free_text",
         "source_request": source_request,
         "missing_fields": list(decision.missing_fields),
+        **({"dbtl_cycle_id": cycle_id} if cycle_id else {}),
         # The structured form of what the question text renders, so a later
         # card UI can show per-question fields without emitting them twice.
         "setup_questions": [
@@ -724,19 +741,11 @@ def _design_inputs_acknowledgement(state: dict) -> str | None:
     questions card is only ever raised after an approval — answering it already
     implies one, and the emitted-card check keeps a forged id from faking it.
 
-    Terminal on purpose. The cycle already exists — the authenticated action
-    created it at approval — so there is nothing left to confirm, and falling
-    through would ask someone to approve what they just approved.
-
-    It must not send the owner to a refusal. Automatic Design-meeting kickoff is
-    written only by the project-rail creation endpoints, so a cycle created
-    through *this* branch reaches `design` with no worker runs and no artifact —
-    and `submit_stage_for_review` refuses precisely that ("Stage 'design' has no
-    artifact to review; attach evidence first."). Telling someone to review and
-    submit here named the one action guaranteed to fail, and omitted the step
-    that produces a package at all. This is the only sentence standing between
-    the owner and an apparently dead cycle, so it says what actually happens
-    next.
+    Terminal on purpose. The cycle already exists — the server created it at
+    approval — so there is nothing left to confirm, and falling through would
+    ask someone to approve what they just approved. Production setup now turns
+    this answer into the Design preflight in the same server run; this text is
+    retained only for adapters that cannot preview a meeting.
     """
     answered = _card_answer(state, SETUP_CLARIFICATION_PREFIX)
     if answered is None:
@@ -826,7 +835,10 @@ def _council_preflight_message(
     recommendation,
     *,
     request_nonce: str,
+    request_text: str | None = None,
     model_options: Sequence[str] = (),
+    discovery_event_id: str | None = None,
+    discovery_receipt_event_id: str | None = None,
 ) -> tuple[AIMessage, ToolMessage]:
     """Show who will sit in the design meeting, and let the human set it up.
 
@@ -880,6 +892,14 @@ def _council_preflight_message(
         "council_participants": participants_payload(plan, model_options=model_options),
         "recommended_depth": recommendation.depth.value,
         "recommended_option_id": recommendation.depth.value,
+        # The answer that accepts this roster arrives as hidden card transport.
+        # Bind the exact server-resolved request here so dispatch does not fall
+        # back to an older visible turn after the browser's one-shot scope is
+        # gone. Artifacts are stripped from external input, so this remains a
+        # server-owned scope and context binding.
+        **({"dbtl_request_text": request_text[:8_000]} if request_text else {}),
+        **({"dbtl_discovery_event_id": discovery_event_id} if discovery_event_id else {}),
+        **({"dbtl_discovery_receipt_event_id": discovery_receipt_event_id} if discovery_receipt_event_id else {}),
     }
     return build_human_input_messages(
         request_id=request_id,
@@ -1251,6 +1271,9 @@ def build_supervisor_graph(
     depth_interpreter=None,
     thread_cycle_resolver=None,
     principal_request_context: Mapping[str, Any] | None = None,
+    discovery_store=None,
+    discovery_context_provider=None,
+    cycle_creator=None,
 ) -> StateGraph:
     """Build (but do not compile) the supervisor graph.
 
@@ -1273,7 +1296,13 @@ def build_supervisor_graph(
     writer = question_writer or _make_llm_question_writer(context, principal_request_context)
     depth_reader = depth_interpreter or make_llm_depth_interpreter(principal_request_context)
 
-    def decide(state: dict, thread_cycle_id: str | None = None) -> BranchDecision:
+    def decide(
+        state: dict,
+        thread_cycle_id: str | None = None,
+        active_discovery_id: str | None = None,
+        *,
+        discovery_suppressed: bool = False,
+    ) -> BranchDecision:
         text, recovered_choice, recovered_cycle_id = _routing_input(state)
         # The recovered choice wins over the request's own. Answering a card is
         # not choosing a scope: the client sends a scope with every request and
@@ -1288,8 +1317,49 @@ def build_supervisor_graph(
             explicit_choice=recovered_choice if recovered_choice is not None else context.explicit_choice,
             is_new_conversation=_is_new_conversation(state),
             thread_cycle_id=thread_cycle_id or context.thread_cycle_id,
+            active_discovery_id=active_discovery_id or context.active_discovery_id,
+            discovery_suppressed=discovery_suppressed or context.discovery_suppressed,
         )
         return resolve_branch(text, active)
+
+    async def _discovery_routing_state(config: RunnableConfig) -> tuple[dict[str, Any] | None, bool]:
+        if discovery_store is None or not context.discovery_enabled or not context.project_id:
+            return None, False
+        raw_context = request_context(config)
+        thread_id = str((config.get("configurable", {}) or {}).get("thread_id") or raw_context.get("thread_id") or "")
+        user_id = str(raw_context.get("user_id") or "")
+        if not thread_id or not user_id:
+            return None, False
+        try:
+            latest_reader = getattr(discovery_store, "get_latest", None)
+            if callable(latest_reader):
+                latest = await latest_reader(project_id=context.project_id, thread_id=thread_id, user_id=user_id)
+            else:
+                # Compatibility for injected Phase 1 ports that predate terminal
+                # suppression. Production repositories implement ``get_latest``.
+                latest = await discovery_store.get_active(
+                    project_id=context.project_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                )
+        except Exception:  # noqa: BLE001 - classifier entry must fail closed to ordinary work
+            logger.warning("DBTL discovery: routing state is unavailable", exc_info=True)
+            return None, True
+        if latest is None:
+            return None, False
+        if latest.get("status") in {
+            DiscoveryStatus.GATHERING.value,
+            DiscoveryStatus.READY.value,
+            DiscoveryStatus.OFFERED.value,
+        }:
+            return latest, False
+        # A deliberate ordinary-work decision suppresses classifier re-entry
+        # for this conversation. Explicit start still wins on routing rung 2.
+        return None, latest.get("status") == DiscoveryStatus.DECLINED.value
+
+    async def _active_discovery(config: RunnableConfig) -> dict[str, Any] | None:
+        active, _suppressed = await _discovery_routing_state(config)
+        return active
 
     async def _conversation_cycle_id(config: RunnableConfig) -> str | None:
         """The live cycle this conversation opened, or ``None``.
@@ -1358,7 +1428,13 @@ def build_supervisor_graph(
         if _confirmation_answer(state) == "create_cycle" and not _has_emitted_card(state, SETUP_CLARIFICATION_PREFIX):
             return SupervisorBranch.CLARIFICATION.value
 
-        decision = decide(state, await _conversation_cycle_id(config))
+        active_discovery, discovery_suppressed = await _discovery_routing_state(config)
+        decision = decide(
+            state,
+            await _conversation_cycle_id(config),
+            str(active_discovery.get("id") or "") if active_discovery else None,
+            discovery_suppressed=discovery_suppressed,
+        )
         if decision.branch is SupervisorBranch.ORDINARY and context.project_id and context.selected_cycle_id is None and _stage_control_intent(_latest_user_text(state)) is not None:
             return SupervisorBranch.CYCLE_CONTINUATION.value
         # An unanswered control outranks the parked-Design route below. Parking
@@ -1405,27 +1481,339 @@ def build_supervisor_graph(
         )
         return decision.branch.value
 
+    async def discovery(state: dict, config: RunnableConfig) -> dict:
+        """Run one read-only Lead turn against a durable pre-cycle candidate."""
+
+        if discovery_store is None or not context.project_id:
+            return {"messages": [receipt_message("Conversational discovery is unavailable, so no cycle was created. Continue as ordinary work or try again after an administrator enables its durable store.")]}
+        raw_context = request_context(config)
+        thread_id = str((config.get("configurable", {}) or {}).get("thread_id") or raw_context.get("thread_id") or "")
+        user_id = str(raw_context.get("user_id") or "")
+        if not thread_id or not user_id:
+            return {"messages": [receipt_message("Conversational discovery could not verify this project conversation, so no cycle was created.")]}
+
+        latest_text = _latest_user_text(state)
+        active = await discovery_store.get_active(project_id=context.project_id, thread_id=thread_id, user_id=user_id)
+        answered = _card_answer(state, DISCOVERY_START_PREFIX)
+        if answered is not None:
+            request = _emitted_card_request(state, answered[0])
+            if request is None or request.get("clarification_type") != "dbtl_discovery_start":
+                return {"messages": [receipt_message("That discovery control is no longer valid. No cycle was created.")]}
+            request_discovery_id = str(request.get("discovery_id") or "")
+            if active is None or str(active.get("id") or "") != request_discovery_id:
+                active = await discovery_store.get(
+                    request_discovery_id,
+                    project_id=context.project_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                )
+            if active is None:
+                return {"messages": [receipt_message("That discovery control is no longer valid. No cycle was created.")]}
+            action = answered[1].strip().lower()
+            if active.get("status") == DiscoveryStatus.CONFIRMED.value and action != DiscoveryAction.START.value:
+                return {"messages": [receipt_message("That discovery has already created its cycle; the earlier decision is unchanged.")]}
+            if active.get("status") != DiscoveryStatus.CONFIRMED.value:
+                try:
+                    active = await discovery_store.acknowledge_offer(
+                        discovery_id=str(active["id"]),
+                        expected_revision=int(request.get("discovery_revision") or 0),
+                        package_hash=str(request.get("proposal_hash") or ""),
+                        event_id=str(request.get("discovery_event_id") or ""),
+                        project_id=context.project_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    )
+                except ValueError:
+                    return {"messages": [receipt_message("That discovery card is stale. No cycle was created; use the newest proposal in this conversation.")]}
+            if action == DiscoveryAction.START.value:
+                try:
+                    confirmed = await discovery_store.confirm_and_create_cycle(
+                        discovery_id=str(active["id"]),
+                        expected_revision=int(request.get("discovery_revision") or 0),
+                        package_hash=str(request.get("proposal_hash") or ""),
+                        project_id=context.project_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        submission_id=answered[0],
+                    )
+                except ValueError:
+                    return {"messages": [receipt_message("That discovery start conflicted with a newer decision. No additional cycle was created.")]}
+                receipt_event = next(
+                    (item for item in confirmed.get("outbox") or [] if item.get("event_type") == "creation_receipt"),
+                    None,
+                )
+                receipt_payload = dict((receipt_event or {}).get("payload") or {})
+                receipt_id = str((receipt_event or {}).get("id") or "")
+                cycle_id = str(confirmed["cycle_id"])
+                kickoff_event = next(
+                    (item for item in confirmed.get("outbox") or [] if item.get("event_type") == "design_kickoff"),
+                    None,
+                )
+                kickoff_id = str((kickoff_event or {}).get("id") or "")
+                messages: list = [
+                    receipt_message(
+                        str(receipt_payload.get("message") or f"DBTL cycle {cycle_id} was created from the accepted discovery proposal. Design has not run yet."),
+                        message_id=receipt_id or None,
+                        metadata={
+                            "dbtl_discovery_event_id": receipt_id,
+                            "dbtl_discovery_cycle_id": cycle_id,
+                            "dbtl_discovery_package_hash": str(confirmed.get("package_hash") or ""),
+                            "dbtl_discovery_design_kickoff_pending": True,
+                        },
+                    )
+                ]
+                preview = getattr(stage_adapter, "preview_council", None)
+                if callable(preview):
+                    try:
+                        request_text = "Start Design from the accepted discovery package."
+                        plan = preview(
+                            project_id=context.project_id,
+                            cycle_id=cycle_id,
+                            request_text=request_text,
+                            config=config,
+                        )
+                        if isawaitable(plan):
+                            plan = await plan
+                        if plan is not None and plan.dispatchable:
+                            cycle_decision = BranchDecision(
+                                branch=SupervisorBranch.CYCLE_CONTINUATION,
+                                route=RoutingDecision(
+                                    kind=RouteKind.CYCLE_CONTINUATION,
+                                    source=RouteSource.ACTIVE_DISCOVERY,
+                                    cycle_id=cycle_id,
+                                ),
+                                cycle_id=cycle_id,
+                            )
+                            recommendation = await interpret_depth(
+                                request_text,
+                                interpreter=depth_reader,
+                            )
+                            messages.extend(
+                                _council_preflight_message(
+                                    cycle_decision,
+                                    plan,
+                                    recommendation,
+                                    request_nonce=kickoff_id or receipt_id,
+                                    request_text=request_text,
+                                    model_options=_adapter_known_models(stage_adapter),
+                                    discovery_event_id=kickoff_id or None,
+                                    discovery_receipt_event_id=receipt_id or None,
+                                )
+                            )
+                    except Exception:  # noqa: BLE001 - cycle creation already committed; preserve its receipt
+                        logger.warning("DBTL discovery: Design preflight failed after cycle %s was created", cycle_id, exc_info=True)
+                return {
+                    "messages": messages,
+                }
+            if action == DiscoveryAction.KEEP_DISCUSSING.value:
+                await discovery_store.transition(
+                    discovery_id=str(active["id"]),
+                    expected_revision=int(active["revision"]),
+                    target=DiscoveryStatus.GATHERING,
+                )
+                return {"messages": [receipt_message("Keeping this discovery open. Continue in the chatbox; no cycle has been created.")]}
+            if action == DiscoveryAction.CONTINUE_ORDINARY.value:
+                await discovery_store.transition(
+                    discovery_id=str(active["id"]),
+                    expected_revision=int(active["revision"]),
+                    target=DiscoveryStatus.DECLINED,
+                )
+                return {"messages": [receipt_message("Discovery closed. No cycle was created; the next request is ordinary project work.")]}
+            return {"messages": [receipt_message("That discovery option is not valid. No cycle was created.")]}
+
+        discovery_evidence: dict[str, Any] = {}
+        if discovery_context_provider is not None:
+            try:
+                loaded = discovery_context_provider(
+                    project_id=context.project_id,
+                    project_root=str(raw_context.get("project_root") or ""),
+                    current_thread_id=thread_id,
+                    user_id=user_id,
+                    query=latest_text,
+                )
+                if isawaitable(loaded):
+                    loaded = await loaded
+                if isinstance(loaded, dict):
+                    discovery_evidence = loaded
+            except Exception:  # noqa: BLE001 - project context is optional enrichment
+                logger.warning("DBTL discovery: project context retrieval failed", exc_info=True)
+
+        previous_draft = dict((active or {}).get("draft") or {})
+        structured_draft = build_discovery_package(latest_text, previous_draft)
+        if discovery_evidence:
+            structured_draft["context_refs"] = list(discovery_evidence.get("source_refs") or [])
+            structured_draft["context_conflicts"] = list(discovery_evidence.get("conflicts") or [])
+        if active is None:
+            entry_decision = decide(state)
+            trigger = DiscoveryTrigger.CLASSIFIER if entry_decision.route.source is RouteSource.CLASSIFIER else DiscoveryTrigger.EXPLICIT
+            active = await discovery_store.begin(
+                project_id=context.project_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                policy_version=context.policy_version,
+                trigger=trigger,
+                latest_user_turn=latest_text,
+                structured_draft=structured_draft,
+            )
+        else:
+            if active.get("status") == DiscoveryStatus.OFFERED.value:
+                active = await discovery_store.transition(
+                    discovery_id=str(active["id"]),
+                    expected_revision=int(active["revision"]),
+                    target=DiscoveryStatus.GATHERING,
+                )
+            active = await discovery_store.record_turn(
+                discovery_id=str(active["id"]),
+                expected_revision=int(active["revision"]),
+                latest_user_turn=latest_text,
+                structured_draft=structured_draft,
+            )
+
+        discovery_context = {
+            "active": True,
+            "discovery_id": str(active["id"]),
+            "revision": int(active["revision"]),
+            "status": str(active["status"]),
+            "project_id": context.project_id,
+            "thread_id": thread_id,
+            "no_cycle_exists": True,
+            **({"evidence": discovery_evidence} if discovery_evidence else {}),
+        }
+        active_context = {**raw_context, DBTL_DISCOVERY_CONTEXT_KEY: discovery_context}
+        discovery_config = dict(config)
+        discovery_config["context"] = active_context
+        configurable = dict(discovery_config.get("configurable") or {})
+        configurable["context"] = active_context
+        discovery_config["configurable"] = configurable
+        run_id = run_id_from_config(config)
+        parent_id = supervisor_activity_id(run_id) if isinstance(run_id, str) and run_id else None
+        with activity_parent_context(parent_id):
+            lead_result = await lead_agent.ainvoke(state, config=discovery_config)
+
+        draft = DiscoveryDraft(
+            discovery_id=str(active["id"]),
+            project_id=context.project_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            trigger=DiscoveryTrigger(str(active.get("trigger") or DiscoveryTrigger.EXPLICIT.value)),
+            policy_version=str(active["policy_version"]),
+            revision=int(active["revision"]),
+            status=DiscoveryStatus(str(active["status"])),
+            proposed_title=DiscoveryValue(str(structured_draft.get("proposed_title") or ""), DiscoveryProvenance.USER_TURN),
+            objective=DiscoveryValue(str(structured_draft.get("objective") or ""), DiscoveryProvenance.USER_TURN),
+            rationale=DiscoveryValue(str(structured_draft.get("rationale") or ""), DiscoveryProvenance.MODEL_SUGGESTION),
+            intended_outputs=tuple(DiscoveryValue(str(item), DiscoveryProvenance.MODEL_SUGGESTION) for item in structured_draft.get("intended_outputs") or []),
+            known_inputs=tuple(DiscoveryValue(str(item), DiscoveryProvenance.USER_TURN) for item in structured_draft.get("known_inputs") or []),
+            success_criteria=((DiscoveryValue(str(structured_draft.get("success_criteria")), DiscoveryProvenance.USER_TURN),) if str(structured_draft.get("success_criteria") or "").strip() else ()),
+            rejection_criteria=tuple(DiscoveryValue(str(item), DiscoveryProvenance.USER_TURN) for item in structured_draft.get("rejection_criteria") or []),
+            open_questions=tuple(str(item) for item in structured_draft.get("open_questions") or []),
+        )
+        if not assess_discovery_readiness(draft).ready:
+            return lead_result
+
+        ready = await discovery_store.mark_ready(discovery_id=draft.discovery_id, expected_revision=draft.revision)
+        should_offer = draft.trigger is DiscoveryTrigger.EXPLICIT or context.discovery_auto_offer or wants_discovery_offer(latest_text)
+        if not should_offer:
+            return lead_result
+        package = {**structured_draft, "discovery_id": draft.discovery_id, "discovery_revision": int(ready["revision"]), "policy_version": draft.policy_version}
+        offered = await discovery_store.offer(
+            discovery_id=draft.discovery_id,
+            expected_revision=int(ready["revision"]),
+            package=package,
+        )
+        card_draft = replace(draft, revision=int(offered["revision"]), status=DiscoveryStatus.OFFERED, offered_revision=int(offered["revision"]))
+        request = discovery_card_request(card_draft, proposal_hash=str(offered["package_hash"]))
+        request_id = card_request_id(DISCOVERY_START_PREFIX, draft.discovery_id, str(card_draft.revision), str(offered["package_hash"]))
+        outbox_event = dict(offered.get("outbox") or {})
+        request.update(
+            {
+                "request_id": request_id,
+                "source_request": latest_text,
+                "discovery_event_id": str(outbox_event.get("id") or ""),
+            }
+        )
+        card_messages = build_human_input_messages(
+            request_id=request_id,
+            tool_args={
+                "question": request["question"],
+                "context": request["context"],
+                "clarification_type": request["clarification_type"],
+                "options": request["options"],
+            },
+            request=request,
+            fallback_content=f"{request['context']}\n\n{request['question']}",
+        )
+        return {**lead_result, "messages": [*list(lead_result.get("messages") or []), *card_messages]}
+
     async def clarification(state: dict, config: RunnableConfig) -> dict:
         decision = decide(state)
         source_request, _, _ = _routing_input(state)
         raw_context = request_context(config)
         request_nonce = str(raw_context.get("run_id") or "")
-        questions = await writer(source_request, decision.missing_fields)
+        cycle_id: str | None = None
+        creation_messages: list = []
+        confirmation = _card_answer(state, SETUP_CONFIRMATION_PREFIX)
+        if confirmation is not None and cycle_creator is not None and context.project_id:
+            request = _emitted_card_request(state, confirmation[0])
+            setup = dict((request or {}).get("dbtl_cycle_setup") or {})
+            thread_id = str((config.get("configurable", {}) or {}).get("thread_id") or raw_context.get("thread_id") or "")
+            user_id = str(raw_context.get("user_id") or "")
+            if request is None or not thread_id or not user_id:
+                return {"messages": [receipt_message("The cycle could not be created because this project conversation could not be verified. Start a new cycle request to try again.")]}
+            digest = hashlib.sha256(confirmation[0].encode()).hexdigest()[:32]
+            request_nonce = confirmation[0]
+            try:
+                created = cycle_creator(
+                    cycle_id=f"cycle-{digest}",
+                    project_id=context.project_id,
+                    title=str(setup.get("title") or "New DBTL cycle"),
+                    cycle_class="computational",
+                    cycle_weight="full",
+                    research_question=str(setup.get("objective") or source_request),
+                    objective=str(setup.get("objective") or source_request),
+                    success_criteria=str(setup.get("success_criteria") or ""),
+                    created_by=user_id,
+                    policy_version=context.policy_version,
+                    idempotency_key=f"setup:{digest}",
+                    parent_cycle_id=None,
+                    originating_thread_id=thread_id,
+                )
+                if isawaitable(created):
+                    created = await created
+            except Exception:  # noqa: BLE001 - surface a retry path without claiming creation
+                logger.warning("DBTL setup: server-owned cycle creation failed", exc_info=True)
+                return {"messages": [receipt_message("The cycle was not created because the durable write failed. Start a new cycle request to retry; no Design work ran.")]}
+            cycle_id = str((created or {}).get("id") or "") or None
+            if cycle_id is None:
+                return {"messages": [receipt_message("The cycle write returned no durable cycle identity. No Design work ran; start a new cycle request to retry.")]}
+            creation_messages.append(
+                receipt_message(
+                    f"DBTL cycle {cycle_id} was created from your confirmed setup. Design has not run yet.",
+                    message_id=f"setup-cycle-receipt:{digest}",
+                )
+            )
+        try:
+            questions = await writer(source_request, decision.missing_fields)
+        except Exception:  # noqa: BLE001 - a created cycle must never lose its next visible control
+            logger.warning("DBTL setup: question drafting failed", exc_info=True)
+            questions = fallback_questions(decision.missing_fields)
         return {
-            "messages": list(
-                _setup_clarification_message(
+            "messages": [
+                *creation_messages,
+                *_setup_clarification_message(
                     decision,
                     context,
                     source_request=source_request,
                     request_nonce=request_nonce,
                     questions=questions,
-                )
-            )
+                    cycle_id=cycle_id,
+                ),
+            ]
         }
 
-    def cycle_setup(state: dict, config: RunnableConfig) -> dict:
+    async def cycle_setup(state: dict, config: RunnableConfig) -> dict:
         decision = decide(state)
-        acknowledgement = _setup_confirmation_acknowledgement(state) or _design_inputs_acknowledgement(state)
+        acknowledgement = _setup_confirmation_acknowledgement(state)
         if acknowledgement is not None:
             # A receipt, not a bare turn: no model call sits behind this reply,
             # so without the marker it lives in the checkpoint alone. Someone
@@ -1433,6 +1821,55 @@ def build_supervisor_graph(
             # silent -- the sentence telling them where to review the Design was
             # written and never saved.
             return {"messages": [receipt_message(acknowledgement)]}
+        design_answer = _card_answer(state, SETUP_CLARIFICATION_PREFIX)
+        if design_answer is not None:
+            design_request = _emitted_card_request(state, design_answer[0])
+            cycle_id = str((design_request or {}).get("dbtl_cycle_id") or "")
+            if cycle_id and callable(getattr(stage_adapter, "preview_council", None)):
+                # The setup answer is hidden card transport, so the generic
+                # visible-turn reader would return only the original request.
+                # Routing input resolves the answer against the emitted card
+                # and combines both, which is the Design context the owner
+                # actually approved.
+                request_text, _choice, _recovered_cycle = _routing_input(state)
+                try:
+                    plan = stage_adapter.preview_council(
+                        project_id=context.project_id,
+                        cycle_id=cycle_id,
+                        request_text=request_text,
+                        config=config,
+                    )
+                    if isawaitable(plan):
+                        plan = await plan
+                    if plan is not None and plan.dispatchable:
+                        continuation = BranchDecision(
+                            branch=SupervisorBranch.CYCLE_CONTINUATION,
+                            route=RoutingDecision(
+                                kind=RouteKind.CYCLE_CONTINUATION,
+                                source=RouteSource.EXPLICIT_CHOICE,
+                                cycle_id=cycle_id,
+                            ),
+                            cycle_id=cycle_id,
+                        )
+                        recommendation = await interpret_depth(
+                            request_text,
+                            interpreter=depth_reader,
+                        )
+                        return {
+                            "messages": list(
+                                _council_preflight_message(
+                                    continuation,
+                                    plan,
+                                    recommendation,
+                                    request_nonce=design_answer[0],
+                                    request_text=request_text,
+                                    model_options=_adapter_known_models(stage_adapter),
+                                )
+                            )
+                        }
+                except Exception:  # noqa: BLE001 - preserve the cycle and give an honest recovery path
+                    logger.warning("DBTL setup: Design preflight failed for cycle %s", cycle_id, exc_info=True)
+            return {"messages": [receipt_message(_design_inputs_acknowledgement(state) or "Your design inputs were recorded, but the Design preflight is unavailable. Select this cycle and ask to start Design when ready.")]}
         source_request, _choice, _cycle_id = _routing_input(state)
         raw_context = request_context(config)
         request_nonce = str(raw_context.get("run_id") or "")
@@ -1468,6 +1905,28 @@ def build_supervisor_graph(
                 )
         raw_context = request_context(config)
         request_nonce = str(raw_context.get("run_id") or "")
+        preflight_answer = _card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
+        if preflight_answer is not None and discovery_store is not None and context.project_id:
+            preflight_request = _emitted_card_request(state, preflight_answer[0])
+            discovery_event_id = str((preflight_request or {}).get("dbtl_discovery_event_id") or "")
+            discovery_receipt_event_id = str((preflight_request or {}).get("dbtl_discovery_receipt_event_id") or "")
+            thread_id = str((config.get("configurable", {}) or {}).get("thread_id") or raw_context.get("thread_id") or "")
+            if thread_id:
+                for event_id, event_type in (
+                    (discovery_event_id, "design_kickoff"),
+                    (discovery_receipt_event_id, "creation_receipt"),
+                ):
+                    if not event_id:
+                        continue
+                    try:
+                        await discovery_store.mark_outbox_delivered(
+                            event_id=event_id,
+                            event_type=event_type,
+                            project_id=context.project_id,
+                            thread_id=thread_id,
+                        )
+                    except Exception:  # noqa: BLE001 - the server card remains authoritative
+                        logger.warning("DBTL discovery: could not settle %s outbox event %s", event_type, event_id, exc_info=True)
 
         handoff = await handle_stage_handoff(
             state=state,
@@ -1645,6 +2104,7 @@ def build_supervisor_graph(
                             plan,
                             recommendation,
                             request_nonce=request_nonce,
+                            request_text=request_text,
                             model_options=offered_models,
                         )
                     )
@@ -1905,6 +2365,17 @@ def build_supervisor_graph(
         widens what it may do.
         """
         decision = decide(state)
+        if context.explicit_choice is ExplicitChoice.ORDINARY:
+            active_discovery = await _active_discovery(config)
+            if active_discovery is not None:
+                try:
+                    await discovery_store.transition(
+                        discovery_id=str(active_discovery["id"]),
+                        expected_revision=int(active_discovery["revision"]),
+                        target=DiscoveryStatus.DECLINED,
+                    )
+                except Exception:  # noqa: BLE001 - ordinary work must remain available
+                    logger.warning("DBTL discovery: could not record ordinary opt-out", exc_info=True)
         extra: dict[str, Any] = {}
         if decision.cycle_id:
             reader = getattr(stage_adapter, "parked_design_context", None)
@@ -1941,6 +2412,7 @@ def build_supervisor_graph(
     builder.add_node(SupervisorBranch.CLARIFICATION.value, clarification)
     builder.add_node(SupervisorBranch.CYCLE_SETUP.value, cycle_setup)
     builder.add_node(SupervisorBranch.CYCLE_CONTINUATION.value, cycle_continuation)
+    builder.add_node(SupervisorBranch.DISCOVERY.value, discovery)
 
     builder.add_conditional_edges(START, route, [branch.value for branch in SupervisorBranch])
     for branch in SupervisorBranch:
@@ -2045,12 +2517,14 @@ def make_project_supervisor(config: RunnableConfig):
         make_llm_transition_assessor,
     )
     from deerflow.dbtl.cycle_state import TERMINAL_CYCLE_STATES
-    from deerflow.persistence.dbtl import DbtlCycleRepository
+    from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlDiscoveryRepository
     from deerflow.persistence.engine import get_session_factory
+    from deerflow.runtime.context_keys import RUN_EVENT_STORE_CONFIG_KEY, THREAD_STORE_CONFIG_KEY
 
     session_factory = get_session_factory()
     if session_factory is None:
         raise RuntimeError("DBTL stage execution requires an initialized SQL persistence layer.")
+    cycle_repo = DbtlCycleRepository(session_factory)
 
     # The run's principal travels into every one-shot factory so DBTL's
     # internal model calls enforce the same ``model:use`` policy as the
@@ -2058,6 +2532,56 @@ def make_project_supervisor(config: RunnableConfig):
     from deerflow.agents.dbtl.model_access import principal_context
 
     run_principal_context = principal_context(config)
+    event_store = config.get(RUN_EVENT_STORE_CONFIG_KEY)
+    thread_store = config.get(THREAD_STORE_CONFIG_KEY)
+
+    async def _project_discovery_context(**scope):
+        from deerflow.dbtl.discovery_context import (
+            build_discovery_memory_context,
+            build_project_discovery_context,
+            detect_context_conflicts,
+        )
+
+        query = str(scope.pop("query", ""))
+        pack: dict[str, Any] = {}
+        if runtime_app_config.dbtl.discovery_project_history and event_store is not None and thread_store is not None and scope.get("project_root"):
+            pack = await build_project_discovery_context(
+                **scope,
+                thread_store=thread_store,
+                event_store=event_store,
+            )
+        if runtime_app_config.dbtl.discovery_global_memory:
+            try:
+                from deerflow.agents.memory.manager import get_memory_manager
+
+                memory = await build_discovery_memory_context(
+                    query=query,
+                    project_id=str(scope["project_id"]),
+                    user_id=str(scope["user_id"]),
+                    memory_manager=get_memory_manager(),
+                    publication_reader=cycle_repo.active_publications_for_project,
+                    runtime_context={
+                        "project_id": str(scope["project_id"]),
+                        "project_root": str(scope.get("project_root") or ""),
+                    },
+                )
+            except Exception:  # noqa: BLE001 - optional memory must not erase project evidence
+                logger.warning("DBTL discovery: memory context initialization failed", exc_info=True)
+                memory = {}
+            if memory.get("items"):
+                prior_threads = list(pack.get("prior_threads") or [])
+                memory_items = list(memory.get("items") or [])
+                pack = {
+                    "version": 1,
+                    "project_id": str(scope["project_id"]),
+                    "manifest": list(pack.get("manifest") or []),
+                    "prior_threads": prior_threads,
+                    "conflicts": detect_context_conflicts(prior_threads, memory_items),
+                    "source_refs": [*list(pack.get("source_refs") or []), *list(memory.get("source_refs") or [])],
+                    "budgets": {**dict(pack.get("budgets") or {}), "memory": dict(memory.get("budgets") or {})},
+                    "memory": memory,
+                }
+        return pack
 
     async def _resolve_conversation_cycle(*, project_id: str, thread_id: str) -> str | None:
         """The live cycle this conversation opened, from the durable record.
@@ -2068,7 +2592,7 @@ def make_project_supervisor(config: RunnableConfig):
         can mean — and when a conversation opened several, the most recent is
         the one it is still working on.
         """
-        cycles = await DbtlCycleRepository(session_factory).list_cycles(project_id)
+        cycles = await cycle_repo.list_cycles(project_id)
         mine = [cycle for cycle in cycles if cycle.get("originating_thread_id") == thread_id and cycle.get("state") not in TERMINAL_CYCLE_STATES]
         if not mine:
             return None
@@ -2076,12 +2600,19 @@ def make_project_supervisor(config: RunnableConfig):
         cycle_id = newest.get("id")
         return str(cycle_id) if cycle_id else None
 
+    supervisor_context = replace(
+        supervisor_context_from_config(config),
+        discovery_enabled=runtime_app_config.dbtl.conversational_discovery_enabled,
+        discovery_classifier_entry=runtime_app_config.dbtl.discovery_classifier_entry,
+        discovery_auto_offer=runtime_app_config.dbtl.discovery_auto_offer,
+        policy_version=runtime_app_config.dbtl.policy_version,
+    )
     graph = build_supervisor_graph(
         lead_agent=lead_agent,
-        context=supervisor_context_from_config(config),
+        context=supervisor_context,
         state_schema=get_thread_state_schema(mode),
         stage_adapter=LiveStageAdapter(
-            repo=DbtlCycleRepository(session_factory),
+            repo=cycle_repo,
             app_config=runtime_app_config,
             runtime_config=config,
             roster_writer=make_llm_roster_writer(run_principal_context),
@@ -2091,5 +2622,8 @@ def make_project_supervisor(config: RunnableConfig):
         ),
         thread_cycle_resolver=_resolve_conversation_cycle,
         principal_request_context=run_principal_context,
+        discovery_store=DbtlDiscoveryRepository(session_factory),
+        discovery_context_provider=_project_discovery_context,
+        cycle_creator=cycle_repo.create_cycle,
     )
     return graph.compile()

@@ -93,6 +93,7 @@ def project_manifest(project_root: str, *, limit: int = 120) -> list[dict[str, A
                 "path": f"{WORKSPACE_VIRTUAL_ROOT}/{relative.as_posix()}",
                 "kind": "directory" if path.is_dir() else "file",
                 "size_bytes": 0 if path.is_dir() else stat.st_size,
+                "modified_ns": stat.st_mtime_ns,
             }
         )
     return entries

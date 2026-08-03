@@ -47,7 +47,11 @@ from deerflow.runtime.checkpoint_state import (
     graph_state_schema,
     graph_writable_channels,
 )
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.context_keys import (
+    CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+    RUN_EVENT_STORE_CONFIG_KEY,
+    THREAD_STORE_CONFIG_KEY,
+)
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -366,7 +370,11 @@ def _build_runtime_context(
     runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
     if isinstance(caller_context, dict):
         for key, value in caller_context.items():
-            if key == CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY:
+            if key in {
+                CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+                RUN_EVENT_STORE_CONFIG_KEY,
+                THREAD_STORE_CONFIG_KEY,
+            }:
                 continue
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
@@ -737,6 +745,14 @@ async def run_agent(
         # runtime-internal channel; user code must not depend on the key name.
         if journal is not None:
             runtime_ctx["__run_journal"] = journal
+        # Read-only dependencies for server-owned context composition. Keep
+        # them on top-level run config, outside ToolRuntime.context and every
+        # checkpointed configurable channel. The worker overwrites any caller
+        # value before the agent factory sees them.
+        if event_store is not None:
+            config[RUN_EVENT_STORE_CONFIG_KEY] = event_store
+        if thread_store is not None:
+            config[THREAD_STORE_CONFIG_KEY] = thread_store
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
@@ -778,6 +794,11 @@ async def run_agent(
             agent = agent_factory(config=initial_runnable_config, app_config=ctx.app_config)
         else:
             agent = agent_factory(config=initial_runnable_config)
+        # The factory has closed over the dependencies it needs. Do not pass
+        # persistence handles into LangGraph callbacks, tools, or serializers.
+        config.pop(RUN_EVENT_STORE_CONFIG_KEY, None)
+        config.pop(THREAD_STORE_CONFIG_KEY, None)
+        initial_runnable_config = RunnableConfig(**config)
 
         accessor = CheckpointStateAccessor.bind(
             agent,

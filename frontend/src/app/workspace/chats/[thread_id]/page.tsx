@@ -15,6 +15,7 @@ import {
 } from "@/components/workspace/chats";
 import { ContextUsageBadge } from "@/components/workspace/context-usage-badge";
 import {
+  DiscoveryComposerIndicator,
   useDbtlUpgradeProposal,
   useProjectCycleSelection,
 } from "@/components/workspace/dbtl";
@@ -43,6 +44,8 @@ import { Welcome } from "@/components/workspace/welcome";
 import {
   AUTO_REQUEST_CONTEXT,
   type RequestContext,
+  findNewDiscoveryCycle,
+  findNewSetupCycle,
   humanInputRunContext,
   nextContextAfterSend,
   normalizeContext,
@@ -50,6 +53,7 @@ import {
   runActivityMetadata,
   runContextPayload,
   useDbtlFeature,
+  useDiscoveryStatus,
   useProjectCycles,
 } from "@/core/dbtl";
 import { useBrowserControlEnabled } from "@/core/features";
@@ -141,6 +145,10 @@ export default function ChatPage() {
   const showDbtlScope = Boolean(
     projectId && dbtlFeature?.graph_execution_enabled,
   );
+  const { data: discoveryStatusData, refetch: refetchDiscoveryStatus } =
+    useDiscoveryStatus(projectId, isNewThread ? null : threadId, {
+      enabled: showDbtlScope && !isMock,
+    });
 
   const {
     thread,
@@ -172,6 +180,9 @@ export default function ChatPage() {
       setIsNewThread(false);
     },
     onFinish: (state) => {
+      if (showDbtlScope && !isMock && !isNewThread) {
+        void refetchDiscoveryStatus();
+      }
       if (document.hidden || !document.hasFocus()) {
         let body = "Conversation finished";
         const lastMessage = state.messages.at(-1);
@@ -222,22 +233,16 @@ export default function ChatPage() {
   const {
     selectedCycleId,
     selectCycle,
-    pendingDesignKickoff,
-    consumeDesignKickoff,
-    armDesignKickoff,
-    releaseDesignKickoff,
     pendingScopeRequest,
     consumeComposerScope,
   } = useProjectCycleSelection();
-  const {
-    evaluate: evaluateForUpgrade,
-    recordOutcome: recordProposalOutcome,
-    createFromNativeSetup,
-  } = upgradeProposal;
+  const { evaluate: evaluateForUpgrade, recordOutcome: recordProposalOutcome } =
+    upgradeProposal;
 
   // The scope selector only appears where the supervisor can actually route, so
   // the control is never offered when changing it would do nothing.
-  const { data: projectCycles } = useProjectCycles(projectId);
+  const { data: projectCycles, refetch: refetchProjectCycles } =
+    useProjectCycles(projectId);
   // No scope control: the chatbox is the only input surface, so the resting
   // state is "let the assistant judge" and the rail is what arms anything else.
   // Sending an explicit "ordinary" here would settle every request on the first
@@ -245,7 +250,10 @@ export default function ChatPage() {
   const [requestContext, setRequestContext] =
     useState<RequestContext>(AUTO_REQUEST_CONTEXT);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
-  const cycleList = projectCycles?.cycles ?? [];
+  const cycleList = useMemo(
+    () => projectCycles?.cycles ?? [],
+    [projectCycles?.cycles],
+  );
   // Resolve against the live list on every render: a cycle can be completed in
   // another tab, and the label must not keep claiming a scope that is gone.
   const effectiveContext = normalizeContext(
@@ -343,67 +351,10 @@ export default function ChatPage() {
       selectCycle,
     ],
   );
-  const designKickoffInFlight = useRef<number | null>(null);
-  useEffect(() => {
-    if (
-      !pendingDesignKickoff ||
-      designKickoffInFlight.current === pendingDesignKickoff.nonce ||
-      thread.isLoading ||
-      isMock
-    ) {
-      return;
-    }
-    const kickoff = pendingDesignKickoff;
-    const cycleContext: RequestContext = {
-      kind: "cycle",
-      cycleId: kickoff.cycleId,
-    };
-    designKickoffInFlight.current = kickoff.nonce;
-    setRequestContext(cycleContext);
-    void Promise.resolve(
-      sendMessage(
-        threadId,
-        {
-          text: [
-            `Start the Design council for “${kickoff.cycleTitle}”. Ground the design in this project's files and cycle context. Have independent specialists debate assumptions, evidence, risks, success criteria, and rejection criteria. If a project-owner decision is missing, ask me one focused clarification; otherwise synthesize a Design package for human review. Do not advance the gate.`,
-            kickoff.designNotes?.trim()
-              ? `\nThe project owner answered the setup questions as follows. Treat these as the owner's decisions rather than as suggestions to revisit:\n\n${kickoff.designNotes.trim()}`
-              : "",
-          ].join(""),
-          files: [],
-        },
-        runContextPayload(cycleContext),
-        {
-          runMetadata: runActivityMetadata(cycleContext),
-          additionalKwargs: {
-            hide_from_ui: true,
-            dbtl_design_kickoff: true,
-          },
-          onSent: () => {
-            consumeDesignKickoff(kickoff.nonce);
-            setRequestContext(AUTO_REQUEST_CONTEXT);
-            // The kickoff already carried its cycle id. Do not let that
-            // internal run silently scope the next human follow-up.
-            selectCycle(null);
-          },
-        },
-      ),
-    ).catch(() => {
-      designKickoffInFlight.current = null;
-    });
-  }, [
-    consumeDesignKickoff,
-    isMock,
-    pendingDesignKickoff,
-    selectCycle,
-    sendMessage,
-    thread.isLoading,
-    threadId,
-  ]);
-
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
       let sent = false;
+      const cycleIdsBeforeSend = new Set(cycleList.map((cycle) => cycle.id));
       await sendMessage(
         threadId,
         {
@@ -425,52 +376,76 @@ export default function ChatPage() {
       );
       if (sent && request.clarification_type === "cycle_setup_confirmation") {
         if (response.value === "create_cycle") {
-          if (!request.dbtl_cycle_setup) {
-            toast.error("The cycle setup payload is incomplete.");
-            return false;
+          let refreshed: Awaited<ReturnType<typeof refetchProjectCycles>>;
+          try {
+            refreshed = await refetchProjectCycles({ throwOnError: true });
+          } catch {
+            toast.error(
+              "The cycle response arrived, but the project cycle list could not refresh. Refresh the project to select it.",
+            );
+            return sent;
           }
-          const cycle = await createFromNativeSetup(
-            request.dbtl_cycle_setup,
-            request.request_id,
+          const cycle = findNewSetupCycle(
+            refreshed.data?.cycles ?? [],
+            cycleIdsBeforeSend,
             threadId,
           );
           if (!cycle) {
-            toast.error("Could not start the DBTL cycle.");
-            return false;
+            toast.error(
+              "No new cycle was recorded. Review the server response, then start a new cycle request to retry.",
+            );
+            return sent;
           }
           selectCycle(cycle.id);
-          // Armed, not sent. The supervisor answers this approval with the
-          // design questions, and a council convened before those are answered
-          // debates an objective and nothing else — which is how it produced
-          // confident syntheses of no use to anyone. The kickoff is released
-          // below, once the human has actually answered.
-          armDesignKickoff(cycle.id, cycle.title);
+          recordProposalOutcome("start_setup");
         } else if (response.value === "keep_ordinary") {
           recordProposalOutcome("keep_ordinary");
         } else {
           recordProposalOutcome("not_sure");
         }
       }
-      if (sent && request.clarification_type === "cycle_setup") {
-        // The design questions have been answered, so the council finally has
-        // something to ground itself in. Their answers travel with the kickoff
-        // rather than being left for it to rediscover from the transcript.
-        releaseDesignKickoff(
-          typeof response.value === "string" ? response.value : "",
+      if (
+        sent &&
+        request.clarification_type === "dbtl_discovery_start" &&
+        response.value === "start_cycle"
+      ) {
+        let refreshed: Awaited<ReturnType<typeof refetchProjectCycles>>;
+        try {
+          refreshed = await refetchProjectCycles({ throwOnError: true });
+        } catch {
+          toast.error(
+            "The cycle was created, but the project cycle list could not refresh. Refresh the project to select it.",
+          );
+          return sent;
+        }
+        const cycle = findNewDiscoveryCycle(
+          refreshed.data?.cycles ?? [],
+          cycleIdsBeforeSend,
+          threadId,
         );
+        if (!cycle) {
+          toast.error(
+            "The cycle was created, but the project cycle list could not refresh. Refresh the project to select it.",
+          );
+          return sent;
+        }
+        selectCycle(cycle.id);
+      }
+      if (sent && request.clarification_type === "dbtl_discovery_start") {
+        void refetchDiscoveryStatus();
       }
       return sent;
     },
     [
-      armDesignKickoff,
-      createFromNativeSetup,
+      refetchDiscoveryStatus,
       recordProposalOutcome,
-      releaseDesignKickoff,
+      refetchProjectCycles,
       selectCycle,
       selectedCycleId,
       sendMessage,
       showDbtlScope,
       threadId,
+      cycleList,
     ],
   );
   const handleStop = useCallback(async () => {
@@ -702,6 +677,11 @@ export default function ChatPage() {
                         !hasTodos && <Welcome mode={settings.context.mode} />
                       }
                       focusSignal={composerFocusSignal}
+                      extraTools={
+                        <DiscoveryComposerIndicator
+                          discovery={discoveryStatusData?.discovery}
+                        />
+                      }
                       disabled={
                         isMock ||
                         env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||

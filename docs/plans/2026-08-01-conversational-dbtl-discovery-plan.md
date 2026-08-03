@@ -1,7 +1,8 @@
 # Conversational DBTL discovery before cycle creation
 
-**Status:** Proposed standalone implementation plan. No implementation is
-authorized by this document.
+**Status:** Implementation in progress. Phases 0–4 are complete behind
+default-off rollout flags and have passed delegate-mode OCR review. Phases 5–6
+remain.
 
 **Date:** 2026-08-01
 
@@ -10,6 +11,40 @@ should let the Lead Agent continue the conversation, gather relevant context,
 and prepare a reviewable cycle proposal before showing the DBTL start card.
 Nothing in discovery creates a cycle, opens a stage, or grants the Lead Agent
 workflow authority.
+
+## Implementation audit — 2026-08-03
+
+The explicit discovery route, durable lifecycle, revision-bound native card,
+server-owned cycle creation, Design handoff, project context, and scoped memory
+composition are implemented behind default-off flags. Classifier entry,
+automatic offering, the server-derived composer indicator, and legacy-path
+cleanup remain.
+
+Several prerequisites have landed since the first draft:
+
+- the current Supervisor has native, checkpointed Human Input Cards for cycle
+  setup and recovers card identity from server-owned history;
+- deterministic graph replies can be reconciled through `RunJournal` with the
+  `deerflow_graph_receipt` marker, terminal `run.delivery` events exist, and
+  current handoff watchers verify that the expected control reached the thread
+  projection rather than equating run success with delivery;
+- routing now protects unanswered stage/build controls, accepts server-resolved
+  originating-thread cycles for narrow continuation requests, and supplies the
+  ordinary Lead Agent with a read-only DBTL status snapshot;
+- setup drafting/questions, classifier shadow evaluation, and the administrator
+  evaluation drawer provide useful bounded-model and rollout foundations; and
+- Design already receives a bounded project manifest, declared inputs, prior
+  meeting history, and the latest human clarification through the Stage Adapter.
+
+Those are foundations, not partial conversational discovery. In particular,
+cycle creation after the native setup card is still initiated by the browser's
+`createFromNativeSetup` mutation, and the frontend later sends a hidden
+`dbtl_design_kickoff` message assembled from setup answers. The minimum viable
+discovery implementation must replace that browser-owned authority gap with the
+server-bound, revisioned start transaction in this plan. Expanded project
+history, user-global memory, shared memory, and published-knowledge retrieval
+remain later slices rather than prerequisites for the first explicit-entry
+release.
 
 ## 1. Outcome
 
@@ -43,15 +78,17 @@ Supervisor create the durable cycle and enter Design.
 
 ## 2. Why this is a separate feature
 
-The current entry flow has the correct authority boundary but the wrong
-conversational order for an early, underspecified request:
+The current entry flow has a human confirmation boundary but still splits
+authority between the graph and browser, and it has the wrong conversational
+order for an early, underspecified request:
 
 ```text
 request looks DBTL-shaped
-    -> proposal / setup confirmation
+    -> native proposal / setup-confirmation card
     -> human agrees to start
-    -> setup questions
-    -> cycle creation and Design
+    -> browser creates the cycle through the cycle REST mutation
+    -> Supervisor asks setup questions
+    -> browser sends a hidden Design-kickoff request with those answers
 ```
 
 That order protects the person from accidentally creating a record, but it asks
@@ -254,16 +291,17 @@ Suggested statuses:
 
 The server, not the browser, owns this state. A browser-local state would lose
 the discovery on refresh and reintroduce the same one-shot scope failure seen in
-post-approval handoffs. Discovery therefore adopts the *target* durable handoff
-contract proposed in the stage-chat progress plan: a status row advanced only
-by compare-and-set, an `offered` card recorded only after durable journal
-insertion, and redelivery by outbox rather than loss on failure. That SQL
-handoff/outbox is not implemented on the current branch; if discovery lands
-first, it must introduce a small shared delivery primitive rather than claiming
-to reuse a row that does not yet exist. A single-use start consumes the
-discovery exactly once (see the server-bound start action below), with an
-explicit retryable delivery failure state rather than a status that can strand
-the record.
+post-approval handoffs. Discovery can reuse the current journal reconciliation,
+deterministic graph-receipt marker, terminal `run.delivery` event, and verified
+thread-projection watcher patterns. Those mechanisms solve message projection;
+they do not atomically bind a discovery revision to cycle creation. Discovery
+therefore still needs a small SQL compare-and-set/action-ledger plus outbox
+contract: advance status only by compare-and-set, mark `offered` only after the
+canonical card is durable, and retry projection without replaying cycle
+creation. There is still no generic `dbtl_stage_handoffs` SQL outbox to reuse.
+A single-use start consumes the discovery exactly once (see the server-bound
+start action below), with an explicit retryable delivery failure state rather
+than a status that can strand the record.
 
 ## 6. Context assembly
 
@@ -368,17 +406,24 @@ recorded in the run journal.
 
 Routing precedence becomes:
 
-1. server-emitted card answers and active-cycle controls;
-2. an explicit per-request choice: ordinary, continue a named cycle, or begin
-   discovery for a new one;
-3. a selected existing cycle when no explicit choice overrode it;
-4. active thread-bound discovery;
-5. classifier suggestion; and
-6. ordinary work.
+1. server-emitted card answers plus unanswered stage-handoff and Build controls;
+2. explicit per-request authority choices: ordinary work, continue a named
+   cycle, or begin discovery for a new one;
+3. review/stage-control intent and a selected, named, or narrowly
+   originating-thread-resolved live cycle;
+4. an active discovery bound to this project thread;
+5. an explicit typed request to start a new cycle when no stronger control or
+   existing-cycle intent applies;
+6. an eligible classifier suggestion; and
+7. ordinary work.
 
-The stage-control recovery fence from the stage-chat progress plan remains
-higher priority than discovery. A thread with a pending Build handoff must
-recover that handoff, not open a new pre-cycle conversation.
+This ordering incorporates guards that are now implemented outside the original
+pure routing helper. The pending-control fence, answered setup/card recovery,
+parked-Design behavior, and current-cycle ownership checks remain higher
+priority than discovery. A thread with a pending handoff must recover that
+control, not open a new pre-cycle conversation. An explicit new-cycle choice
+may intentionally start discovery beside another live cycle, but discovery is
+never inferred merely because a cycle already exists in the thread.
 
 ### 7.2 Persist a versioned discovery draft
 
@@ -500,10 +545,13 @@ The Lead Agent is not in this transaction. A cycle created from discovery enters
 the same governance schema as any other cycle; there is no lightweight cycle
 class that bypasses gates.
 
-The existing frontend-owned `createFromNativeSetup` path can remain during
-migration, but the end state should not require the browser to translate a card
-answer into an unrelated mutation. The server-issued card and server mutation
-must share one idempotent authority boundary.
+The existing frontend-owned `createFromNativeSetup` path may remain behind the
+rollback flag while explicit discovery is developed, but it cannot remain on
+the successful discovery path or be deferred to final cleanup. Phase 2 must
+move discovery start into this server transaction; otherwise the proposed card
+still asks the browser to translate a graph answer into an unrelated mutation.
+The server-issued card and server mutation must share one idempotent authority
+boundary.
 
 ### 7.6 Delivery contract
 
@@ -516,17 +564,20 @@ This requirement directly prevents the generated-but-undelivered handoff drift
 recorded in the stage-chat progress plan. Refresh, replay, and live streaming
 must project the same single card.
 
-Use the persist-before-publish envelope discipline proposed for durable stage
-progress: persist the card or receipt event first, then publish that same stored
-event to the live bridge, so a live-only control cannot vanish on reload and a
-replay cannot invent a second one. The current branch has the canonical
-`run_events` history but not the proposed DBTL stage-progress envelope or
-durable handoff outbox. Discovery therefore defines a stable
-`discovery_event_id`; if the shared envelope work lands first, it reuses its
-idempotent event writer, and otherwise implements the smallest shared writer
-rather than a discovery-only transport. A replayed confirmation reuses the
-original event identity. On a bridge gap or hard refresh the client backfills
-from the authenticated thread-history endpoint and then resumes live delivery.
+Use the existing persist/reconcile discipline: give each deterministic card or
+receipt a stable `discovery_event_id`, reconcile it into canonical thread
+history using the current known-boundary and graph-receipt mechanisms, emit the
+terminal delivery result, and verify the expected control through the
+authenticated message projection. A replayed confirmation reuses the original
+event identity. On a bridge gap or hard refresh the client backfills from the
+authenticated thread-history endpoint and then resumes live delivery.
+
+Do not mistake these shipped runtime mechanisms for transaction atomicity. The
+offer still needs a discovery outbox item that advances the matching revision to
+`offered` only after canonical insertion, while the confirmation transaction
+must commit the cycle, discovery link, and receipt/kickoff outbox together.
+Discovery should extract or reuse the existing verified-delivery patterns rather
+than invent a separate live-only transport.
 
 For the offer itself, an outbox item is created from the `ready` revision. Its
 dispatcher idempotently inserts the canonical card event, then advances that
@@ -559,6 +610,13 @@ and skill allowlist. Tools remain least-privilege for the seat, while the Stage
 Adapter remains the only component allowed to record Design evidence or satisfy
 a gate. The review package records the discovery-package hash supplied to the
 meeting so a reviewer can reconstruct what all participants knew.
+
+The current Stage Adapter's Design context is the integration seam, not the
+finished handoff: it already distributes the project manifest, declared inputs,
+prior meeting runs, change requests, and clarification answers. Add the
+hash-bound discovery block once at that shared context-construction boundary
+and prove that every planned/resumed Design participant receives it. Do not
+reconstruct it independently in each seat prompt or in the frontend.
 
 ## 8. Frontend architecture
 
@@ -595,6 +653,12 @@ After cycle creation, select the returned cycle and begin the existing Design
 preflight using the accepted discovery package. Do not replay an automatic
 “start the council” transcript message as if the person typed it.
 
+Today the frontend arms Design after `createFromNativeSetup` and later sends a
+hidden `dbtl_design_kickoff` request containing concatenated setup answers. That
+path may be retained for rollback, but discovery kickoff must reference the
+server-stored package id/hash; the frontend must not serialize the accepted
+brief back into an authoritative prompt.
+
 The Design context should include:
 
 - the accepted discovery summary;
@@ -623,6 +687,8 @@ dbtl:
 
 Exact names may change during implementation, but the controls should permit
 independent rollout of routing, expanded retrieval, and automatic card timing.
+None of these discovery switches exists yet; the current DBTL configuration has
+classifier shadow/visibility and setup-draft controls only.
 Because the design uses a Supervisor branch, visible conversational discovery
 requires `graph_enabled`. `audit_only` may shadow-evaluate it; `manual` keeps the
 current manual/proposal path during migration unless a separate non-graph
@@ -648,6 +714,10 @@ as one large cutover.
 
 ### Phase 0 — characterization and contracts
 
+**Audit (2026-08-03): Complete.** Characterization plus the discovery-specific
+lifecycle, provenance, readiness, transition, and card contracts are pinned by
+focused backend tests.
+
 - Pin the current explicit-start, classifier proposal, setup confirmation,
   setup-question, cycle-creation, and automatic Design-kickoff behavior.
 - Add manual scenarios for underspecified, well-specified, ordinary, existing
@@ -659,6 +729,10 @@ as one large cutover.
 reviewed without an implementation.
 
 ### Phase 1 — explicit conversational discovery
+
+**Audit (2026-08-03): Complete behind `dbtl.conversational_discovery=false`.**
+Explicit entry is thread-bound and durable; the Lead runs once under a closed
+read-only policy. History, memory, classifier entry, and auto-offer remain off.
 
 - Route only explicit **Start a new cycle** requests into a new discovery
   branch.
@@ -673,10 +747,18 @@ refresh, and no cycle exists until the final start action.
 
 ### Phase 2 — structured draft and deterministic start card
 
+**Audit (2026-08-03): Complete for the explicit discovery path.** The accepted
+package is revision/hash bound, start is one backend transaction, human-visible
+effects use deterministic outbox identities, and the backend returns the
+Design preflight with the immutable package already bound into shared worker
+context. The legacy browser-owned path remains only for the rollback flow.
+
 - Add `DiscoveryUpdater`, validation, revisioning, readiness checks, and
   provenance.
 - Render and durably journal one revision-bound start card.
 - Add stale-card, retry, idempotency, and cycle-creation linkage.
+- Replace `createFromNativeSetup` on the discovery path with the server-bound
+  compare-and-set transaction and durable creation receipt.
 - Materialize the accepted discovery package and carry its hash-bound shared
   context into every Design meeting work unit without changing per-agent
   tools/skills.
@@ -686,6 +768,11 @@ cycle with no duplicate questions and no browser-owned authority gap.
 
 ### Phase 3 — project context and history retrieval
 
+**Audit (2026-08-03): Complete behind `discovery_project_history=false` after
+OCR delegate review.** The bounded metadata manifest and authorized same-user,
+same-project prior-thread excerpts now form one source-referenced data pack.
+Explicit key/value disagreements are reported instead of silently resolved.
+
 - Add bounded project-file manifest and authorized prior-thread summaries.
 - Preserve source references and conflict reporting.
 - Measure retrieval usefulness and prompt/token cost.
@@ -694,6 +781,14 @@ cycle with no duplicate questions and no browser-owned authority gap.
 evidence, while cross-thread content remains scoped and inspectable.
 
 ### Phase 4 — project and system-wide memory composition
+
+**Audit (2026-08-03): Complete behind `discovery_global_memory=false` after
+OCR delegate review.** Private project, explicitly shared project, opt-in fresh
+user-global, and active published knowledge are composed under per-source and
+combined budgets. Every item remains unaccepted data with provenance/staleness
+labels, and conflicts are detected across history and memory authorities.
+Optional memory initialization is isolated from already-loaded project
+evidence, and active-publication reads are bounded.
 
 - Compose project-private, shared-project, user-global, and published-knowledge
   sources under explicit budgets.
@@ -706,6 +801,14 @@ new user decision or leaking another project/member's context.
 
 ### Phase 5 — classifier entry and automatic offering
 
+**Audit (2026-08-03): Complete behind separate default-off classifier-entry
+and auto-offer flags after OCR delegate review.** Suggested entry uses the same
+durable read-only branch, an ordinary-work decision suppresses later
+classifier re-entry in that conversation, explicit starts still win, and the
+composer/admin drawer consume server-derived discovery state and outcomes. The
+admin projection excludes proposal content, and its outcome totals aggregate
+the full project rather than the visible page.
+
 - Route eligible classifier suggestions into discovery.
 - Calibrate re-entry suppression after a person chooses ordinary work.
 - Enable automatic offer timing behind its own flag.
@@ -716,13 +819,38 @@ quality meet the human-reviewed rollout thresholds.
 
 ### Phase 6 — cleanup and migration
 
+**Audit (2026-08-03): Implementation complete; release-window evidence remains
+operational.** The browser-owned setup/create/kickoff chain is gone. When
+discovery is disabled, its temporary rollback is now a server-owned immediate
+setup confirmation: the Supervisor creates idempotently, emits the bound
+Design questions, and opens the existing Design preflight from their answer.
+The readiness report and Settings surface show the active rollout switches,
+server creation authority, and rollback posture. The isolated manual profile
+and scenario runbook exercise explicit discovery by default. Delegate OCR
+review found and fixed one context/replay defect: the Design setup answer is
+now bound into the server-emitted preflight and recovered at dispatch, and a
+retry addresses the same deterministic card instead of minting a second
+control.
+
 - Retire duplicate immediate-proposal/setup paths after rollback coverage proves
   discovery is stable.
-- Consolidate frontend cycle creation into the server-bound start action.
+- Remove the legacy browser-owned setup/create/kickoff path after the Phase 2
+  server-bound path has passed rollback review.
 - Update DBTL readiness, operator documentation, and manual scenario captures.
 
 **Exit:** one supported pre-cycle path remains, with explicit rollback for the
 duration of the release window.
+
+### Remaining work, in dependency order
+
+1. Run and capture the shared-environment scenarios in
+   `docs/conversational-dbtl-discovery-manual.md`; code-level coverage cannot
+   substitute for human review of proposal quality and interruption cost.
+2. Review false-entry, abandonment, time-to-offer, correction, stale-card, and
+   duplicate-start telemetry against the rollout thresholds.
+3. Enable classifier entry, then automatic offers, only after those thresholds
+   pass. Keep the server-owned immediate setup fallback for the documented
+   release window, then remove that rollback route in a later cleanup release.
 
 ## 11. Failure and safety behavior
 
@@ -869,9 +997,9 @@ The work should extend, not duplicate, these existing boundaries:
   handoff/outbox contract proposed in the stage-chat progress plan rather than
   depending on a currently nonexistent `dbtl_stage_handoffs` row;
 - Gateway DBTL proposal/cycle routers for authenticated reads and actions;
-- the existing runtime event journal plus the proposed shared
-  persist-before-publish/idempotent-event writer for durable, dedup-safe card
-  and receipt projection;
+- `RunJournal`, graph receipts, terminal `run.delivery`, and verified thread
+  projection for durable, dedup-safe card/receipt delivery, plus a small SQL
+  discovery outbox for atomic start linkage;
 - DBTL stage planning/council context construction for hash-bound discovery
   background on every Design work unit while preserving per-agent tools and
   skills;

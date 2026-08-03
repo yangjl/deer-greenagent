@@ -217,6 +217,18 @@ Breeding-workspace note:
   projections, and bounded retrieval pointers. Supersession and retraction
   retain the old claim and event history while removing its active publication
   pointers. No agent, stage approval, or promotion call can implicitly publish.
+- Conversational discovery is the durable, read-only pre-cycle path. Explicit
+  starts are gated by `dbtl.conversational_discovery`; classifier entry and its
+  automatic ready-card offer have separate default-off switches. A declined
+  discovery suppresses later classifier interruptions in that conversation but
+  never overrides a new explicit start. The composer indicator and admin
+  evaluation outcomes are server-derived inspection surfaces only. Starting a
+  cycle remains a revision/hash-bound Human Input Card transaction owned by the
+  backend. During the release-window rollback, disabling discovery restores the
+  immediate setup card, not browser authority: the Supervisor creates the
+  cycle idempotently, binds its id to the Design questions, and opens the
+  Design preflight from the answer. Settings → DBTL readiness reports which
+  path is active and the browser never authors a hidden kickoff.
 - New cycles started from the project rail automatically queue the current
   `generic:design:v2` Design council in project chat. Its context includes a
   bounded project-file manifest, declared cycle inputs, prior council turns,

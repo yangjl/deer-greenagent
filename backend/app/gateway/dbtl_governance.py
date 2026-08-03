@@ -123,6 +123,10 @@ async def build_governance_report(
         ),
     ]
     technical_ready = all(check["status"] == "passed" for check in checks)
+    if config.conversational_discovery_enabled:
+        rollout_stage = "automatic_offers" if config.discovery_auto_offer else "explicit_discovery"
+    else:
+        rollout_stage = "server_owned_setup_fallback"
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "database_backend": database_backend,
@@ -136,5 +140,20 @@ async def build_governance_report(
             "counts": legacy.counts,
             "items": [item.model_dump(mode="json") for item in legacy.items],
         },
-        "rollback_posture": ("Keep DBTL graph execution disabled, retain legacy files read-only, and revert to the prior application release before any data repair."),
+        "conversational_discovery": {
+            "rollout_stage": rollout_stage,
+            "enabled": config.conversational_discovery_enabled,
+            "classifier_entry": bool(config.conversational_discovery_enabled and config.discovery_classifier_entry),
+            "automatic_offers": bool(config.conversational_discovery_enabled and config.discovery_auto_offer),
+            "project_history": bool(config.conversational_discovery_enabled and config.discovery_project_history),
+            "global_memory": bool(config.conversational_discovery_enabled and config.discovery_global_memory),
+            "cycle_creation_authority": "server",
+            "setup_fallback": "server_owned_confirmation_card",
+            "browser_creation_authority": False,
+        },
+        "rollback_posture": (
+            "Set dbtl.conversational_discovery=false to restore the server-owned immediate setup card; "
+            "the browser never creates the cycle or authors a hidden Design kickoff. Keep DBTL graph execution "
+            "disabled and retain legacy files read-only before any broader governance rollback."
+        ),
     }

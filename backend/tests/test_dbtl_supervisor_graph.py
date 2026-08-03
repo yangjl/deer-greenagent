@@ -715,6 +715,174 @@ class TestSetupClarificationIsACard:
         assert "suggested" not in question.lower(), "a fallback may not invent an answer"
 
     @pytest.mark.asyncio
+    async def test_server_creates_the_cycle_and_opens_design_without_a_browser_kickoff(self):
+        asked = await self.ask("server-owned-setup")
+        confirmation_id = asked[-1].artifact["human_input"]["request_id"]
+        created_with: list[dict] = []
+
+        async def create_cycle(**kwargs):
+            created_with.append(kwargs)
+            return {"id": kwargs["cycle_id"]}
+
+        create_graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="test2"),
+            stage_adapter=ManualStageAdapter(),
+            state_schema=SCHEMA,
+            question_writer=fake_question_writer,
+            cycle_creator=create_cycle,
+        ).compile(checkpointer=InMemorySaver())
+        created = await create_graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [*asked, self.card_reply(confirmation_id, "create_cycle")],
+            },
+            config={
+                "configurable": {"thread_id": "server-owned-setup"},
+                "context": {"run_id": "run-create", "user_id": "owner-1"},
+            },
+        )
+
+        assert len(created_with) == 1
+        create_args = created_with[0]
+        assert create_args["project_id"] == "proj-1"
+        assert create_args["originating_thread_id"] == "server-owned-setup"
+        assert create_args["created_by"] == "owner-1"
+        assert create_args["idempotency_key"].startswith("setup:")
+        assert created["messages"][-3].additional_kwargs["deerflow_graph_receipt"] is True
+        setup_request = created["messages"][-1].artifact["human_input"]
+        assert setup_request["clarification_type"] == "cycle_setup"
+        assert setup_request["dbtl_cycle_id"] == create_args["cycle_id"]
+
+        previewed: list[dict] = []
+        executed: list[dict] = []
+
+        class Adapter:
+            async def preview_council(self, **kwargs):
+                previewed.append(kwargs)
+                return TestCouncilPreflight._plan()
+
+            async def execute(self, **kwargs):
+                executed.append(kwargs)
+                return SimpleNamespace(
+                    stage="design",
+                    cycle_id=kwargs["cycle_id"],
+                    note="ran",
+                    artifact_uri=None,
+                    clarification_question=None,
+                    produced_usable_evidence=True,
+                )
+
+        setup_id = setup_request["request_id"]
+        design_graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="test2"),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+            question_writer=fake_question_writer,
+        ).compile(checkpointer=InMemorySaver())
+        preflight = await design_graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [*created["messages"], self.card_reply(setup_id, self.ANSWER)],
+            },
+            config={
+                "configurable": {"thread_id": "server-owned-setup"},
+                "context": {"run_id": "run-design", "user_id": "owner-1"},
+            },
+        )
+
+        assert executed == []
+        assert len(previewed) == 1
+        assert previewed[0]["cycle_id"] == create_args["cycle_id"]
+        assert self.REQUEST in previewed[0]["request_text"]
+        assert self.ANSWER in previewed[0]["request_text"]
+        preflight_request = preflight["messages"][-1].artifact["human_input"]
+        assert preflight_request["clarification_type"] == "council_preflight"
+        assert preflight_request["dbtl_cycle_id"] == create_args["cycle_id"]
+        assert self.REQUEST in preflight_request["dbtl_request_text"]
+        assert self.ANSWER in preflight_request["dbtl_request_text"]
+
+        # Replaying the same setup answer may recompute a preview, but it must
+        # address the same server card rather than minting a second control.
+        replay = await design_graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [*created["messages"], self.card_reply(setup_id, self.ANSWER)],
+            },
+            config={
+                "configurable": {"thread_id": "server-owned-setup-replay"},
+                "context": {"run_id": "different-run", "user_id": "owner-1"},
+            },
+        )
+        assert replay["messages"][-1].artifact["human_input"]["request_id"] == preflight_request["request_id"]
+
+        execute_graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="test2"),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+            question_writer=fake_question_writer,
+        ).compile(checkpointer=InMemorySaver())
+        await execute_graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    *preflight["messages"],
+                    self.card_reply(preflight_request["request_id"], "light"),
+                ],
+            },
+            config={
+                "configurable": {"thread_id": "server-owned-setup"},
+                "context": {
+                    "run_id": "run-meeting",
+                    "user_id": "owner-1",
+                    "dbtl_council_depth": "light",
+                },
+            },
+        )
+
+        assert len(executed) == 1
+        assert executed[0]["cycle_id"] == create_args["cycle_id"]
+        assert self.REQUEST in executed[0]["request_text"]
+        assert self.ANSWER in executed[0]["request_text"]
+
+    @pytest.mark.asyncio
+    async def test_question_writer_failure_cannot_hide_a_created_cycle(self):
+        asked = await self.ask("server-owned-setup-writer-failure")
+        confirmation_id = asked[-1].artifact["human_input"]["request_id"]
+
+        async def create_cycle(**kwargs):
+            return {"id": kwargs["cycle_id"]}
+
+        async def failed_writer(_request_text, _missing_fields):
+            raise RuntimeError("question service unavailable")
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="test2"),
+            stage_adapter=ManualStageAdapter(),
+            state_schema=SCHEMA,
+            question_writer=failed_writer,
+            cycle_creator=create_cycle,
+        ).compile(checkpointer=InMemorySaver())
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [*asked, self.card_reply(confirmation_id, "create_cycle")],
+            },
+            config={
+                "configurable": {"thread_id": "server-owned-setup-writer-failure"},
+                "context": {"run_id": "run-create", "user_id": "owner-1"},
+            },
+        )
+
+        receipt, _call, card = final["messages"][-3:]
+        assert "was created" in receipt.content
+        assert card.artifact["human_input"]["clarification_type"] == "cycle_setup"
+        assert "target trait" in card.artifact["human_input"]["question"].lower()
+
+    @pytest.mark.asyncio
     async def test_a_design_answer_still_feeds_the_running_stage(self):
         # The sibling clarification. Both prefixes resume, but to different
         # places: a design answer is the stage's input, not a routing signal.

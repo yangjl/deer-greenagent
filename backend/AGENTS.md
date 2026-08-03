@@ -73,6 +73,92 @@ deer-flow/
 
 ## Important Development Guidelines
 
+### Conversational DBTL discovery contracts
+
+`deerflow.dbtl.discovery` owns the dependency-free pre-cycle vocabulary:
+discovery lifecycle, provenance, deterministic readiness, and the
+revision-bound start-card payload. A discovery draft is not a cycle and the
+type structurally carries no cycle, stage, or gate identity. Persistence,
+Supervisor routing, read-only execution policy, and server-bound cycle creation
+must build on this contract without adding repository authority to the pure
+module. Focused characterization coverage lives in
+`tests/test_dbtl_discovery_contract.py`.
+
+Migration `0030_dbtl_conversational_discovery` adds one CAS-revisioned active
+discovery per project thread. `DbtlDiscoveryRepository` owns begin, turn, and
+lifecycle transitions. With `dbtl.conversational_discovery=true` and
+`mode=graph_enabled`, explicit new-cycle requests route to the Supervisor's
+terminal `discovery` branch; classifier entry remains off. The branch invokes
+the Lead Agent once with request-only `dbtl_discovery_context`.
+`DbtlDiscoveryPolicyMiddleware` is the execution fence: it uses a closed
+read/inspection allowlist for model schemas and independently rejects forged
+mutation, shell, connector-write, memory-write, and delegation calls. The
+ordinary path is unchanged when the flag is off.
+
+Phase 2 keeps start authority in `DbtlDiscoveryRepository`: a ready package is
+content-hashed and paired with a `dbtl_discovery_outbox` start-card event while
+the row remains `ready`; only a reply resolving against that server-emitted
+card may atomically create the cycle, its five initial stage rows, provenance
+event, creation receipt, and Design-kickoff outbox item. Retries reuse the same
+discovery/card identities and cycle. The Supervisor publishes a deterministic
+receipt plus the existing Design preflight immediately after the transaction.
+The accepted package and hash live in the cycle projection, and
+`LiveStageAdapter` adds the same bounded `discovery_package` block to the
+shared Design stage context before any seat-specific prompt is built. Do not
+reconstruct that package in the frontend or in individual workers.
+
+Phase 3 context composition lives in `deerflow.dbtl.discovery_context` and is
+enabled only by `dbtl.discovery_project_history`. It reuses the stage layer's
+metadata-only project manifest, then reads prior project threads through the
+server-injected event/thread stores with the authenticated `user_id` on every
+query. The current thread is excluded; entry, thread, message, and character
+budgets are constants pinned by tests. `ProjectContextMiddleware` renders the
+pack as an escaped, hidden `HumanMessage`, not a `SystemMessage`, so content
+from files/history cannot raise its own instruction authority. Source refs and
+deterministic explicit key/value conflicts are copied into the versioned draft
+and immutable package. Runtime store objects use private, server-overwritten
+top-level run-config keys only while the graph factory is built; the worker
+removes them before graph execution. They must never enter ToolRuntime context,
+client context, callbacks, or checkpoints.
+
+Phase 4 is separately gated by `dbtl.discovery_global_memory`. Discovery reads
+the private project, human-approved shared-project, and opt-in user-global
+DeerMem buckets with independent caps and a combined item/character budget.
+Governed publications do not trust the memory projection as lifecycle
+authority: `active_publications_for_project` joins active publication and
+active claim SQL rows on every turn, so retraction/supersession immediately
+removes retrieval. Memory/published values stay escaped hidden HumanMessage
+data, carry provenance/revision refs, remain `accepted=false`, and are labeled
+potentially stale. Explicit `key: value` conflicts are computed across prior
+threads and all memory authorities together. A failed bucket is logged and
+omitted without erasing the project manifest/history pack.
+
+Phase 5 keeps suggested entry separate from explicit discovery.
+`dbtl.discovery_classifier_entry` lets only the final classifier rung enter the
+discovery branch; a durable `declined` discovery suppresses later classifier
+entry in that project conversation, but cannot override an explicit start.
+`dbtl.discovery_auto_offer` governs cards for classifier-entered ready drafts;
+explicit discovery and an explicit request to review the proposal can still
+show the server card. `DbtlDiscoveryRepository.get_latest` is the routing and
+suppression authority. The authenticated discovery-status endpoint exposes
+only active state for the composer, and the admin drawer reads bounded
+lifecycle outcomes without gaining cycle mutation authority.
+
+Phase 6 removes the browser from the remaining pre-cycle mutation boundary.
+The conversational path remains primary when enabled; its release-window
+rollback uses the immediate setup confirmation card, but the Supervisor now
+creates that cycle through `DbtlCycleRepository` with the card request as the
+deterministic idempotency boundary. The emitted Design-questions card carries
+the server-created cycle id, and its answer opens `preview_council` directly;
+no browser-authored hidden kickoff is required. Question drafting is fail-soft
+after creation so a durable cycle always retains a visible next control. The
+preflight binds the server-resolved setup request and uses the setup-card id as
+its stable nonce, so a later depth answer cannot lose the owner's setup context
+and a retry cannot mint a different control. The
+governance readiness report exposes the discovery switches, server creation
+authority, and rollback posture without treating rollout preference as a
+PostgreSQL foundation check.
+
 ### Documentation Update Policy
 
 **CRITICAL: Always update README.md and AGENTS.md after every code change**

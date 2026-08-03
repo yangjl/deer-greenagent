@@ -536,6 +536,10 @@ def build_middlewares(
 
     middlewares.append(ProjectContextMiddleware())
 
+    from deerflow.agents.middlewares.dbtl_discovery_policy_middleware import DbtlDiscoveryPolicyMiddleware
+
+    middlewares.append(DbtlDiscoveryPolicyMiddleware())
+
     # Coalesce every SystemMessage into a single leading one before the request
     # reaches the provider. Strict backends (vLLM, SGLang, Qwen, Anthropic)
     # reject non-leading SystemMessages. See system_message_coalescing_middleware.py.

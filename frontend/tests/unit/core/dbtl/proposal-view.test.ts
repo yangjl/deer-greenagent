@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@rstest/core";
 
 import {
+  discoveryStatusLabel,
   NO_RECORD_NOTICE,
   PROPOSAL_ACTIONS,
   type EvaluationResponse,
@@ -293,5 +294,13 @@ describe("the evaluation drawer", () => {
     });
     expect(summary.falseUpgradeRate).toBe(0);
     expect(summary.missedCycleRate).toBe(0);
+  });
+});
+
+describe("the discovery composer indicator", () => {
+  it("uses quiet server-state labels without implying that a cycle exists", () => {
+    expect(discoveryStatusLabel("gathering")).toBe("Shaping a cycle brief");
+    expect(discoveryStatusLabel("ready")).toBe("Cycle brief ready");
+    expect(discoveryStatusLabel("offered")).toBe("Awaiting your decision");
   });
 });

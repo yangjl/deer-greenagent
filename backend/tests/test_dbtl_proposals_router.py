@@ -22,7 +22,8 @@ from app.gateway.auth.models import User
 from app.gateway.routers import dbtl_proposals, workspaces
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.dbtl_config import DbtlConfig
-from deerflow.persistence.dbtl import DbtlCycleRepository
+from deerflow.dbtl.discovery import DiscoveryStatus, DiscoveryTrigger
+from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlDiscoveryRepository
 from deerflow.persistence.dbtl.model import DbtlCycleRow
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.telemetry import ClassifierEvaluationRepository
@@ -66,6 +67,7 @@ def _make_app(workspace_repo, evaluation_repo, *, mode: str = "manual", proposal
     app.state.classifier_evaluation_repo = evaluation_repo
     session_factory = get_session_factory()
     app.state.dbtl_cycle_repo = DbtlCycleRepository(session_factory) if session_factory is not None else None
+    app.state.dbtl_discovery_repo = DbtlDiscoveryRepository(session_factory) if session_factory is not None else None
     app.state.dbtl_config_override = DbtlConfig(mode=mode, proposals_visible=proposals_visible)
     app.include_router(workspaces.router)
     app.include_router(dbtl_proposals.router)
@@ -111,6 +113,83 @@ def test_a_research_request_produces_a_no_record_proposal(tmp_path: Path) -> Non
         assert proposal["notice"] == "No cycle has been created yet."
         assert proposal["requires_confirmation"] is True
         assert "target trait" in proposal["missing_fields"]
+
+
+def test_classifier_entry_reports_discovery_and_status_is_server_derived(tmp_path: Path) -> None:
+    workspace_repo, evaluation_repo, session_factory = anyio.run(_make_repos, tmp_path)
+    app = _make_app(
+        workspace_repo,
+        evaluation_repo,
+        mode="graph_enabled",
+        proposals_visible=False,
+    )
+    app.state.dbtl_config_override = DbtlConfig(
+        mode="graph_enabled",
+        conversational_discovery=True,
+        discovery_classifier_entry=True,
+    )
+    with TestClient(app) as client:
+        project_id = _seed_project(client)
+        body = _evaluate(client, project_id)
+        assert body["route_kind"] == "discovery"
+        assert body["route_source"] == "classifier"
+        assert body["proposal"] is None
+
+        empty = client.get(
+            f"/api/projects/{project_id}/dbtl/discovery/status",
+            params={"thread_id": "thread-1"},
+        )
+        assert empty.status_code == 200
+        assert empty.json() == {"enabled": True, "discovery": None}
+
+        async def begin_discovery():
+            return await DbtlDiscoveryRepository(session_factory).begin(
+                project_id=project_id,
+                thread_id="thread-1",
+                user_id=str(_USER_ID),
+                policy_version="test-policy",
+                trigger=DiscoveryTrigger.CLASSIFIER,
+                latest_user_turn=RESEARCH_TEXT,
+            )
+
+        started = anyio.run(begin_discovery)
+        active = client.get(
+            f"/api/projects/{project_id}/dbtl/discovery/status",
+            params={"thread_id": "thread-1"},
+        )
+        assert active.status_code == 200
+        assert active.json()["discovery"] == {
+            "id": started["id"],
+            "status": "gathering",
+            "trigger": "classifier",
+            "revision": 1,
+            "turn_count": 1,
+            "updated_at": started["updated_at"],
+        }
+
+        continued = _evaluate(
+            client,
+            project_id,
+            idempotency_key="eval-active-discovery",
+        )
+        assert continued["route_kind"] == "discovery"
+        assert continued["route_source"] == "active_discovery"
+
+        async def decline_discovery():
+            return await DbtlDiscoveryRepository(session_factory).transition(
+                discovery_id=started["id"],
+                expected_revision=1,
+                target=DiscoveryStatus.DECLINED,
+            )
+
+        anyio.run(decline_discovery)
+        suppressed = _evaluate(
+            client,
+            project_id,
+            idempotency_key="eval-suppressed-discovery",
+        )
+        assert suppressed["route_kind"] == "ordinary"
+        assert suppressed["route_source"] == "classifier"
 
 
 def test_fresh_project_prior_is_reflected_in_shadow_evaluation(tmp_path: Path) -> None:

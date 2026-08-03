@@ -80,6 +80,87 @@ class DbtlCycleRow(Base):
     )
 
 
+class DbtlDiscoveryRow(Base):
+    """One durable pre-cycle conversation bound to a project thread."""
+
+    __tablename__ = "dbtl_discoveries"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    thread_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    trigger: Mapped[str] = mapped_column(String(24), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(96), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    draft_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    offered_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    package_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    package_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cycle_id: Mapped[str | None] = mapped_column(String(64), ForeignKey("dbtl_cycles.id", ondelete="RESTRICT"), nullable=True)
+    start_submission_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now, onupdate=_utc_now)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_dbtl_discovery_active_thread",
+            "project_id",
+            "thread_id",
+            unique=True,
+            sqlite_where=text("status IN ('gathering', 'ready', 'offered')"),
+            postgresql_where=text("status IN ('gathering', 'ready', 'offered')"),
+        ),
+        UniqueConstraint("start_submission_id", name="uq_dbtl_discovery_start_submission"),
+    )
+
+
+class DbtlDiscoveryOutboxRow(Base):
+    """One replayable, human-visible effect of a discovery transition.
+
+    The outbox identity is also the message/event identity used by the graph.
+    A retry can therefore publish the same effect without creating a second
+    card, receipt, package projection, or Design kickoff.
+    """
+
+    __tablename__ = "dbtl_discovery_outbox"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    discovery_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("dbtl_discoveries.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    thread_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending", server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_utc_now)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_dbtl_discovery_outbox_pending",
+            "status",
+            "created_at",
+        ),
+    )
+
+
 class DbtlStageAttemptRow(Base):
     __tablename__ = "dbtl_stage_runs"
 

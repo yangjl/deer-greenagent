@@ -18,14 +18,17 @@ export type RouteKind =
   | "ordinary"
   | "cycle_setup"
   | "cycle_continuation"
-  | "proposal";
+  | "proposal"
+  | "discovery";
 
 export type RouteSource =
   | "explicit_choice"
   | "explicit_request"
   | "selected_cycle"
+  | "thread_cycle"
   | "no_project"
-  | "classifier";
+  | "classifier"
+  | "active_discovery";
 
 export type ConfidenceBand = "low" | "medium" | "high";
 
@@ -96,6 +99,63 @@ export interface EvaluationStats {
   decided: number;
   false_upgrades: number;
   missed_cycles: number;
+}
+
+export type DiscoveryLifecycleStatus =
+  | "gathering"
+  | "ready"
+  | "offered"
+  | "confirmed"
+  | "declined"
+  | "superseded"
+  | "expired";
+
+export interface DiscoveryStatusItem {
+  id: string;
+  status: Extract<DiscoveryLifecycleStatus, "gathering" | "ready" | "offered">;
+  trigger: "explicit" | "classifier";
+  revision: number;
+  turn_count: number;
+  updated_at: string;
+}
+
+export interface DiscoveryStatusResponse {
+  enabled: boolean;
+  discovery: DiscoveryStatusItem | null;
+}
+
+export interface DiscoveryOutcomeRow {
+  id: string;
+  thread_id: string;
+  trigger: "explicit" | "classifier";
+  status: DiscoveryLifecycleStatus;
+  revision: number;
+  turn_count: number;
+  offered: boolean;
+  cycle_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DiscoveryStats {
+  total: number;
+  classifier_entries: number;
+  confirmed: number;
+  declined: number;
+  active: number;
+}
+
+export function discoveryStatusLabel(
+  status: DiscoveryStatusItem["status"],
+): string {
+  switch (status) {
+    case "gathering":
+      return "Shaping a cycle brief";
+    case "ready":
+      return "Cycle brief ready";
+    case "offered":
+      return "Awaiting your decision";
+  }
 }
 
 export interface ActionDescriptor {

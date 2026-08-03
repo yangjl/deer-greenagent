@@ -21,6 +21,7 @@ from deerflow.runtime.journal import GRAPH_RECEIPT_KEY
 # tool-call grammar.
 SETUP_CLARIFICATION_PREFIX = "dbtl-setup__"
 SETUP_CONFIRMATION_PREFIX = "dbtl-setup-confirm__"
+DISCOVERY_START_PREFIX = "dbtl-discovery__"
 DESIGN_CLARIFICATION_PREFIX = "dbtl-design__"
 DESIGN_AUTHORING_PREFIX = "dbtl-design-write__"
 TEST_REVIEW_PREFIX = "dbtl-test-review__"
@@ -67,7 +68,14 @@ STAGE_HANDOFF_REFUSED_KEY = "dbtl_stage_handoff_refused"
 BUILD_CONTROL_REFUSED_KEY = "dbtl_build_control_refused"
 
 
-def receipt_message(content: str, *, stage_handoff_refused: str | None = None, build_control_refused: str | None = None) -> AIMessage:
+def receipt_message(
+    content: str,
+    *,
+    stage_handoff_refused: str | None = None,
+    build_control_refused: str | None = None,
+    message_id: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> AIMessage:
     """A deterministic supervisor reply that must survive a page reload.
 
     These are authored by the graph with no model call behind them, so no LLM
@@ -85,12 +93,14 @@ def receipt_message(content: str, *, stage_handoff_refused: str | None = None, b
         extra[STAGE_HANDOFF_REFUSED_KEY] = stage_handoff_refused
     if build_control_refused:
         extra[BUILD_CONTROL_REFUSED_KEY] = build_control_refused
+    if metadata:
+        extra.update(dict(metadata))
     # The id is minted here rather than left to ``add_messages``. Reconciliation
     # identifies a message by id and skips one that has none, so leaving it to
     # the reducer would make durable delivery of this receipt depend on a
     # framework detail — and the whole reason it carries a marker is that
     # nothing else will persist it.
-    return AIMessage(id=f"dbtl-receipt__{uuid4().hex}", content=content, additional_kwargs=extra)
+    return AIMessage(id=message_id or f"dbtl-receipt__{uuid4().hex}", content=content, additional_kwargs=extra)
 
 
 def build_human_input_messages(
