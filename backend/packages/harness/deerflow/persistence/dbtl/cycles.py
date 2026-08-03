@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.dbtl.cycle_state import (
     STAGE_ORDER,
     TERMINAL_CYCLE_STATES,
+    BuildDisposition,
     ReviewDecision,
     StageStatus,
     TransitionRefused,
@@ -40,8 +41,8 @@ from deerflow.dbtl.cycle_state import (
     stage_for_state,
     validate_cycle_class,
 )
-from deerflow.dbtl.reconciliation_policy import build_workflow_steps_enabled, reconciliation_required
-from deerflow.dbtl.stage_routes import GRAPH_STAGES
+from deerflow.dbtl.reconciliation_policy import build_workflow_steps_enabled, conditional_test_enabled, reconciliation_required
+from deerflow.dbtl.stage_routes import GRAPH_STAGES, RouteSlug
 from deerflow.persistence.dbtl.build_test_ops import BuildTestOpsMixin
 from deerflow.persistence.dbtl.collaboration_ops import CollaborationOpsMixin
 from deerflow.persistence.dbtl.design_feedback_ops import DesignFeedbackOpsMixin
@@ -892,6 +893,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
         design_feedback_provenance: dict[str, Any] | None = None,
         progressive_transition: dict[str, Any] | None = None,
         auto_submit: bool = False,
+        build_disposition: str | None = None,
     ) -> dict[str, Any]:
         """Apply one human verdict, advancing the cycle only when legal."""
         if not rationale.strip():
@@ -899,6 +901,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
         if stage == "test":
             raise DbtlWorkflowRefused("Test requires a typed validity assessment; the generic review path is disabled.")
         verdict = ReviewDecision(decision)
+        disposition = self._parse_build_disposition(build_disposition)
 
         async with self._sf() as session:
             loaded = await self._load(session, cycle_id, project_id, for_update=True)
@@ -921,6 +924,9 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
                         "design_feedback_provenance": design_feedback_provenance,
                         "progressive_transition": progressive_transition,
                         "auto_submit": auto_submit,
+                        # A replay carrying a different disposition is a
+                        # different decision, not the same one arriving twice.
+                        "build_disposition": str(disposition) if disposition else None,
                     },
                 )
                 is not None
@@ -957,7 +963,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
                     cycle.state = "build"
             bound_projection_hash = cycle.projection_hash
             try:
-                updated = apply_review(statuses, stage, verdict, reconciliation_required=reconciliation_required())
+                updated = apply_review(statuses, stage, verdict, reconciliation_required=reconciliation_required(), build_disposition=disposition)
             except TransitionRefused as exc:
                 raise DbtlWorkflowRefused(str(exc)) from exc
 
@@ -1033,7 +1039,10 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
                 session,
                 cycle=cycle,
                 from_stage=stage,
-                chosen_route=str(verdict),
+                # An exploratory closeout is a different edge from an ordinary
+                # approval — it points at Learn, not Test — so the path history
+                # records the route rather than the verdict behind it.
+                chosen_route=(str(RouteSlug.LEARN_EXPLORATORY) if disposition is BuildDisposition.LEARN_EXPLORATORY else str(verdict)),
                 decided_by=reviewer_user_id,
                 stage_attempt=attempt_row,
                 evidence_hash=evidence.content_hash,
@@ -1060,10 +1069,32 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
                     "design_feedback_provenance": design_feedback_provenance,
                     "progressive_transition": progressive_transition,
                     "auto_submit": auto_submit,
+                    "build_disposition": str(disposition) if disposition else None,
                 },
             )
             await session.commit()
             return self._cycle_payload(cycle, stages)
+
+    @staticmethod
+    def _parse_build_disposition(value: str | None) -> BuildDisposition | None:
+        """Validate a caller-supplied Build disposition against the switch.
+
+        The deployment rule is enforced *here* rather than only in the UI. A
+        frontend that can skip Test while persistence still treats the result
+        as validated is the one failure this whole path exists to avoid, so an
+        exploratory closeout arriving at a deployment that never enabled it is
+        refused at the write boundary.
+        """
+        if value is None:
+            return None
+        try:
+            disposition = BuildDisposition(value)
+        except ValueError as exc:
+            allowed = ", ".join(item.value for item in BuildDisposition)
+            raise DbtlWorkflowRefused(f"Unknown Build disposition {value!r}; expected one of: {allowed}.") from exc
+        if disposition is BuildDisposition.LEARN_EXPLORATORY and not conditional_test_enabled():
+            raise DbtlWorkflowRefused("This deployment requires retention qualification; a Build cannot close straight to Learn.")
+        return disposition
 
     # -- artifacts and work items ---------------------------------------
 

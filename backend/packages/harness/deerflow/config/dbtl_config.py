@@ -103,6 +103,22 @@ class DbtlConfig(BaseModel):
         ),
     )
 
+    conditional_test: bool = Field(
+        default=False,
+        description=(
+            "Let a person decide whether a Build result is worth qualifying for retention. On, an approved Build offers "
+            "two routes instead of one: 'Keep and validate' opens Test as it does today, and 'Learn from this exploration' "
+            "opens Learn directly with Test recorded as explicitly skipped. Off keeps today's mandatory Design → Build → "
+            "Test → Learn path exactly as it was. "
+            "Skipping is never silent success: the skip is a durable, human-owned record bound to the Build evidence it "
+            "was taken against, the Test stage reports 'skipped' rather than 'locked' or 'approved', and the resulting "
+            "Learn synthesis is marked unvalidated — knowledge promotion and cross-project publication are refused at the "
+            "persistence boundary for a claim that never passed retention qualification. What is given up is the "
+            "guarantee that every recorded cycle carries a validity assessment; what is gained is that an exploratory "
+            "pilot no longer has to fail a predictive contract it never claimed to satisfy."
+        ),
+    )
+
     progressive_gate: bool = Field(
         default=False,
         description=(

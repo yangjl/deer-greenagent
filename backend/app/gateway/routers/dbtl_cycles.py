@@ -49,6 +49,7 @@ from deerflow.dbtl import (
     render_claim_markdown,
     validate_candidate_grade,
 )
+from deerflow.dbtl.reconciliation_policy import conditional_test_enabled
 from deerflow.dbtl.stage_feedback import filter_stage_feedback_intents
 from deerflow.dbtl.stage_meetings import (
     TRANSITION_INTENTS,
@@ -148,6 +149,22 @@ def _surface_meeting_gate(
 
 def _route_available(gate: dict[str, Any], slug: str) -> bool:
     return any(str(route.get("slug") or "") == slug and not bool(route.get("blocked")) for route in gate.get("routes", []) if isinstance(route, dict))
+
+
+def _exploratory_actions(surface_stage: str) -> list[str]:
+    """The exploratory closeout, offered only where the question is asked.
+
+    The caller decides *when*, and the two call sites are not symmetric. On an
+    ``awaiting_review`` Build it is offered unconditionally, which is the
+    ordinary path and does not need the progressive gate. On an ``in_progress``
+    Build it rides inside the one-click gate branch, because recording a
+    verdict on an unsubmitted stage needs ``auto_submit``, and that is only
+    reachable when a transition gate exists — offering it there without one
+    would render a button whose own request the repository then refuses.
+    """
+    if surface_stage != "build" or not conditional_test_enabled():
+        return []
+    return ["learn_exploratory"]
 
 
 async def _post_design_meeting_progress(
@@ -439,6 +456,7 @@ class DesignFeedbackAction(BaseModel):
         "chair_text",
         "submit_for_review",
         "approve",
+        "learn_exploratory",
         "request_changes",
         "reject",
         "advance",
@@ -876,12 +894,14 @@ async def _design_feedback_read_model(
                             allowed_actions.append("park")
                         if _route_available(gate, "advance"):
                             allowed_actions.append("advance")
+                        allowed_actions.extend(_exploratory_actions(surface_stage))
                     else:
                         allowed_actions = ["submit_for_review"]
                 elif stage_status == "awaiting_review":
                     allowed_actions = ["approve", "request_changes", "reject"]
                     if gate is not None and surface_stage == "design" and "stage_park" not in groups:
                         allowed_actions.append("park")
+                    allowed_actions.extend(_exploratory_actions(surface_stage))
         # The convening decision is folded in before the stage's own intent
         # matrix has the last word: the gate may add ``convene_review_meeting``
         # or withhold the transition intents, but it can never grant a stage an
@@ -890,7 +910,7 @@ async def _design_feedback_read_model(
         allowed_actions = filter_stage_feedback_intents(surface_stage, allowed_actions)
         if latest_action is not None and latest_action.get("status") == "handoff_failed":
             retry_kind = str(latest_action.get("action_kind") or "")
-            allowed_actions = [retry_kind] if retry_kind in {"approve", "advance"} else []
+            allowed_actions = [retry_kind] if retry_kind in {"approve", "advance", "learn_exploratory"} else []
         interactive = bool(allowed_actions)
 
     note = ""
@@ -1619,6 +1639,15 @@ async def apply_design_feedback_action(
             raise DesignFeedbackConflict("This deck does not carry a progressive transition gate.")
         if body.action.kind in {"advance", "park"} and surface_stage != "design":
             raise DesignFeedbackConflict(f"The {body.action.kind.replace('_', ' ')} intent is not implemented for the {surface_stage.title()} gate.")
+        if body.action.kind == "learn_exploratory":
+            # Only Build is asked whether its result is worth qualifying, and
+            # only a deployment that enabled the choice may record the answer.
+            # The repository refuses this too; refusing here as well means the
+            # deck is told why instead of getting a generic workflow error.
+            if surface_stage != "build":
+                raise DesignFeedbackConflict(f"Closing without retention qualification is a Build decision; the {surface_stage.title()} gate cannot take it.")
+            if not conditional_test_enabled():
+                raise DesignFeedbackConflict("This deployment requires retention qualification; a Build cannot close straight to Learn.")
         assessment = dict((transition_gate or {}).get("assessment") or {})
         assessed_difficulty = str(assessment.get("difficulty") or "")
         assessment_rationale = str(assessment.get("rationale") or "")
@@ -1764,7 +1793,13 @@ async def apply_design_feedback_action(
             raise DesignFeedbackConflict(f"A high-stakes {surface_stage.title()} verdict requires the reviewer's written rationale.")
         if body.action.kind == "reject" and not body.comment.strip():
             raise DesignFeedbackConflict(f"{body.action.kind.replace('_', ' ').title()} requires a comment.")
-        rationale = body.comment.strip() or (f"Approved from the registered {surface_stage.title()} feedback deck." if body.action.kind == "approve" else f"Selected contested {surface_stage.title()} issues require refinement.")
+        if body.action.kind == "learn_exploratory":
+            default_rationale = "Approved from the registered Build feedback deck and closed without retention qualification."
+        elif body.action.kind == "approve":
+            default_rationale = f"Approved from the registered {surface_stage.title()} feedback deck."
+        else:
+            default_rationale = f"Selected contested {surface_stage.title()} issues require refinement."
+        rationale = body.comment.strip() or default_rationale
         rationale_projection = rationale
         if body.action.kind == "request_changes":
             target = f"the recorded issues {', '.join(body.action.option_ids)}" if body.action.option_ids else f"the {surface_stage.title()} evidence described in the reviewer's comment"
@@ -1781,7 +1816,7 @@ async def apply_design_feedback_action(
             "rationale_source": "server_projection",
         }
         auto_submit = False
-        if body.action.kind in {"approve", "request_changes"} and transition_gate is not None:
+        if body.action.kind in {"approve", "learn_exploratory", "request_changes"} and transition_gate is not None:
             # The simple gate card records a verdict in one action while the
             # stage is still open, materializing the submit and the verdict in
             # one review — the same shape the routine `advance` route uses.
@@ -1798,7 +1833,10 @@ async def apply_design_feedback_action(
             cycle_id=cycle_id,
             project_id=project_id,
             stage=surface_stage,
-            decision=body.action.kind,
+            # An exploratory closeout is still an approval of the Build; what
+            # differs is what the reviewer decided it was for, which travels as
+            # the disposition rather than as a fourth verdict.
+            decision="approve" if body.action.kind == "learn_exploratory" else body.action.kind,
             rationale=rationale_projection,
             expected_db_revision=body.expected_db_revision,
             reviewer_user_id=user_id,
@@ -1807,10 +1845,11 @@ async def apply_design_feedback_action(
             design_feedback_provenance=provenance,
             progressive_transition=progressive_transition,
             auto_submit=auto_submit,
+            build_disposition=("learn_exploratory" if body.action.kind == "learn_exploratory" else None),
         )
         handoff: _PostApprovalHandoff | None = None
         handoff_updated: dict[str, Any] | None = None
-        if body.action.kind == "approve":
+        if body.action.kind in {"approve", "learn_exploratory"}:
             handoff_updated, handoff = await finish_approval_handoff(
                 cycle,
                 approved_stage=surface_stage,

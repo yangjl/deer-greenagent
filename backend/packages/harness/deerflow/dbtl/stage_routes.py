@@ -39,6 +39,7 @@ class RouteSlug(StrEnum):
     """Stable ids for the edges a transition deck may offer."""
 
     ADVANCE = "advance"
+    LEARN_EXPLORATORY = "learn_exploratory"
     REVISE_HERE = "revise_here"
     RETURN_TO_BUILD = "return_to_build"
     RETURN_TO_DESIGN = "return_to_design"
@@ -92,6 +93,11 @@ class RouteContext:
     #: keeps the stricter behaviour; a route menu is a safety surface, and the
     #: forgiving default belongs on the other side.
     reconciliation_required: bool = True
+    #: Whether this deployment lets a reviewer close a Build without retention
+    #: qualification. Defaults to ``False`` for the same reason: a menu that
+    #: offered the skip to a deployment which never enabled it would be
+    #: offering an edge nobody vetted.
+    conditional_test: bool = False
 
     @property
     def build_edge_open(self) -> bool:
@@ -111,6 +117,22 @@ def _advance(stage: str, *, build_edge_open: bool) -> StageRoute:
         f"Open {target.capitalize()} as the next stage attempt.",
         blocked=blocked,
         blocked_reason=UNRECONCILED_REASON if blocked else "",
+    )
+
+
+def _learn_exploratory() -> StageRoute:
+    """Close a Build without qualifying it for retention.
+
+    Offered only beside ``advance``, never instead of it: the point is that a
+    person chooses between qualifying the result and recording it as
+    exploratory, and a menu showing only one of those has taken the decision
+    for them.
+    """
+    return StageRoute(
+        RouteSlug.LEARN_EXPLORATORY,
+        "learn",
+        "Learn from this exploration",
+        "Skip retention qualification and synthesize what this Build taught us. Test is recorded as explicitly skipped, and the result cannot be promoted or published as a validated claim.",
     )
 
 
@@ -183,6 +205,7 @@ def compute_stage_routes(context: RouteContext) -> tuple[StageRoute, ...]:
     if outcome in {"approve", "approved"}:
         return (
             _advance(stage, build_edge_open=context.build_edge_open),
+            *((_learn_exploratory(),) if stage == "build" and context.conditional_test else ()),
             *(() if stage == "learn" else (_revise(stage),)),
             *(() if stage == "learn" else (_park(stage),)),
             *(() if stage == "learn" else (_close(),)),
@@ -205,6 +228,13 @@ def transition_target(stage: str, chosen_route: str) -> str:
     route = chosen_route.strip().lower()
     if route in {"approve", "approved", "advance", "advance_to_learn"}:
         return COMPLETED if stage == "learn" else _NEXT_STAGE[stage]
+    if route == "learn_exploratory":
+        # Only Build asks whether the result is worth qualifying, so only Build
+        # can answer "no". Accepting this from another stage would record a
+        # skipped Test on a path that never reached one.
+        if stage != "build":
+            raise StageRoutesRefused(f"Route 'learn_exploratory' is a Build decision; stage {stage!r} cannot take it.")
+        return "learn"
     if route in {"request_changes", "changes_requested", "revise_here", "repeat_test"}:
         return stage
     if route in {"reject", "rejected"}:

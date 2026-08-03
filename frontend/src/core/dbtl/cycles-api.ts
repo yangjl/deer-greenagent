@@ -23,6 +23,7 @@ export type DesignFeedbackActionKind =
   | "chair_text"
   | "submit_for_review"
   | "approve"
+  | "learn_exploratory"
   | "request_changes"
   | "reject"
   | "advance"

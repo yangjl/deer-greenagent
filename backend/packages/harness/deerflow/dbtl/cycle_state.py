@@ -57,7 +57,14 @@ class CycleClass(StrEnum):
 
 
 class StageStatus(StrEnum):
-    """Where one stage stands."""
+    """Where one stage stands.
+
+    ``SKIPPED`` is deliberately its own value rather than a flavour of
+    ``LOCKED`` or ``APPROVED``. Locked means work is still blocked and approved
+    means a review happened; a stage a person chose not to run is neither, and
+    collapsing it into either one is how "we decided not to validate this"
+    becomes indistinguishable from "this passed".
+    """
 
     LOCKED = "locked"
     IN_PROGRESS = "in_progress"
@@ -65,6 +72,32 @@ class StageStatus(StrEnum):
     CHANGES_REQUESTED = "changes_requested"
     APPROVED = "approved"
     REJECTED = "rejected"
+    SKIPPED = "skipped"
+
+
+class BuildDisposition(StrEnum):
+    """What a reviewer decided a finished Build is for.
+
+    A generic "approve" conflates two different decisions: that the execution
+    happened and is worth recording, and that the result is worth qualifying
+    for retention. Only the second one opens Test. Naming them separately is
+    what lets an exploratory pilot close honestly instead of failing a
+    predictive contract it never claimed to satisfy.
+    """
+
+    KEEP_AND_VALIDATE = "keep_and_validate"
+    LEARN_EXPLORATORY = "learn_exploratory"
+
+
+# The one stage a human may decline to run. Test asks whether evidence is fit
+# to retain, which is a question a person is entitled to answer "we are not
+# retaining this" — the others each produce something later stages read.
+_SKIPPABLE_STAGES: frozenset[str] = frozenset({"test"})
+
+# A skip may only be recorded before the stage has done anything. Skipping an
+# in-flight Test would discard work nobody agreed to discard, and skipping an
+# approved one would retroactively unmake a qualification that already happened.
+_SKIPPABLE_FROM: frozenset[StageStatus] = frozenset({StageStatus.LOCKED})
 
 
 class ReviewDecision(StrEnum):
@@ -208,6 +241,16 @@ def _approved(statuses: Mapping[str, StageStatus], stages: tuple[str, ...]) -> b
     return all(statuses.get(stage) is StageStatus.APPROVED for stage in stages)
 
 
+def _settled(statuses: Mapping[str, StageStatus], stages: tuple[str, ...]) -> bool:
+    """Whether every stage in *stages* has been dealt with, one way or another.
+
+    A skipped stage settles its dependants without pretending it was approved.
+    Only ``_SKIPPABLE_STAGES`` may settle this way, so a skip cannot be used to
+    walk past a stage that never offered the choice.
+    """
+    return all(statuses.get(stage) is StageStatus.APPROVED or (stage in _SKIPPABLE_STAGES and statuses.get(stage) is StageStatus.SKIPPED) for stage in stages)
+
+
 def can_enter_stage(
     stage: str,
     current_state: str,
@@ -225,9 +268,16 @@ def can_enter_stage(
     stage_prerequisites = prerequisites.get(stage)
     if stage_prerequisites is None or is_terminal(current_state):
         return False
-    if not _approved(statuses, stage_prerequisites):
+    if statuses.get(stage) is StageStatus.SKIPPED:
         return False
-    return current_state in entry_states[stage]
+    if not _settled(statuses, stage_prerequisites):
+        return False
+    if current_state in entry_states[stage]:
+        return True
+    # A skipped Test is stepped over rather than passed through, so Learn is
+    # reachable while the cycle still sits at Build. Nothing else may take this
+    # shortcut: the skip has to be recorded on Test itself for it to apply.
+    return stage == "learn" and current_state == "build" and statuses.get("test") is StageStatus.SKIPPED
 
 
 def next_cycle_state(
@@ -242,9 +292,18 @@ def next_cycle_state(
     if move is None:
         raise TransitionRefused(f"No forward transition exists from state {current_state!r}.")
     target, required = move
-    if not _approved(statuses, required):
+    if not _settled(statuses, required):
         missing = [stage for stage in required if statuses.get(stage) is not StageStatus.APPROVED]
         raise TransitionRefused(f"Cannot advance to {target!r}: awaiting approval of {', '.join(missing)}.")
+    if target in _SKIPPABLE_STAGES and statuses.get(target) is StageStatus.SKIPPED:
+        # The reviewer closed this Build without retention qualification, so the
+        # cycle steps over Test rather than entering it. The skip stays on the
+        # record; what it does not do is hold the cycle at a stage nobody will
+        # work.
+        stepped = forward.get(target)
+        if stepped is None:
+            raise TransitionRefused(f"No forward transition exists past skipped stage {target!r}.")
+        return stepped[0]
     return target
 
 
@@ -254,6 +313,7 @@ def apply_review(
     decision: ReviewDecision,
     *,
     reconciliation_required: bool = True,
+    build_disposition: BuildDisposition | None = None,
 ) -> dict[str, StageStatus]:
     """Return a **new** status map with *decision* applied to *stage*.
 
@@ -262,16 +322,32 @@ def apply_review(
     When reconciliation is not required, the successor of Design is Build, and
     reconciliation is stepped over rather than opened: opening a stage nothing
     waits for would leave every cycle showing permanent outstanding work.
+
+    ``build_disposition`` says what the reviewer decided a finished Build is
+    for. It is accepted only on an approved Build, because that is the only
+    place the question is asked; anywhere else it is a caller error and is
+    refused rather than ignored, since silently dropping it would skip Test for
+    a reason nobody recorded.
     """
     if stage not in STAGE_ORDER:
         raise TransitionRefused(f"Unknown stage {stage!r}.")
     current = statuses.get(stage)
     if current not in _REVIEWABLE_STATUSES:
         raise TransitionRefused(f"Stage {stage!r} is {current} and is not awaiting review.")
+    if build_disposition is not None and (stage != "build" or decision is not ReviewDecision.APPROVE):
+        raise TransitionRefused(f"A Build disposition applies only to an approved Build, not to {decision.value!r} on {stage!r}.")
 
     prerequisites, _entry_states, _forward = _tables(reconciliation_required)
     updated = dict(statuses)
     updated[stage] = _REVIEW_RESULT[decision]
+
+    if build_disposition is BuildDisposition.LEARN_EXPLORATORY:
+        test_status = updated.get("test")
+        if test_status not in _SKIPPABLE_FROM:
+            raise TransitionRefused(f"Test is {test_status} and has already started; it cannot be skipped now.")
+        updated["test"] = StageStatus.SKIPPED
+        updated["learn"] = StageStatus.IN_PROGRESS
+        return updated
 
     if decision is ReviewDecision.APPROVE:
         successor = _successor_stage(stage, reconciliation_required=reconciliation_required)

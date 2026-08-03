@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from sqlalchemy import select
 
+from deerflow.dbtl.cycle_state import StageStatus
 from deerflow.dbtl.knowledge import (
     KnowledgeLifecycleRefused,
     candidate_eligibility,
@@ -247,11 +248,24 @@ class KnowledgeOpsMixin:
                 .order_by(DbtlValidityAssessmentRow.assessment_revision.desc())
                 .limit(1)
             )
-            if assessment is None:
+            # Learn runs on one of two authorities: a human-owned Test validity
+            # assessment, or a human-owned decision that this Build was not
+            # worth qualifying. Nothing else — an absent assessment on a cycle
+            # that never recorded either is work happening before its gate.
+            test_skipped = self._statuses(stages).get("test") is StageStatus.SKIPPED
+            if assessment is None and not test_skipped:
                 raise KnowledgeLifecycleRefused("Learn requires a human-owned Test validity assessment.")
-            eligibility = candidate_eligibility(assessment.outcome)
-            if candidates and not eligibility.eligible:
-                raise KnowledgeLifecycleRefused(eligibility.reason)
+            if test_skipped:
+                # The exploratory path is non-promotable, and that is enforced
+                # by producing nothing promotable rather than by a rule someone
+                # must remember downstream: no candidate means no claim, so
+                # promotion and publication have nothing to act on.
+                if candidates:
+                    raise KnowledgeLifecycleRefused("This cycle closed without retention qualification, so its synthesis cannot create a knowledge candidate. Run Test to qualify the evidence first.")
+            else:
+                eligibility = candidate_eligibility(assessment.outcome)
+                if candidates and not eligibility.eligible:
+                    raise KnowledgeLifecycleRefused(eligibility.reason)
 
             created: list[MemoryCandidateRow] = []
             for item in candidates[:20]:
@@ -298,7 +312,8 @@ class KnowledgeOpsMixin:
                     "request_digest": request_digest,
                     "summary": summary.strip(),
                     "candidate_ids": [row.id for row in created],
-                    "test_outcome": assessment.outcome,
+                    "test_outcome": assessment.outcome if assessment is not None else None,
+                    "retention_status": "not_validated" if test_skipped else "qualified",
                     "db_revision": cycle.db_revision,
                 },
             )
@@ -310,7 +325,8 @@ class KnowledgeOpsMixin:
                 payload={
                     "idempotency_key": idempotency_key,
                     "candidate_count": len(created),
-                    "test_outcome": assessment.outcome,
+                    "test_outcome": assessment.outcome if assessment is not None else None,
+                    "retention_status": "not_validated" if test_skipped else "qualified",
                 },
             )
             await session.commit()

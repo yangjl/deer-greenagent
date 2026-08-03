@@ -30,6 +30,24 @@ def reconciliation_required() -> bool:
     return True if value is None else bool(value)
 
 
+def conditional_test_enabled() -> bool:
+    """True when a person may skip Test and take a Build straight to Learn.
+
+    Fail-safe is **mandatory Test**, matching the other switches here: a
+    deployment that cannot read its own rule has not asked for the looser one,
+    and defaulting the other way would let an unreadable config turn every
+    Build into an unvalidated exploratory closeout.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        app_config = get_app_config()
+    except Exception:  # noqa: BLE001 - an unreadable config keeps Test mandatory
+        logger.warning("Could not read the DBTL conditional-Test rule; keeping Test mandatory.", exc_info=True)
+        return False
+    return bool(getattr(getattr(app_config, "dbtl", None), "conditional_test", False))
+
+
 def build_workflow_steps_enabled() -> bool:
     """True when Build review requires the durable phased workflow chain.
 

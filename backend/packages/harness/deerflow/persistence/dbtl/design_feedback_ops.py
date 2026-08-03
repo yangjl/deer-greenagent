@@ -61,6 +61,10 @@ _ACTION_GROUP = {
     "chair_text": "chair_response",
     "submit_for_review": "stage_submit",
     "approve": "stage_review",
+    # The exploratory closeout *is* the Build verdict, so it shares the
+    # single-use review group: a reviewer records one decision about a Build,
+    # not an approval and then a second thought about what it was for.
+    "learn_exploratory": "stage_review",
     "request_changes": "stage_review",
     "reject": "stage_review",
     "advance": "stage_review",

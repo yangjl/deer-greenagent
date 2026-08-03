@@ -131,6 +131,23 @@ def strict_reconciliation(monkeypatch):
 
 
 @pytest.fixture
+def mandatory_test(monkeypatch):
+    """Pin the Test gate to the shipped default (retention qualification required).
+
+    Same hazard as ``strict_reconciliation``: ``conditional_test_enabled()``
+    reads the ambient ``config.yaml``, so a developer who sets
+    ``dbtl.conditional_test: true`` locally makes an exploratory closeout
+    legal under every test that asserts a Build approval opens Test — and the
+    failures look like a regression in whatever was last touched.
+
+    The opt-in counterpart is the ``conditional_test`` fixture in
+    ``test_dbtl_conditional_test_repository.py``; both patch the writer that
+    consults the rule.
+    """
+    monkeypatch.setattr("deerflow.persistence.dbtl.cycles.conditional_test_enabled", lambda: False)
+
+
+@pytest.fixture
 def build_workflow_steps_off(monkeypatch):
     """Pin Build's durable-workflow requirement to the shipped default (off).
 

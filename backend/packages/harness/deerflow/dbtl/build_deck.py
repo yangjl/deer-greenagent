@@ -33,7 +33,7 @@ MAX_DECK_FIGURE_BYTES = 6_000_000
 #: Part of Build's deterministic feedback-surface id. Bump whenever the
 #: bridge-bearing structure changes so newly rendered bytes cannot reuse an id
 #: embedded in an older deck.
-BUILD_DECK_SURFACE_VERSION = "build-review-surface-v3-design-shell"
+BUILD_DECK_SURFACE_VERSION = "build-review-surface-v4-exploratory-closeout"
 
 FigureReader = Callable[[str], tuple[bytes, str] | None]
 

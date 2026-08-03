@@ -24,6 +24,10 @@ STAGE_ALLOWED_INTENTS: dict[str, frozenset[str]] = {
         {
             "submit_for_review",
             "approve",
+            # Approving a Build and deciding it is worth qualifying for
+            # retention are two different judgements. Only Build is asked the
+            # second one, so only Build may answer it.
+            "learn_exploratory",
             "request_changes",
             "reject",
             "convene_review_meeting",

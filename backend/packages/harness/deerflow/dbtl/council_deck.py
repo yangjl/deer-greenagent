@@ -321,6 +321,12 @@ def _stage_review_controls(
                 '<button type="button" data-deck-action="reject" disabled>Reject</button>',
             ]
         )
+    if normalized == "build":
+        # Rendered unconditionally and enabled by the server's read model,
+        # like every other control here: the deck is a persisted file that may
+        # be opened long after the deployment's rules changed, so it must not
+        # be the thing that decides which decisions exist.
+        buttons.append('<button type="button" data-deck-action="learn_exploratory" disabled>Keep, but do not validate</button>')
     test_note = '<p class="option-detail">The scientific outcome and route are computed from the structured validity review; the meeting may annotate that pack but cannot choose an outcome.</p>' if normalized == "test" else ""
     stage_label = normalized.title() or "Stage"
     return (

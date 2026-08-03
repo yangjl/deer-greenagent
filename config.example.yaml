@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 41
+config_version: 42
 
 # ============================================================================
 # Logging
@@ -1301,6 +1301,21 @@ dbtl:
   # exchange cannot settle. The meeting reads the recorded evidence and proposes
   # options; it is advisory and can never resume the Build by itself.
   build_work_meetings: false
+  # Let a person decide whether a Build result is worth qualifying for
+  # retention. On, an approved Build offers two routes: "Keep and validate"
+  # opens Test as it does today, and "Learn from this exploration" opens Learn
+  # directly with Test recorded as explicitly skipped. Off keeps today's
+  # mandatory Design -> Build -> Test -> Learn path.
+  #
+  # Skipping is never silent success. The skip is a durable, human-owned record
+  # bound to the exact Build evidence it was taken against; the Test stage reads
+  # "skipped" rather than "locked" or "approved"; and the resulting Learn
+  # synthesis is marked unvalidated, with knowledge promotion and cross-project
+  # publication refused at the persistence boundary rather than merely hidden in
+  # the UI. What is given up is the guarantee that every cycle carries a
+  # validity assessment; what is gained is that an exploratory pilot no longer
+  # fails a predictive contract it never claimed to satisfy.
+  conditional_test: false
   progressive_gate: false
   # One-shot model that assesses the remaining work as routine, standard, or
   # high_stakes after a Design meeting produces bound evidence. null, provider
