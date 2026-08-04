@@ -29,7 +29,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.dbtl.live_stage.build_controls import DISABLED_GATE, BuildControlGate, BuildControlNotRecorded
 from deerflow.agents.dbtl.live_stage.build_meeting import BUILD_WORK_MEETING_CONTRACT, MeetingContext, meeting_units, parse_recommendation
-from deerflow.agents.dbtl.live_stage.build_phase_verification import BuildPhaseVerification, execute_and_verify_phase
+from deerflow.agents.dbtl.live_stage.build_phase_verification import BuildPhaseVerification, entry_command, execute_and_verify_phase
 from deerflow.agents.dbtl.live_stage.build_phases import (
     GENERALIST,
     MAX_SCANNED_ENTRY_POINT_BYTES,
@@ -37,6 +37,7 @@ from deerflow.agents.dbtl.live_stage.build_phases import (
     BuildPhaseManifest,
     PhaseAssignment,
     assign_phase,
+    parse_phase_manifest,
     phase_completion_error,
     phase_correction_unit,
     phase_unit,
@@ -122,7 +123,8 @@ from deerflow.dbtl.build_control import (
     worker_question_request,
 )
 from deerflow.dbtl.build_deck import BUILD_DECK_SURFACE_VERSION
-from deerflow.dbtl.build_execution import BuildExecutionBundle
+from deerflow.dbtl.build_driver import DriverPhase, driver_rerun_spec, render_driver_script
+from deerflow.dbtl.build_execution import BuildExecutionBundle, BuildRerunSpec
 from deerflow.dbtl.build_grant import INPUT_ENV_PREFIX, build_input_grant
 from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError, restore_build_input_bundle
 from deerflow.dbtl.build_plan import BuildPhasePlan, parse_build_plan, restore_build_plan, single_phase_plan
@@ -2513,6 +2515,69 @@ class RenderedDeck:
     content_hash: str
 
 
+def _write_build_driver(
+    *,
+    project_root: str,
+    cycle: dict[str, Any],
+    results: Sequence[StageWorkerResult],
+    bound_inputs: Sequence[str] = (),
+) -> BuildRerunSpec | None:
+    """Record how to re-run a phased Build, as one command the server wrote.
+
+    A phased Build has one entry point per phase, and the worker-supplied rerun
+    specs merge only when they agree — so two phases naming different entry
+    points conflicted, `parse_execution_bundle` reported no rerun record, and a
+    Build that ran every planned phase failed `structured_rerun_spec` and could
+    never reach its human gate. The phase prompt never asked for the record
+    either, so the gate was unsatisfiable in production regardless.
+
+    Deriving it is also the more trustworthy answer: these entry points are the
+    ones the server verified and executed itself, so the record describes what
+    ran rather than a worker's account of it.
+
+    Returns ``None`` and writes nothing when no phase declared a runnable entry
+    point — the gate must still be able to fail.
+    """
+    phases: list[DriverPhase] = []
+    outputs: list[str] = []
+    for result in results:
+        manifest = parse_phase_manifest((result.provenance or {}).get("phase_manifest"))
+        if manifest is None:
+            continue
+        phases.append(DriverPhase(title=result.summary[:80], entry_point=manifest.entry_point, execution_inputs=tuple(manifest.execution_inputs)))
+        outputs.extend(manifest.declared_outputs)
+    script = render_driver_script(phases, workspace_root=WORKSPACE_VIRTUAL_ROOT, project_root=WORKSPACE_VIRTUAL_ROOT)
+    if not script:
+        return None
+
+    document = script.encode("utf-8")
+    content_hash = hashlib.sha256(document).hexdigest()
+    try:
+        root = Path(project_root).expanduser().resolve()
+        ensure_project_dirs(root)
+        relative = stage_output_dir(
+            cycle_id=str(cycle["id"]),
+            cycle_title=str(cycle.get("title") or ""),
+            stage="build",
+        ) / stage_file_name(stage="build", kind="rerun", revision=cycle.get("db_revision"), content_hash=content_hash)
+        _atomic_write(project_outputs_dir(root) / relative, document)
+    except Exception:  # noqa: BLE001 - a Build with no rerun record refuses at the gate
+        logger.warning("Could not write the Build rerun driver.", exc_info=True)
+        return None
+
+    # The interpreters the server actually used, rather than a guess about the
+    # host: a rerun record naming an environment nobody verified is the kind of
+    # unchecked reassurance this gate exists to prevent.
+    interpreters = sorted({entry_command(phase.entry_point).split(" ", 1)[0] for phase in phases if phase.entry_point.strip()})
+    return driver_rerun_spec(
+        phases,
+        driver_path=f"/mnt/user-data/outputs/{relative.as_posix()}",
+        expected_outputs=outputs,
+        bound_inputs=bound_inputs,
+        environment={"interpreters": ", ".join(interpreters)} if interpreters else {"interpreters": "unknown"},
+    )
+
+
 def _write_council_deck(
     *,
     project_root: str,
@@ -3038,6 +3103,24 @@ def _build_phase_context(
 
 def _pause_note(assignment: PhaseAssignment) -> str:
     return f"Paused after {assignment.phase.title!r} because the plan asked for a look before the next phase."
+
+
+def _stops_at_boundary(assignment: PhaseAssignment, *, index: int, total: int) -> bool:
+    """Whether this phase's `pause_after` is a boundary anyone can stand at.
+
+    A boundary stops *before the next phase*, so on the final phase there is
+    nothing to stop before. Honouring it there raised a card offering
+    "Continue — runs the remaining 0 phases": its only real option did nothing,
+    and because the pause marks the plan incomplete, a Build that had run every
+    planned phase wrote no review package and could never reach its human gate.
+    A planner setting `pause_after` on every phase is not wrong, so this is read
+    as the plan asking to be looked at wherever a look is still possible.
+
+    Both the replay and fresh-execution paths ask through here, because a
+    boundary honoured on one and skipped on the other would pause a plan that
+    cannot then be resumed past it.
+    """
+    return assignment.phase.pause_after and index < total
 
 
 @dataclass(frozen=True, slots=True)
@@ -4424,7 +4507,7 @@ class LiveStageAdapter:
                 # A replayed phase's boundary was already shown and answered —
                 # that is what "Continue" meant. Stopping at it again would ask
                 # the same question forever and make the plan unfinishable.
-                if assignment.phase.pause_after and not boundaries_released:
+                if _stops_at_boundary(assignment, index=index, total=len(assignments)) and not boundaries_released:
                     stopped = _pause_note(assignment)
                     rejected.append(stopped)
                     paused, paused_title = True, assignment.phase.title
@@ -4812,7 +4895,7 @@ class LiveStageAdapter:
                 },
             )
             completed.append(_phase_note(assignment, result))
-            if assignment.phase.pause_after:
+            if _stops_at_boundary(assignment, index=index, total=len(assignments)):
                 # A phase boundary is a committed, resumable state with no worker
                 # lease held, so honouring the plan's own request to stop here
                 # costs nothing and is the cheapest possible pause.
@@ -6702,6 +6785,19 @@ class LiveStageAdapter:
             unit_result_pairs = list(zip(outcome.plan.units, outcome.results, strict=True))
         if stage == "build" and published_build_artifacts:
             build_execution_record = execution_bundle(outcome.trustworthy_results, published=published_build_artifacts)
+            if phase_run is not None and build_execution_record.rerun_spec is None:
+                # The phased path derives its own record rather than merging the
+                # workers'. Only when they produced none, so a single-phase Build
+                # whose worker recorded one keeps the worker's own account.
+                driver_spec = await asyncio.to_thread(
+                    _write_build_driver,
+                    project_root=project_root,
+                    cycle=cycle,
+                    results=list(phase_run.outcome.trustworthy_results),
+                    bound_inputs=list(phase_run.input_artifacts),
+                )
+                if driver_spec is not None:
+                    build_execution_record = replace(build_execution_record, rerun_spec=driver_spec, rerun_procedure=driver_spec.command)
         missing_structured_rerun = bool(stage == "build" and "structured_rerun_spec" in spec.validity_gates and (build_execution_record is None or build_execution_record.rerun_spec is None))
         # **A stage can refuse for a reason no worker owns.** Every worker here
         # may have returned a contract-valid result and the stage still not be

@@ -258,7 +258,11 @@ async def test_current_build_contract_refuses_missing_typed_rerun_record(tmp_pat
     repo = await _repo(tmp_path)
     await _ready_for_build(repo)
 
-    with pytest.raises(ValueError, match="generic:build:v11 requires"):
+    # Version-agnostic on purpose: the assertion is that the refusal names the
+    # contract the attempt is pinned to, not that the default is any one
+    # version — pinning the number here breaks on every default bump and says
+    # nothing about the behaviour under test.
+    with pytest.raises(ValueError, match=r"generic:build:v\d+ requires"):
         await _record_lineage(repo, typed=False)
 
 

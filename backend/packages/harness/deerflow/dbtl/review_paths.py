@@ -89,7 +89,8 @@ def stage_file_name(
     """One output file's name.
 
     ``kind`` is "review" (Markdown, the document the approval binds to),
-    "slides" (the HTML deck the meeting's outcome is presented from), or
+    "slides" (the HTML deck the meeting's outcome is presented from), "rerun"
+    (the shell driver re-running a phased Build's entry points in order), or
     "package" (JSON, the machine record). Anything unrecognized falls back to
     the JSON package shape rather than raising: a new caller getting an
     oddly-named file is a smaller failure than a stage that cannot write its
@@ -99,6 +100,7 @@ def stage_file_name(
     kind_slug, extension = {
         "review": ("review", "md"),
         "slides": ("slides", "html"),
+        "rerun": ("rerun", "sh"),
     }.get(kind, ("package", "json"))
 
     parts = [stage_slug, kind_slug]

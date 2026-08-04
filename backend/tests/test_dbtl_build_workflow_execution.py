@@ -676,21 +676,37 @@ class TestAPresentationalFailureKeepsTheScience:
         # something is unfinished.
         assert view["next_step"] == BuildStepKey.EXECUTE_PHASES.value
 
-    async def test_v8_build_without_typed_rerun_lineage_stops_before_summary(self, project) -> None:
+    async def test_a_phased_build_records_the_servers_own_rerun_driver(self, project) -> None:
+        """The server writes the rerun record rather than asking for it.
+
+        A phased Build has one entry point per phase, and the worker-supplied
+        specs merge only when they agree — so two phases naming different entry
+        points conflicted and the bundle carried no rerun record at all. The
+        phase prompt never asked for one either, so `structured_rerun_spec` was
+        unsatisfiable in production however well the phases ran, and a Build
+        that completed every planned phase could never reach its human gate.
+
+        Deriving it from the verified manifests is also the more trustworthy
+        answer: those entry points are the ones the server executed itself.
+        The case where there is genuinely nothing runnable to record is covered
+        in `test_dbtl_build_driver.py`.
+        """
         repo, root = project
         await _ready_for_build(repo)
-        stage_attempt_id = await _build_stage_attempt_id(repo)
 
-        result, dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(include_rerun_spec=False))
+        result, _dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(include_rerun_spec=False))
 
-        assert not result.produced_usable_evidence
-        assert result.artifact_uri is None
-        assert dispatcher.summarizer_units == []
-        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
-        execute = _step(view, BuildStepKey.EXECUTE_PHASES)
-        assert execute["status"] == StepState.FAILED.value
-        assert "structured rerun record" in execute["attempts"][0]["error_summary"]
-        assert (await repo.build_test_view("cycle-1", project_id="project-1"))["build_lineage"] is None
+        assert result.produced_usable_evidence
+        assert result.artifact_uri is not None
+        lineage = (await repo.build_test_view("cycle-1", project_id="project-1"))["build_lineage"]
+        assert lineage is not None
+        rerun = lineage["rerun_spec"]
+        assert rerun["entry_point"].endswith(".sh")
+        assert rerun["command"].startswith("/bin/bash ")
+        # The driver has to exist as a real project file, or Test cannot re-run it.
+        driver = root / "outputs" / rerun["entry_point"].removeprefix("/mnt/user-data/outputs/")
+        assert driver.is_file()
+        assert "set -euo pipefail" in driver.read_text(encoding="utf-8")
 
     async def test_a_failed_execution_does_not_open_a_fake_deck_failure(self, project) -> None:
         repo, root = project
@@ -1096,6 +1112,28 @@ class TestABuildStopsBeingOneOpaqueWorker:
         assert not result.produced_usable_evidence
         assert result.artifact_uri is None
         assert "1 of 2 planned build phase(s)" in result.note
+
+    async def test_a_boundary_after_the_last_phase_is_not_a_boundary(self, project) -> None:
+        """`pause_after` on the final phase has nothing to pause before.
+
+        A planner may set it on every phase, including the last one. Honouring
+        it there offers "Continue — runs the remaining 0 phases": a card whose
+        only real option does nothing, and which marks a plan that ran to
+        completion as unfinished, so no review package is ever written and the
+        Build can never reach its human gate. The boundary exists to stop
+        *before the next phase*, so with no next phase there is nothing to ask.
+        """
+        repo, root = project
+        await _ready_for_build(repo)
+        paused = json.loads(TWO_PHASE_PLAN)
+        paused["phases"][-1]["pause_after"] = True
+
+        result, dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=json.dumps(paused)))
+
+        assert [unit.capability for unit in dispatcher.phase_units] == ["software_and_workflow_engineering", "statistical_analysis"]
+        assert result.produced_usable_evidence
+        assert result.artifact_uri is not None
+        assert "planned build phase(s)" not in result.note
 
 
 class TestACommittedStepIsReplayedRatherThanReRun:

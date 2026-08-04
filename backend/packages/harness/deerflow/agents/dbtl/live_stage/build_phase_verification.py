@@ -38,7 +38,7 @@ class BuildPhaseVerification:
         }
 
 
-def _entry_command(entry_point: str) -> str:
+def entry_command(entry_point: str) -> str:
     suffix = PurePosixPath(entry_point).suffix.lower()
     quoted = shlex.quote(entry_point)
     interpreters = {
@@ -70,7 +70,7 @@ def verification_shell_command(
 ) -> tuple[str, dict[str, str]]:
     """Return the bounded command and server-issued environment for a phase."""
     workspace = unit_workspace.rstrip("/")
-    command = _entry_command(manifest.entry_point)
+    command = entry_command(manifest.entry_point)
     stdout = f"{workspace}/{VERIFY_STDOUT}"
     stderr = f"{workspace}/{VERIFY_STDERR}"
     status = f"{workspace}/{VERIFY_STATUS}"
@@ -170,17 +170,17 @@ def execute_and_verify_phase(
         shell, env = verification_shell_command(manifest, unit_workspace=unit_workspace, issued_inputs=issued_inputs)
         execute(shell, env, timeout_seconds)
     except Exception as exc:  # noqa: BLE001 - converted into a bounded stage receipt
-        return BuildPhaseVerification(False, f"The server could not execute the Build entry point: {exc}", _entry_command(manifest.entry_point))
+        return BuildPhaseVerification(False, f"The server could not execute the Build entry point: {exc}", entry_command(manifest.entry_point))
 
     status_ref = f"{unit_workspace.rstrip('/')}/{VERIFY_STATUS}"
     status_file = _verified_file(status_ref, project_root=project_root, unit_workspace=unit_workspace, max_bytes=32)
     if status_file is None:
-        return BuildPhaseVerification(False, "The server execution produced no readable exit-status receipt.", _entry_command(manifest.entry_point))
+        return BuildPhaseVerification(False, "The server execution produced no readable exit-status receipt.", entry_command(manifest.entry_point))
     resolved_status = workspace_relative_path(status_ref, project_root=project_root)
     try:
         exit_status = int(resolved_status[1].read_text(encoding="utf-8").strip()) if resolved_status is not None else -1
     except (OSError, UnicodeError, ValueError):
-        return BuildPhaseVerification(False, "The server execution exit-status receipt is malformed.", _entry_command(manifest.entry_point))
+        return BuildPhaseVerification(False, "The server execution exit-status receipt is malformed.", entry_command(manifest.entry_point))
 
     logs: list[dict[str, Any]] = []
     for stream, filename in (("stdout", VERIFY_STDOUT), ("stderr", VERIFY_STDERR)):
@@ -191,7 +191,7 @@ def execute_and_verify_phase(
             max_bytes=MAX_VERIFY_LOG_BYTES,
         )
         if verified is None:
-            return BuildPhaseVerification(False, f"The server execution {stream} log is missing or too large.", _entry_command(manifest.entry_point), exit_status=exit_status)
+            return BuildPhaseVerification(False, f"The server execution {stream} log is missing or too large.", entry_command(manifest.entry_point), exit_status=exit_status)
         relative, size, content_hash = verified
         logs.append({"stream": stream, "path": f"/mnt/user-data/{relative}", "bytes": size, "content_hash": content_hash})
 
@@ -199,7 +199,7 @@ def execute_and_verify_phase(
         return BuildPhaseVerification(
             False,
             f"The server executed the declared Build entry point and it exited with status {exit_status}.",
-            _entry_command(manifest.entry_point),
+            entry_command(manifest.entry_point),
             exit_status=exit_status,
             logs=tuple(logs),
         )
@@ -211,7 +211,7 @@ def execute_and_verify_phase(
             return BuildPhaseVerification(
                 False,
                 f"The server execution could not verify declared output {declared!r} inside the phase grant.",
-                _entry_command(manifest.entry_point),
+                entry_command(manifest.entry_point),
                 exit_status=exit_status,
                 logs=tuple(logs),
             )
@@ -221,7 +221,7 @@ def execute_and_verify_phase(
     return BuildPhaseVerification(
         True,
         "The server executed the declared Build entry point successfully.",
-        _entry_command(manifest.entry_point),
+        entry_command(manifest.entry_point),
         exit_status=exit_status,
         logs=tuple(logs),
         outputs=tuple(outputs),

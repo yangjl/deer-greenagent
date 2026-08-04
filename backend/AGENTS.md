@@ -3748,6 +3748,51 @@ same switch:
   `test_dbtl_build_test_repository.py`, and
   `test_dbtl_build_workflow_execution.py`.
 
+  **A phased Build's rerun record is written by the server, not asked for.**
+  Test re-runs a Build as one command, and a phased Build has one entry point
+  per phase; `merge_rerun_specs` keeps a record only while the phases agree, so
+  two phases naming different entry points conflicted and the bundle carried no
+  rerun record at all. The phase prompt never asked for one either
+  (`build_phases.build_prompt` passes the generic `RESULT_CONTRACT`, not the
+  Build clause that requests `provenance.rerun_spec`), so `structured_rerun_spec`
+  was **unsatisfiable under the phased workflow** for every spec that declares
+  it (v9+): a Build could run every planned phase, publish every output, and
+  still fail the gate with no message naming the real cause, because the
+  incomplete-plan branch reports first and prints an empty "It stopped there:".
+  `deerflow.dbtl.build_driver` is the pure renderer: `render_driver_script`
+  emits one `set -euo pipefail` shell script running each verified entry point
+  in plan order — `set -e` is what makes it a check rather than a
+  demonstration, since without it a failed phase is stepped over and the script
+  still exits 0, so Test would record a successful reproduction of a Build that
+  did not reproduce. Inputs are exported **per phase** because `DBTL_INPUT_n` is
+  numbered within a phase, and a union would hand phase two the wrong file under
+  the right name. It shares `build_phase_verification.entry_command` with the
+  server's own v12 execution, so the driver re-runs a phase exactly the way the
+  server ran it and a reproduction failure cannot be an artefact of the driver.
+  `_write_build_driver` writes it beside the review package
+  (`stage_file_name(kind="rerun")`) and derives the spec, whose `inputs` union
+  the phases' runtime inputs with the Build lineage the server bound — a
+  pre-v3 manifest reports no `execution_inputs` at all, and lineage is the set
+  Test verifies has not changed. The derivation runs **only** when the workers
+  produced no record of their own, so a single-phase Build keeps its worker's
+  account. Nothing runnable still records nothing, or the gate would be
+  satisfied by a promise nobody could perform. Tests:
+  `test_dbtl_build_driver.py`, plus
+  `test_dbtl_build_workflow_execution.py::TestAPresentationalFailureKeepsTheScience::test_a_phased_build_records_the_servers_own_rerun_driver`.
+
+  **A boundary after the last phase is not a boundary.** `pause_after` stops
+  *before the next phase*, so on the final phase there is nothing to stop
+  before — but both the replay and fresh-execution paths honoured it anyway.
+  The card offered "Continue — runs the remaining 0 phases", whose only real
+  option did nothing, and because a pause marks the plan incomplete, a Build
+  that had run 3 of 3 planned phases wrote no review package and could never
+  reach its human gate. A planner setting `pause_after` on every phase is not
+  wrong, so `_stops_at_boundary` reads it as the plan asking to be looked at
+  wherever a look is still possible; both paths ask through that one predicate,
+  because a boundary honoured on one and skipped on the other pauses a plan that
+  cannot then be resumed past it. Tests:
+  `test_dbtl_build_workflow_execution.py::TestABuildStopsBeingOneOpaqueWorker::test_a_boundary_after_the_last_phase_is_not_a_boundary`.
+
   Build v9 introduced the
   `server_verified_phase_manifest` gate reuses the per-phase publisher,
   `phase_done_condition`, `BuildStepRecorder`, and phase output digest. After

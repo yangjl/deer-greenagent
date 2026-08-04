@@ -772,6 +772,22 @@ artifact` is server-owned in full and is now stripped from external run input:
   whichever agent runs. See [backend/AGENTS.md](backend/AGENTS.md) for the grant,
   the scanner's deliberate narrowness, and why an unreadable entry point is not
   refused by that check.
+- **A Build that ran every planned phase must be able to reach its gate.** Two
+  independent defects stopped it, and each looked like the plan being
+  unfinished. A `pause_after` on the **final** phase was honoured as a
+  boundary, so the card offered "Continue — runs the remaining 0 phases": its
+  only real option did nothing, and the pause marked a completed plan
+  incomplete. And the phased workflow could never satisfy
+  `structured_rerun_spec` at all — the phase prompt never asked a worker for the
+  record, and even when one was supplied, phases naming different entry points
+  conflict on merge and leave the bundle with none. The server now writes that
+  record itself: `deerflow.dbtl.build_driver` renders one ordered
+  `set -euo pipefail` script re-running each verified entry point exactly the
+  way v12's server verification ran it, which is more trustworthy than a
+  worker's account as well as being the only thing Test's single-command rerun
+  can use. Neither defect was visible in the suite, because the test fixture
+  supplied a rerun record production never requested — and supplied the same one
+  for every phase, so the merge conflict never arose either.
   `generic:test:v3` keeps the v2 bounded allowance and pins the authoritative
   `generic-predictive:v2` check list into the worker contract. Ordinary
   Build/Test/Learn worker events do not carry `council_seat`; only actual
