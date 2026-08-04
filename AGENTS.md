@@ -547,7 +547,21 @@ artifact` is server-owned in full and is now stripped from external run input:
   `CouncilPlan.human_authored` **before** `dispatchable`: both are false here,
   and the other one means the council cannot answer the question. Nothing
   recommends this depth — declining to consult anyone is a statement about who
-  owns the answer, not a judgement a rule table should make. The authoring card
+  owns the answer, not a judgement a rule table should make.
+  **An authored design still gets a registered deck, because that is the only
+  place a Design can be decided.** The council path reaches its deck through a
+  chair result, which this depth never produces, so the authored package was
+  recorded and then stranded: no surface, no deck, and — since the Design stage
+  sheet is inspection-only — no control anywhere in the product capable of
+  approving it, with Build locked behind a design nobody could accept. The fix
+  is not a synthetic chair. `render_authored_design_deck` is a separate renderer
+  quoting the owner's own text, kept apart from `render_council_deck` because
+  that function reads its content off a chair result and with none renders "The
+  chair recorded no agreement" and an empty Contested section — a meeting that
+  went badly rather than one deliberately never convened. It says plainly that a
+  person wrote this and no meeting was held, carries Design's byte-stable gate
+  controls, and registers as an ordinary `stage_review` surface bound by hash to
+  the authored package. The authoring card
   carries its own `council_depth` and the supervisor reads it back from the card
   the server emitted, because the client sends a scope with every request and
   falls back to `ordinary` for a card it does not special-case; without that the

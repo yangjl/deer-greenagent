@@ -1046,6 +1046,90 @@ def render_council_deck(
     )
 
 
+def render_authored_design_deck(
+    *,
+    cycle_title: str,
+    authored_design: str,
+    package_path: str = "",
+    surface_id: str = "",
+    surface_mode: str = "",
+    transition_gate: Mapping[str, object] | None = None,
+    research_question: str = "",
+    objective: str = "",
+    success_criteria: Sequence[str] | str = (),
+    generated_at: datetime | None = None,
+) -> str:
+    """A design the project owner wrote, in the deck they will answer it in.
+
+    Design is submitted and decided in its registered deck and nowhere else, so
+    a depth that seats nobody still needs one — otherwise the package is
+    recorded and the cycle is stranded with no control anywhere capable of
+    approving it.
+
+    This is a separate renderer rather than ``render_council_deck`` with an
+    empty roster, because that function reads its content off a chair result:
+    with none it renders "The chair recorded no agreement" and an empty
+    Contested section, which describes a meeting that went badly instead of one
+    that was deliberately never convened. The renderer still authors nothing —
+    the owner's text is quoted verbatim and the only added sentences are about
+    provenance.
+    """
+    stamp = (generated_at or datetime.now(UTC)).strftime("%Y-%m-%d %H:%M UTC")
+    slides: list[str] = [
+        _slide(
+            kind="title",
+            eyebrow="Design · written by the project owner",
+            title=cycle_title or "Design",
+            body=(
+                '<p class="lede">This design was written by the project owner. No meeting was convened and no participant argued it, so there is no synthesis below — only the design itself, and your decision on it.</p>'
+                f'<p class="stamp">{html.escape(stamp)}</p>'
+            ),
+        )
+    ]
+    slides.extend(_brief_slides(research_question=research_question, objective=objective, success_criteria=success_criteria))
+    paragraphs = [_text(item, limit=MAX_SUMMARY_CHARS) for item in (authored_design or "").split("\n\n") if item.strip()]
+    slides.extend(
+        _paged_slides(
+            kind="summary",
+            eyebrow="In the owner's own words",
+            title="The design",
+            items=paragraphs,
+            per_page=PARAGRAPHS_PER_SLIDE,
+            body_of=lambda page: "".join(f'<p class="statement">{html.escape(str(item))}</p>' for item in page),
+            empty="No design text was recorded.",
+            note_label="The design",
+            note_prefix="design",
+        )
+    )
+
+    closing = '<p class="gate">Nothing here approves anything merely by opening the deck. The final slide is where a verdict is recorded.</p>' + (
+        f'<p class="stamp">Full review package: {html.escape(package_path)}</p>' if package_path else ""
+    )
+    anchor = '<div class="note"' if '<div class="note"' in slides[-1] else "</section>"
+    slides[-1] = slides[-1].replace(anchor, closing + anchor, 1)
+
+    if surface_mode == "stage_review":
+        slides.append(
+            _slide(
+                kind="review",
+                eyebrow="Human gate",
+                title="Review the Design",
+                body=(
+                    '<p class="gate">Writing this design did not approve it. Your notes from the earlier slides are sent with this decision.</p>'
+                    # Design's byte-stable control. ``consensus`` is None because
+                    # there is no meeting to select contested points from.
+                    + _review_controls(None, transition_gate)
+                ),
+            )
+        )
+
+    return render_design_deck_shell(
+        title=html.escape(f"{cycle_title or 'Design'} — Design"),
+        slides=slides,
+        bridge=_bridge_script_for_stage(surface_id, "design"),
+    )
+
+
 def render_design_deck_shell(*, title: str, slides: Sequence[str], bridge: str = "") -> str:
     """Place evidence slides in the canonical Design navigation and theme."""
     return _DECK_TEMPLATE.format(

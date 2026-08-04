@@ -94,6 +94,8 @@ class FakeRepo:
         #: Set to raise from surface registration, proving the review surface
         #: failure is visible even though meeting evidence is already durable.
         self.surface_error: Exception | None = None
+        #: Model production's artifact row so a deck can bind evidence by hash.
+        self.records_artifacts: bool = False
 
     async def get_cycle(self, cycle_id: str, *, project_id: str):
         if self.cycle is None or cycle_id != self.cycle["id"] or project_id != self.cycle["project_id"]:
@@ -133,6 +135,21 @@ class FakeRepo:
     async def record_worker_runs(self, **kwargs):
         self.recorded.append(kwargs)
         self.cycle["db_revision"] += 1
+        # Production writes the artifact row and a later ``get_cycle`` returns
+        # it; surface planning matches evidence by hash off that list. Opt-in,
+        # because several tests here prove the read_only fallback precisely by
+        # leaving the cycle's artifacts unmatchable.
+        if self.records_artifacts and kwargs.get("artifact_uri") and kwargs.get("artifact_content_hash"):
+            artifacts = self.cycle.setdefault("artifacts", [])
+            artifacts.append(
+                {
+                    "id": f"artifact-{len(artifacts) + 1}",
+                    "revision": 1,
+                    "uri": kwargs["artifact_uri"],
+                    "content_hash": kwargs["artifact_content_hash"],
+                    "artifact_type": kwargs.get("artifact_type"),
+                }
+            )
         return kwargs["results"]
 
     async def record_build_lineage(self, **kwargs):

@@ -143,7 +143,7 @@ from deerflow.dbtl.council import (
     recommend_depth,
 )
 from deerflow.dbtl.council_deck import chair_result as _chair_result_of
-from deerflow.dbtl.council_deck import render_council_deck
+from deerflow.dbtl.council_deck import render_authored_design_deck, render_council_deck
 from deerflow.dbtl.council_proposal import (
     CouncilProposal,
     build_proposal_prompt,
@@ -2627,6 +2627,21 @@ def _write_council_deck(
         logger.warning("Could not render the design meeting slide deck.", exc_info=True)
         return None
 
+    return _persist_deck(project_root=project_root, cycle=cycle, stage=stage, document=document)
+
+
+def _persist_deck(
+    *,
+    project_root: str,
+    cycle: Mapping[str, Any],
+    stage: str,
+    document: bytes,
+) -> RenderedDeck | None:
+    """Write rendered deck bytes beside the stage's review package.
+
+    Shared by every deck renderer so the naming, content addressing, and
+    fail-soft behaviour cannot drift between them.
+    """
     content_hash = hashlib.sha256(document).hexdigest()
     try:
         root = Path(project_root).expanduser().resolve()
@@ -2647,6 +2662,33 @@ def _write_council_deck(
         logger.warning("Could not write the design meeting slide deck.", exc_info=True)
         return None
     return RenderedDeck(uri=f"/mnt/user-data/outputs/{relative.as_posix()}", content_hash=content_hash)
+
+
+def _write_authored_design_deck(
+    *,
+    project_root: str,
+    cycle: Mapping[str, Any],
+    authored_design: str,
+    package_path: str,
+    surface_id: str,
+    surface_mode: str,
+) -> RenderedDeck | None:
+    """The owner's own design, rendered into the deck they answer it in."""
+    try:
+        document = render_authored_design_deck(
+            cycle_title=str(cycle.get("title") or ""),
+            authored_design=authored_design,
+            package_path=package_path,
+            surface_id=surface_id,
+            surface_mode=surface_mode,
+            research_question=str(cycle.get("research_question") or ""),
+            objective=str(cycle.get("objective") or ""),
+            success_criteria=cycle.get("success_criteria") or (),
+        ).encode("utf-8")
+    except Exception:  # noqa: BLE001 - a presentation must not break the record
+        logger.warning("Could not render the authored design slide deck.", exc_info=True)
+        return None
+    return _persist_deck(project_root=project_root, cycle=cycle, stage="design", document=document)
 
 
 def _stage_attempt_row_id(cycle: Mapping[str, Any], stage: str) -> str:
@@ -5097,6 +5139,7 @@ class LiveStageAdapter:
         cycle_id: str,
         user_id: str,
         execution_key: str,
+        originating_thread_id: str = "",
     ) -> LiveStageResult:
         """Record a design the person wrote, or ask them to write it.
 
@@ -5104,6 +5147,13 @@ class LiveStageAdapter:
         is still a package — same path, same content addressing, same refusal to
         satisfy the gate — because the reviewer's job does not change just
         because the author was human.
+
+        It also gets a registered deck. Design is submitted and decided in that
+        deck and nowhere else, and this depth produces no chair result, which is
+        what the council path reaches its deck through. Without one the design
+        was recorded and then unapprovable: the stage sheet is inspection-only,
+        so no control existed anywhere in the product that could move the gate,
+        and Build stayed locked behind a design nobody could accept.
         """
         text = (authored_design or "").strip()
         if not text:
@@ -5138,6 +5188,41 @@ class LiveStageAdapter:
             artifact_uri=artifact_uri,
             artifact_content_hash=artifact_hash,
         )
+
+        # The gate the owner answers this through. Planned before rendering,
+        # because the deck must carry its own surface id and registering binds
+        # the bytes that id was assigned for.
+        surface_plan = await self._plan_feedback_surface(
+            stage=spec.stage,
+            cycle_id=cycle_id,
+            project_id=project_id,
+            execution_key=execution_key,
+            round_number=1,
+            originating_thread_id=originating_thread_id,
+            paused=False,
+            artifact_uri=artifact_uri,
+            artifact_hash=artifact_hash,
+            # No meeting ran, so no worker run may be named as its chair.
+            chair_worker_run_id=None,
+        )
+        deck = await asyncio.to_thread(
+            _write_authored_design_deck,
+            project_root=project_root,
+            cycle=cycle,
+            authored_design=text,
+            package_path=artifact_uri,
+            surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
+            surface_mode=(surface_plan.mode if surface_plan is not None else ""),
+        )
+        surface_id = None
+        if deck is not None and surface_plan is not None:
+            await self._register_feedback_surface(
+                surface_plan,
+                deck,
+                cycle_id=cycle_id,
+                project_id=project_id,
+            )
+            surface_id = surface_plan.surface_id if surface_plan.answerable else None
         return LiveStageResult(
             stage=spec.stage,
             cycle_id=cycle_id,
@@ -5145,6 +5230,8 @@ class LiveStageAdapter:
             worker_count=0,
             produced_usable_evidence=True,
             artifact_uri=artifact_uri,
+            deck_uri=(deck.uri if deck is not None else None),
+            feedback_surface_id=surface_id,
         )
 
     async def _plan_feedback_surface(
@@ -6309,6 +6396,7 @@ class LiveStageAdapter:
                     cycle_id=cycle_id,
                     user_id=str(user_id),
                     execution_key=execution_key,
+                    originating_thread_id=str(runtime.get("thread_id") or ""),
                 )
         base_dispatcher = self._dispatcher or self._production_dispatcher(
             config=config,
