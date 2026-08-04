@@ -571,6 +571,15 @@ execution authority, publication path, or persistence model.
   `hardened_v10` and `legacy_v9` as explicit rollback choices. The isolated
   manual profile defaults to v11 for new profiles while preserving explicit
   rollback selections.
+- Captured v10 retries exposed a result-envelope compatibility gap rather than
+  a sandbox escape: a completed worker wrote valid files inside its grant but
+  returned `src/...` paths. Publication now resolves grant-relative output
+  paths only against that worker's containment root and remaps exact files into
+  the governed manifest; all existing traversal, symlink, hash, and directory
+  entry-point refusals remain in force. The Build parser also preserves the
+  observed unambiguous failure shapes (`incomplete`, nested `phase.status`,
+  `{item: ...}` limitations, and `not_completed` checks) as truthful failures
+  instead of replacing them with schema-error failures.
 
 **Implementation record (finalization timing — the token axis):**
 

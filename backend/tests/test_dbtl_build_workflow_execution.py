@@ -1717,6 +1717,46 @@ class TestTheServerOwnsThePhaseManifestVerdict:
 
         assert result.produced_usable_evidence, result.note
 
+    async def test_grant_relative_result_paths_publish_under_the_same_containment_rules(self, project) -> None:
+        class _GrantRelativeDispatcher(_WritingDispatcher):
+            async def __call__(self, units, *, budget):
+                outcomes = await super().__call__(units, budget=budget)
+                revised = []
+                for unit, outcome in zip(units, outcomes, strict=True):
+                    if unit.role != "phase" or not outcome.text:
+                        revised.append(outcome)
+                        continue
+                    grant_prefix = _virtual(_grant_from_prompt(unit.prompt)).rstrip("/") + "/"
+
+                    def relative(value: str) -> str:
+                        return value.removeprefix(grant_prefix) if value.startswith(grant_prefix) else value
+
+                    payload = json.loads(outcome.text)
+                    payload["artifact_refs"] = [relative(value) for value in payload["artifact_refs"]]
+                    for evidence in payload["evidence_refs"]:
+                        evidence["reference"] = relative(evidence["reference"])
+                    for figure in payload.get("figures", []):
+                        figure["path"] = relative(figure["path"])
+                    manifest = payload["provenance"]["phase_manifest"]
+                    manifest["entry_point"] = relative(manifest["entry_point"])
+                    manifest["declared_outputs"] = [relative(value) for value in manifest["declared_outputs"]]
+                    revised.append(DispatchOutcome(unit_id=outcome.unit_id, text=json.dumps(payload)))
+                return revised
+
+        repo, root = project
+        await _ready_for_build(repo)
+
+        result, _dispatcher = await _run_build(
+            repo,
+            root,
+            dispatcher=_GrantRelativeDispatcher(plan=SINGLE_PHASE_PLAN),
+        )
+
+        assert result.produced_usable_evidence, result.note
+        lineage = (await repo.build_test_view("cycle-1", project_id="project-1"))["build_lineage"]
+        assert lineage["output_artifacts"]
+        assert all(item["uri"].startswith("/mnt/user-data/outputs/dbtl/") for item in lineage["output_artifacts"])
+
     @pytest.mark.parametrize(
         ("mutation", "expected"),
         [

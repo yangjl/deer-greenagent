@@ -580,6 +580,71 @@ class TestWorkerResultContract:
 
         assert result.status is WorkerStatus.COMPLETED
 
+    def test_build_incomplete_status_is_a_truthful_failure(self) -> None:
+        result = parse_worker_result(
+            _valid_payload(status="incomplete"),
+            capability="software_engineering",
+            agent_name="general-purpose",
+            stage="build",
+        )
+
+        assert result.status is WorkerStatus.FAILED
+        assert not result.is_trustworthy
+
+    def test_build_recovers_nested_failed_phase_envelope(self) -> None:
+        result = parse_worker_result(
+            {
+                "phase": {
+                    "status": "incomplete",
+                    "decision_reason": "Validation stopped before its required figures were generated.",
+                },
+                "artifact_refs": {
+                    "created": {
+                        "validator": "/mnt/user-data/outputs/.dbtl-stage-work/run/src/validate.py",
+                        "log": "/mnt/user-data/outputs/.dbtl-stage-work/run/logs/validation.log",
+                    },
+                    "required_but_not_completed": {"report": "artifacts/report.md"},
+                },
+                "claims": [
+                    {
+                        "claim": "The validator stopped before completion.",
+                        "evidence": ["/mnt/user-data/outputs/.dbtl-stage-work/run/logs/validation.log"],
+                    }
+                ],
+                "limitations": [{"item": "No PASS decision was issued."}],
+                "quality_checks": [{"name": "figures", "status": "not_completed"}],
+            },
+            capability="field_trial_quality_control",
+            agent_name="general-purpose",
+            stage="build",
+        )
+
+        assert result.status is WorkerStatus.FAILED
+        assert result.summary == "Validation stopped before its required figures were generated."
+        assert result.artifact_refs == (
+            "/mnt/user-data/outputs/.dbtl-stage-work/run/src/validate.py",
+            "/mnt/user-data/outputs/.dbtl-stage-work/run/logs/validation.log",
+        )
+        assert result.evidence_refs[0].reference.endswith("logs/validation.log")
+        assert result.limitations == ("No PASS decision was issued.",)
+        assert result.quality_checks[0].passed is False
+
+    def test_failed_build_diagnostic_mapping_does_not_become_evidence(self) -> None:
+        result = parse_worker_result(
+            _valid_payload(
+                status="failed",
+                claims=[{"claim": "No pass was asserted.", "evidence": ["Validator exit code 1"]}],
+                evidence_refs={"execution": {"exit_code": 1}},
+            ),
+            capability="field_trial_quality_control",
+            agent_name="general-purpose",
+            stage="build",
+        )
+
+        assert result.status is WorkerStatus.FAILED
+        assert result.claims == ()
+        assert result.evidence_refs == ()
+
     def test_build_field_aliases_keep_the_reported_values(self) -> None:
         payload = _valid_payload()
         payload.pop("summary")

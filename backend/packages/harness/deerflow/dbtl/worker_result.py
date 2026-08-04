@@ -23,6 +23,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Any
 
 from deerflow.dbtl.build_execution import BuildFigure, KeyOutcome, parse_figures, parse_key_outcomes
@@ -210,7 +211,12 @@ class StageWorkerResult:
         }
 
 
-def _string_tuple(raw: object, field_name: str) -> tuple[str, ...]:
+def _string_tuple(
+    raw: object,
+    field_name: str,
+    *,
+    object_text_fields: tuple[str, ...] = (),
+) -> tuple[str, ...]:
     if raw is None:
         return ()
     if isinstance(raw, str):
@@ -220,6 +226,12 @@ def _string_tuple(raw: object, field_name: str) -> tuple[str, ...]:
         raise WorkerResultRejected(f"{field_name!r} must be a list of strings.")
     items: list[str] = []
     for entry in raw[:MAX_ITEMS]:
+        if isinstance(entry, Mapping) and object_text_fields:
+            candidates = {value.strip() for name in object_text_fields if isinstance((value := entry.get(name)), str) and value.strip()}
+            if len(candidates) != 1:
+                expected = ", ".join(repr(name) for name in object_text_fields)
+                raise WorkerResultRejected(f"Each {field_name!r} object needs exactly one unambiguous text field: {expected}.")
+            entry = next(iter(candidates))
         if not isinstance(entry, str):
             raise WorkerResultRejected(f"{field_name!r} must contain only strings.")
         text = entry.strip()
@@ -335,17 +347,22 @@ def _claim_tuple(
             # a named top-level evidence entry. IDs are resolved, never treated
             # as external evidence by implication.
             claim_evidence = entry.get("evidence_refs")
+            if claim_evidence is None and stage == "build":
+                claim_evidence = entry.get("evidence")
             if isinstance(claim_evidence, Mapping):
                 nested_evidence.extend(_evidence_tuple([claim_evidence], artifact_aliases=artifact_aliases, stage=stage))
             elif isinstance(claim_evidence, Sequence) and not isinstance(claim_evidence, str):
                 inline: list[Mapping[str, Any]] = []
                 for evidence_item in claim_evidence:
                     if isinstance(evidence_item, str):
-                        evidence_id = evidence_item.strip()
-                        resolved = indexed_evidence.get(evidence_id)
-                        if not evidence_id or resolved is None:
-                            raise WorkerResultRejected(f"Claim references unknown evidence id {evidence_id!r}.")
-                        nested_evidence.append(resolved)
+                        if stage == "build" and _is_build_workspace_path(evidence_item):
+                            nested_evidence.append(EvidenceRef(kind="workspace_file", reference=evidence_item.strip()[:MAX_ITEM_CHARS]))
+                        else:
+                            evidence_id = evidence_item.strip()
+                            resolved = indexed_evidence.get(evidence_id)
+                            if not evidence_id or resolved is None:
+                                raise WorkerResultRejected(f"Claim references unknown evidence id {evidence_id!r}.")
+                            nested_evidence.append(resolved)
                     elif isinstance(evidence_item, Mapping):
                         inline.append(evidence_item)
                     else:
@@ -375,7 +392,7 @@ def _evidence_items(
     ids: dict[str, EvidenceRef] = {}
     aliases = artifact_aliases or {}
     for entry in raw[:MAX_ITEMS]:
-        if stage == "build" and isinstance(entry, str) and entry.strip().startswith("/mnt/user-data/"):
+        if stage == "build" and isinstance(entry, str) and _is_build_workspace_path(entry):
             refs.append(EvidenceRef(kind="workspace_file", reference=entry.strip()[:MAX_ITEM_CHARS]))
             continue
         if not isinstance(entry, Mapping):
@@ -501,7 +518,7 @@ def _quality_tuple(raw: object, *, stage: str | None = None) -> tuple[QualityChe
         if raw_status is not None:
             if normalized_status in {"passed", "pass"}:
                 status_passed = True
-            elif normalized_status in {"failed", "fail", "not_run", "skipped"}:
+            elif normalized_status in {"failed", "fail", "not_run", "not_completed", "skipped"}:
                 status_passed = False
             else:
                 raise WorkerResultRejected(f"Quality check {entry.get('name')!r} has an unknown 'status'.")
@@ -620,7 +637,29 @@ _STATUS_ALIASES: Mapping[str, WorkerStatus] = {
     "error": WorkerStatus.FAILED,
     "errored": WorkerStatus.FAILED,
     "failure": WorkerStatus.FAILED,
+    "incomplete": WorkerStatus.FAILED,
 }
+
+
+_BUILD_RELATIVE_WORKSPACE_DIRS = frozenset({"artifacts", "config", "logs", "src", "tests"})
+
+
+def _is_build_workspace_path(value: object) -> bool:
+    """Whether a Build string unambiguously names a workspace path.
+
+    Absolute project-virtual references and grant-relative paths rooted in the
+    server-created Build directories are locators. Arbitrary prose remains
+    prose and cannot be promoted into evidence by this compatibility layer.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return False
+    text = value.strip()
+    if text.startswith("/mnt/user-data/"):
+        return True
+    if text.startswith("/") or "://" in text:
+        return False
+    path = PurePosixPath(text)
+    return not path.is_absolute() and ".." not in path.parts and bool(path.parts) and (path.parts[0] in _BUILD_RELATIVE_WORKSPACE_DIRS or path.as_posix() == "README.md")
 
 
 def _compatible_payload(payload: Mapping[str, Any], *, stage: str | None) -> dict[str, Any]:
@@ -643,6 +682,26 @@ def _compatible_payload(payload: Mapping[str, Any], *, stage: str | None) -> dic
                     normalized[canonical] = normalized[alias]
                     break
 
+        phase = normalized.get("phase")
+        if isinstance(phase, Mapping):
+            if normalized.get("status") is None and isinstance(phase.get("status"), str):
+                normalized["status"] = phase["status"]
+            if normalized.get("summary") is None:
+                for field_name in ("decision_reason", "summary", "reason"):
+                    candidate = phase.get(field_name)
+                    if isinstance(candidate, str) and candidate.strip():
+                        normalized["summary"] = candidate
+                        break
+
+        # A Build failure may report the scratch tree as a structured map.
+        # Only `created` paths are real partial artifacts; required-but-missing
+        # and bound-input sections are deliberately not promoted to outputs.
+        raw_artifacts = normalized.get("artifact_refs")
+        if isinstance(raw_artifacts, Mapping):
+            created = raw_artifacts.get("created")
+            if isinstance(created, Mapping):
+                normalized["artifact_refs"] = [{"name": str(name), "path": path} for name, path in created.items() if isinstance(name, str) and name.strip() and isinstance(path, str) and path.strip()]
+
     raw_status = normalized.get("status")
     if isinstance(raw_status, str):
         status_alias = _STATUS_ALIASES.get(raw_status.strip().lower())
@@ -660,6 +719,14 @@ def _compatible_payload(payload: Mapping[str, Any], *, stage: str | None) -> dic
             completion = next((item for item in checks if item.name == "phase_done_condition"), None)
             if completion is not None:
                 normalized["status"] = (WorkerStatus.COMPLETED if completion.passed else WorkerStatus.FAILED).value
+
+    # Some failed Build reports use `evidence` for a nested diagnostic object,
+    # not a list of evidence locators. It cannot satisfy a stage either way;
+    # retain the failure summary/limitations and discard claims that cannot be
+    # evidence-bound rather than misreporting this as a schema crash.
+    if stage == "build" and normalized.get("status") == WorkerStatus.FAILED.value and isinstance(normalized.get("evidence_refs"), Mapping):
+        normalized["evidence_refs"] = []
+        normalized["claims"] = []
     return normalized
 
 
@@ -751,7 +818,11 @@ def parse_worker_result(
         artifact_refs=artifact_refs,
         evidence_refs=evidence_refs,
         claims=claims,
-        limitations=_string_tuple(payload.get("limitations"), "limitations"),
+        limitations=_string_tuple(
+            payload.get("limitations"),
+            "limitations",
+            object_text_fields=(("item", "limitation", "text", "description", "detail") if stage == "build" else ()),
+        ),
         provenance=dict(provenance),
         quality_checks=_quality_tuple(payload.get("quality_checks"), stage=stage),
         recommended_next_actions=_string_tuple(payload.get("recommended_next_actions"), "recommended_next_actions"),

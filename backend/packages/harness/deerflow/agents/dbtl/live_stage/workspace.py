@@ -208,6 +208,7 @@ def verified_workspace_files(
     *,
     project_root: str,
     containment_reference: str | None = None,
+    relative_to_containment: bool = False,
     max_files: int = 5_000,
 ) -> tuple[tuple[str, Path], ...]:
     """Resolve one file or expand one directory without following symlinks.
@@ -226,17 +227,23 @@ def verified_workspace_files(
         raise ValueError("workspace file limit must be positive")
 
     root = Path(project_root).expanduser().resolve()
-    lexical = workspace_lexical_path(reference, project_root=project_root)
-    if lexical is None:
-        raise ValueError("reference is outside the project workspace")
-    _relative, candidate = lexical
-
     containment = root
     if containment_reference is not None:
         contained = workspace_lexical_path(containment_reference, project_root=project_root)
         if contained is None:
             raise ValueError("containment root is outside the project workspace")
         containment = contained[1]
+
+    lexical = workspace_lexical_path(reference, project_root=project_root)
+    raw_reference = reference.strip()
+    if relative_to_containment and containment_reference is not None and raw_reference and not raw_reference.startswith(f"{WORKSPACE_VIRTUAL_ROOT}/") and not raw_reference.startswith("/") and "://" not in raw_reference:
+        relative_reference = PurePosixPath(raw_reference)
+        if not relative_reference.is_absolute() and ".." not in relative_reference.parts:
+            candidate = containment.joinpath(*relative_reference.parts)
+            lexical = (candidate.relative_to(root).as_posix(), candidate)
+    if lexical is None:
+        raise ValueError("reference is outside the project workspace")
+    _relative, candidate = lexical
 
     try:
         containment.relative_to(root)

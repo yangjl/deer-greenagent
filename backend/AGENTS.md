@@ -3724,6 +3724,16 @@ same switch:
   `test_dbtl_live_stage_execution.py` and
   `test_dbtl_build_workflow_execution.py::TestABuildStopsBeingOneOpaqueWorker`.
 
+  Build output declarations may use either a full `/mnt/user-data/...` path or
+  a grant-relative path rooted in the server-created worker directories
+  (`src/`, `tests/`, `config/`, `artifacts/`, `logs/`, or `README.md`). Relative
+  output paths are resolved only when the publisher supplies that worker's
+  exact containment root; ordinary project inputs retain project-relative
+  semantics. Traversal, schemes, host-absolute paths, symlinks, non-regular
+  files, and cross-worker references remain refused. The exact relative file
+  locator is remapped into manifests and evidence, but a directory is never
+  inferred to be an entry point even when it contains one file.
+
   Build v8 introduced the `structured_rerun_spec` gate, parsed by
   `dbtl.build_execution`, remapped
   from the worker grant to governed published URIs, and stored on the existing

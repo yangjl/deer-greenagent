@@ -1610,6 +1610,37 @@ def test_workspace_directory_expansion_is_stable_and_regular_file_only(tmp_path:
     assert [relative for relative, _path in files] == ["bundle/nested/a.txt", "bundle/z.txt"]
 
 
+def test_worker_relative_output_resolves_only_from_its_containment_root(tmp_path: Path) -> None:
+    grant = tmp_path / "outputs" / ".dbtl-stage-work" / "attempt" / "build" / "worker"
+    source = grant / "src" / "validate.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("print('validated')\n", encoding="utf-8")
+
+    files = verified_workspace_files(
+        "src/validate.py",
+        project_root=str(tmp_path),
+        containment_reference="/mnt/user-data/outputs/.dbtl-stage-work/attempt/build/worker",
+        relative_to_containment=True,
+    )
+
+    assert files == (("outputs/.dbtl-stage-work/attempt/build/worker/src/validate.py", source),)
+
+
+def test_worker_relative_output_still_refuses_parent_traversal(tmp_path: Path) -> None:
+    grant = tmp_path / "outputs" / ".dbtl-stage-work" / "attempt" / "build" / "worker"
+    grant.mkdir(parents=True)
+    outside = grant.parent / "outside.py"
+    outside.write_text("print('outside')\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="outside"):
+        verified_workspace_files(
+            "../outside.py",
+            project_root=str(tmp_path),
+            containment_reference="/mnt/user-data/outputs/.dbtl-stage-work/attempt/build/worker",
+            relative_to_containment=True,
+        )
+
+
 def test_workspace_directory_expansion_refuses_symlinks(tmp_path: Path) -> None:
     bundle = tmp_path / "bundle"
     bundle.mkdir()

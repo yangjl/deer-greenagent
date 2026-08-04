@@ -22,7 +22,7 @@ from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from inspect import isawaitable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -2597,6 +2597,7 @@ def _publish_build_worker_artifacts(
                         reference,
                         project_root=project_root,
                         containment_reference=unit_workspace,
+                        relative_to_containment=True,
                         max_files=remaining_files,
                     )
                 except FileNotFoundError:
@@ -2645,6 +2646,21 @@ def _publish_build_worker_artifacts(
                     reference_uris.append(uri)
                     file_remapped[source_relative] = uri
                     file_remapped[f"{WORKSPACE_VIRTUAL_ROOT}/{source_relative}"] = uri
+                    # Preserve the worker's exact locator as an alias only
+                    # when it names this file itself. A directory that happens
+                    # to contain one file must not become an entry point by
+                    # inference; its relative name differs from its child's.
+                    try:
+                        grant_relative = source.relative_to(workspace_host).as_posix()
+                    except ValueError:
+                        grant_relative = ""
+                    normalized_reference = PurePosixPath(reference.strip()).as_posix()
+                    if normalized_reference in {
+                        source_relative,
+                        f"{WORKSPACE_VIRTUAL_ROOT}/{source_relative}",
+                        grant_relative,
+                    }:
+                        file_remapped[reference] = uri
                 if failure:
                     break
                 remapped[reference] = tuple(reference_uris)
