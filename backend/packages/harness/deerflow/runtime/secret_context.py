@@ -25,6 +25,7 @@ SECRETS_CONTEXT_KEY = "secrets"
 # (binding point A). Written by the skill-activation middleware, read by the bash
 # tool. Both reserved keys are stripped from trace payloads (see tracing redactor).
 ACTIVE_SECRETS_CONTEXT_KEY = "__active_skill_secrets"
+DBTL_EXECUTION_ENV_CONTEXT_KEY = "__dbtl_execution_env"
 
 # Reserved sub-key holding the active skill tool-policy decision for one model
 # step. The decision includes a middleware-instance owner token that prevents a
@@ -75,6 +76,13 @@ def read_active_secrets(context: Any) -> dict[str, str]:
     if not isinstance(context, dict):
         return {}
     return _string_pairs(context.get(ACTIVE_SECRETS_CONTEXT_KEY))
+
+
+def read_dbtl_execution_env(context: Any) -> dict[str, str]:
+    """Return the server-issued environment for one governed stage worker."""
+    if not isinstance(context, dict):
+        return {}
+    return _string_pairs(context.get(DBTL_EXECUTION_ENV_CONTEXT_KEY))
 
 
 def write_pre_isolation_command(
@@ -191,6 +199,7 @@ REDACTED_CONTEXT_KEYS = frozenset(
     {
         SECRETS_CONTEXT_KEY,
         ACTIVE_SECRETS_CONTEXT_KEY,
+        DBTL_EXECUTION_ENV_CONTEXT_KEY,
         _SLASH_SECRET_SOURCE_KEY,
         _SECRETS_BINDING_AUDIT_KEY,
         _SLASH_SKILL_ACTIVATION_RUN_KEY,

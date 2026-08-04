@@ -40,6 +40,27 @@ describe("messageToStep", () => {
     expect(step.tool_calls).toBeUndefined();
   });
 
+  it("keeps the exact model-call usage on an AI step", () => {
+    const step = messageToStep(
+      {
+        type: "ai",
+        content: "Inspecting",
+        usage_metadata: {
+          input_tokens: 12_300,
+          output_tokens: 410,
+          total_tokens: 12_710,
+        },
+      },
+      4,
+    );
+
+    expect(step.usage).toEqual({
+      inputTokens: 12_300,
+      outputTokens: 410,
+      totalTokens: 12_710,
+    });
+  });
+
   it("flattens list-of-blocks content to text", () => {
     const step = messageToStep(
       {
@@ -182,6 +203,9 @@ describe("eventsToSteps", () => {
         kind: "ai",
         text: "searching",
         tool_calls: [{ name: "web_search", args: {} }],
+        // Persisted backend events use the provider wire shape. The frontend
+        // must normalize it instead of type-casting it as its camelCase model.
+        usage: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
       },
       metadata: { task_id: "call_1", message_index: 1 },
     },
@@ -202,8 +226,32 @@ describe("eventsToSteps", () => {
 
     expect(steps.map((s) => s.message_index)).toEqual([1, 2]);
     expect(steps[0]!.kind).toBe("ai");
+    expect(steps[0]!.usage?.inputTokens).toBe(100);
     expect(steps[1]!.kind).toBe("tool");
     expect(steps[1]!.tool_name).toBe("web_search");
+  });
+
+  it("restores live usage from additional_kwargs when the provider puts it there", () => {
+    const step = messageToStep(
+      {
+        type: "ai",
+        content: "Inspecting",
+        additional_kwargs: {
+          usage_metadata: {
+            input_tokens: 80,
+            output_tokens: 10,
+            total_tokens: 90,
+          },
+        },
+      },
+      5,
+    );
+
+    expect(step.usage).toEqual({
+      inputTokens: 80,
+      outputTokens: 10,
+      totalTokens: 90,
+    });
   });
 
   it("ignores steps belonging to other tasks and non-step events", () => {

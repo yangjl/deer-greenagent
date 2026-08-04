@@ -119,13 +119,15 @@ def _with_phase_manifest(
     declared_outputs: list[str] | None = None,
 ) -> dict:
     done_match = re.search(r"^Done when: (?P<condition>.*)$", unit.prompt, re.MULTILINE)
-    manifest_version = 2 if "return version=2" in unit.prompt else 1
+    version_match = re.search(r"return version=(?P<version>[123])", unit.prompt)
+    manifest_version = int(version_match.group("version")) if version_match is not None else 1
     payload["provenance"]["phase_manifest"] = {
         "version": manifest_version,
         "entry_point": entry_point,
         "declared_outputs": declared_outputs if declared_outputs is not None else list(payload["artifact_refs"]),
         "completion_condition": done_match.group("condition") if done_match is not None else "",
         **({"declared_inputs": list(payload["provenance"].get("inputs_examined") or ())} if manifest_version >= 2 else {}),
+        **({"execution_inputs": []} if manifest_version >= 3 else {}),
     }
     return payload
 
@@ -251,7 +253,11 @@ def _grant_from_prompt(prompt: str) -> Path:
     # Anchored on the sentence that *grants* the directory. An unanchored scan
     # matches the first stage-work path in the prompt, which for a later phase is
     # a preceding phase's output — a path this unit may read and must not write.
-    match = re.search(r"execution log under (/mnt/user-data/outputs/\.dbtl-stage-work/[A-Za-z0-9._/-]+?)[.\s\"]", prompt) or re.search(r"(/mnt/user-data/outputs/\.dbtl-stage-work/[A-Za-z0-9._/-]+)", prompt)
+    match = (
+        re.search(r"Write the corrected implementation under (/mnt/user-data/outputs/\.dbtl-stage-work/[A-Za-z0-9._/-]+?)[;\s\"]", prompt)
+        or re.search(r"execution log under (/mnt/user-data/outputs/\.dbtl-stage-work/[A-Za-z0-9._/-]+?)[.\s\"]", prompt)
+        or re.search(r"(/mnt/user-data/outputs/\.dbtl-stage-work/[A-Za-z0-9._/-]+)", prompt)
+    )
     assert match is not None, "the adapter did not bind a writable grant into the prompt"
     return _PROJECT_ROOT[0] / match.group(1)[len("/mnt/user-data/") :]
 
@@ -1591,6 +1597,35 @@ class _ContradictoryPhaseDispatcher(_IncompletePhaseDispatcher):
         return revised
 
 
+class _FreshCorrectionDispatcher(_WritingDispatcher):
+    """Fail the first implementation check, then complete the fresh unit."""
+
+    async def __call__(self, units, *, budget):
+        outcomes = await super().__call__(units, budget=budget)
+        revised = []
+        for unit, outcome in zip(units, outcomes, strict=True):
+            if unit.role != "phase" or not outcome.text:
+                revised.append(outcome)
+                continue
+            payload = json.loads(outcome.text)
+            marker = next(item for item in payload["quality_checks"] if item["name"] == "phase_done_condition")
+            is_correction = bool(unit.tool_contract.get("correction_attempt"))
+            if not is_correction:
+                marker.update(passed=False, detail="The generated implementation test failed.")
+            revised.append(
+                DispatchOutcome(
+                    unit_id=outcome.unit_id,
+                    text=json.dumps(payload),
+                    token_usage={
+                        "input_tokens": 20 if is_correction else 100,
+                        "output_tokens": 5 if is_correction else 10,
+                        "total_tokens": 25 if is_correction else 110,
+                    },
+                )
+            )
+        return revised
+
+
 class TestAPhaseMayBuildOnThePhaseBeforeIt:
     """The pre-run snapshot cannot contain what the run itself published.
 
@@ -1840,6 +1875,46 @@ class TestTheServerOwnsThePhaseManifestVerdict:
 
 
 class TestAPartialPhaseCannotAdvanceThePlan:
+    async def test_v12_uses_one_fresh_40k_correction_and_keeps_the_first_usage(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        dispatcher = _FreshCorrectionDispatcher(plan=SINGLE_PHASE_PLAN)
+        merged_usage: list[dict[str, int]] = []
+        original_merge = adapter_module._merge_token_usage
+
+        def observed_merge(*values):
+            merged = original_merge(*values)
+            merged_usage.append(merged)
+            return merged
+
+        monkeypatch.setattr(adapter_module, "_merge_token_usage", observed_merge)
+
+        result, _ = await _run_build(
+            repo,
+            root,
+            dispatcher=dispatcher,
+            build_worker_contract="hardened_v12",
+        )
+
+        assert result.produced_usable_evidence, result.note
+        assert len(dispatcher.phase_units) == 2
+        first, correction = dispatcher.phase_units
+        assert not first.tool_contract.get("correction_attempt")
+        assert correction.tool_contract["correction_attempt"] is True
+        assert correction.tool_contract["fresh_correction"] is True
+        assert correction.max_tokens == 40_000
+        assert "The generated implementation test failed" in correction.prompt
+        assert "read-only" in correction.prompt
+        assert {"input_tokens": 120, "output_tokens": 15, "total_tokens": 135} in merged_usage
+
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        phase = view["phases"][0]
+        assert phase["status"] == StepState.SUCCEEDED.value
+        # The unit id in the committed digest/payload is the fresh worker, so a
+        # replay cannot accidentally resurrect the rejected first result.
+        assert "correction" in correction.unit_id
+
     async def test_a_failed_done_condition_stops_before_the_next_phase(self, project) -> None:
         repo, root = project
         await _ready_for_build(repo)

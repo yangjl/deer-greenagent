@@ -752,6 +752,26 @@ artifact` is server-owned in full and is now stripped from external run input:
   `generic:build:v3` gives executable Build work twelve bounded model calls
   (143 LangGraph super-steps) rather than the four-call effective default that
   could only read the Design and one input before finalizing.
+- **The server issues a Build phase its paths; the phase does not compose its
+  own.** Two workers on one cycle — a registered specialist and the generalist —
+  independently wrote the same nonexistent host path into generated code and
+  spent 650K tokens between them failing to run it. The agent was not the
+  variable: the worker contract had *instructed* them to use absolute paths, so
+  the failure was specified rather than improvised. `generic:build:v12` drops
+  that instruction and supplies the workspace and each declared input through
+  the environment instead, refuses an entry point that names a location outside
+  its grant (naming the literal and the line), and has the server run the
+  declared entry point itself rather than trusting a worker's account of having
+  run it. Local verification hides unissued project files with `sandbox-exec`;
+  remote verification requires `bwrap` and fails preflight when that read
+  boundary is unavailable. V12 restores the 120K phase cap; one failed implementation check gets
+  a fresh 40K correction over the staged files, not the old transcript.
+  Provider usage is persisted on each AI ReAct step and rendered once with its
+  input/output split after reload. `dbtl.build_implementer_agent` picks who implements a phase with no
+  registered specialist — an efficiency dial only, since correctness now holds
+  whichever agent runs. See [backend/AGENTS.md](backend/AGENTS.md) for the grant,
+  the scanner's deliberate narrowness, and why an unreadable entry point is not
+  refused by that check.
   `generic:test:v3` keeps the v2 bounded allowance and pins the authoritative
   `generic-predictive:v2` check list into the worker contract. Ordinary
   Build/Test/Learn worker events do not carry `council_seat`; only actual

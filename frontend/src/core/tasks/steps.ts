@@ -1,3 +1,5 @@
+import { normalizeTokenUsage } from "../messages/usage";
+
 /**
  * Subtask step model shared by the live (SSE) and reload (fetched) paths.
  *
@@ -22,6 +24,12 @@ export interface SubtaskStep {
   truncated?: boolean;
   tool_calls?: SubtaskStepToolCall[];
   tool_name?: string;
+  /** Provider-reported usage for this exact assistant/model call. */
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  };
 }
 
 type RawMessage = {
@@ -29,6 +37,15 @@ type RawMessage = {
   content?: unknown;
   name?: string;
   tool_calls?: { name?: string; args?: unknown; [key: string]: unknown }[];
+  usage_metadata?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+  };
+  additional_kwargs?: {
+    usage_metadata?: unknown;
+    [key: string]: unknown;
+  };
   [key: string]: unknown;
 };
 
@@ -73,6 +90,9 @@ export function messageToStep(
       name: call.name,
       args: call.args,
     }));
+    step.usage = normalizeTokenUsage(
+      message.usage_metadata ?? message.additional_kwargs?.usage_metadata,
+    );
   }
 
   return step;
@@ -142,6 +162,7 @@ export function eventsToSteps(
       truncated: content.truncated,
       tool_calls: content.tool_calls,
       tool_name: content.tool_name,
+      usage: normalizeTokenUsage(content.usage),
     });
   }
   return steps.sort((a, b) => a.message_index - b.message_index);

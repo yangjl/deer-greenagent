@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 DbtlMode = Literal["disabled", "audit_only", "manual", "graph_enabled"]
-DbtlBuildWorkerContract = Literal["hardened_v11", "hardened_v10", "legacy_v9"]
+DbtlBuildWorkerContract = Literal["hardened_v12", "hardened_v11", "hardened_v10", "legacy_v9"]
 
 
 class DbtlStageMeetingsConfig(BaseModel):
@@ -84,11 +84,28 @@ class DbtlConfig(BaseModel):
     )
 
     build_worker_contract: DbtlBuildWorkerContract = Field(
-        default="hardened_v11",
+        default="hardened_v12",
         description=(
-            "Execution contract for new, unpinned phased Build attempts. hardened_v11 retains v10 governance with "
-            "a 500,000-token worker ceiling; hardened_v10 and legacy_v9 are bounded rollback paths. Already-pinned "
-            "attempts keep their recorded contract regardless of this setting."
+            "Execution contract for new, unpinned phased Build attempts. hardened_v12 adds the server-issued path "
+            "grant: a phase's entry point is refused if it names a location outside its workspace, and the server "
+            "runs that entry point itself and records exit status, logs, and output hashes rather than trusting the "
+            "worker's account of having run it. hardened_v12 restores the bounded 120,000-token phase ceiling and "
+            "uses one fresh 40,000-token correction only for a reported failed implementation check. hardened_v11 "
+            "keeps v10 governance with its experimental 500,000-token ceiling; hardened_v10 and legacy_v9 are "
+            "bounded rollback paths. Already-pinned attempts keep their "
+            "recorded contract regardless of this setting."
+        ),
+    )
+
+    build_implementer_agent: str | None = Field(
+        default=None,
+        description=(
+            "Agent that implements Build phases whose capability has no registered specialist. null keeps the "
+            "existing behaviour, which selects the registered generalist and records the stand-in. This is an "
+            "efficiency dial and never a correctness one: the server-issued path grant, the entry-point refusal, "
+            "and the server's own execution of that entry point hold whichever agent runs, because the observed "
+            "failure crossed both the specialist and the generalist. A name that is not a registered agent is "
+            "ignored with a warning rather than failing the Build."
         ),
     )
 

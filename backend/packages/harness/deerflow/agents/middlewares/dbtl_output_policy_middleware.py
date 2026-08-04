@@ -36,6 +36,95 @@ _UNISOLATED_SHELL = "Error: bash blocked — this sandbox cannot enforce the DBT
 _VIRTUAL_DATA_PATH = re.compile(r"/mnt/user-data(?=/|$|[^\w./-])(?:/[^\s\"']*)?")
 
 
+def sandbox_exec_command(
+    command: str,
+    *,
+    writable_paths: Sequence[str],
+    readable_paths: Sequence[str] | None = None,
+    restricted_read_roots: Sequence[str] = (),
+) -> str:
+    """Wrap a server-owned command in the same macOS write grant as Bash.
+
+    Build verification does not travel through a model tool call, so there is
+    no ``ToolCallRequest`` for this middleware to rewrite.  It still must run
+    under the identical process-tree boundary; keeping the profile builder here
+    prevents the model and server execution paths from drifting.
+    """
+    canonical = tuple(_canonical_agent_path(path).rstrip("/") for path in writable_paths if path.strip())
+    rules = ["(deny file-write*)"]
+    rules.extend(f"(allow file-write* (subpath {_profile_path(path)}))" for path in canonical)
+    rules.extend(
+        [
+            '(allow file-write* (subpath "/private/tmp"))',
+            '(allow file-write* (subpath "/tmp"))',
+            f"(allow file-write* (subpath {_profile_path(tempfile.gettempdir())}))",
+            '(allow file-write* (literal "/dev/null"))',
+        ]
+    )
+    if readable_paths is not None:
+        readable = tuple(_canonical_agent_path(path).rstrip("/") for path in readable_paths if path.strip())
+        restricted = tuple(_canonical_agent_path(path).rstrip("/") for path in restricted_read_roots if path.strip())
+        # Interpreters need their operating-system and package files. Restrict
+        # the mounted project tree instead of denying every process read, then
+        # open only the issued files and writable phase workspace inside it.
+        rules.extend(f"(deny file-read-data (subpath {_profile_path(path)}))" for path in restricted)
+        rules.extend(f"(allow file-read-data (subpath {_profile_path(path)}))" for path in canonical if path)
+        rules.extend(f"(allow file-read-data (literal {_profile_path(path)}))" for path in readable if path)
+    profile = " ".join(["(version 1)", "(allow default)", *rules])
+    return f"sandbox-exec -p {shlex.quote(profile)} /bin/bash --noprofile --norc -c {shlex.quote(command)}"
+
+
+def bubblewrap_exec_command(
+    command: str,
+    *,
+    executable: str,
+    writable_path: str,
+    readable_paths: Sequence[str],
+    restricted_root: str = "/mnt/user-data",
+) -> str:
+    """Confine a Linux sandbox process to issued project inputs.
+
+    The sandbox container remains the outer security boundary. Bubblewrap adds
+    the narrower Build contract inside it: the project mount is replaced with
+    an empty tmpfs, then only the phase workspace and issued input files are
+    mounted back. A provider without bubblewrap is refused by the caller's
+    preflight instead of silently running with a broader read view.
+    """
+    workspace = _canonical_agent_path(writable_path).rstrip("/")
+    readable = tuple(_canonical_agent_path(path).rstrip("/") for path in readable_paths if path.strip())
+    restricted = _canonical_agent_path(restricted_root).rstrip("/")
+    if not workspace.startswith(f"{restricted}/"):
+        raise ValueError("The Build workspace is outside the restricted project root.")
+    if any(not path.startswith(f"{restricted}/") for path in readable):
+        raise ValueError("A Build input is outside the restricted project root.")
+
+    parents: set[str] = {restricted}
+    for path in (workspace, *readable):
+        parent = posixpath.dirname(path)
+        while parent.startswith(f"{restricted}/"):
+            parents.add(parent)
+            parent = posixpath.dirname(parent)
+
+    args = [
+        executable,
+        "--die-with-parent",
+        "--new-session",
+        "--ro-bind",
+        "/",
+        "/",
+        "--tmpfs",
+        restricted,
+    ]
+    for parent in sorted(parents, key=lambda value: (value.count("/"), value)):
+        if parent != restricted:
+            args.extend(("--dir", parent))
+    args.extend(("--bind", workspace, workspace))
+    for path in readable:
+        args.extend(("--ro-bind", path, path))
+    args.extend(("--", "/bin/bash", "--noprofile", "--norc", "-c", command))
+    return shlex.join(args)
+
+
 def _profile_path(path: str) -> str:
     """Quote one path for an Apple sandbox profile string."""
     return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -147,27 +236,16 @@ class DbtlOutputPolicyMiddleware(AgentMiddleware):
         if self._shell_isolation != "sandbox-exec":
             return request
 
+        protected_command, preserved_literals = _protect_heredoc_virtual_paths(command)
         if self._writable_paths:
-            rules = ["(deny file-write*)"]
-            rules.extend(f"(allow file-write* (subpath {_profile_path(path)}))" for path in self._writable_paths)
-            # Interpreters and compilers commonly need scratch files. These
-            # locations are outside the project and are never published.
-            rules.extend(
-                [
-                    '(allow file-write* (subpath "/private/tmp"))',
-                    '(allow file-write* (subpath "/tmp"))',
-                    f"(allow file-write* (subpath {_profile_path(tempfile.gettempdir())}))",
-                    '(allow file-write* (literal "/dev/null"))',
-                ]
-            )
+            isolated = sandbox_exec_command(protected_command, writable_paths=self._writable_paths)
         else:
             rules = [
                 '(deny file-write* (subpath "/mnt/user-data/outputs/dbtl"))',
                 '(deny file-write* (subpath "/mnt/user-data/outputs/.dbtl-stage-work"))',
             ]
-        profile = " ".join(["(version 1)", "(allow default)", *rules])
-        protected_command, preserved_literals = _protect_heredoc_virtual_paths(command)
-        isolated = f"sandbox-exec -p {shlex.quote(profile)} /bin/bash --noprofile --norc -c {shlex.quote(protected_command)}"
+            profile = " ".join(["(version 1)", "(allow default)", *rules])
+            isolated = f"sandbox-exec -p {shlex.quote(profile)} /bin/bash --noprofile --norc -c {shlex.quote(protected_command)}"
         # The wrapper is server-authored and names host scratch directories the
         # local-bash path guard excludes on purpose. Pair it with the model's
         # own command so that guard audits what the model asked for instead of

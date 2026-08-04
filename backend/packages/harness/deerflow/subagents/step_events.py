@@ -203,6 +203,18 @@ def build_subagent_step(
         step["tool_name"] = message.get("name")
     else:
         step["tool_calls"] = [_bounded_tool_call(call, max_chars) for call in (message.get("tool_calls") or [])]
+        # Persist the provider's usage for this exact assistant turn.  The
+        # live streamer also carries a cumulative task meter, but that snapshot
+        # cannot reconstruct per-ReAct cost after reload (and several messages
+        # drained together may all receive the same cumulative value).  An
+        # AIMessage's own usage_metadata is the authoritative per-call delta.
+        usage = normalize_token_usage(message.get("usage_metadata"))
+        if usage is None:
+            additional = message.get("additional_kwargs")
+            if isinstance(additional, dict):
+                usage = normalize_token_usage(additional.get("usage_metadata"))
+        if usage is not None:
+            step["usage"] = usage
 
     return step
 

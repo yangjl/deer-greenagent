@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from deerflow.dbtl.agent_selector import Assignment, SelectionResult, capability_brief, select_agents
+from deerflow.dbtl.build_grant import INPUT_ENV_PREFIX, PROJECT_ROOT_ENV, WORKSPACE_ENV
 from deerflow.dbtl.stage_spec import StageSpec, WorkerBudget
 from deerflow.dbtl.worker_result import (
     StageWorkerResult,
@@ -340,9 +341,24 @@ def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> st
                     '   "seed": "seed or empty", "inputs": ["/mnt/user-data/..."],',
                     '   "environment": {"runtime": "version or requirement"},',
                     '   "configuration": ["/mnt/user-data/..."], "expected_outputs": ["/mnt/user-data/..."]}.',
-                    "- The command must run unchanged from a fresh working directory. Use absolute /mnt/user-data paths for the entry point, inputs, and configuration.",
+                    "- The command must run unchanged from a fresh working directory.",
+                    "- Name absolute /mnt/user-data paths in this record. The record is the server's, and it is",
+                    "  what lets the server re-run your work later; it is not a licence to embed those paths in code.",
                     "- Write each expected output into the current directory with the same filename it has in expected_outputs.",
                     "- recorded_rerun_procedure prose is legacy display data and does not satisfy this contract.",
+                ]
+            )
+        if "granted_paths_only" in spec.validity_gates:
+            lines.extend(
+                [
+                    "- Your code must not contain an absolute path to its data. The server supplies them:",
+                    f"  {WORKSPACE_ENV} is the directory you write to, {PROJECT_ROOT_ENV} is the project root, and",
+                    f"  {INPUT_ENV_PREFIX}1, {INPUT_ENV_PREFIX}2, ... are the server-issued candidate inputs in the order shown in the phase prompt ({INPUT_ENV_PREFIX}COUNT holds how many).",
+                    "  provenance.phase_manifest.declared_inputs names the exact subset consumed and does not renumber those variables.",
+                    "  Read them from the environment, or accept them as command-line arguments and pass them in the command.",
+                    "- An entry point naming a location outside this workspace is refused before it is run, and the",
+                    "  refusal names the literal and the line. This is not a style rule: a path you compose yourself is",
+                    "  a guess about a filesystem you cannot see, and a wrong one costs the whole phase.",
                 ]
             )
     if spec.stage == "test":

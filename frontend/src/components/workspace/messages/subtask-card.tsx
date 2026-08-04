@@ -18,6 +18,7 @@ import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Button } from "@/components/ui/button";
 import { ShineBorder } from "@/components/ui/shine-border";
 import { useI18n } from "@/core/i18n/hooks";
+import { formatTokenCount } from "@/core/messages/usage";
 import { hasToolCalls } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import {
@@ -278,8 +279,22 @@ export function SubtaskCard({
                   entry.kind === "tool" ? (
                     <SubtaskToolStep entry={entry} />
                   ) : (
-                    <div className="text-muted-foreground line-clamp-3 text-sm">
-                      <MarkdownContent content={entry.text} isLoading={false} />
+                    <div className="min-w-0">
+                      <div className="text-muted-foreground line-clamp-3 text-sm">
+                        <MarkdownContent
+                          content={entry.text}
+                          isLoading={false}
+                        />
+                      </div>
+                      {entry.usage ? (
+                        <div
+                          className="text-muted-foreground mt-0.5 text-[10px] tabular-nums"
+                          title={`${entry.usage.totalTokens.toLocaleString()} total tokens`}
+                        >
+                          {formatTokenCount(entry.usage.inputTokens)} input ·{" "}
+                          {formatTokenCount(entry.usage.outputTokens)} output
+                        </div>
+                      ) : null}
                     </div>
                   )
                 }

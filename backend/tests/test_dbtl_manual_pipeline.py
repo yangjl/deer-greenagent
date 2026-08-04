@@ -112,7 +112,7 @@ def test_profile_is_isolated_and_disables_background_writers(tmp_path: Path) -> 
     assert generated["projects"]["root"] == str((manual_root / "live" / "projects").resolve())
     assert generated["dbtl"]["mode"] == "graph_enabled"
     assert generated["dbtl"]["design_deck_feedback"] is True
-    assert generated["dbtl"]["build_worker_contract"] == "hardened_v11"
+    assert generated["dbtl"]["build_worker_contract"] == "hardened_v12"
     assert generated["sandbox"]["allow_host_bash"] is True
     assert generated["memory"]["enabled"] is False
     assert generated["memory"]["injection_enabled"] is False
@@ -143,7 +143,7 @@ def test_existing_manual_profile_is_upgraded_to_persistent_history_without_force
     assert same_profile == profile
     assert upgraded["run_events"] == {"backend": "db", "track_token_usage": True}
     assert upgraded["sandbox"]["allow_host_bash"] is True
-    assert upgraded["dbtl"]["build_worker_contract"] == "hardened_v11"
+    assert upgraded["dbtl"]["build_worker_contract"] == "hardened_v12"
 
 
 def test_existing_manual_profile_preserves_explicit_legacy_build_contract(tmp_path: Path) -> None:

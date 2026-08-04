@@ -340,6 +340,34 @@ def test_run_event_for_task_running_carries_step_payload():
     assert record["content"] == build_subagent_step(chunk["message"], task_id="call_1", message_index=2)
 
 
+def test_ai_step_persists_exact_model_call_usage():
+    message = {
+        "type": "ai",
+        "content": "I will inspect the dataset.",
+        "tool_calls": [{"name": "read_file", "args": {"path": "/mnt/user-data/trial.csv"}}],
+        "usage_metadata": {"input_tokens": 12_300, "output_tokens": 410, "total_tokens": 12_710},
+    }
+
+    step = build_subagent_step(message, task_id="build-phase", message_index=4)
+
+    assert step["usage"] == {"input_tokens": 12_300, "output_tokens": 410, "total_tokens": 12_710}
+
+
+def test_tool_step_does_not_repeat_the_preceding_model_usage():
+    step = build_subagent_step(
+        {
+            "type": "tool",
+            "name": "read_file",
+            "content": "rows",
+            "usage_metadata": {"input_tokens": 99, "output_tokens": 1, "total_tokens": 100},
+        },
+        task_id="build-phase",
+        message_index=5,
+    )
+
+    assert "usage" not in step
+
+
 def test_run_event_for_terminal_status():
     record = subagent_run_event(
         {

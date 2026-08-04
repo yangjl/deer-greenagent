@@ -506,6 +506,10 @@ class TestAgentConstruction:
         assert "Skill instructions here" not in messages[0].content
         # HumanMessage should be the task
         assert messages[1].content == "Do the task"
+        from deerflow.runtime.compaction_markers import COMPACTION_ANCHOR_KEY
+
+        assert messages[0].additional_kwargs[COMPACTION_ANCHOR_KEY] is True
+        assert messages[1].additional_kwargs[COMPACTION_ANCHOR_KEY] is True
 
     @pytest.mark.anyio
     async def test_build_initial_state_no_skills_only_system_prompt(

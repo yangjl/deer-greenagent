@@ -118,7 +118,7 @@ class TestStageSpecRegistry:
         assert current_spec_keys() == (
             "generic:design:v2",
             "generic:reconciliation:v1",
-            "generic:build:v11",
+            "generic:build:v12",
             "generic:test:v4",
             "generic:learn:v1",
         )
@@ -1207,10 +1207,10 @@ class TestBuildRecordsRerunInformationRatherThanProvingIt:
         assert "recorded_rerun_procedure" in BUILD_SPEC_V4.validity_gates
         assert "server_bound_input_lineage" in BUILD_SPEC_V4.validity_gates
 
-    def test_build_v11_is_current_and_raises_only_the_token_ceiling(self) -> None:
-        from deerflow.dbtl.stage_spec import BUILD_SPEC_V9, BUILD_SPEC_V10, BUILD_SPEC_V11
+    def test_build_v12_is_current_and_restores_the_bounded_ceiling(self) -> None:
+        from deerflow.dbtl.stage_spec import BUILD_SPEC_V9, BUILD_SPEC_V10, BUILD_SPEC_V11, BUILD_SPEC_V12
 
-        assert resolve_stage_spec("build").spec_key == "generic:build:v11"
+        assert resolve_stage_spec("build").spec_key == "generic:build:v12"
         assert BUILD_SPEC_V10.required_inputs == BUILD_SPEC_V9.required_inputs
         assert BUILD_SPEC_V10.validity_gates == (
             "server_bound_input_lineage",
@@ -1226,6 +1226,9 @@ class TestBuildRecordsRerunInformationRatherThanProvingIt:
         assert BUILD_SPEC_V11.budget.max_turns == BUILD_SPEC_V10.budget.max_turns
         assert BUILD_SPEC_V11.budget.timeout_seconds == BUILD_SPEC_V10.budget.timeout_seconds
         assert BUILD_SPEC_V11.budget.token_limit_enforced is True
+        assert BUILD_SPEC_V12.budget == BUILD_SPEC_V10.budget
+        assert BUILD_SPEC_V12.budget.max_tokens == 120_000
+        assert "server_executed_entry_point" in BUILD_SPEC_V12.validity_gates
 
     def test_the_older_build_contracts_are_unchanged(self) -> None:
         from deerflow.dbtl.stage_spec import BUILD_SPEC_V2, BUILD_SPEC_V3, BUILD_SPEC_V4, BUILD_SPEC_V7

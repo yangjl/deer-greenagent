@@ -17,18 +17,35 @@ import {
   transcriptToolCallCount,
 } from "@/core/tasks/tool-transcript";
 
-function ai(index: number, text: string, calls: { name: string; args?: unknown }[] = []): SubtaskStep {
+function ai(
+  index: number,
+  text: string,
+  calls: { name: string; args?: unknown }[] = [],
+): SubtaskStep {
   return { message_index: index, kind: "ai", text, tool_calls: calls };
 }
 
-function tool(index: number, name: string, text: string, extra: Partial<SubtaskStep> = {}): SubtaskStep {
-  return { message_index: index, kind: "tool", text, tool_name: name, ...extra };
+function tool(
+  index: number,
+  name: string,
+  text: string,
+  extra: Partial<SubtaskStep> = {},
+): SubtaskStep {
+  return {
+    message_index: index,
+    kind: "tool",
+    text,
+    tool_name: name,
+    ...extra,
+  };
 }
 
 describe("a tool result belongs to the call that asked for it", () => {
   it("pairs a request with the output that followed it", () => {
     const entries = taskTranscript([
-      ai(1, "Reading the inputs", [{ name: "read_file", args: { path: "/mnt/user-data/x.csv" } }]),
+      ai(1, "Reading the inputs", [
+        { name: "read_file", args: { path: "/mnt/user-data/x.csv" } },
+      ]),
       tool(2, "read_file", "col_a,col_b"),
     ]);
 
@@ -39,7 +56,9 @@ describe("a tool result belongs to the call that asked for it", () => {
 
   it("names the path in the row title rather than the whole payload", () => {
     const entries = taskTranscript([
-      ai(1, "", [{ name: "read_file", args: { path: "/mnt/user-data/design.md" } }]),
+      ai(1, "", [
+        { name: "read_file", args: { path: "/mnt/user-data/design.md" } },
+      ]),
       tool(2, "read_file", "# Design"),
     ]);
 
@@ -48,7 +67,9 @@ describe("a tool result belongs to the call that asked for it", () => {
 
   it("shows a bash command in the title", () => {
     const entries = taskTranscript([
-      ai(1, "", [{ name: "bash", args: { command: "python fit.py --seed 7" } }]),
+      ai(1, "", [
+        { name: "bash", args: { command: "python fit.py --seed 7" } },
+      ]),
       tool(2, "bash", "done"),
     ]);
 
@@ -56,7 +77,9 @@ describe("a tool result belongs to the call that asked for it", () => {
   });
 
   it("marks a call whose output has not arrived as pending", () => {
-    const entries = taskTranscript([ai(1, "", [{ name: "bash", args: { command: "sleep 60" } }])]);
+    const entries = taskTranscript([
+      ai(1, "", [{ name: "bash", args: { command: "sleep 60" } }]),
+    ]);
 
     expect(entries[0]?.pending).toBe(true);
     expect(entries[0]?.text).toBe("");
@@ -73,12 +96,18 @@ describe("a tool result belongs to the call that asked for it", () => {
 
   it("pairs several calls in one turn positionally", () => {
     const entries = taskTranscript([
-      ai(1, "", [{ name: "read_file", args: { path: "a" } }, { name: "read_file", args: { path: "b" } }]),
+      ai(1, "", [
+        { name: "read_file", args: { path: "a" } },
+        { name: "read_file", args: { path: "b" } },
+      ]),
       tool(2, "read_file", "contents of a"),
       tool(3, "read_file", "contents of b"),
     ]);
 
-    expect(entries.map((entry) => entry.text)).toEqual(["contents of a", "contents of b"]);
+    expect(entries.map((entry) => entry.text)).toEqual([
+      "contents of a",
+      "contents of b",
+    ]);
   });
 });
 
@@ -114,8 +143,36 @@ describe("a completed task does not show its answer twice", () => {
 });
 
 describe("ordering and counting", () => {
+  it("places one ReAct meter on thinking when thinking is visible", () => {
+    const step = ai(1, "thinking", [{ name: "bash" }]);
+    step.usage = { inputTokens: 1_000, outputTokens: 50, totalTokens: 1_050 };
+
+    const entries = taskTranscript([step, tool(2, "bash", "ok")]);
+
+    expect(entries[0]?.kind).toBe("thinking");
+    expect(entries[0]?.usage?.inputTokens).toBe(1_000);
+    expect(entries[1]?.usage).toBeUndefined();
+  });
+
+  it("places one ReAct meter on the first tool when thinking is blank", () => {
+    const step = ai(1, "", [{ name: "bash" }, { name: "read_file" }]);
+    step.usage = { inputTokens: 900, outputTokens: 40, totalTokens: 940 };
+
+    const entries = taskTranscript([
+      step,
+      tool(2, "bash", "ok"),
+      tool(3, "read_file", "rows"),
+    ]);
+
+    expect(entries[0]?.usage?.outputTokens).toBe(40);
+    expect(entries[1]?.usage).toBeUndefined();
+  });
+
   it("returns entries oldest first regardless of input order", () => {
-    const entries = taskTranscript([tool(4, "bash", "second"), ai(1, "", [{ name: "bash" }])]);
+    const entries = taskTranscript([
+      tool(4, "bash", "second"),
+      ai(1, "", [{ name: "bash" }]),
+    ]);
     expect(entries.map((entry) => entry.stepIndex)).toEqual([4]);
   });
 

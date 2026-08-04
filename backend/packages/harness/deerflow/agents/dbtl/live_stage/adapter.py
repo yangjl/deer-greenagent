@@ -29,17 +29,23 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.dbtl.live_stage.build_controls import DISABLED_GATE, BuildControlGate, BuildControlNotRecorded
 from deerflow.agents.dbtl.live_stage.build_meeting import BUILD_WORK_MEETING_CONTRACT, MeetingContext, meeting_units, parse_recommendation
+from deerflow.agents.dbtl.live_stage.build_phase_verification import BuildPhaseVerification, execute_and_verify_phase
 from deerflow.agents.dbtl.live_stage.build_phases import (
     GENERALIST,
+    MAX_SCANNED_ENTRY_POINT_BYTES,
     PLANNER_ROLE,
     BuildPhaseManifest,
     PhaseAssignment,
     assign_phase,
     phase_completion_error,
+    phase_correction_unit,
     phase_unit,
     plan_notes,
     planner_unit,
+    required_phase_manifest_version,
+    verify_granted_paths,
     verify_phase_manifest,
+    verify_unpublished_phase_manifest,
 )
 from deerflow.agents.dbtl.live_stage.build_recorder import (
     DISABLED_RECORDER,
@@ -94,6 +100,7 @@ from deerflow.agents.middlewares.build_phase_correction_middleware import (
     BUILD_PHASE_CORRECTION_HEADROOM_STEPS,
     BuildPhaseCorrectionMiddleware,
 )
+from deerflow.agents.middlewares.dbtl_output_policy_middleware import bubblewrap_exec_command, sandbox_exec_command
 from deerflow.agents.middlewares.finalization_deadline_middleware import (
     SUBAGENT_SUPERSTEPS_PER_TURN,
     FinalizationDeadlineMiddleware,
@@ -116,6 +123,7 @@ from deerflow.dbtl.build_control import (
 )
 from deerflow.dbtl.build_deck import BUILD_DECK_SURFACE_VERSION
 from deerflow.dbtl.build_execution import BuildExecutionBundle
+from deerflow.dbtl.build_grant import INPUT_ENV_PREFIX, build_input_grant
 from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError, restore_build_input_bundle
 from deerflow.dbtl.build_plan import BuildPhasePlan, parse_build_plan, restore_build_plan, single_phase_plan
 from deerflow.dbtl.build_summary import BuildReviewPackage
@@ -221,6 +229,8 @@ from deerflow.runtime.activity.envelope import ActivityScope
 from deerflow.runtime.activity.lineage import supervisor_activity_id
 from deerflow.runtime.activity.spans import optional_activity_span
 from deerflow.runtime.activity.vocabulary import ActivityState, ActorKind
+from deerflow.sandbox import get_sandbox_provider
+from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.subagents.step_streaming import SubagentStepStreamer, run_with_step_stream
 from deerflow.tools.mcp_metadata import get_mcp_source, is_mcp_tool
 from deerflow.trace_context import (
@@ -303,13 +313,15 @@ def _initial_stage_spec(stage: str, dbtl_config: Any) -> StageSpec:
     """
     if stage != "build":
         return resolve_stage_spec(stage)
-    contract = str(getattr(dbtl_config, "build_worker_contract", "hardened_v11") or "").strip()
+    contract = str(getattr(dbtl_config, "build_worker_contract", "hardened_v12") or "").strip()
     if contract == "legacy_v9":
         return resolve_stage_spec(stage, version=9)
     if contract == "hardened_v10":
         return resolve_stage_spec(stage, version=10)
     if contract == "hardened_v11":
         return resolve_stage_spec(stage, version=11)
+    if contract == "hardened_v12":
+        return resolve_stage_spec(stage, version=12)
     raise StageSpecNotFound(f"Unknown DBTL Build worker contract {contract!r}.")
 
 
@@ -639,6 +651,10 @@ def _summarize_token_usage(
         return None
     usage = {key: sum(int(record.get(key, 0) or 0) for record in records if isinstance(record.get(key, 0), (int, float))) for key in ("input_tokens", "output_tokens", "total_tokens")}
     return usage if any(usage.values()) else None
+
+
+def _merge_token_usage(*values: Mapping[str, int] | None) -> dict[str, int]:
+    return {key: sum(int(value.get(key, 0) or 0) for value in values if value is not None) for key in ("input_tokens", "output_tokens", "total_tokens")}
 
 
 def _report_subagent_token_usage(
@@ -1801,6 +1817,123 @@ def _published_input_index(
             continue
         index[resolved[0]] = content_hash
     return index
+
+
+def _phase_granted_inputs(
+    *,
+    datasets: Sequence[Mapping[str, Any]],
+    prior_published: Sequence[Mapping[str, Any]],
+    pre_run_files: Mapping[str, tuple[int, int]],
+    project_root: str,
+    limit: int = 24,
+) -> tuple[str, ...]:
+    """Resolve a compact, stable input env before a worker spends model tokens."""
+    candidates: list[str] = []
+    for item in datasets:
+        for field_name in ("uri", "path", "source_key"):
+            value = str(item.get(field_name) or "").strip()
+            if not value:
+                continue
+            reference = value if value.startswith("/mnt/user-data/") else f"/mnt/user-data/{value.lstrip('/')}"
+            resolved = _workspace_relative_path(reference, project_root=project_root)
+            if resolved is not None and resolved[1].is_file():
+                candidates.append(f"/mnt/user-data/{resolved[0]}")
+                break
+    candidates.extend(str(item.get("uri") or "") for item in prior_published if str(item.get("uri") or ""))
+
+    # Optional-Reconciliation projects may have no durable dataset URI. The
+    # server already took this bounded snapshot; prefer data-shaped files, then
+    # notes, rather than making every specialist rediscover the directory.
+    priority_suffixes = (".csv", ".tsv", ".parquet", ".feather", ".xlsx", ".xls", ".json", ".md", ".txt")
+    for relative in sorted(pre_run_files, key=lambda value: (next((i for i, suffix in enumerate(priority_suffixes) if value.lower().endswith(suffix)), len(priority_suffixes)), value)):
+        if len(candidates) >= limit:
+            break
+        if relative.lower().endswith(priority_suffixes):
+            candidates.append(f"/mnt/user-data/{relative}")
+
+    granted: list[str] = []
+    for reference in candidates:
+        resolved = _workspace_relative_path(reference, project_root=project_root)
+        canonical = f"/mnt/user-data/{resolved[0]}" if resolved is not None and resolved[1].is_file() else ""
+        if canonical and canonical not in granted:
+            granted.append(canonical)
+        if len(granted) >= limit:
+            break
+    return tuple(granted)
+
+
+def _published_source_text(reference: str, *, project_root: str) -> str | None:
+    """Read a published file as source text, or report that it is not readable text.
+
+    Returning ``None`` rather than raising on unreadable bytes is deliberate: a
+    compiled or binary entry point has no source for the grant scanner to judge,
+    and refusing it here would be this check asserting something it did not
+    read. The size cap exists because the whole point is to inspect a script,
+    and anything larger than a script is not one.
+    """
+    resolved = _workspace_relative_path(reference, project_root=project_root)
+    if resolved is None or not resolved[1].is_file():
+        return None
+    try:
+        if resolved[1].stat().st_size > MAX_SCANNED_ENTRY_POINT_BYTES:
+            return None
+        return resolved[1].read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+
+
+def _execute_server_build_command(
+    command: str,
+    env: dict[str, str],
+    timeout_seconds: float,
+    *,
+    sandbox_state: Any,
+    writable_workspace: str,
+    thread_id: str,
+    user_id: str,
+    project_id: str,
+    project_root: str,
+) -> str:
+    """Execute a verifier command in the run's sandbox, never on bare host Bash."""
+    unwrapped, _ = unwrap_sandbox(sandbox_state)
+    sandbox_id = unwrapped.get("sandbox_id") if isinstance(unwrapped, dict) else None
+    provider = get_sandbox_provider()
+    acquired = False
+    if not isinstance(sandbox_id, str) or not sandbox_id or provider.get(sandbox_id) is None:
+        if not thread_id or not user_id:
+            raise RuntimeError("the run has no initialized sandbox and no identity with which to acquire one")
+        sandbox_id = provider.acquire(thread_id, user_id=user_id, project_id=project_id, project_root=project_root)
+        acquired = True
+    sandbox = provider.get(sandbox_id)
+    if sandbox is None:
+        raise RuntimeError("the run's sandbox is no longer available")
+    try:
+        is_local = sandbox_id == "local" or sandbox_id.startswith("local:")
+        if is_local and sys.platform != "darwin":
+            raise RuntimeError("local Build verification has no process-tree write sandbox on this platform")
+        readable_inputs = tuple(value for key, value in env.items() if key.startswith(INPUT_ENV_PREFIX) and key != f"{INPUT_ENV_PREFIX}COUNT")
+        if is_local:
+            isolated = sandbox_exec_command(
+                command,
+                writable_paths=(writable_workspace,),
+                readable_paths=readable_inputs,
+                restricted_read_roots=("/mnt/user-data",),
+            )
+        else:
+            probe = sandbox.execute_command("command -v bwrap", timeout=min(timeout_seconds, 10.0))
+            executable = next((line.strip() for line in str(probe).splitlines() if line.strip().startswith("/") and line.strip().rsplit("/", 1)[-1] == "bwrap"), "")
+            if not executable:
+                raise RuntimeError("the remote sandbox cannot enforce the Build input read grant because bubblewrap (bwrap) is unavailable")
+            isolated = bubblewrap_exec_command(
+                command,
+                executable=executable,
+                writable_path=writable_workspace,
+                readable_paths=readable_inputs,
+            )
+        return sandbox.execute_command(isolated, env=env, timeout=timeout_seconds)
+    finally:
+        if acquired:
+            provider.release(sandbox_id)
 
 
 _WORKSPACE_INPUT_BINDING = re.compile(r"^workspace_file:(.+):sha256:([0-9a-f]{64})$")
@@ -3084,7 +3217,7 @@ def _restore_phase(
             result,
             published=published,
             completion_condition=assignment.phase.done_condition,
-            required_version=(2 if "narrow_implementation_inputs" in spec.validity_gates else 1),
+            required_version=required_phase_manifest_version(spec),
         )
         if manifest_error:
             logger.warning("A recorded Build phase no longer satisfies its pinned manifest contract: %s", manifest_error)
@@ -3914,7 +4047,7 @@ class LiveStageAdapter:
                     agent_name=unit.agent_name,
                     retry_blocked=deadline.forced_finalization,
                 )
-                if stage == "build" and unit.role == "phase"
+                if stage == "build" and unit.role == "phase" and not unit.tool_contract.get("fresh_correction")
                 else None
             )
             extra_middlewares = [deadline]
@@ -3952,6 +4085,15 @@ class LiveStageAdapter:
                 dbtl_writable_paths=(() if unit.role in _READ_ONLY_ROLES else ((unit_workspace,) if unit_workspace else ())),
                 thinking_enabled=unit.reasoning == REASONING_EXTENDED,
                 extra_middlewares=extra_middlewares,
+                execution_env=(
+                    build_input_grant(
+                        workspace=unit_workspace,
+                        project_root=WORKSPACE_VIRTUAL_ROOT,
+                        declared_inputs=tuple(unit.tool_contract.get("granted_inputs") or ()),
+                    )
+                    if stage == "build" and unit.role == "phase" and unit_workspace
+                    else None
+                ),
             )
             # One activity row per real work unit, opened after the guards above
             # so a worker that never ran does not appear to have started. A
@@ -4153,6 +4295,9 @@ class LiveStageAdapter:
         meeting_available: bool = False,
         boundaries_released: bool = False,
         user_id: str = "",
+        sandbox_state: Any = None,
+        enforce_server_execution: bool = False,
+        thread_id: str = "",
     ) -> _PhaseRun:
         """Run the plan's phases in order, each as its own attempt.
 
@@ -4184,7 +4329,8 @@ class LiveStageAdapter:
         summary/deck retry unreachable. A freshly run phase still stops at its
         own boundary regardless, because that one has never been shown.
         """
-        assignments = [assign_phase(phase, candidates) for phase in plan.phases]
+        implementer = str(getattr(getattr(self._app_config, "dbtl", None), "build_implementer_agent", "") or "").strip()
+        assignments = [assign_phase(phase, candidates, implementer=implementer) for phase in plan.phases]
         selection = SelectionResult(
             assignments=tuple(Assignment(capability=item.phase.capability, agent_name=item.agent_name, via_generalist=item.via_generalist or not item.covered) for item in assignments),
             notes=plan_notes(plan, assignments),
@@ -4296,6 +4442,12 @@ class LiveStageAdapter:
                         "The previous attempt at this phase asked for human input. Carry this exchange verbatim into the retry:\n" + answer,
                     )
                 )
+            granted_inputs = _phase_granted_inputs(
+                datasets=datasets,
+                prior_published=published,
+                pre_run_files=pre_run_files,
+                project_root=project_root,
+            )
             unit = phase_unit(
                 assignment,
                 index=index,
@@ -4305,6 +4457,7 @@ class LiveStageAdapter:
                 context=phase_context,
                 completed=completed,
                 result_contract=RESULT_CONTRACT,
+                granted_inputs=granted_inputs,
             )
             units.append(unit)
             phase_plan = StageExecutionPlan(spec=spec, selection=selection, units=(unit,))
@@ -4381,6 +4534,56 @@ class LiveStageAdapter:
                 break
 
             completion_error = phase_completion_error(result, unit.completion_check)
+            if completion_error and spec.version >= 12 and not unit.tool_contract.get("correction_attempt"):
+                first_unit = unit
+                first_result = result
+                first_workspace = _unit_stage_workspace(stage_workspace, first_unit.unit_id)
+                correction = phase_correction_unit(
+                    assignment,
+                    index=index,
+                    attempt_id=attempt_id,
+                    attempt_token=safe_token(handle.step_run_id or f"{attempt_id}:{plan.digest}:{index}"),
+                    spec=spec,
+                    previous_workspace=first_workspace,
+                    failure=completion_error,
+                    result_contract=RESULT_CONTRACT,
+                    granted_inputs=granted_inputs,
+                )
+                # A phase has one accepted result. The rejected first worker
+                # remains visible in its task timeline and is named by
+                # `correction_of`, but keeping both units beside one corrected
+                # result violates StageExecutionOutcome's one-unit/one-result
+                # invariant and crashes the downstream strict zip.
+                units[-1] = correction
+                correction_plan = StageExecutionPlan(spec=spec, selection=selection, units=(correction,))
+                try:
+                    correction_dispatched = await dispatcher((correction,), budget=spec.budget)
+                except Exception:  # noqa: BLE001 - the normal rejection path records it
+                    logger.warning("Build phase correction could not be dispatched.", exc_info=True)
+                    correction_dispatched = []
+                correction_outcome = collect_results(correction_plan, correction_dispatched)
+                rejected.extend(entry for entry in correction_outcome.rejected if entry not in rejected)
+                corrected = correction_outcome.results[0] if correction_outcome.results else None
+                if corrected is not None and corrected.is_trustworthy:
+                    corrected = replace(
+                        corrected,
+                        token_usage=_merge_token_usage(first_result.token_usage, corrected.token_usage),
+                        provenance={
+                            **corrected.provenance,
+                            "correction_of": first_unit.unit_id,
+                        },
+                    )
+                    correction_outcome = replace(correction_outcome, results=(corrected,))
+                unit = correction
+                result = corrected
+                phase_outcome = correction_outcome
+                if result is None or not result.is_trustworthy:
+                    results.extend(correction_outcome.results)
+                    stopped = "; ".join(correction_outcome.rejected) or f"The fresh correction for phase {assignment.phase.title!r} returned no usable result."
+                    failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
+                    await recorder.fail(handle, failure_code, stopped)
+                    break
+                completion_error = phase_completion_error(result, unit.completion_check)
             if completion_error:
                 results.append(
                     replace(
@@ -4397,6 +4600,73 @@ class LiveStageAdapter:
                 failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
                 await recorder.fail(handle, failure_code, stopped)
                 break
+
+            server_verification: BuildPhaseVerification | None = None
+            if "server_executed_entry_point" in spec.validity_gates and enforce_server_execution:
+                raw_manifest, raw_manifest_error = verify_unpublished_phase_manifest(
+                    result,
+                    completion_condition=assignment.phase.done_condition,
+                    required_version=required_phase_manifest_version(spec),
+                )
+                unit_workspace = _unit_stage_workspace(stage_workspace, unit.unit_id)
+                if raw_manifest is None:
+                    server_verification = BuildPhaseVerification(False, raw_manifest_error, "")
+                else:
+                    grant_error = verify_granted_paths(
+                        raw_manifest,
+                        read_source=functools.partial(_published_source_text, project_root=project_root),
+                        allowed_roots=(),
+                    )
+                    if grant_error:
+                        server_verification = BuildPhaseVerification(False, grant_error, "")
+                    else:
+                        server_verification = await asyncio.to_thread(
+                            execute_and_verify_phase,
+                            raw_manifest,
+                            project_root=project_root,
+                            unit_workspace=unit_workspace,
+                            execute=functools.partial(
+                                _execute_server_build_command,
+                                sandbox_state=sandbox_state,
+                                writable_workspace=unit_workspace,
+                                thread_id=thread_id,
+                                user_id=user_id,
+                                project_id=str(cycle.get("project_id") or ""),
+                                project_root=project_root,
+                            ),
+                            timeout_seconds=min(float(spec.budget.timeout_seconds), 300.0),
+                            issued_inputs=granted_inputs,
+                        )
+                if not server_verification.passed:
+                    stopped = server_verification.reason
+                    rejected.append(stopped)
+                    results.append(
+                        replace(
+                            failed_result(
+                                capability=result.capability,
+                                agent_name=result.agent_name,
+                                reason=stopped,
+                            ),
+                            token_usage=result.token_usage,
+                        )
+                    )
+                    failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
+                    await _emit_build_verification_failure(unit, stopped)
+                    await recorder.fail(
+                        handle,
+                        failure_code,
+                        stopped,
+                        execution={"server_phase_verification": server_verification.as_dict()},
+                    )
+                    break
+                result = replace(
+                    result,
+                    provenance={
+                        **result.provenance,
+                        "server_phase_verification": server_verification.as_dict(),
+                    },
+                )
+                phase_outcome = replace(phase_outcome, results=(result,))
 
             # Publish *this* phase before its row is settled, so a success in the
             # chain always means "the bytes are in the governed tree and hashed".
@@ -4429,7 +4699,7 @@ class LiveStageAdapter:
                     result,
                     published=phase_published,
                     completion_condition=assignment.phase.done_condition,
-                    required_version=(2 if "narrow_implementation_inputs" in spec.validity_gates else 1),
+                    required_version=required_phase_manifest_version(spec),
                 )
                 if manifest_error:
                     stopped = manifest_error
@@ -4440,6 +4710,31 @@ class LiveStageAdapter:
                                 capability=result.capability,
                                 agent_name=result.agent_name,
                                 reason=manifest_error,
+                            ),
+                            token_usage=result.token_usage,
+                        )
+                    )
+                    failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
+                    await _emit_build_verification_failure(unit, stopped)
+                    await recorder.fail(handle, failure_code, stopped)
+                    break
+
+            if phase_manifest is not None and "granted_paths_only" in spec.validity_gates:
+                grant_error = await asyncio.to_thread(
+                    verify_granted_paths,
+                    phase_manifest,
+                    read_source=functools.partial(_published_source_text, project_root=project_root),
+                    allowed_roots=(),
+                )
+                if grant_error:
+                    stopped = grant_error
+                    rejected.append(grant_error)
+                    results.append(
+                        replace(
+                            failed_result(
+                                capability=result.capability,
+                                agent_name=result.agent_name,
+                                reason=grant_error,
                             ),
                             token_usage=result.token_usage,
                         )
@@ -4504,6 +4799,7 @@ class LiveStageAdapter:
                         if phase_manifest is not None
                         else {}
                     ),
+                    **({"server_phase_verification": server_verification.as_dict()} if server_verification is not None else {}),
                 },
                 payload={
                     "unit_id": unit.unit_id,
@@ -4512,6 +4808,7 @@ class LiveStageAdapter:
                     "input_artifacts": phase_input_artifacts,
                     "skill_bindings": list(phase_skill_bindings),
                     **({"phase_manifest": phase_manifest.as_dict()} if phase_manifest is not None else {}),
+                    **({"server_phase_verification": server_verification.as_dict()} if server_verification is not None else {}),
                 },
             )
             completed.append(_phase_note(assignment, result))
@@ -6204,6 +6501,11 @@ class LiveStageAdapter:
                     or await control_gate.boundary_released(build_plan.digest)
                 ),
                 user_id=str(user_id),
+                sandbox_state=state.get("sandbox"),
+                # A custom dispatcher is the adapter's test/integration seam;
+                # production always executes through the run's real sandbox.
+                enforce_server_execution=self._dispatcher is None,
+                thread_id=str(self._runtime(config).get("thread_id") or ""),
             )
             outcome = phase_run.outcome
         elif stage == "test" and "server_verified_build_rerun" in spec.validity_gates:

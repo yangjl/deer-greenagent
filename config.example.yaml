@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 44
+config_version: 45
 
 # ============================================================================
 # Logging
@@ -1289,12 +1289,30 @@ dbtl:
   # failure. Every option states what it costs, nothing is preselected, and the
   # answer is recorded with who gave it.
   build_workflow_steps: false
-  # Contract for new phased Build attempts. hardened_v11 keeps v10's declared
-  # skill and implementation-input bindings and raises the enforced per-worker
-  # token ceiling from 120,000 to 500,000. hardened_v10 and legacy_v9 remain
-  # bounded rollback paths. Attempts that already pinned a contract never
-  # change underneath an operator when this setting changes.
-  build_worker_contract: hardened_v11
+  # Contract for new phased Build attempts. hardened_v12 issues a phase its
+  # paths instead of asking it to compose them: the server supplies the
+  # workspace and each declared input through the environment, and an entry
+  # point that names a location outside its grant is refused before it runs.
+  # Two workers on one cycle each hardcoded a host path that did not exist and
+  # spent most of their budget failing to run it, so the earlier contract's
+  # instruction to use absolute paths is gone. Each phase is bounded at 120K
+  # tokens; a reported failed implementation check gets one fresh 40K
+  # correction that sees the rejection and staged files, not the old transcript.
+  # Remote sandbox images must provide `bwrap`; Build fails preflight instead
+  # of running an entry point that can read unissued project files.
+  # hardened_v11 keeps v10's
+  # declared skill and implementation-input bindings with a 500,000-token
+  # ceiling; hardened_v10 and legacy_v9 remain bounded rollback paths. Attempts
+  # that already pinned a contract never change underneath an operator when
+  # this setting changes.
+  build_worker_contract: hardened_v12
+  # Which agent implements a Build phase whose capability has no registered
+  # specialist. null keeps the registered generalist. This is an efficiency
+  # dial, never a correctness one: the path grant, the entry-point refusal, and
+  # the server's own verification hold whichever agent runs, because the
+  # failure they exist to stop crossed both the specialist and the generalist.
+  # An unregistered name falls back rather than failing the Build.
+  build_implementer_agent: null
   # Show the recorded plan before any phase runs: Start the build, Change the
   # plan, Hold here. Redirecting a build here costs a sentence; redirecting it
   # afterwards costs the run. "Change the plan" carries your words verbatim into

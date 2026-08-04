@@ -18,7 +18,7 @@ from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-from deerflow.runtime.secret_context import read_active_secrets, read_pre_isolation_command, read_pre_isolation_literals
+from deerflow.runtime.secret_context import read_active_secrets, read_dbtl_execution_env, read_pre_isolation_command, read_pre_isolation_literals
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.exceptions import (
     SandboxError,
@@ -2096,6 +2096,9 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
         # GitHub channel. Both are injected as per-call env into the subprocess,
         # never placed in the command string.
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
+        dbtl_env = read_dbtl_execution_env(getattr(runtime, "context", None))
+        if dbtl_env:
+            injected_env = {**(injected_env or {}), **dbtl_env}
         identity_prefix = _channel_identity_prefix(runtime)
         github_env = _github_env_from_runtime(runtime)
         lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime))

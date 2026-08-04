@@ -29,6 +29,7 @@ from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
+from deerflow.runtime.compaction_markers import COMPACTION_ANCHOR_KEY
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -461,6 +462,7 @@ class SubagentExecutor:
         dbtl_writable_paths: Sequence[str] | None = None,
         extra_middlewares: Sequence[Any] | None = None,
         thinking_enabled: bool = False,
+        execution_env: Mapping[str, str] | None = None,
     ):
         """Initialize the executor.
 
@@ -538,6 +540,7 @@ class SubagentExecutor:
         # wraps the built-ins rather than being wrapped by them. Kept as a
         # tuple so a caller cannot mutate the chain after construction.
         self.extra_middlewares = tuple(extra_middlewares or ())
+        self.execution_env = {str(key): str(value) for key, value in (execution_env or {}).items() if isinstance(key, str) and isinstance(value, str)}
 
         self._base_tools = _filter_tools(
             tools,
@@ -789,10 +792,23 @@ class SubagentExecutor:
 
         messages: list[Any] = []
         if system_parts:
-            messages.append(SystemMessage(content="\n\n".join(system_parts)))
+            messages.append(
+                SystemMessage(
+                    content="\n\n".join(system_parts),
+                    additional_kwargs={COMPACTION_ANCHOR_KEY: True},
+                )
+            )
 
-        # Then the actual task
-        messages.append(HumanMessage(content=task))
+        # Then the actual task. This is the delegated contract, not ordinary
+        # conversation history: Build puts its versioned manifest, completion,
+        # and path-grant requirements here. Compaction must retain the exact
+        # bytes rather than feeding a paraphrase back to a long-running worker.
+        messages.append(
+            HumanMessage(
+                content=task,
+                additional_kwargs={COMPACTION_ANCHOR_KEY: True},
+            )
+        )
 
         state: dict[str, Any] = {
             "messages": messages,
@@ -921,6 +937,10 @@ class SubagentExecutor:
             if self.project_root:
                 context["project_root"] = self.project_root
             context["is_subagent"] = True
+            if self.execution_env:
+                from deerflow.runtime.secret_context import DBTL_EXECUTION_ENV_CONTEXT_KEY
+
+                context[DBTL_EXECUTION_ENV_CONTEXT_KEY] = dict(self.execution_env)
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 

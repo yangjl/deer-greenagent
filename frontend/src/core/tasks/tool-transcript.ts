@@ -24,6 +24,8 @@
  * is the whole question the reader has.
  */
 
+import type { TokenUsage } from "../messages/usage";
+
 import type { SubtaskStep, SubtaskStepToolCall } from "./steps";
 
 export type TranscriptEntryKind = "thinking" | "tool" | "answer";
@@ -43,6 +45,8 @@ export interface TranscriptEntry {
   pending?: boolean;
   truncated?: boolean;
   stepIndex: number;
+  /** Cost of the model call that produced this ReAct step. */
+  usage?: TokenUsage;
 }
 
 export interface TaskTranscriptOptions {
@@ -136,6 +140,7 @@ export function taskTranscript(
         text,
         truncated: step.truncated,
         stepIndex: step.message_index,
+        usage: step.usage,
       });
     }
     for (const [callIndex, call] of (step.tool_calls ?? []).entries()) {
@@ -153,6 +158,11 @@ export function taskTranscript(
         ...(result === undefined ? { pending: true } : {}),
         truncated: result?.truncated,
         stepIndex: result?.message_index ?? step.message_index,
+        // When the assistant turn contains no visible thinking, put its meter
+        // on the first tool row so every ReAct still has exactly one badge.
+        ...(!text && callIndex === 0 && step.usage
+          ? { usage: step.usage }
+          : {}),
       });
     }
   }

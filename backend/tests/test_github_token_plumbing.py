@@ -28,7 +28,7 @@ from langgraph_sdk.errors import ConflictError
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
 from app.channels.store import ChannelStore
-from deerflow.sandbox.local.local_sandbox import LocalSandbox
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.tools import _github_env_from_runtime, bash_tool
 
 
@@ -69,6 +69,32 @@ def test_local_sandbox_env_overlay_reaches_subprocess(monkeypatch: pytest.Monkey
     assert env["GITHUB_TOKEN"] == "tok-123"
     # Inherited vars survive the overlay.
     assert env["EXISTING"] == "kept"
+
+
+def test_local_sandbox_resolves_virtual_paths_in_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake_run_posix(args, timeout, env=None):
+        captured["env"] = env
+        return ("", "", 0, False)
+
+    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(fake_run_posix))
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "/bin/bash"))
+    sandbox = LocalSandbox(
+        "local:t",
+        path_mappings=[PathMapping(container_path="/mnt/user-data", local_path=str(tmp_path))],
+    )
+
+    sandbox.execute_command(
+        "true",
+        env={
+            "DBTL_INPUT_1": "/mnt/user-data/trial.csv",
+            "UNCHANGED": "prefix:/mnt/user-data/trial.csv",
+        },
+    )
+
+    assert captured["env"]["DBTL_INPUT_1"] == f"{tmp_path}/trial.csv"
+    assert captured["env"]["UNCHANGED"] == "prefix:/mnt/user-data/trial.csv"
 
 
 def test_local_sandbox_no_env_passes_sanitized_environ(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -390,6 +416,36 @@ def test_bash_tool_no_env_without_token(monkeypatch: pytest.MonkeyPatch) -> None
 
     bash_tool.func(runtime=runtime, description="ls", command="ls")
     assert captured["env"] is None
+
+
+def test_bash_tool_injects_the_server_owned_dbtl_execution_grant(monkeypatch: pytest.MonkeyPatch) -> None:
+    from deerflow.runtime.secret_context import DBTL_EXECUTION_ENV_CONTEXT_KEY
+
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "aio:xyz"}},
+        context={
+            "thread_id": "t1",
+            DBTL_EXECUTION_ENV_CONTEXT_KEY: {
+                "DBTL_WORKSPACE": "/mnt/user-data/outputs/.dbtl-stage-work/a/build/p",
+                "DBTL_INPUT_1": "/mnt/user-data/trial.csv",
+            },
+        },
+        config={},
+    )
+    captured: dict = {}
+
+    class _Sandbox:
+        def execute_command(self, command, env=None, timeout=None):
+            captured["env"] = env
+            return "done"
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: _Sandbox())
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+
+    bash_tool.func(runtime=runtime, description="verify", command="python src/run.py")
+
+    assert captured["env"]["DBTL_INPUT_1"] == "/mnt/user-data/trial.csv"
+    assert captured["env"]["DBTL_WORKSPACE"].endswith("/build/p")
 
 
 # ---------------------------------------------------------------------------

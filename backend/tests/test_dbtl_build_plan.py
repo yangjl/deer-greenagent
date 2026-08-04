@@ -101,7 +101,8 @@ class TestAPlanIsData:
         )
 
         assert unit.skills == ("analysis",)
-        assert "return version=2" in unit.prompt
+        assert "return version=3" in unit.prompt
+        assert "execution_inputs" in unit.prompt
 
     def test_duplicate_keys_are_disambiguated_rather_than_dropped(self) -> None:
         parsed = parse_build_plan(_plan(_phase(1, phase_key="fit"), _phase(2, phase_key="fit")), objective="x")

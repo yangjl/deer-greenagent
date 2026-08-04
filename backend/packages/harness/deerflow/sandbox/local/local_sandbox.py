@@ -486,7 +486,15 @@ class LocalSandbox(Sandbox):
         # Inherit os.environ minus platform secrets, then layer any injected
         # request-scoped secrets on top (#3861). An explicit env is always passed
         # so platform credentials never leak into skill subprocesses.
-        sandbox_env = build_sandbox_env(env)
+        # Environment values that are exact mounted virtual paths need the
+        # same translation as command operands. DBTL intentionally passes its
+        # input grant through env so generated source never embeds host paths;
+        # leaving those values virtual makes LocalSandbox's subprocess unable
+        # to open files that exist under the mapped host root.
+        resolved_env = None
+        if env is not None:
+            resolved_env = {key: self._resolve_path(value).replace("\\", "/") if self._find_path_mapping(value) is not None else value for key, value in env.items()}
+        sandbox_env = build_sandbox_env(resolved_env)
         timed_out = False
         if os.name == "nt":
             if self._is_powershell(shell):

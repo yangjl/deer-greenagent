@@ -581,6 +581,67 @@ execution authority, publication path, or persistence model.
   `{item: ...}` limitations, and `not_completed` checks) as truthful failures
   instead of replacing them with schema-error failures.
 
+**Post-implementation evidence (2026-08-04) — the first matched trial, and what
+it says about the wrapper question:**
+
+The evaluation gate asked for token, completion, and false-success counts from a
+real run. One arrived, and it argues against the lead-like wrapper rather than
+for it. Three v11 workers on one cycle spent 863,047 tokens for 27,150 of output
+(3%); two failed, and both failed the same way. The **succeeding** phase carries
+the same defect: it published a governed, hash-bound `analysis-spec-v1.json`
+naming its dataset at a host path that does not exist, so it is a completed,
+`is_trustworthy: true` record that Test could never re-run — one
+false-success incident, on the phase that passed.
+
+The cause was not reasoning autonomy, which §"Evaluation gate" makes the sole
+condition for reconsidering a wrapper. It was the contract: `build_prompt` told
+workers to *"use absolute /mnt/user-data paths for the entry point, inputs, and
+configuration"*, and both a registered specialist and the generalist obliged by
+hardcoding a path neither could see. The budget was not binding either (249K of
+a 500K ceiling, never reaching the 75% reserve warning), and the worker's own
+escalation route went unused — `needs_input` exists precisely for a phase
+blocked on its environment, and the failed result carried an empty
+`clarification_question`.
+
+`generic:build:v12` therefore answers it as a contract fix, per this plan's
+reuse rule:
+
+- The rerun clause no longer demands absolute paths in code. The *record* still
+  names them — it is the server's, and Test re-runs from it — while the code
+  reads `DBTL_INPUT_1..N` and writes beneath `DBTL_WORKSPACE`.
+- `deerflow.dbtl.build_grant` is the pure half: `build_input_grant` refuses an
+  input outside the grant (the environment must not become the channel a
+  scanner-refused path arrives through), and `scan_foreign_paths` reports
+  absolute literals no granted root covers, compared segment-wise.
+- `verify_granted_paths` refuses the phase with the literal and the line, on the
+  same footing as `verify_phase_manifest`. An unreadable entry point is **not**
+  refused — that belongs to `server_executed_entry_point`, the sibling gate.
+- `dbtl.build_implementer_agent` is the implementer dial, deliberately recorded
+  as a stand-in and deliberately unable to affect correctness.
+
+`server_executed_entry_point` is enforced before publication. The adapter runs
+the manifest's entry point in the existing sandbox under the phase's exact
+write grant, injects numbered input paths through the environment, and derives
+exit status, bounded stdout/stderr logs, and output hashes from fixed receipt
+files. The receipt is stored in the existing `BuildStepRecorder` execution and
+payload rows, so replay remains in the same digest chain as the phase output.
+No bare host command runner exists: local macOS verification uses the identical
+`sandbox-exec` profile builder as model-facing Bash and restricts project reads
+to issued inputs plus the phase workspace. Remote providers preflight `bwrap`
+and execute in a bubblewrap namespace that hides the rest of `/mnt/user-data`;
+without it they fail closed. A local platform without process-tree confinement
+also fails closed. V12 restores v10's 120K phase ceiling and replaces the old
+same-history correction loop with one fresh 40K specialist invocation carrying
+only the failure and the previous staged workspace.
+
+V12's phase manifest is version 3. `declared_inputs` is the narrow union of
+files consumed while implementing or executing the phase, while
+`execution_inputs` identifies only the server-issued subset consumed by the
+entry point at runtime. The server injects the full original grant so subset
+declaration never renumbers `DBTL_INPUT_n`, and refuses an execution input that
+was not issued. Source scanning covers every declared source-code output, not
+only the entry point.
+
 **Implementation record (finalization timing — the token axis):**
 
 This phase's "tune finalization timing" had a precondition stated in its own

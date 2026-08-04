@@ -1031,7 +1031,7 @@ work carrying one would render as a design meeting. Tests:
 `tests/test_subagent_step_streaming.py`, `tests/test_dbtl_stage_worker_progress.py`.
 **Handled LLM failures**: `LLMErrorHandlingMiddleware` deliberately converts provider/model exceptions into an `AIMessage` so the graph can end cleanly, stamping `additional_kwargs.deerflow_error_fallback=true` plus error metadata. Clean graph termination does not imply subagent success: `SubagentExecutor` inspects the last assistant message at terminalization and maps a marked fallback to `SubagentStatus.FAILED`, which then emits `task_failed` and the existing structured `subagent_error`. Only the marker is authoritative — error-looking assistant prose without it remains a normal completed result, so neither the executor nor frontend parses display text as a status protocol.
 **Guardrail caps & `stop_reason` (#3875 Phase 2)**: three independent axes can end a subagent run early, and all now surface _why_ through one additive field rather than a new status enum. **Turn axis**: `recursion_limit` on the subagent `run_config` equals `max_turns`, so exhausting the turn budget raises `GraphRecursionError` from `agent.astream`; `executor.py::_aexecute` catches it specifically (before the generic `except Exception`). **Token axis**: `TokenBudgetMiddleware` is attached per-agent via `build_subagent_runtime_middlewares` from `subagents.token_budget` (default `max_tokens` **coupled to `summarization.enabled`** — 1,000,000 when subagent summarization is on, 2,000,000 when off, warn at 0.7, hard-stop at 1.0; a user-set budget always wins regardless of the switch — #3875 Phase 3; a backstop against a subagent that burns tokens on trivial work). It does _not_ raise: at the hard-stop threshold it strips the in-flight turn's tool calls, forces `finish_reason="stop"`, and lets the run complete naturally with a final answer. **Loop axis**: `LoopDetectionMiddleware` (attached at the same point) catches repeated identical tool-call sets — or one tool _type_ called many times with varying args — and its hard-stop likewise strips `tool_calls` and forces a final answer without raising, recording `loop_capped`. Each guard exposes its cap on a per-`run_id` `consume_stop_reason(run_id)` accessor; `_aexecute` collects **every** middleware with that method (duck-typed via `hasattr`, so the executor has no import coupling to the guard classes) and surfaces the first non-`None` reason — adding a future guard needs no executor change. **Surfacing**: whichever axis fired, `_aexecute` stamps a normal status plus an additive reason — `completed` + `stop_reason=token_capped|turn_capped|loop_capped` when a usable final answer (or partial recovered from the last streamed chunk via `_extract_final_result` → `utils/messages.py::message_content_to_text`, returning a `"No response Generated"` sentinel when no text survived) was produced; `failed` + `stop_reason=turn_capped` when nothing usable survived. `SubagentResult.stop_reason` flows through `task_tool.py::_task_result_command` → `format_subagent_result_message` (renders `Task Succeeded (capped: ...)` / `Task failed (capped: ...)`) and `make_subagent_additional_kwargs`, which stamps the additive `subagent_stop_reason` key alongside the normal `subagent_status`. **Why additive, not an enum**: a new status value would break v1 consumers; an optional field is ignored by older frontends and ledger readers, so the cross-language contract (`contracts/subagent_status_contract.json` v2 + `subagents/status_contract.py` + `frontend/.../subtask-result.ts`, pinned by `test_status_values_match_contract` / `test_stop_reason_values_match_contract`) stays backward-compatible. The durable delegation ledger captures `stop_reason` onto the entry and renders model-facing guidance ("hit a guardrail cap with a partial result; reuse it, retry tighter, or raise the per-agent budget (`max_turns` / `token_budget`)") so the lead reuses a capped completion knowingly instead of mistaking it for a clean one. (Phase 1 shipped this surfacing as a `MAX_TURNS_REACHED` status enum in #3949; Phase 2 replaced that enum with the additive `stop_reason` field per the agreed design — the `max_turns_reached` status value and `SubagentStatus.MAX_TURNS_REACHED` are gone.)
-**Context compaction (#3875 Phase 3, #4039)**: subagents inherit `DeerFlowSummarizationMiddleware` via `build_subagent_runtime_middlewares`, gated on the **same** `summarization.enabled` switch the lead reads (one config covers both chains; trigger/keep/model/prompt come from the shared `summarization` config so they cannot drift). The subagent builder attaches `DurableContextMiddleware` immediately before summarization, using the same skills path/read-tool settings as the lead chain. Compaction stores the generated summary in `ThreadState.summary_text` rather than as a `messages` item; the durable-context wrapper therefore projects it into the next model request as guarded hidden human data. This is required when a message-count keep policy preserves only an assistant tool-call plus its tool results: without the injected summary the next request begins with assistant/tool history and strict OpenAI-compatible providers can reject it. Because `DurableContextMiddleware` inserts a second `SystemMessage(authority_contract)` after the subagent's leading system prompt, the builder also appends `SystemMessageCoalescingMiddleware` innermost (mirroring the lead chain, appended after the optional summarization middleware so it is unconditionally last) to merge every `SystemMessage` into one leading `system_message` — otherwise the durable fix would trade #4039's assistant-first HTTP 400 for a duplicate-system 400 on the same strict backends (#4040). The factory is called with `skip_memory_flush=True` on the subagent path: the lead's `memory_flush_hook` (attached when `memory.enabled`) flushes pre-compaction messages into durable memory keyed by `thread_id`, and subagents share the parent's `thread_id`, so without skipping the hook a subagent's internal turns would pollute the **parent** thread's durable memory. Placement differs from the lead chain (lead appends summarization _before_ the guard trio; subagent appends it _after_) — benign because the middleware implements only `before_model` (compaction) with no `after_model`/`consume_stop_reason`, so it cannot disturb the Phase 2 guard-cap stop-reason channel. Compaction rewrites the messages channel via `RemoveMessage(id=REMOVE_ALL_MESSAGES)`, which shrinks `len(messages)` below the step-capture cursor mid-run; `capture_new_step_messages` (see Step capture below) resets the cursor to the new tail on contraction so steps appended after the compaction point are not silently dropped.
+**Context compaction (#3875 Phase 3, #4039)**: subagents inherit `DeerFlowSummarizationMiddleware` via `build_subagent_runtime_middlewares`, gated on the **same** `summarization.enabled` switch the lead reads (one config covers both chains; trigger/keep/model/prompt come from the shared `summarization` config so they cannot drift). Compaction never delegates authority to the summary model: the server-tagged initial subagent `SystemMessage` and `HumanMessage` stay verbatim, so a long Build cannot replace its phase manifest, Done conditions, or `DBTL_INPUT_n` grants with a paraphrase. Role alone is not provenance; an untagged system-role message remains compressible. The compaction-anchor marker is server-owned and stripped from external run input. Anchors are excluded only from message-trigger counting so an uncompressible fixed contract cannot make every subsequent ReAct pair invoke the summary model; they remain in token/fraction accounting because their bytes still occupy the provider context window. The subagent builder attaches `DurableContextMiddleware` immediately before summarization, using the same skills path/read-tool settings as the lead chain. Compaction stores the generated summary in `ThreadState.summary_text` rather than as a `messages` item; the durable-context wrapper therefore projects it into the next model request as guarded hidden human data. This is required when a message-count keep policy preserves only an assistant tool-call plus its tool results: without the injected summary the next request begins with assistant/tool history and strict OpenAI-compatible providers can reject it. Because `DurableContextMiddleware` inserts a second `SystemMessage(authority_contract)` after the subagent's leading system prompt, the builder also appends `SystemMessageCoalescingMiddleware` innermost (mirroring the lead chain, appended after the optional summarization middleware so it is unconditionally last) to merge every `SystemMessage` into one leading `system_message` — otherwise the durable fix would trade #4039's assistant-first HTTP 400 for a duplicate-system 400 on the same strict backends (#4040). The factory is called with `skip_memory_flush=True` on the subagent path: the lead's `memory_flush_hook` (attached when `memory.enabled`) flushes pre-compaction messages into durable memory keyed by `thread_id`, and subagents share the parent's `thread_id`, so without skipping the hook a subagent's internal turns would pollute the **parent** thread's durable memory. Placement differs from the lead chain (lead appends summarization _before_ the guard trio; subagent appends it _after_) — benign because the middleware implements only `before_model` (compaction) with no `after_model`/`consume_stop_reason`, so it cannot disturb the Phase 2 guard-cap stop-reason channel. Compaction rewrites the messages channel via `RemoveMessage(id=REMOVE_ALL_MESSAGES)`, which shrinks `len(messages)` below the step-capture cursor mid-run; `capture_new_step_messages` (see Step capture below) resets the cursor to the new tail on contraction so steps appended after the compaction point are not silently dropped.
 **Step capture & persistence (#3779)**: `executor.py` captures both assistant turns (`AIMessage`) **and** tool outputs (`ToolMessage`) via `subagents/step_events.py::capture_new_step_messages`, which walks the _newly-appended tail_ of each `stream_mode="values"` chunk (not just `messages[-1]`) so a multi-tool-call turn — where LangGraph's `ToolNode` appends several `ToolMessage`s in one super-step — keeps every tool output instead of dropping all but the last. Every child graph is tagged `TAG_NOSTREAM`: these internal messages belong only in the subtask timeline and must not enter the parent `messages-tuple` stream or `RunJournal` thread feed. `runtime/runs/worker.py::_SubagentEventBuffer` additionally persists these `task_*` custom events to the `RunEventStore` as `subagent.start`/`subagent.step`/`subagent.end` (`category="subagent"`, `task_id` in `metadata`). It **batches** writes via `put_batch` (flushing on a terminal `subagent.end`, at `FLUSH_THRESHOLD` events, and in the worker's `finally`) rather than one `put()` per step, since `put()` is a documented low-frequency path (per-thread advisory lock per call) and a deep subagent (`max_turns=150`) emits hundreds of steps on the hot stream loop. `subagent_run_event` rejects malformed chunks that lack a non-empty `task_id`; running chunks additionally require a non-negative integer `message_index` and a message object, so persisted records always satisfy the required lifecycle envelope. `build_subagent_step` caps both the per-step `text` and each tool call's serialized `args` at `SUBAGENT_STEP_MAX_CHARS` (flagged `truncated` / `args_truncated`) so a large `write_file`/`bash` payload can't produce an unbounded row. The dedicated category keeps them out of `list_messages` (the thread feed) while `list_events` returns them for the frontend's fetch-on-expand backfill. `list_events` accepts `task_id` (filters on `metadata["task_id"]` — SQL-side in `DbRunEventStore` via `event_metadata["task_id"].as_string()`, in-memory in the JSONL/memory stores) plus an `after_seq` forward cursor, so the card pages through one subagent's steps without the run-wide `limit` truncating the tail (no schema migration: the filter rides the existing run-scoped index). `step_events.py` is a pure, unit-tested layer (`build_subagent_step` / `subagent_run_event`). **History contraction (#3875 Phase 3)**: `capture_new_step_messages` assumes append-only growth, but `DeerFlowSummarizationMiddleware` rewrites the messages channel via `RemoveMessage(id=REMOVE_ALL_MESSAGES)`, shrinking `len(messages)` below the cursor mid-run. On contraction (`total < processed_count`) the cursor resets to the new tail; `capture_step_message`'s id/content dedup prevents re-emitting pre-compaction steps, so steps appended after the compaction point are still captured instead of being dropped until `total` overtakes the stale cursor.
 **Deferred MCP tools** (if `tool_search.enabled`): `SubagentExecutor._build_initial_state` assembles deferral after policy filtering via the shared `assemble_deferred_tools` (fail-closed), appends the `tool_search` tool, injects the `<available-deferred-tools>` section into the subagent's `SystemMessage`, and threads the setup to `_create_agent`, which attaches `McpRoutingMiddleware` (when PR1 routing metadata matches deferred tools) before `DeferredToolFilterMiddleware` through `build_subagent_runtime_middlewares(...)`. Subagents thus withhold full MCP schemas until promotion, same as the lead agent; each task run gets a fresh `ThreadState` so promotion is isolated per run
 
@@ -3801,15 +3801,90 @@ same switch:
   `test_dbtl_build_workflow_execution.py`, and
   `test_dbtl_live_stage_execution.py`.
 
-  Current Build is `generic:build:v11`. It keeps v10's inputs, capabilities,
-  validity gates, and enforced guard semantics, while raising only the
-  per-worker token ceiling from 120,000 to 500,000. V10 stays immutable and
-  resolvable, so its pinned attempts retain the budget under which they began.
+  Current Build is `generic:build:v12`. V11 stays immutable and resolvable as
+  the matched-checkpoint experiment that raised v10's per-worker ceiling from
+  120,000 to 500,000; v12 restores the 120,000 ceiling after the live run showed
+  that more budget amplified an environment-contract error rather than fixing
+  it. A failed implementation check receives one fresh 40,000-token correction
+  worker carrying only the refusal and previous staged workspace. It does not
+  inherit the first worker's growing ReAct transcript.
+
+  V12 requires phase-manifest v3. `declared_inputs` binds the narrow set of
+  workspace files consumed while implementing or executing the phase;
+  `execution_inputs` is the subset the declared entry point consumes at
+  runtime. The latter must come from the server-issued grant, but it does not
+  renumber `DBTL_INPUT_n`: server execution receives the original issued order
+  so a script using only `DBTL_INPUT_2` still receives that exact variable.
+
+  **A path a phase composes for itself is a guess about a filesystem it cannot
+  see.** `generic:build:v12` issues the paths instead of asking for them, after
+  two workers on one cycle — a registered specialist and the generalist —
+  independently wrote the same nonexistent host path into generated code and
+  spent 650K tokens between them failing to run it. Agent identity was not the
+  variable; the contract was. `build_prompt`'s rerun clause used to instruct
+  workers to *"use absolute /mnt/user-data paths for the entry point, inputs,
+  and configuration"*, so the failure was specified rather than improvised. That
+  sentence is gone: the record still names absolute paths (it is the server's,
+  and it is what lets Test re-run the work), while the *code* reads
+  `DBTL_INPUT_1`, `DBTL_INPUT_2`, … in declared order (`DBTL_INPUT_COUNT` holds
+  how many) and writes beneath `DBTL_WORKSPACE`.
+  `deerflow.dbtl.build_grant` is the pure half. `build_input_grant` refuses an
+  input outside the grant, because the environment must not become the channel
+  by which a foreign path reaches the script the scanner would have refused for
+  naming it directly. `scan_foreign_paths` reads a phase's declared source outputs and
+  reports absolute literals no granted root covers, compared **segment-wise**
+  (`/mnt/user-data-other` starts with `/mnt/user-data` and is a different
+  directory). It is deliberately narrow about what it forgives: interpreters and
+  devices (`/usr/bin/`, `/dev/`, …) are executables rather than places a Build
+  reads its data, a lone `"/"` is a separator far more often than a file, and a
+  hardcoded `/tmp` output is refused because it is an ungoverned one. Findings
+  are bounded at `MAX_REPORTED_PATHS` for the reader, not for the count.
+  `verify_granted_paths` returns a message rather than raising, on the same
+  footing as `verify_phase_manifest` — one failed phase with a reviewer-readable
+  reason, naming the literal and the line, instead of a lost run. An
+  **unreadable** source output is not refused: a compiled or binary one has no
+  source to judge, and refusing it would be the check asserting something it
+  never read. That case belongs to `server_executed_entry_point`, the sibling
+  gate v12 also declares. Before publication, the server runs the declared
+  entry point in the run's sandbox under the same exact writable-workspace
+  boundary used by model-facing Bash. Numbered inputs and `DBTL_WORKSPACE` are
+  injected as environment variables; fixed receipt files provide exit status,
+  bounded stdout/stderr logs, and output hashes, all retained in the Build step
+  digest chain. Local macOS uses the shared `sandbox-exec` profile builder;
+  its server-verification profile also hides the project tree except for the
+  phase workspace and issued inputs. Remote providers must pass a `bwrap`
+  preflight and run inside an equivalent bubblewrap mount namespace: the
+  project mount becomes an empty tmpfs and only those same paths are mounted
+  back. A provider without that boundary fails before the entry point runs;
+  a local platform without a process-tree write boundary likewise fails
+  closed. The refusal is the cheap early
+  half; the execution is what actually decides whether the paths were real.
+  `dbtl.build_implementer_agent` selects which agent implements a phase whose
+  capability has no registered specialist. It replaces only the *stand-in* and
+  is still recorded as one (`via_generalist=True`) — nothing about a preferred
+  agent covers the capability, and a reviewer who cannot tell a specialist from
+  a preference has lost the distinction capability selection exists to keep. A
+  registered specialist still wins, and an unregistered name falls back rather
+  than failing the phase: this is an efficiency dial, and correctness does not
+  rest on which agent runs, which is precisely what the two-agent failure
+  showed. Tests: `tests/test_dbtl_build_grant.py`,
+  `tests/test_dbtl_build_granted_paths.py`.
+
+  Each persisted `subagent.step` AI row also carries that AIMessage's own
+  provider usage delta (`input_tokens`, `output_tokens`, `total_tokens`). The
+  cumulative `task_running` meter is insufficient here: several messages
+  drained together can share one snapshot, and reload used to lose every
+  per-ReAct boundary. Tool rows never repeat the meter. The frontend attaches
+  it once to visible thinking, or to the first tool row when the model call had
+  no visible prose, so the expanded Build worker shows exact input/output cost
+  without double-counting a multi-tool turn. Tests:
+  `test_subagent_step_events.py`, `core/tasks/steps.test.ts`, and
+  `core/tasks/tool-transcript.test.ts`.
 
   `dbtl.build_worker_contract` is the rollout boundary for new, unpinned
-  phased Build attempts. `hardened_v11` is the default; `hardened_v10` and
-  `legacy_v9` are bounded rollbacks while matched-checkpoint evaluation
-  continues. A recorded
+  phased Build attempts. `hardened_v12` is the default; `hardened_v11`,
+  `hardened_v10`, and `legacy_v9` are bounded rollbacks while
+  matched-checkpoint evaluation continues. A recorded
   `stage_spec_key` always wins over the setting, and repository pinning still
   arbitrates concurrent starters, so changing the configuration cannot rewrite
   an active attempt's contract. Keep v9's parser and broad provenance fallback

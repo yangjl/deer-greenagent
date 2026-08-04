@@ -1,6 +1,7 @@
 import { ChevronRightIcon, Loader2Icon } from "lucide-react";
 import { useState } from "react";
 
+import { formatTokenCount } from "@/core/messages/usage";
 import {
   formatToolArgs,
   type TranscriptEntry,
@@ -58,7 +59,8 @@ export function SubtaskToolStep({ entry }: { entry: TranscriptEntry }) {
         aria-expanded={hasDetail ? open : undefined}
         className={cn(
           "group flex w-full items-center gap-1.5 rounded text-left",
-          hasDetail && "hover:bg-muted/50 focus-visible:ring-ring -mx-1 px-1 focus-visible:ring-2 focus-visible:outline-none",
+          hasDetail &&
+            "hover:bg-muted/50 focus-visible:ring-ring -mx-1 px-1 focus-visible:ring-2 focus-visible:outline-none",
         )}
         disabled={!hasDetail}
         type="button"
@@ -80,6 +82,15 @@ export function SubtaskToolStep({ entry }: { entry: TranscriptEntry }) {
           <span className="text-muted-foreground flex shrink-0 items-center gap-1 text-[11px]">
             <Loader2Icon className="size-2.5 animate-spin motion-reduce:animate-none" />
             running
+          </span>
+        ) : null}
+        {entry.usage ? (
+          <span
+            className="text-muted-foreground shrink-0 text-[10px] tabular-nums"
+            title={`${entry.usage.inputTokens.toLocaleString()} input + ${entry.usage.outputTokens.toLocaleString()} output`}
+          >
+            {formatTokenCount(entry.usage.inputTokens)} in ·{" "}
+            {formatTokenCount(entry.usage.outputTokens)} out
           </span>
         ) : null}
       </button>

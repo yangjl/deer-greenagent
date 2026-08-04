@@ -17,6 +17,7 @@ from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummari
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.summarization_config import SummarizationConfig
+from deerflow.runtime.compaction_markers import COMPACTION_ANCHOR_KEY
 
 
 def _messages() -> list:
@@ -75,8 +76,11 @@ def _middleware(
     before_summarization=None,
     trigger=("messages", 4),
     keep=("messages", 2),
+    max_input_tokens: int | None = None,
 ) -> DeerFlowSummarizationMiddleware:
     model = MagicMock()
+    if max_input_tokens is not None:
+        model.profile = {"max_input_tokens": max_input_tokens}
     model.invoke.return_value = SimpleNamespace(text="compressed summary")
     model.ainvoke = AsyncMock(return_value=SimpleNamespace(text="compressed summary"))
     model.with_config.return_value = model
@@ -103,6 +107,115 @@ def test_before_summarization_hook_receives_messages_before_compression() -> Non
     assert isinstance(result["messages"][0], RemoveMessage)
     assert result["summary_text"] == "compressed summary"
     assert [message.content for message in result["messages"][1:]] == ["user-2", "assistant-2"]
+
+
+def test_subagent_authority_and_task_contract_survive_compaction_verbatim() -> None:
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append], trigger=("messages", 6), keep=("messages", 2))
+    system_contract = SystemMessage(content="You are the bounded Build implementer.")
+    system_contract.additional_kwargs[COMPACTION_ANCHOR_KEY] = True
+    build_contract = HumanMessage(
+        content="Return phase_manifest version=3; read DBTL_INPUT_1; never invent a path.",
+        additional_kwargs={COMPACTION_ANCHOR_KEY: True},
+    )
+
+    result = middleware.before_model(
+        {
+            "messages": [
+                system_contract,
+                build_contract,
+                AIMessage(content="I will inspect the input."),
+                HumanMessage(content="tool output 1"),
+                AIMessage(content="I will implement it."),
+                HumanMessage(content="tool output 2"),
+                AIMessage(content="I will verify it."),
+                HumanMessage(content="tool output 3"),
+            ]
+        },
+        _runtime(agent_name="general-purpose"),
+    )
+
+    assert result is not None
+    assert captured
+    assert system_contract not in captured[0].messages_to_summarize
+    assert build_contract not in captured[0].messages_to_summarize
+    assert result["messages"][1] is system_contract
+    assert result["messages"][2] is build_contract
+    assert "phase_manifest version=3" not in captured[0].messages_to_summarize[0].content
+
+
+def test_unmarked_external_system_message_is_compressible() -> None:
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append], trigger=("messages", 4), keep=("messages", 2))
+    external_system = SystemMessage(content="Caller-supplied system history")
+
+    result = middleware.before_model(
+        {
+            "messages": [
+                external_system,
+                HumanMessage(content="old request"),
+                AIMessage(content="old response"),
+                HumanMessage(content="current request"),
+            ]
+        },
+        _runtime(),
+    )
+
+    assert result is not None
+    assert external_system in captured[0].messages_to_summarize
+    assert external_system not in captured[0].preserved_messages
+
+
+def test_authority_anchors_do_not_retrigger_compaction_after_one_new_pair() -> None:
+    middleware = _middleware(trigger=("messages", 6), keep=("messages", 2))
+    anchors = [
+        SystemMessage(content="Bounded implementer", additional_kwargs={COMPACTION_ANCHOR_KEY: True}),
+        HumanMessage(content="Exact Build contract", additional_kwargs={COMPACTION_ANCHOR_KEY: True}),
+    ]
+    first = middleware.before_model(
+        {
+            "messages": [
+                *anchors,
+                AIMessage(content="turn 1"),
+                HumanMessage(content="tool 1"),
+                AIMessage(content="turn 2"),
+                HumanMessage(content="tool 2"),
+                AIMessage(content="turn 3"),
+                HumanMessage(content="tool 3"),
+            ]
+        },
+        _runtime(),
+    )
+
+    assert first is not None
+    compacted = [*first["messages"][1:], AIMessage(content="turn 4"), HumanMessage(content="tool 4")]
+
+    assert middleware.before_model({"messages": compacted, "summary_text": first["summary_text"]}, _runtime()) is None
+
+
+@pytest.mark.parametrize(
+    ("trigger", "profile_limit"),
+    [
+        (("tokens", 8), None),
+        (("fraction", 0.5), 16),
+    ],
+)
+def test_authority_anchor_tokens_still_trigger_compaction(trigger, profile_limit) -> None:
+    middleware = _middleware(trigger=trigger, keep=("messages", 2), max_input_tokens=profile_limit)
+    messages = [
+        SystemMessage(content="Bounded implementer", additional_kwargs={COMPACTION_ANCHOR_KEY: True}),
+        HumanMessage(content="Exact Build contract", additional_kwargs={COMPACTION_ANCHOR_KEY: True}),
+        AIMessage(content="turn 1"),
+        HumanMessage(content="tool 1"),
+        AIMessage(content="turn 2"),
+        HumanMessage(content="tool 2"),
+        AIMessage(content="turn 3"),
+        HumanMessage(content="tool 3"),
+    ]
+
+    result = middleware.before_model({"messages": messages}, _runtime())
+
+    assert result is not None
 
 
 def test_summarization_middleware_emits_frontend_update_key_in_agent_stream() -> None:

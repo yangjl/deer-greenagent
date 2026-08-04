@@ -582,6 +582,34 @@ BUILD_SPEC_V11 = StageSpec(
 )
 
 
+BUILD_SPEC_V12 = StageSpec(
+    stage="build",
+    domain_profile=GENERIC_PROFILE,
+    version=12,
+    title=BUILD_SPEC_V11.title,
+    purpose=BUILD_SPEC_V11.purpose,
+    cycle_classes=BUILD_SPEC_V11.cycle_classes,
+    cycle_weights=BUILD_SPEC_V11.cycle_weights,
+    required_inputs=BUILD_SPEC_V11.required_inputs,
+    required_artifact_types=BUILD_SPEC_V11.required_artifact_types,
+    output_schema="build_package.v12",
+    required_capabilities=BUILD_SPEC_V11.required_capabilities,
+    optional_capabilities=BUILD_SPEC_V11.optional_capabilities,
+    # `granted_paths_only` refuses an entry point that names a location the
+    # grant does not cover; `server_executed_entry_point` then runs the file the
+    # manifest declared and records exit status, logs, and output hashes. The
+    # first is a cheap early refusal with a specific message, the second is what
+    # actually decides whether the paths were real -- a worker's own account of
+    # having run its code is not evidence that it ran.
+    validity_gates=(*BUILD_SPEC_V11.validity_gates, "granted_paths_only", "server_executed_entry_point"),
+    memory_write_policy=BUILD_SPEC_V11.memory_write_policy,
+    # The path grant removes the failure that motivated v11's 500K experiment.
+    # Return to the bounded v10 envelope: one bad phase may fail, but it may not
+    # consume another quarter-million tokens while rediscovering its mount.
+    budget=BUILD_SPEC_V10.budget,
+)
+
+
 TEST_SPEC_V1 = StageSpec(
     stage="test",
     domain_profile=GENERIC_PROFILE,
@@ -762,6 +790,7 @@ _REGISTRY: dict[str, StageSpec] = {
         BUILD_SPEC_V9,
         BUILD_SPEC_V10,
         BUILD_SPEC_V11,
+        BUILD_SPEC_V12,
         TEST_SPEC_V1,
         TEST_SPEC_V2,
         TEST_SPEC_V3,
@@ -780,7 +809,7 @@ _CURRENT: MappingProxyType[tuple[str, str], int] = MappingProxyType(
     {
         (GENERIC_PROFILE, "design"): DESIGN_SPEC_V2.version,
         (GENERIC_PROFILE, "reconciliation"): RECONCILIATION_SPEC_V1.version,
-        (GENERIC_PROFILE, "build"): BUILD_SPEC_V11.version,
+        (GENERIC_PROFILE, "build"): BUILD_SPEC_V12.version,
         (GENERIC_PROFILE, "test"): TEST_SPEC_V4.version,
         (GENERIC_PROFILE, "learn"): LEARN_SPEC_V1.version,
     }

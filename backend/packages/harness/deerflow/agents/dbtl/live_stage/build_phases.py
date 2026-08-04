@@ -21,12 +21,14 @@ them. An earlier phase's output is an input, hash-bound like any other.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
 from deerflow.agents.dbtl.live_stage.workspace import SHELL_WORKSPACE_IDIOM, STAGE_UNIT_WORKSPACE_PLACEHOLDER
 from deerflow.dbtl.agent_selector import AgentCandidate
+from deerflow.dbtl.build_grant import INPUT_ENV_PREFIX, WORKSPACE_ENV, describe_foreign_paths, scan_foreign_paths
 from deerflow.dbtl.build_plan import PLANNER_CONTRACT, BuildPhase, BuildPhasePlan
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_runner import BUILD_PLAN_OUTPUT, WorkUnit
@@ -42,6 +44,14 @@ PHASE_DONE_CHECK = "phase_done_condition"
 GENERALIST = "general-purpose"
 
 
+def required_phase_manifest_version(spec: StageSpec) -> int:
+    if "server_executed_entry_point" in spec.validity_gates:
+        return 3
+    if "narrow_implementation_inputs" in spec.validity_gates:
+        return 2
+    return 1
+
+
 @dataclass(frozen=True, slots=True)
 class BuildPhaseManifest:
     """The minimal worker declaration the server binds to workspace facts."""
@@ -50,6 +60,7 @@ class BuildPhaseManifest:
     declared_outputs: tuple[str, ...]
     completion_condition: str
     declared_inputs: tuple[str, ...] = ()
+    execution_inputs: tuple[str, ...] = ()
     version: int = 1
 
     def as_dict(self) -> dict[str, Any]:
@@ -61,11 +72,13 @@ class BuildPhaseManifest:
         }
         if self.version >= 2:
             payload["declared_inputs"] = list(self.declared_inputs)
+        if self.version >= 3:
+            payload["execution_inputs"] = list(self.execution_inputs)
         return payload
 
 
 def parse_phase_manifest(value: Any) -> BuildPhaseManifest | None:
-    if not isinstance(value, Mapping) or value.get("version") not in {1, 2} or isinstance(value.get("version"), bool):
+    if not isinstance(value, Mapping) or value.get("version") not in {1, 2, 3} or isinstance(value.get("version"), bool):
         return None
     version = int(value["version"])
     entry_point = value.get("entry_point")
@@ -92,11 +105,22 @@ def parse_phase_manifest(value: Any) -> BuildPhaseManifest | None:
         declared_inputs.append(item.strip())
     if len(set(declared_inputs)) != len(declared_inputs):
         return None
+    raw_execution_inputs = value.get("execution_inputs", [])
+    if version >= 3 and (not isinstance(raw_execution_inputs, list) or len(raw_execution_inputs) > 500):
+        return None
+    execution_inputs: list[str] = []
+    for item in raw_execution_inputs if isinstance(raw_execution_inputs, list) else []:
+        if not isinstance(item, str) or not item.strip() or len(item) > 1_024:
+            return None
+        execution_inputs.append(item.strip())
+    if len(set(execution_inputs)) != len(execution_inputs):
+        return None
     return BuildPhaseManifest(
         entry_point=entry_point.strip(),
         declared_outputs=tuple(normalized),
         completion_condition=completion.strip(),
         declared_inputs=tuple(declared_inputs),
+        execution_inputs=tuple(execution_inputs),
         version=version,
     )
 
@@ -122,7 +146,75 @@ def verify_phase_manifest(
         return None, "The Build phase entry point is not one of its governed published files."
     if manifest.completion_condition != completion_condition.strip():
         return None, "The Build phase manifest changed the versioned completion condition from the recorded plan."
+    if manifest.version >= 3 and not set(manifest.execution_inputs).issubset(manifest.declared_inputs):
+        return None, "The Build phase manifest's execution_inputs must be a subset of declared_inputs."
     return manifest, ""
+
+
+def verify_unpublished_phase_manifest(
+    result: StageWorkerResult,
+    *,
+    completion_condition: str,
+    required_version: int,
+) -> tuple[BuildPhaseManifest | None, str]:
+    """Validate the declaration before any worker bytes become governed.
+
+    The post-publication verifier below binds remapped URIs. This sibling binds
+    the worker's original grant paths so the server can execute the entry point
+    *before* publication; otherwise a failing command would already have copied
+    its outputs into the governed tree.
+    """
+    manifest = parse_phase_manifest(result.provenance.get("phase_manifest"))
+    if manifest is None:
+        return None, "The Build phase did not return a valid versioned phase manifest."
+    if manifest.version != required_version:
+        return None, f"The Build phase manifest must use version {required_version}."
+    if set(manifest.declared_outputs) != set(result.artifact_refs) or len(manifest.declared_outputs) != len(result.artifact_refs):
+        return None, "The Build phase manifest does not name exactly the outputs it asked the server to publish."
+    if manifest.entry_point not in result.artifact_refs:
+        return None, "The Build phase entry point is not one of its declared output files."
+    if manifest.completion_condition != completion_condition.strip():
+        return None, "The Build phase manifest changed the versioned completion condition from the recorded plan."
+    if manifest.version >= 3 and not set(manifest.execution_inputs).issubset(manifest.declared_inputs):
+        return None, "The Build phase manifest's execution_inputs must be a subset of declared_inputs."
+    return manifest, ""
+
+
+MAX_SCANNED_ENTRY_POINT_BYTES = 2 * 1024 * 1024
+_SCANNED_SOURCE_SUFFIXES = frozenset({".py", ".r", ".sh", ".bash", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jl", ".rb", ".pl"})
+
+
+def verify_granted_paths(
+    manifest: BuildPhaseManifest,
+    *,
+    read_source: Callable[[str], str | None],
+    allowed_roots: Sequence[str],
+) -> str:
+    """Refuse an entry point that names a location outside this phase's grant.
+
+    ``read_source`` resolves a published URI to its text, or returns ``None``
+    when the file is not readable text -- a compiled or binary entry point is
+    not refused here, because this check reads source and has nothing to say
+    about bytes it cannot read. The server's own execution of the entry point is
+    what decides those cases.
+
+    Returning a message rather than raising keeps this on the same footing as
+    ``verify_phase_manifest``: the caller records one failed phase with a
+    reviewer-readable reason instead of losing the run to an exception.
+    """
+    references = [manifest.entry_point]
+    references.extend(reference for reference in manifest.declared_outputs if reference != manifest.entry_point and PurePosixPath(reference).suffix.lower() in _SCANNED_SOURCE_SUFFIXES)
+    for reference in references:
+        source = read_source(reference)
+        if source is None:
+            continue
+        findings = scan_foreign_paths(source, allowed_roots=allowed_roots)
+        if findings:
+            # One exact refusal is enough to stop publication. Keeping the
+            # diagnostic bounded also prevents a generated source tree from
+            # turning the failure report itself into another large prompt.
+            return f"{reference}: {describe_foreign_paths(findings)}"
+    return ""
 
 
 def is_non_gating_build_check(name: str) -> bool:
@@ -174,7 +266,12 @@ class PhaseAssignment:
         return bool(self.agent_name)
 
 
-def assign_phase(phase: BuildPhase, candidates: Sequence[AgentCandidate]) -> PhaseAssignment:
+def assign_phase(
+    phase: BuildPhase,
+    candidates: Sequence[AgentCandidate],
+    *,
+    implementer: str = "",
+) -> PhaseAssignment:
     """Resolve one phase's capability against the registered agents.
 
     A specialist wins; otherwise the **registered generalist** covers it and the
@@ -193,6 +290,17 @@ def assign_phase(phase: BuildPhase, candidates: Sequence[AgentCandidate]) -> Pha
     specialist = next((item for item in available if phase.capability in item.capabilities), None)
     if specialist is not None:
         return PhaseAssignment(phase=phase, agent_name=specialist.name, via_generalist=False)
+    # A configured implementer replaces only the *stand-in*, never a registered
+    # specialist: the deployment is stating which agent implements best, not
+    # overruling a declared capability. It is still recorded as a stand-in,
+    # because it is one -- nothing about it covers the capability, and a
+    # reviewer who cannot tell a specialist from a preference has lost the
+    # distinction capability selection exists to keep. An unregistered name
+    # falls through to the generalist rather than failing the phase: this is an
+    # efficiency dial, and correctness does not rest on which agent runs.
+    preferred = next((item for item in available if implementer and item.name == implementer), None)
+    if preferred is not None:
+        return PhaseAssignment(phase=phase, agent_name=preferred.name, via_generalist=True)
     generalist = next((item for item in available if item.name == GENERALIST), None)
     return PhaseAssignment(phase=phase, agent_name=generalist.name if generalist else "", via_generalist=bool(generalist))
 
@@ -232,6 +340,7 @@ def phase_unit(
     context: str,
     completed: Sequence[Mapping[str, object]] = (),
     result_contract: str = "",
+    granted_inputs: Sequence[str] = (),
 ) -> WorkUnit:
     """One phase's work unit, carrying what the phases before it produced.
 
@@ -276,6 +385,23 @@ def phase_unit(
         "re-read before editing that file again. If a tool returns a recoverable error, follow its",
         "recommended next action or choose a different tool; do not repeat the identical failing call.",
         SHELL_WORKSPACE_IDIOM,
+        *(
+            [
+                "",
+                "The server issues your paths; do not compose your own. Your code must read its inputs",
+                f"from {INPUT_ENV_PREFIX}1, {INPUT_ENV_PREFIX}2, ... in the server-issued order below, with {INPUT_ENV_PREFIX}COUNT",
+                f"holding how many) and write beneath {WORKSPACE_ENV}, either by reading those environment",
+                "variables directly. An entry point that",
+                "names an absolute path to its data is refused before it runs, and the refusal names the",
+                "literal and the line. A path you compose yourself is a guess about a filesystem you",
+                "cannot see, and a wrong guess costs the whole phase.",
+                "Server-issued input order for this phase:",
+                *(f"  {INPUT_ENV_PREFIX}{position}={path}" for position, path in enumerate(granted_inputs, start=1)),
+                "In phase_manifest.declared_inputs list the exact subset your implementation consumed; this does not renumber the environment.",
+            ]
+            if "granted_paths_only" in spec.validity_gates
+            else []
+        ),
         "Your objective above was derived from the approved Design, so you normally do not need",
         "the Design itself. Project context names it and the manifest lists the project's files;",
         "read a named file only when you need its exact bytes, and do not read the Design merely",
@@ -295,13 +421,21 @@ def phase_unit(
                 "remain auditable, but they cannot advance this build plan.",
                 *(
                     [
-                        f"In provenance.phase_manifest return version={'2' if 'narrow_implementation_inputs' in spec.validity_gates else '1'}, the executable entry_point path,",
+                        f"In provenance.phase_manifest return version={required_phase_manifest_version(spec)}, the executable entry_point path,",
                         "declared_outputs containing every artifact_refs path exactly once, and",
                         "completion_condition copied verbatim from Done when (or an empty string when none was recorded).",
                         *(
                             [
-                                "Also return declared_inputs containing only exact workspace files actually consumed to implement this phase.",
+                                "Also return declared_inputs containing only exact workspace files actually consumed to implement or execute this phase.",
                                 "Do not include files read only for orientation, discovery, or restating project context.",
+                                *(
+                                    [
+                                        "Also return execution_inputs containing only the server-issued inputs the entry point consumes at runtime.",
+                                        "execution_inputs is a subset of declared_inputs and does not renumber DBTL_INPUT_n.",
+                                    ]
+                                    if "server_executed_entry_point" in spec.validity_gates
+                                    else []
+                                ),
                             ]
                             if "narrow_implementation_inputs" in spec.validity_gates
                             else []
@@ -326,6 +460,67 @@ def phase_unit(
         role=PHASE_ROLE,
         completion_check=PHASE_DONE_CHECK if spec.version >= 6 else "",
         skills=phase.skills,
+        tool_contract={"fresh_correction": spec.version >= 12, "granted_inputs": tuple(granted_inputs)},
+    )
+
+
+def phase_correction_unit(
+    assignment: PhaseAssignment,
+    *,
+    index: int,
+    attempt_id: str,
+    attempt_token: str,
+    spec: StageSpec,
+    previous_workspace: str,
+    failure: str,
+    result_contract: str,
+    granted_inputs: Sequence[str] = (),
+) -> WorkUnit:
+    """A fresh, compact executor for one failed implementation check.
+
+    It deliberately does not receive the first worker's conversation. The
+    previous workspace is readable evidence; the transcript that grew while
+    producing it is not useful implementation input and was the dominant cost
+    of the old same-agent loop.
+    """
+    phase = assignment.phase
+    lines = [
+        f"You are correcting phase {index} of the {spec.title} stage.",
+        f"Phase: {phase.title}",
+        f"Objective: {phase.objective}",
+        *([f"Done when: {phase.done_condition}"] if phase.done_condition else []),
+        "",
+        "The server rejected the first implementation for exactly this reason:",
+        failure[:2_000],
+        "",
+        f"Its staged files are read-only at {previous_workspace}.",
+        f"Write the corrected implementation under {STAGE_UNIT_WORKSPACE_PLACEHOLDER}; do not modify the previous workspace.",
+        "Inspect only the files needed to fix the named failure. Do not repeat discovery or restate the Design.",
+        f"Read data paths from {INPUT_ENV_PREFIX}1, {INPUT_ENV_PREFIX}2, ... and write beneath {WORKSPACE_ENV}; never hardcode a host or mount path.",
+        "Server-issued input order for this correction:",
+        *(f"  {INPUT_ENV_PREFIX}{position}={path}" for position, path in enumerate(granted_inputs, start=1)),
+        f"In provenance.phase_manifest return version={required_phase_manifest_version(spec)}, the executable entry_point path,",
+        "declared_outputs containing every artifact_refs path exactly once, and",
+        "completion_condition copied verbatim from Done when (or an empty string when none was recorded).",
+        "In declared_inputs list only exact workspace files actually consumed to implement or execute the correction.",
+        "In execution_inputs list only server-issued inputs the corrected entry point consumes at runtime.",
+        "execution_inputs is a subset of declared_inputs and does not renumber DBTL_INPUT_n.",
+        f"Return exactly one {PHASE_DONE_CHECK!r} check, passed only after the corrected entry point runs and the Done when condition holds.",
+        "Return the complete phase manifest and shared structured result.",
+        "",
+        result_contract,
+    ]
+    return WorkUnit(
+        unit_id=f"{attempt_id}-{index}-{phase.phase_key}-{attempt_token}-correction",
+        capability=phase.capability.value,
+        agent_name=assignment.agent_name,
+        prompt="\n".join(lines),
+        via_generalist=assignment.via_generalist,
+        role=PHASE_ROLE,
+        max_tokens=40_000,
+        completion_check=PHASE_DONE_CHECK,
+        skills=phase.skills,
+        tool_contract={"fresh_correction": True, "correction_attempt": True, "granted_inputs": tuple(granted_inputs)},
     )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -156,6 +157,84 @@ def test_local_shell_uses_process_level_isolation_for_relative_path_bypasses() -
     assert seen and seen[0].startswith("sandbox-exec -p ")
     assert "(deny file-write*)" in seen[0]
     assert workspace in seen[0]
+
+
+def test_server_shell_profile_can_restrict_reads_to_issued_inputs() -> None:
+    from deerflow.agents.middlewares.dbtl_output_policy_middleware import sandbox_exec_command
+
+    workspace = "/mnt/user-data/outputs/.dbtl-stage-work/a/build/p"
+    issued = "/mnt/user-data/trial.csv"
+
+    command = sandbox_exec_command(
+        "python src/run.py",
+        writable_paths=(workspace,),
+        readable_paths=(issued,),
+        restricted_read_roots=("/mnt/user-data",),
+    )
+
+    assert '(deny file-read-data (subpath "/mnt/user-data"))' in command
+    assert f'(allow file-read-data (literal "{issued}"))' in command
+    assert f'(allow file-read-data (subpath "{workspace}"))' in command
+
+
+def test_remote_server_command_hides_the_project_except_for_the_grant() -> None:
+    from deerflow.agents.middlewares.dbtl_output_policy_middleware import bubblewrap_exec_command
+
+    workspace = "/mnt/user-data/outputs/.dbtl-stage-work/a/build/p"
+    issued = "/mnt/user-data/trial.csv"
+
+    command = bubblewrap_exec_command(
+        "python src/run.py",
+        executable="/usr/bin/bwrap",
+        writable_path=workspace,
+        readable_paths=(issued,),
+    )
+
+    assert "--tmpfs /mnt/user-data" in command
+    assert f"--bind {workspace} {workspace}" in command
+    assert f"--ro-bind {issued} {issued}" in command
+    assert command.endswith("'python src/run.py'")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is the local macOS process boundary")
+def test_server_shell_profile_reads_the_grant_but_not_an_unissued_project_file(tmp_path) -> None:
+    from deerflow.agents.middlewares.dbtl_output_policy_middleware import sandbox_exec_command
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    issued = tmp_path / "issued.csv"
+    issued.write_text("x\n1\n", encoding="utf-8")
+    unissued = tmp_path / "unissued.csv"
+    unissued.write_text("secret\n", encoding="utf-8")
+    read_issued = shlex.quote(f"from pathlib import Path; print(Path({str(issued)!r}).read_text())")
+    allowed = subprocess.run(
+        sandbox_exec_command(
+            f"python -c {read_issued}",
+            writable_paths=(str(workspace),),
+            readable_paths=(str(issued),),
+            restricted_read_roots=(str(tmp_path),),
+        ),
+        shell=True,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    read_unissued = shlex.quote(f"from pathlib import Path; print(Path({str(unissued)!r}).read_text())")
+    refused = subprocess.run(
+        sandbox_exec_command(
+            f"python -c {read_unissued}",
+            writable_paths=(str(workspace),),
+            readable_paths=(str(issued),),
+            restricted_read_roots=(str(tmp_path),),
+        ),
+        shell=True,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert allowed.returncode == 0, allowed.stderr
+    assert refused.returncode != 0
 
 
 def test_stage_shell_may_embed_governed_input_paths_as_heredoc_data() -> None:

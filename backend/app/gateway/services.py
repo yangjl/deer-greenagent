@@ -62,6 +62,7 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
+from deerflow.runtime.compaction_markers import COMPACTION_ANCHOR_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import GRAPH_RECEIPT_KEY, build_checkpoint_history_seed_events
 from deerflow.runtime.runs.naming import resolve_root_run_name
@@ -110,6 +111,9 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = frozenset(
         _DYNAMIC_CONTEXT_REMINDER_KEY,
         _REMINDER_DATE_KEY,
         _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
+        # Keeps a server-authored authority/task contract verbatim across
+        # compaction. A caller may not pin arbitrary history into model context.
+        COMPACTION_ANCHOR_KEY,
         # Marks an assistant turn the graph authored itself; the journal treats
         # it as reconcile-worthy, so a client must not be able to supply one.
         GRAPH_RECEIPT_KEY,

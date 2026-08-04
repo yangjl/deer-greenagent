@@ -18,6 +18,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
 from deerflow.models import create_chat_model
+from deerflow.runtime.compaction_markers import COMPACTION_ANCHOR_KEY
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
@@ -334,10 +335,22 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     def _summary_count_message(summary_text: str) -> HumanMessage:
         return HumanMessage(content=summary_text, name=_SUMMARY_TRIGGER_MESSAGE_NAME)
 
-    def _messages_for_trigger_count(self, messages: list[AnyMessage], summary_text: str | None) -> list[AnyMessage]:
+    def _messages_for_token_count(self, messages: list[AnyMessage], summary_text: str | None) -> list[AnyMessage]:
+        """Return the complete provider context used for token accounting."""
         if not summary_text:
             return messages
         return [*messages, self._summary_count_message(summary_text)]
+
+    def _messages_for_trigger_count(self, messages: list[AnyMessage], summary_text: str | None) -> list[AnyMessage]:
+        # Authority anchors cannot be compressed, so counting them toward the
+        # message threshold makes a compacted worker immediately eligible again.
+        # With two initial subagent anchors, trigger=6/keep=2 otherwise summarizes
+        # every subsequent AI/tool pair. They remain in token accounting because
+        # their bytes still occupy the provider context window. The previous
+        # summary remains in both counts because it grows and is replaceable on
+        # the next successful compaction.
+        messages = [message for message in messages if not self._is_authority_anchor(message)]
+        return self._messages_for_token_count(messages, summary_text)
 
     @staticmethod
     def _bound_text(text: str, cap: int) -> str:
@@ -466,7 +479,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
 
         previous_summary = state.get("summary_text") if isinstance(state.get("summary_text"), str) else None
         trigger_messages = self._messages_for_trigger_count(messages, previous_summary)
-        total_tokens = self.token_counter(trigger_messages)
+        total_tokens = self.token_counter(self._messages_for_token_count(messages, previous_summary))
         if not force and not self._should_summarize(trigger_messages, total_tokens):
             return None
 
@@ -475,7 +488,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
 
         messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
-        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
+        messages_to_summarize, preserved_messages = self._preserve_authority_and_dynamic_context(messages_to_summarize, preserved_messages)
         if not messages_to_summarize:
             return None
         return messages_to_summarize, preserved_messages, previous_summary, total_tokens
@@ -568,12 +581,19 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             "summary_text": result.summary_text,
         }
 
-    def _preserve_dynamic_context_reminders(
+    def _preserve_authority_and_dynamic_context(
         self,
         messages_to_summarize: list[AnyMessage],
         preserved_messages: list[AnyMessage],
     ) -> tuple[list[AnyMessage], list[AnyMessage]]:
-        """Keep hidden dynamic-context reminders and their ID-swap peers out of summary compression.
+        """Keep authority messages and dynamic-context triplets verbatim.
+
+        Subagents tag both their initial ``SystemMessage`` and initial task
+        ``HumanMessage`` with :data:`COMPACTION_ANCHOR_KEY`. The latter is the
+        delegated contract (for Build, the manifest, completion, and
+        ``DBTL_INPUT_n`` requirements). Role alone is not provenance: the
+        gateway permits external system-role history, so an untagged
+        ``SystemMessage`` remains ordinary compressible context.
 
         These reminders carry the current date and optional memory. If summarization
         removes them, DynamicContextMiddleware can lose the already-injected reminder
@@ -590,7 +610,8 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         ``id`` shares the same ``stable_id`` prefix (i.e. ``X__user``, ``X__memory``).
         """
         reminders = [msg for msg in messages_to_summarize if is_dynamic_context_reminder(msg)]
-        if not reminders:
+        anchors = [msg for msg in messages_to_summarize if self._is_authority_anchor(msg)]
+        if not reminders and not anchors:
             return messages_to_summarize, preserved_messages
 
         # Collect the base IDs (the stable_id prefix) from tagged reminders.
@@ -616,11 +637,16 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         rescued: list[AnyMessage] = []
         remaining: list[AnyMessage] = []
         for msg in messages_to_summarize:
-            if is_dynamic_context_reminder(msg) or (msg.id and any(msg.id.startswith(b + "__") for b in reminder_base_ids)):
+            if self._is_authority_anchor(msg) or is_dynamic_context_reminder(msg) or (msg.id and any(msg.id.startswith(b + "__") for b in reminder_base_ids)):
                 rescued.append(msg)
             else:
                 remaining.append(msg)
         return remaining, rescued + preserved_messages
+
+    @staticmethod
+    def _is_authority_anchor(message: AnyMessage) -> bool:
+        """Return whether the server marked ``message`` as verbatim authority."""
+        return message.additional_kwargs.get(COMPACTION_ANCHOR_KEY) is True
 
     def _fire_hooks(
         self,
