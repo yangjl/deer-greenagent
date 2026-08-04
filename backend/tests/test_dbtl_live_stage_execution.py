@@ -26,6 +26,7 @@ from deerflow.agents.dbtl.live_stage.adapter import (
     _tools_for_stage_budget,
     _wants_new_debate,
 )
+from deerflow.agents.dbtl.live_stage.workspace import safe_token
 from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_runner import DispatchOutcome, WorkUnit
@@ -1211,7 +1212,11 @@ async def test_build_worker_receives_an_attempt_scoped_writable_workspace(
 
     assert result.stage == "build"
     prompt = dispatcher.calls[0][0][0].prompt
-    attempt_id = "dbtl-" + hashlib.sha256(b"dbtl-stage:run-1:cycle-1").hexdigest()[:20]
+    # Derive the token the way production does. Restating the digest width here
+    # made a path-length change look like a behaviour change; what this test is
+    # about is that the workspace is scoped to the attempt, not how wide the
+    # digest is (which tests/test_dbtl_stage_path_token_cost.py owns).
+    attempt_id = "dbtl-" + safe_token("dbtl-stage:run-1:cycle-1")
     expected = f"/mnt/user-data/outputs/.dbtl-stage-work/{attempt_id}/build"
     assert expected in prompt
     assert "Write every new implementation, derived output, and execution log under this exact directory" in prompt

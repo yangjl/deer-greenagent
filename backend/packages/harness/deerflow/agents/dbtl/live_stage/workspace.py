@@ -31,9 +31,42 @@ STAGE_UNIT_WORKSPACE_PLACEHOLDER = "__DBTL_UNIT_WORKSPACE__"
 #: legacy state, the stage's own scratch tree, and dependency caches.
 IGNORED_PROJECT_DIRS = frozenset({".git", ".greenagent", STAGE_WORK_ROOT, "node_modules", "__pycache__"})
 
+#: A shell command repeats the whole workspace prefix on every path it names,
+#: and every repeat is re-sent on each of the phase's later model calls. Bash
+#: can bind it once, and the local path audit already permits exactly this
+#: shape: one literal, ordered assignment authorizes a later ``cd "$STAGE"``.
+#: The shape matters — a reassignment, a command substitution, or an assignment
+#: after ``&&`` is refused — so the prompt shows the permitted form rather than
+#: describing the idea and letting a worker guess at it.
+#:
+#: The second half is not padding. The variable is a *shell* convenience;
+#: ``write_file``, ``str_replace``, and every path in the result contract are
+#: resolved by tools that have no shell to expand it, so teaching the idiom
+#: without saying where it does not apply trades a few tokens for a run of
+#: refused writes.
+SHELL_WORKSPACE_IDIOM = """
+In Bash, bind that directory once instead of repeating it:
+  STAGE=<the directory above>; cd "$STAGE"; python src/simulate.py
+Assign it literally and before its first use, in that order — a reassignment or
+a computed value is refused by the path guard. Everywhere outside Bash — the
+full path arguments to write_file and str_replace, and every path in your
+result — name the full path; those tools have no shell to expand $STAGE.
+""".strip()
+
+
+#: How much of the digest reaches a path. Random hex tokenizes at roughly half
+#: the density of prose, so every character here is paid twice over — and paid
+#: again on every tool call, every echoed result, and every model call in the
+#: phase, because the conversation so far is re-sent each time. Twelve hex
+#: characters is 48 bits, separating unit ids within one stage attempt and
+#: attempt ids within one project: tens of values, not billions. Widen it if the
+#: thing being separated ever becomes adversarial or global; this is a
+#: collision-avoidance width, not a security one.
+_TOKEN_HEX_CHARS = 12
+
 
 def safe_token(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:20]
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:_TOKEN_HEX_CHARS]
 
 
 def prepare_stage_workspace(

@@ -3520,6 +3520,36 @@ self-directory idiom is normalized only for shell-syntax auditing. Direct
 file-writing tools and non-isolated shell mode remain statically fail-closed.
 This keeps durable JSON provenance virtual without hiding executable host-path
 access from the policy boundary.
+
+**A path a worker repeats is a path the run pays for, on every later model
+call.** A stage-work path appears in every `write_file`/`read_file`/`bash`
+argument, in the echoed result, and in the manifest — and the conversation so
+far is re-sent on each of that phase's model calls, so its length is multiplied
+by the phase's whole tool history. Two things in that path cost out of
+proportion to what they say, and both are now bounded.
+`workspace.safe_token` emits **12 hex characters** rather than 20: random hex
+tokenizes at roughly half the density of prose, so each character is paid twice
+over, while 48 bits is far wider than the tens of unit ids within one stage
+attempt and attempt ids within one project that it separates. It is a
+collision-avoidance width, not a security one — widen it if what it separates
+ever becomes adversarial or global. And `workspace.SHELL_WORKSPACE_IDIOM` is
+quoted into both the phased Build prompt and the monolithic stage instruction,
+so a worker binds the prefix once (`STAGE=…; cd "$STAGE"`) instead of repeating
+it per command. It shows the **exact shape the audit above permits** — one
+literal, ordered assignment — because a prompt that described the idea would
+get a reassignment or a command substitution back and have its own example
+refused; the phase prompt's older blanket "do not cd" is gone, since that
+assignment is precisely what authorizes the `cd`. The second half of the idiom
+is load-bearing rather than padding: the variable is a *shell* convenience, and
+`write_file`, `str_replace`, and every path in the result contract are resolved
+by tools with no shell to expand it, so teaching the idiom without naming where
+it does not apply would trade a few tokens for a run of refused writes. Neither
+change is a correctness property — nothing fails when a path grows — which is
+why `tests/test_dbtl_stage_path_token_cost.py` pins them, including that the
+taught command actually passes `validate_local_bash_command_paths`. Tests must
+derive attempt paths through `safe_token` rather than restating the digest
+width, or a cost change reads as a behaviour change.
+
 The review-deck step opens only after execution produced both the review
 artifact URI and content hash; an incomplete Build therefore leaves the deck
 waiting rather than recording a secondary renderer failure.

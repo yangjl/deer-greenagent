@@ -24,7 +24,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from deerflow.agents.dbtl.live_stage.workspace import STAGE_UNIT_WORKSPACE_PLACEHOLDER
+from deerflow.agents.dbtl.live_stage.workspace import SHELL_WORKSPACE_IDIOM, STAGE_UNIT_WORKSPACE_PLACEHOLDER
 from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.build_plan import PLANNER_CONTRACT, BuildPhase, BuildPhasePlan
 from deerflow.dbtl.capabilities import Capability
@@ -155,7 +155,8 @@ def phase_unit(
         "The server has already created src/, tests/, config/, artifacts/, and logs/ there.",
         "Use write_file or str_replace for source, configuration, and documentation. Use Bash",
         "only for short execution and verification commands; do not embed complete files in",
-        "Bash heredocs or in a Python write_text wrapper, and do not cd before running them.",
+        "Bash heredocs or in a Python write_text wrapper.",
+        SHELL_WORKSPACE_IDIOM,
         "Your objective above was derived from the approved Design, so you normally do not need",
         "the Design itself. Project context names it and the manifest lists the project's files;",
         "read a named file only when you need its exact bytes, and do not read the Design merely",

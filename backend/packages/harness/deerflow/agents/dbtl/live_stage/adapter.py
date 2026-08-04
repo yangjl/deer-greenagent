@@ -64,6 +64,7 @@ from deerflow.agents.dbtl.live_stage.test_review import (
 )
 from deerflow.agents.dbtl.live_stage.types import LiveStageResult
 from deerflow.agents.dbtl.live_stage.workspace import (
+    SHELL_WORKSPACE_IDIOM,
     STAGE_UNIT_WORKSPACE_PLACEHOLDER,
     WORKSPACE_VIRTUAL_ROOT,
     prepare_stage_workspace,
@@ -5468,6 +5469,11 @@ class LiveStageAdapter:
                         "Write every new implementation, derived output, and execution log under this exact directory. "
                         "Do not write under outputs/dbtl; the stage adapter publishes validated review evidence there after your result passes its contract."
                     ),
+                    # The same idiom the phased Build workflow teaches. A worker
+                    # dispatched through the monolithic path pays the identical
+                    # per-command repeats, so leaving it out here would make the
+                    # saving depend on which dispatch shape happened to run.
+                    "shell_note": SHELL_WORKSPACE_IDIOM,
                 }
                 if stage_workspace
                 else None
