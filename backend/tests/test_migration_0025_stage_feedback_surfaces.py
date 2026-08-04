@@ -39,7 +39,7 @@ async def test_upgrade_backfills_legacy_design_surfaces_and_actions(tmp_path: Pa
             surface = (await connection.execute(sa.text("SELECT stage, surface_revision FROM dbtl_design_feedback_surfaces WHERE id='surface-1'"))).one()
             version = await connection.scalar(sa.text("SELECT version_num FROM alembic_version"))
         assert tuple(surface) == ("design", 1)
-        assert version == "0029_dbtl_cycle_originating_thread"
+        assert version == "0030_dbtl_build_rerun_spec"
     finally:
         await engine.dispose()
 

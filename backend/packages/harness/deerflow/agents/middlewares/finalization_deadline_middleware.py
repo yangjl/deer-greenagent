@@ -46,10 +46,32 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares._bounded_dict import BoundedDict
+from deerflow.agents.middlewares._token_usage import TokenUsage, accumulate_usage
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_RESERVE_CALLS = 3
+
+#: How much of a token ceiling is held back for writing the result.
+#:
+#: **Turns are not the only budget a worker can run out of.** A Build worker
+#: gets 450 turns and 120K tokens; it exhausts the tokens first, so the turn
+#: deadline never fires and the worker dies mid-investigation. The observed
+#: failure was a phase that spent 125.5K tokens and was reported as having
+#: "returned prose instead of a structured result" — it had been cut off, not
+#: badly formatted.
+#:
+#: ``TokenBudgetMiddleware`` does hard-stop at the ceiling, but it strips tool
+#: calls from *the message the model just wrote*, which mid-tool-loop is prose,
+#: and it records ``token_capped`` — so even a good answer would be discarded as
+#: untrustworthy. What was missing is a warning early enough to spend a whole
+#: model call composing the result.
+#:
+#: A quarter is chosen so one more full call fits: at the moment the reserve
+#: opens, that call still has to re-send the whole conversation as input and
+#: produce the result as output. Too small a reserve warns a worker that can no
+#: longer afford to answer.
+DEFAULT_TOKEN_RESERVE_FRACTION = 0.25
 
 #: What one tool-calling worker turn actually costs in LangGraph super-steps.
 #:
@@ -62,12 +84,12 @@ DEFAULT_RESERVE_CALLS = 3
 #: by more than fourfold, which is how a deadline set at half the limit came to
 #: fire after the run had already been aborted.
 #:
-#: Measured from the real chain and pinned by
+#: Measured from the maximum built-in chain and pinned by
 #: ``tests/test_finalization_deadline_middleware.py::TestTheTurnCostAssumption``:
-#: if a middleware gains or loses a hook, that test fails and names the new
-#: number rather than letting every stage worker quietly lose budget. It did
-#: exactly that when upstream #4497/#4538 added hooks to the shared subagent
-#: chain, taking the real cost from 9 to 11.
+#: the value includes one conservative step beyond the conditionally enabled
+#: built-in hooks. If the built-in chain grows past that allowance, the test
+#: fails rather than letting every stage worker quietly lose budget. Build's
+#: phase-only correction nodes are accounted separately by its dispatcher.
 SUBAGENT_SUPERSTEPS_PER_TURN = 11
 
 #: Super-steps held back so the forced final answer has somewhere to land.
@@ -76,16 +98,23 @@ SUBAGENT_SUPERSTEPS_PER_TURN = 11
 _DEADLINE_HEADROOM_STEPS = SUBAGENT_SUPERSTEPS_PER_TURN
 
 
-def model_call_budget(max_turns: int, *, steps_per_turn: int = SUBAGENT_SUPERSTEPS_PER_TURN) -> int:
+def model_call_budget(
+    max_turns: int,
+    *,
+    steps_per_turn: int = SUBAGENT_SUPERSTEPS_PER_TURN,
+    extra_headroom_steps: int = 0,
+) -> int:
     """How many model calls actually fit in a ``recursion_limit`` of ``max_turns``.
 
     Divides by the true per-turn super-step cost, then reserves a turn's worth
     of headroom so the forced answer can be produced *and committed* before the
-    graph aborts. The floor keeps a degenerate budget legal: a deadline that
-    warns on the first call and stops on the second is worse than none, so the
-    result never drops below the reserve plus the one call needed to answer in.
+    graph aborts. ``extra_headroom_steps`` reserves one-time middleware nodes
+    that are not part of every model turn. The floor keeps a degenerate budget
+    legal: a deadline that warns on the first call and stops on the second is
+    worse than none, so the result never drops below the reserve plus the one
+    call needed to answer in.
     """
-    usable = max(0, int(max_turns) - _DEADLINE_HEADROOM_STEPS)
+    usable = max(0, int(max_turns) - _DEADLINE_HEADROOM_STEPS - max(0, int(extra_headroom_steps)))
     return max(DEFAULT_RESERVE_CALLS + 1, usable // max(1, int(steps_per_turn)))
 
 
@@ -98,23 +127,65 @@ _DEADLINE_NOTICE = (
     "look into it."
 )
 
+_TOKEN_DEADLINE_NOTICE = (
+    "[FINALIZATION DEADLINE] You have used {used:,} of this run's {budget:,} "
+    "token budget. Stop investigating now and spend the next call writing your "
+    "result. Your final message is the only thing that is read: it must be the "
+    "single JSON object your instructions specified, and nothing else. Report "
+    "what you could not finish under 'limitations' rather than continuing to "
+    "look into it."
+)
+
 _FORCED_NOTICE = "\n\n[FINALIZATION DEADLINE] The turn budget for this run is exhausted, so no further tool calls are possible. This message is the worker's final answer."
 
 
 class FinalizationDeadlineMiddleware(AgentMiddleware[AgentState]):
-    """Make a worker land its structured result before its turns run out."""
+    """Make a worker land its structured result before its budget runs out.
 
-    def __init__(self, *, max_model_calls: int, reserve_calls: int = DEFAULT_RESERVE_CALLS) -> None:
+    Two axes, deliberately asymmetric in what they are allowed to do.
+
+    The **turn** axis both warns and forces, because ``recursion_limit``
+    *raises* from inside a tool loop and nothing downstream can recover a
+    well-formed answer from that.
+
+    The **token** axis only warns. ``TokenBudgetMiddleware`` already hard-stops
+    at the ceiling and records ``token_capped``; forcing here would duplicate
+    that stop and, worse, relabel a worker that blew through its budget as one
+    that met a deadline — hiding a genuinely truncated investigation behind a
+    clean-looking result. The gap this closes is not the stop, it is the
+    *warning before it*: early enough to afford one more call, with tools
+    removed so "write your result now" is mechanically true rather than advice.
+    """
+
+    def __init__(
+        self,
+        *,
+        max_model_calls: int,
+        reserve_calls: int = DEFAULT_RESERVE_CALLS,
+        max_tokens: int | None = None,
+        token_reserve_fraction: float = DEFAULT_TOKEN_RESERVE_FRACTION,
+    ) -> None:
         super().__init__()
         # A reserve wider than the whole budget would warn on the first call and
         # force a stop on the second, which is worse than no deadline at all.
         # One call must always remain for the model to actually answer in.
         self._max_model_calls = max(1, int(max_model_calls))
         self._reserve_calls = max(0, min(int(reserve_calls), self._max_model_calls - 1))
+        # ``None`` means metered-only execution: there is no ceiling, so there
+        # is no fraction of one to be near and the token axis stays inert.
+        self._max_tokens = int(max_tokens) if max_tokens and int(max_tokens) > 0 else None
+        # Clamped below 1.0 so the warning always precedes the ceiling, and
+        # above 0.0 so a misconfigured fraction cannot disable the axis while
+        # appearing to configure it.
+        self._token_reserve_fraction = min(0.9, max(0.01, float(token_reserve_fraction)))
         self._lock = threading.Lock()
 
         self._warned: BoundedDict[str, bool] = BoundedDict(1000)
         self._pending_notices: BoundedDict[str, list[str]] = BoundedDict(1000)
+        # Per-run token accounting, kept identical to the enforcer's by sharing
+        # its helper rather than re-deriving the delta rule here.
+        self._seen_usage: BoundedDict[str, dict[str, tuple[int, int]]] = BoundedDict(1000)
+        self._usage: BoundedDict[str, TokenUsage] = BoundedDict(1000)
         # Not cleared with the rest of the run state: the dispatcher reads it
         # after the run returns to annotate the result for a human reviewer.
         self._forced: BoundedDict[str, bool] = BoundedDict(1000)
@@ -153,7 +224,15 @@ class FinalizationDeadlineMiddleware(AgentMiddleware[AgentState]):
         with self._lock:
             self._warned.clear()
             self._pending_notices.clear()
+            self._seen_usage.clear()
+            self._usage.clear()
             self._forced.clear()
+
+    def _tokens_spent(self, run_id: str, messages: list[Any]) -> int:
+        """Cumulative spend for this run, counted the enforcer's way."""
+        seen = self._seen_usage.setdefault(run_id, {})
+        usage = self._usage.setdefault(run_id, TokenUsage())
+        return accumulate_usage(messages, seen, usage).total
 
     @staticmethod
     def _model_calls(messages: list[Any]) -> int:
@@ -218,9 +297,29 @@ class FinalizationDeadlineMiddleware(AgentMiddleware[AgentState]):
                 self._forced[run_id] = True
                 return self._force_finalization(last)
 
-            if remaining <= self._reserve_calls and not self._warned.get(run_id, False):
+            if self._warned.get(run_id, False):
+                return None
+
+            if remaining <= self._reserve_calls:
                 self._warned[run_id] = True
                 self._pending_notices.setdefault(run_id, []).append(_DEADLINE_NOTICE.format(remaining=max(remaining, 0)))
+                return None
+
+            # One warning per run, whichever axis binds first. The instruction
+            # is identical either way and the tools are removed either way, so a
+            # second notice would spend budget to change nothing — on a run that
+            # is short of budget by definition. Only the numbers differ, so the
+            # message names the axis that actually ran out.
+            spent = self._tokens_spent(run_id, messages) if self._max_tokens else 0
+            if self._max_tokens and spent >= self._max_tokens * (1.0 - self._token_reserve_fraction):
+                logger.info(
+                    "Token finalization reserve reached for run %s: %s of %s tokens spent",
+                    run_id,
+                    spent,
+                    self._max_tokens,
+                )
+                self._warned[run_id] = True
+                self._pending_notices.setdefault(run_id, []).append(_TOKEN_DEADLINE_NOTICE.format(used=spent, budget=self._max_tokens))
             return None
 
     @override

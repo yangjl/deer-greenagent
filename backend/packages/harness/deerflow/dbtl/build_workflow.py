@@ -373,7 +373,8 @@ def phase_step_material(
     capability: str,
     agent_name: str,
     via_generalist: bool,
-) -> dict[str, str]:
+    skill_bindings: Sequence[str] = (),
+) -> dict[str, object]:
     """One phase's own material, beside the plan it sits in.
 
     The **selection outcome** is part of a phase's identity, not merely a label
@@ -390,6 +391,7 @@ def phase_step_material(
         "capability": capability,
         "agent_name": agent_name,
         "via_generalist": "true" if via_generalist else "false",
+        "skill_bindings": list(skill_bindings),
     }
 
 

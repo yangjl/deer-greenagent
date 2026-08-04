@@ -543,6 +543,50 @@ def test_api_auth_me_auth_disabled_returns_synthetic_user(monkeypatch):
     body = resp.json()
     assert body["id"] == AUTH_DISABLED_USER_ID
     assert body["oauth_provider"] is None
+    assert CSRF_COOKIE_NAME not in resp.cookies
+
+
+def test_api_auth_me_restores_missing_csrf_cookie_for_cookie_session():
+    """A valid access cookie can recover when its CSRF partner was evicted."""
+    _setup_config()
+    client = TestClient(_make_auth_app(), base_url="http://localhost:2026")
+    email = "csrf-recovery@test.com"
+    register = client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": "Tr0ub4dor3a"},
+    )
+    assert register.status_code == 201
+    assert "access_token" in client.cookies
+    assert CSRF_COOKIE_NAME in client.cookies
+
+    client.cookies.delete(CSRF_COOKIE_NAME)
+    resp = client.get("/api/v1/auth/me")
+
+    assert resp.status_code == 200
+    assert resp.json()["email"] == email
+    assert CSRF_COOKIE_NAME in resp.cookies
+    assert client.cookies.get(CSRF_COOKIE_NAME) == resp.cookies[CSRF_COOKIE_NAME]
+    csrf_headers = [header.lower() for header in _get_set_cookie_headers(resp) if "csrf_token=" in header]
+    assert csrf_headers and "max-age=604800" in csrf_headers[0]
+
+
+def test_api_auth_me_does_not_rotate_existing_csrf_cookie():
+    """Concurrent session checks must not invalidate a usable CSRF header."""
+    _setup_config()
+    client = _get_auth_client()
+    register = client.post(
+        "/api/v1/auth/register",
+        json={"email": "csrf-stable@test.com", "password": "Tr0ub4dor3a"},
+    )
+    assert register.status_code == 201
+    csrf_token = client.cookies.get(CSRF_COOKIE_NAME)
+    assert csrf_token
+
+    resp = client.get("/api/v1/auth/me")
+
+    assert resp.status_code == 200
+    assert client.cookies.get(CSRF_COOKIE_NAME) == csrf_token
+    assert CSRF_COOKIE_NAME not in resp.cookies
 
 
 def test_api_auth_me_expired_token_returns_structured_401():

@@ -17,6 +17,7 @@ from deerflow.agents.dbtl.live_stage.adapter import (
     _bound_evidence,
     _build_input_artifacts,
     _compact_design_history,
+    _declared_skill_bindings,
     _executable_stage,
     _project_file_snapshot,
     _report_subagent_token_usage,
@@ -26,11 +27,13 @@ from deerflow.agents.dbtl.live_stage.adapter import (
     _tools_for_stage_budget,
     _wants_new_debate,
 )
-from deerflow.agents.dbtl.live_stage.workspace import safe_token
+from deerflow.agents.dbtl.live_stage.test_rerun import RERUN_EXIT_STATUS_NAME, RERUN_STDERR_NAME, RERUN_STDOUT_NAME
+from deerflow.agents.dbtl.live_stage.workspace import safe_token, verified_workspace_files
 from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_runner import DispatchOutcome, WorkUnit
 from deerflow.dbtl.stage_spec import WorkerBudget, resolve_stage_spec
+from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK
 from deerflow.subagents.config import SubagentConfig
 
 
@@ -229,7 +232,19 @@ def _structured_result() -> str:
                 }
             ],
             "recommended_next_actions": ["Review the design."],
-            "provenance": {"inputs_examined": ["cycle metadata"]},
+            "provenance": {
+                "inputs_examined": ["cycle metadata"],
+                "rerun_spec": {
+                    "version": 1,
+                    "entry_point": "/mnt/user-data/run.py",
+                    "command": "python run.py --seed 7",
+                    "seed": 7,
+                    "inputs": ["/mnt/user-data/yield.csv"],
+                    "environment": {"python": "3.12"},
+                    "configuration": [],
+                    "expected_outputs": ["/mnt/user-data/outputs/design-notes.md"],
+                },
+            },
         }
     )
 
@@ -1149,6 +1164,12 @@ async def test_ready_for_build_runs_build_and_records_reproducibility_lineage(
                         "description": "Executable Build implementation.",
                     }
                 ]
+                payload["provenance"]["phase_manifest"] = {
+                    "version": 1,
+                    "entry_point": artifact,
+                    "declared_outputs": [artifact],
+                    "completion_condition": "The implementation runs and its outputs are recorded.",
+                }
                 outcomes.append(DispatchOutcome(unit_id=unit.unit_id, text=json.dumps(payload)))
             return outcomes
 
@@ -1174,8 +1195,9 @@ async def test_ready_for_build_runs_build_and_records_reproducibility_lineage(
     )
 
     assert result.stage == "build"
-    assert repo.recorded[0]["stage_spec_key"] == "generic:build:v7"
+    assert repo.recorded[0]["stage_spec_key"] == "generic:build:v11"
     assert len(repo.lineage) == 1
+    assert repo.lineage[0]["rerun_spec"]["command"] == "python run.py --seed 7"
     assert repo.lineage[0]["expected_db_revision"] == 4
     assert repo.lineage[0]["output_artifacts"][0]["content_hash"]
     assert "/outputs/dbtl/" in repo.lineage[0]["output_artifacts"][0]["uri"]
@@ -1222,7 +1244,52 @@ async def test_build_worker_receives_an_attempt_scoped_writable_workspace(
     assert "Write every new implementation, derived output, and execution log under this exact directory" in prompt
     assert (tmp_path / "outputs" / ".dbtl-stage-work" / attempt_id / "build").is_dir()
     assert repo.lineage == []
-    assert "none produced usable evidence" in result.note.lower()
+    # The workers here are contract-valid but declare no structured rerun
+    # record, so the *stage* refuses. That reason has to reach the note: see
+    # the regression below for why the generic worker-blaming line is wrong.
+    assert "structured rerun record" in result.note
+
+
+@pytest.mark.asyncio
+async def test_a_build_that_no_worker_failed_still_says_why_it_refused(tmp_path: Path) -> None:
+    """A blank explanation is worse than a wrong one.
+
+    Every worker returned a contract-valid result and the Build still produced
+    no evidence, because its pinned contract requires a structured rerun record
+    and none arrived. The note used to fall through to the per-worker list —
+    "none produced usable evidence" followed by the header "Why each worker did
+    not count:" and then *nothing*, because no worker had failed. That sends a
+    reader to inspect three workers that did nothing wrong, and never mentions
+    the one thing they could act on.
+    """
+    cycle = _cycle(state="ready_for_build")
+    repo = FakeRepo(cycle)
+    dispatcher = FakeDispatcher(text=_structured_result())
+    adapter = LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="builder",
+                capabilities=frozenset({Capability.SOFTWARE_ENGINEERING}),
+            ),
+        ),
+        dispatcher=dispatcher,
+    )
+
+    result = await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Build the approved design.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert result.produced_usable_evidence is False
+    assert "structured rerun record" in result.note
+    assert "Test would have no command to re-execute" in result.note
+    # The header must not appear with nothing under it.
+    assert "Why each worker did not count:" not in result.note
 
 
 @pytest.mark.asyncio
@@ -1326,7 +1393,137 @@ async def test_optional_reconciliation_tells_test_to_judge_bound_build_lineage(
     assert "Only required_checks may determine the overall Test outcome" in prompt
     assert "Missing pedigree, genotype, kinship, or relatedness columns" in prompt
     assert '"duplicates_relatedness"' not in prompt.split('"required_checks":', 1)[1].split("]", 1)[0]
-    assert repo.recorded[0]["stage_spec_key"] == "generic:test:v3"
+    assert repo.recorded[0]["stage_spec_key"] == "generic:test:v4"
+
+
+@pytest.mark.asyncio
+async def test_test_runs_build_command_first_and_records_server_verified_reproducibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("deerflow.agents.dbtl.live_stage.adapter.reconciliation_required", lambda: False)
+    source = tmp_path / "yield.csv"
+    source.write_text("yield\n1\n", encoding="utf-8")
+    (tmp_path / "fit.py").write_text("print('fit')\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='fit'\n", encoding="utf-8")
+    approved = tmp_path / "outputs" / "dbtl" / "build" / "model.bin"
+    approved.parent.mkdir(parents=True)
+    approved.write_bytes(b"model-v1")
+    approved_uri = "/mnt/user-data/outputs/dbtl/build/model.bin"
+    repo = FakeRepo(_cycle(state="test"))
+    repo.lineage.append(
+        {
+            "id": "lineage-1",
+            "rerun_status": "verified",
+            "rerun_spec": {
+                "version": 1,
+                "entry_point": "/mnt/user-data/fit.py",
+                "command": "python /mnt/user-data/fit.py --seed 7",
+                "seed": 7,
+                "inputs": ["/mnt/user-data/yield.csv"],
+                "environment": {"python": "3.12"},
+                "configuration": ["/mnt/user-data/pyproject.toml"],
+                "expected_outputs": [approved_uri],
+            },
+            "input_artifacts": [f"workspace_file:yield.csv:sha256:{hashlib.sha256(source.read_bytes()).hexdigest()}"],
+            "output_artifacts": [
+                {
+                    "uri": approved_uri,
+                    "content_hash": hashlib.sha256(approved.read_bytes()).hexdigest(),
+                    "revision": 1,
+                }
+            ],
+        }
+    )
+
+    class TestDispatcher(FakeDispatcher):
+        async def __call__(self, units, *, budget):
+            self.calls.append((units, budget))
+            outcomes = []
+            for unit in units:
+                if unit.role == "rerun":
+                    match = re.search(r'"fresh_workspace": "([^"]+)"', unit.prompt)
+                    assert match is not None
+                    workspace = tmp_path / match.group(1).removeprefix("/mnt/user-data/")
+                    workspace.mkdir(parents=True)
+                    stdout = workspace / RERUN_STDOUT_NAME
+                    stderr = workspace / RERUN_STDERR_NAME
+                    rerun_output = workspace / "model.bin"
+                    stdout.write_text("fit complete\n", encoding="utf-8")
+                    stderr.write_text("", encoding="utf-8")
+                    rerun_output.write_bytes(b"model-v1")
+                    (workspace / RERUN_EXIT_STATUS_NAME).write_text("0\n", encoding="utf-8")
+                    payload = json.loads(_structured_result())
+                    payload["artifact_refs"] = [
+                        f"/mnt/user-data/{stdout.relative_to(tmp_path).as_posix()}",
+                        f"/mnt/user-data/{stderr.relative_to(tmp_path).as_posix()}",
+                        f"/mnt/user-data/{rerun_output.relative_to(tmp_path).as_posix()}",
+                    ]
+                    payload["provenance"]["rerun_execution"] = {
+                        "command": "python /mnt/user-data/fit.py --seed 7",
+                        "seed": "7",
+                        "environment": {"python": "3.12"},
+                        "exit_status": 0,
+                        "stdout_path": payload["artifact_refs"][0],
+                        "stderr_path": payload["artifact_refs"][1],
+                        "produced_outputs": [{"expected": approved_uri, "path": payload["artifact_refs"][2]}],
+                    }
+                else:
+                    payload = json.loads(_structured_result())
+                    payload["provenance"]["validity_assessment"] = {
+                        "metrics": [
+                            {
+                                "name": "accuracy",
+                                "value": 0.7,
+                                "threshold": 0.6,
+                                "criterion": "gte",
+                                "plausible_max": 0.95,
+                                "unit": "r",
+                            }
+                        ],
+                        "checks": [
+                            {
+                                "check": check.value,
+                                "status": "passed",
+                                "detail": f"{check.value} passed.",
+                                "evidence_refs": [f"artifact://{check.value}"],
+                            }
+                            for check in DEFAULT_VALIDITY_PACK.required_checks
+                        ],
+                        "limitations": [],
+                        "rationale": "The typed validity evidence passed.",
+                    }
+                outcomes.append(DispatchOutcome(unit_id=unit.unit_id, text=json.dumps(payload)))
+            return outcomes
+
+    dispatcher = TestDispatcher()
+    adapter = LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="reviewer",
+                capabilities=frozenset({Capability.VALIDITY_ASSESSMENT}),
+            ),
+        ),
+        dispatcher=dispatcher,
+    )
+
+    result = await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Test the approved Build.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert result.produced_usable_evidence
+    assert [calls[0][0].role for calls in dispatcher.calls] == ["rerun", "position"]
+    recorded = repo.recorded[0]["results"]
+    rerun = recorded[0]["provenance"]["rerun_execution"]
+    assert rerun["status"] == "passed"
+    assessment = recorded[1]["provenance"]["validity_assessment"]
+    assert next(item for item in assessment["checks"] if item["check"] == "reproducibility")["status"] == "passed"
 
 
 def test_build_discovers_and_hashes_the_workspace_input_reported_by_a_worker(tmp_path: Path) -> None:
@@ -1348,6 +1545,112 @@ def test_build_discovers_and_hashes_the_workspace_input_reported_by_a_worker(tmp
     )
 
     assert artifacts == [f"workspace_file:uploads/tiny.csv:sha256:{hashlib.sha256(source.read_bytes()).hexdigest()}"]
+
+
+def test_narrow_implementation_inputs_ignore_orientation_reads(tmp_path: Path) -> None:
+    (tmp_path / "orientation.md").write_text("context", encoding="utf-8")
+    consumed = tmp_path / "data.csv"
+    consumed.write_text("x\n1\n", encoding="utf-8")
+    snapshot = _project_file_snapshot(str(tmp_path))
+    worker = SimpleNamespace(
+        provenance={"inputs_examined": ["/mnt/user-data/orientation.md", "/mnt/user-data/data.csv"]},
+        evidence_refs=(),
+    )
+
+    artifacts = _build_input_artifacts(
+        datasets=(),
+        results=(worker,),
+        project_root=str(tmp_path),
+        pre_run_files=snapshot,
+        implementation_inputs=("/mnt/user-data/data.csv",),
+    )
+
+    assert artifacts == [f"workspace_file:data.csv:sha256:{hashlib.sha256(consumed.read_bytes()).hexdigest()}"]
+
+
+@pytest.mark.asyncio
+async def test_declared_skill_binding_uses_enabled_registry_winner_and_exact_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    skill_file = tmp_path / "SKILL.md"
+    skill_file.write_text("# Analyze\n", encoding="utf-8")
+    storage = SimpleNamespace(load_skills=lambda *, enabled_only: [SimpleNamespace(name="analysis", skill_file=skill_file)])
+    monkeypatch.setattr(
+        "deerflow.skills.storage.get_or_new_user_skill_storage",
+        lambda user_id, *, app_config: storage,
+    )
+
+    bindings = await _declared_skill_bindings(("analysis",), user_id="user-1", app_config=SimpleNamespace())
+
+    assert bindings == {"analysis": f"skill:analysis:sha256:{hashlib.sha256(skill_file.read_bytes()).hexdigest()}"}
+
+
+@pytest.mark.asyncio
+async def test_unknown_declared_skill_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    storage = SimpleNamespace(load_skills=lambda *, enabled_only: [])
+    monkeypatch.setattr(
+        "deerflow.skills.storage.get_or_new_user_skill_storage",
+        lambda user_id, *, app_config: storage,
+    )
+
+    with pytest.raises(ValueError, match="not enabled"):
+        await _declared_skill_bindings(("missing",), user_id="user-1", app_config=SimpleNamespace())
+
+
+def test_workspace_directory_expansion_is_stable_and_regular_file_only(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    (bundle / "nested").mkdir(parents=True)
+    (bundle / "z.txt").write_text("z", encoding="utf-8")
+    (bundle / "nested" / "a.txt").write_text("a", encoding="utf-8")
+
+    files = verified_workspace_files(
+        "/mnt/user-data/bundle",
+        project_root=str(tmp_path),
+        containment_reference="/mnt/user-data/bundle",
+    )
+
+    assert [relative for relative, _path in files] == ["bundle/nested/a.txt", "bundle/z.txt"]
+
+
+def test_workspace_directory_expansion_refuses_symlinks(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    target = tmp_path / "target.txt"
+    target.write_text("outside the declared directory", encoding="utf-8")
+    (bundle / "linked.txt").symlink_to(target)
+
+    with pytest.raises(ValueError, match="symlink"):
+        verified_workspace_files(
+            "/mnt/user-data/bundle",
+            project_root=str(tmp_path),
+            containment_reference="/mnt/user-data/bundle",
+        )
+
+
+def test_workspace_directory_expansion_keeps_an_empty_directory_empty(tmp_path: Path) -> None:
+    (tmp_path / "empty").mkdir()
+
+    assert (
+        verified_workspace_files(
+            "/mnt/user-data/empty",
+            project_root=str(tmp_path),
+            containment_reference="/mnt/user-data/empty",
+        )
+        == ()
+    )
+
+
+def test_workspace_directory_expansion_enforces_its_file_limit(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "one.txt").write_text("1", encoding="utf-8")
+    (bundle / "two.txt").write_text("2", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="1-file limit"):
+        verified_workspace_files(
+            "/mnt/user-data/bundle",
+            project_root=str(tmp_path),
+            containment_reference="/mnt/user-data/bundle",
+            max_files=1,
+        )
 
 
 class TestAPhaseMayReadWhatTheRunAlreadyPublished:

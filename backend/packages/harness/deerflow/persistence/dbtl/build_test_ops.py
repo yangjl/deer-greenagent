@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from sqlalchemy import func, select
 
+from deerflow.dbtl.build_execution import parse_rerun_spec
 from deerflow.dbtl.cycle_state import StageStatus
 from deerflow.dbtl.reconciliation import dataset_fingerprint
 from deerflow.dbtl.reconciliation_policy import reconciliation_required
@@ -18,7 +19,7 @@ from deerflow.dbtl.stage_routes import (
     RouteSlug,
     compute_stage_routes,
 )
-from deerflow.dbtl.stage_spec import resolve_stage_spec
+from deerflow.dbtl.stage_spec import resolve_spec_by_key, resolve_stage_spec
 from deerflow.dbtl.validity import (
     DEFAULT_VALIDITY_PACK,
     CheckStatus,
@@ -107,6 +108,8 @@ class BuildTestOpsMixin:
             "code_revision": row.code_revision,
             "config_revision": row.config_revision,
             "environment": dict(row.environment or {}),
+            "rerun_spec": dict(row.rerun_spec or {}),
+            "rerun_status": "verified" if row.rerun_spec else "rerun_unverified",
             "input_artifacts": list(row.input_artifacts or []),
             "output_artifacts": list(row.output_artifacts or []),
             "deviations": list(row.deviations or []),
@@ -184,6 +187,7 @@ class BuildTestOpsMixin:
         recorded_by: str,
         expected_db_revision: int,
         idempotency_key: str,
+        rerun_spec: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Record a versioned, dataset-bound Build reproducibility package."""
         from deerflow.persistence.dbtl.cycles import DbtlWorkflowRefused
@@ -199,10 +203,15 @@ class BuildTestOpsMixin:
         for item in output_artifacts:
             if not isinstance(item, dict) or not str(item.get("uri") or "").strip() or not _is_sha256(item.get("content_hash")) or not isinstance(item.get("revision"), int) or int(item["revision"]) < 1:
                 raise ValueError("Each Build output needs a URI, lowercase SHA-256 hash, and positive revision.")
+        parsed_rerun = parse_rerun_spec(rerun_spec) if rerun_spec is not None else None
+        if rerun_spec is not None and parsed_rerun is None:
+            raise ValueError("Build lineage received an invalid structured rerun record.")
+        canonical_rerun = parsed_rerun.as_dict() if parsed_rerun is not None else {}
         lineage_input = {
             "code_revision": code_revision.strip(),
             "config_revision": config_revision.strip(),
             "environment": environment,
+            "rerun_spec": canonical_rerun,
             "input_artifacts": input_artifacts,
             "output_artifacts": output_artifacts,
             "deviations": deviations,
@@ -242,6 +251,10 @@ class BuildTestOpsMixin:
             attempts = {item.stage: item for item in stages}
             build = attempts["build"]
             reconciliation = attempts["reconciliation"]
+            stage_spec_key = build.stage_spec_key or resolve_stage_spec("build").spec_key
+            pinned_spec = resolve_spec_by_key(stage_spec_key)
+            if "structured_rerun_spec" in pinned_spec.validity_gates and parsed_rerun is None:
+                raise ValueError(f"Build lineage for {stage_spec_key} requires a valid structured rerun record.")
             if cycle.state not in {"ready_for_build", "build"}:
                 raise DbtlWorkflowRefused("Build lineage can only be recorded after data readiness.")
             if build.status not in {
@@ -271,11 +284,12 @@ class BuildTestOpsMixin:
                 cycle_id=cycle_id,
                 stage_attempt_id=build.id,
                 lineage_revision=revision,
-                stage_spec_key=resolve_stage_spec("build").spec_key,
+                stage_spec_key=stage_spec_key,
                 dataset_fingerprint=fingerprint,
                 code_revision=code_revision.strip(),
                 config_revision=config_revision.strip(),
                 environment=dict(environment),
+                rerun_spec=canonical_rerun,
                 input_artifacts=list(input_artifacts),
                 output_artifacts=list(output_artifacts),
                 deviations=list(deviations),

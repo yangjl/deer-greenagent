@@ -96,9 +96,38 @@ def _build_result(*, artifact: str, figure: str) -> str:
             "provenance": {
                 "inputs_examined": ["/mnt/user-data/yield.csv"],
                 "recorded_rerun_procedure": "uv run python fit.py --seed 7",
+                "rerun_spec": {
+                    "version": 1,
+                    "entry_point": "/mnt/user-data/fit.py",
+                    "command": "uv run python fit.py --seed 7",
+                    "seed": 7,
+                    "inputs": ["/mnt/user-data/yield.csv"],
+                    "environment": {"python": "3.12", "uv": "pinned lockfile"},
+                    "configuration": ["/mnt/user-data/pyproject.toml"],
+                    "expected_outputs": [artifact, figure],
+                },
             },
         }
     )
+
+
+def _with_phase_manifest(
+    payload: dict,
+    *,
+    unit,
+    entry_point: str,
+    declared_outputs: list[str] | None = None,
+) -> dict:
+    done_match = re.search(r"^Done when: (?P<condition>.*)$", unit.prompt, re.MULTILINE)
+    manifest_version = 2 if "return version=2" in unit.prompt else 1
+    payload["provenance"]["phase_manifest"] = {
+        "version": manifest_version,
+        "entry_point": entry_point,
+        "declared_outputs": declared_outputs if declared_outputs is not None else list(payload["artifact_refs"]),
+        "completion_condition": done_match.group("condition") if done_match is not None else "",
+        **({"declared_inputs": list(payload["provenance"].get("inputs_examined") or ())} if manifest_version >= 2 else {}),
+    }
+    return payload
 
 
 class _WritingDispatcher:
@@ -111,7 +140,15 @@ class _WritingDispatcher:
     would be noticed.
     """
 
-    def __init__(self, *, summary: str | None = None, plan: str | None = None, presentable_results: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        summary: str | None = None,
+        plan: str | None = None,
+        presentable_results: bool = True,
+        directory_artifact: bool = False,
+        include_rerun_spec: bool = True,
+    ) -> None:
         self.calls: list[tuple] = []
         self.summarizer_units: list = []
         self.planner_units: list = []
@@ -119,6 +156,8 @@ class _WritingDispatcher:
         self._summary = summary
         self._plan = plan
         self._presentable_results = presentable_results
+        self._directory_artifact = directory_artifact
+        self._include_rerun_spec = include_rerun_spec
 
     async def __call__(self, units, *, budget):
         self.calls.append((tuple(units), budget))
@@ -142,10 +181,30 @@ class _WritingDispatcher:
             if self._presentable_results:
                 plot.write_bytes(PNG)
             payload = json.loads(_build_result(artifact=_virtual(produced), figure=_virtual(plot)))
+            if not self._include_rerun_spec:
+                payload["provenance"].pop("rerun_spec")
+            if self._directory_artifact:
+                bundle = grant / "bundle"
+                bundle.mkdir()
+                produced.rename(bundle / produced.name)
+                figures = bundle / "figures"
+                figures.mkdir()
+                plot.rename(figures / plot.name)
+                produced = bundle / produced.name
+                plot = figures / plot.name
+                payload["artifact_refs"] = [_virtual(bundle)]
+                payload["evidence_refs"] = [{"kind": "workspace_file", "reference": _virtual(bundle), "description": "Complete Build bundle."}]
+                payload["figures"] = [{"path": _virtual(plot), "caption": "Held-out accuracy", "shows": "Predicted against observed yield."}]
+                payload["key_outcomes"] = [{"name": "Held-out accuracy", "value": 0.62, "unit": "r", "figure": _virtual(plot)}]
             if not self._presentable_results:
                 payload["artifact_refs"] = [_virtual(produced)]
                 payload["figures"] = []
                 payload["key_outcomes"] = []
+            _with_phase_manifest(
+                payload,
+                unit=unit,
+                entry_point=_virtual(produced),
+            )
             outcomes.append(
                 DispatchOutcome(
                     unit_id=unit.unit_id,
@@ -358,10 +417,22 @@ CANDIDATES = (
 )
 
 
-def _adapter(repo: DbtlCycleRepository, *, workflow: bool, dispatcher, candidates=CANDIDATES) -> LiveStageAdapter:
+def _adapter(
+    repo: DbtlCycleRepository,
+    *,
+    workflow: bool,
+    dispatcher,
+    candidates=CANDIDATES,
+    build_worker_contract: str = "hardened_v11",
+) -> LiveStageAdapter:
     return LiveStageAdapter(
         repo=repo,
-        app_config=SimpleNamespace(dbtl=SimpleNamespace(build_workflow_steps=workflow)),
+        app_config=SimpleNamespace(
+            dbtl=SimpleNamespace(
+                build_workflow_steps=workflow,
+                build_worker_contract=build_worker_contract,
+            )
+        ),
         candidate_provider=lambda: candidates,
         dispatcher=dispatcher,
     )
@@ -387,7 +458,16 @@ async def _build_stage_attempt_id(repo: DbtlCycleRepository) -> str:
     return str(next(stage for stage in cycle["stages"] if stage["stage"] == "build")["id"])
 
 
-async def _run_build(repo: DbtlCycleRepository, root: Path, *, workflow: bool = True, dispatcher=None, candidates=CANDIDATES, run_id: str = "run-1"):
+async def _run_build(
+    repo: DbtlCycleRepository,
+    root: Path,
+    *,
+    workflow: bool = True,
+    dispatcher=None,
+    candidates=CANDIDATES,
+    run_id: str = "run-1",
+    build_worker_contract: str = "hardened_v11",
+):
     """One Build request.
 
     `run_id` matters whenever a test runs Build twice: the stage-execution
@@ -396,7 +476,13 @@ async def _run_build(repo: DbtlCycleRepository, root: Path, *, workflow: bool = 
     A test about step-level resume that reuses `run-1` proves nothing.
     """
     dispatcher = dispatcher or _WritingDispatcher()
-    result = await _adapter(repo, workflow=workflow, dispatcher=dispatcher, candidates=candidates).execute(
+    result = await _adapter(
+        repo,
+        workflow=workflow,
+        dispatcher=dispatcher,
+        candidates=candidates,
+        build_worker_contract=build_worker_contract,
+    ).execute(
         project_id="project-1",
         cycle_id="cycle-1",
         request_text="Build the approved design.",
@@ -415,6 +501,7 @@ class TestTheWriterAndTheReadModelAgree:
         repo, root = project
         await _ready_for_build(repo)
         events: list[tuple[str, str]] = []
+        observed_token_caps: list[int] = []
         original_pin = repo.pin_stage_spec
 
         async def observed_pin(**kwargs):
@@ -427,13 +514,63 @@ class TestTheWriterAndTheReadModelAgree:
         class _ObservingDispatcher:
             async def __call__(self, units, *, budget):
                 events.append(("dispatch", ""))
+                observed_token_caps.append(budget.max_tokens)
                 return [DispatchOutcome(unit_id=unit.unit_id, text="not a valid result") for unit in units]
 
         dispatcher = _ObservingDispatcher()
         await _run_build(repo, root, dispatcher=dispatcher)
 
-        assert events[0] == ("pin", "generic:build:v7")
+        assert events[0] == ("pin", "generic:build:v11")
         assert events[1][0] == "dispatch"
+        assert observed_token_caps[0] == 500_000
+
+    async def test_v10_remains_an_explicit_budget_rollback_for_new_attempts(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        result, _ = await _run_build(
+            repo,
+            root,
+            build_worker_contract="hardened_v10",
+        )
+
+        assert result.produced_usable_evidence, result.note
+        lineage = (await repo.build_test_view("cycle-1", project_id="project-1"))["build_lineage"]
+        assert lineage["stage_spec_key"] == "generic:build:v10"
+
+    async def test_legacy_build_contract_is_an_explicit_new_attempt_rollback(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        result, _ = await _run_build(
+            repo,
+            root,
+            build_worker_contract="legacy_v9",
+        )
+
+        assert result.produced_usable_evidence, result.note
+        lineage = (await repo.build_test_view("cycle-1", project_id="project-1"))["build_lineage"]
+        assert lineage["stage_spec_key"] == "generic:build:v9"
+
+    async def test_pinned_build_contract_wins_after_operator_changes_rollout_mode(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        attempt_id = await _build_stage_attempt_id(repo)
+        await repo.pin_stage_spec(
+            project_id="project-1",
+            stage_attempt_id=attempt_id,
+            stage_spec_key="generic:build:v9",
+        )
+
+        result, _ = await _run_build(
+            repo,
+            root,
+            build_worker_contract="hardened_v11",
+        )
+
+        assert result.produced_usable_evidence, result.note
+        lineage = (await repo.build_test_view("cycle-1", project_id="project-1"))["build_lineage"]
+        assert lineage["stage_spec_key"] == "generic:build:v9"
 
     async def test_a_successful_build_records_a_complete_chain(self, project) -> None:
         """The property a fake repository cannot show.
@@ -459,6 +596,10 @@ class TestTheWriterAndTheReadModelAgree:
         # Nothing was reported stale, which is the same statement made from the
         # other direction and the one that broke when the two sides disagreed.
         assert all(not entry["invalidated_attempts"] for entry in view["steps"])
+        lineage = (await repo.build_test_view("cycle-1", project_id="project-1"))["build_lineage"]
+        assert lineage["stage_spec_key"] == "generic:build:v11"
+        assert lineage["rerun_status"] == "verified"
+        assert lineage["rerun_spec"]["command"] == "uv run python fit.py --seed 7"
 
     async def test_load_design_binds_the_document_that_was_approved(self, project) -> None:
         repo, root = project
@@ -528,6 +669,22 @@ class TestAPresentationalFailureKeepsTheScience:
         # The read model must be able to say where it stopped, not merely that
         # something is unfinished.
         assert view["next_step"] == BuildStepKey.EXECUTE_PHASES.value
+
+    async def test_v8_build_without_typed_rerun_lineage_stops_before_summary(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        result, dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(include_rerun_spec=False))
+
+        assert not result.produced_usable_evidence
+        assert result.artifact_uri is None
+        assert dispatcher.summarizer_units == []
+        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        execute = _step(view, BuildStepKey.EXECUTE_PHASES)
+        assert execute["status"] == StepState.FAILED.value
+        assert "structured rerun record" in execute["attempts"][0]["error_summary"]
+        assert (await repo.build_test_view("cycle-1", project_id="project-1"))["build_lineage"] is None
 
     async def test_a_failed_execution_does_not_open_a_fake_deck_failure(self, project) -> None:
         repo, root = project
@@ -683,6 +840,77 @@ class TestTheSummarizerWritesTheReviewedDocument:
 
 
 class TestABuildStopsBeingOneOpaqueWorker:
+    async def test_a_declared_output_directory_publishes_each_regular_file(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+
+        result, _dispatcher = await _run_build(
+            repo,
+            root,
+            dispatcher=_WritingDispatcher(plan=SINGLE_PHASE_PLAN, directory_artifact=True),
+        )
+
+        assert result.produced_usable_evidence, result.note
+        view = await repo.build_test_view("cycle-1", project_id="project-1")
+        outputs = view["build_lineage"]["output_artifacts"]
+        assert len(outputs) == 2
+        assert [item["uri"].rsplit("-", 1)[-1] for item in outputs] == ["accuracy.png", "model.bin"]
+        assert all(item["content_hash"] for item in outputs)
+        assert result.deck_uri
+        deck = (root / result.deck_uri.removeprefix("/mnt/user-data/")).read_text(encoding="utf-8")
+        assert "data:image/png;base64," in deck
+
+    async def test_an_empty_declared_output_directory_fails_the_phase(self, project) -> None:
+        class _EmptyDirectoryDispatcher(_WritingDispatcher):
+            async def __call__(self, units, *, budget):
+                outcomes = await super().__call__(units, budget=budget)
+                revised = []
+                by_id = {unit.unit_id: unit for unit in units}
+                for outcome in outcomes:
+                    unit = by_id[outcome.unit_id]
+                    if unit.role != "phase":
+                        revised.append(outcome)
+                        continue
+                    empty = _grant_from_prompt(unit.prompt) / "empty-bundle"
+                    empty.mkdir()
+                    payload = json.loads(outcome.text)
+                    payload["artifact_refs"] = [_virtual(empty)]
+                    revised.append(DispatchOutcome(unit_id=outcome.unit_id, text=json.dumps(payload)))
+                return revised
+
+        repo, root = project
+        await _ready_for_build(repo)
+
+        result, _dispatcher = await _run_build(
+            repo,
+            root,
+            dispatcher=_EmptyDirectoryDispatcher(plan=SINGLE_PHASE_PLAN),
+        )
+
+        assert not result.produced_usable_evidence
+        assert "contains no regular files" in result.note
+
+    async def test_an_output_hash_read_error_fails_the_phase_instead_of_crashing(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        original = adapter_module._sha256_file
+
+        def _unreadable(path: Path) -> str:
+            if ".dbtl-stage-work" in path.parts and path.name == "model.bin":
+                raise OSError("worker output became unreadable")
+            return original(path)
+
+        monkeypatch.setattr(adapter_module, "_sha256_file", _unreadable)
+
+        result, _dispatcher = await _run_build(
+            repo,
+            root,
+            dispatcher=_WritingDispatcher(plan=SINGLE_PHASE_PLAN),
+        )
+
+        assert not result.produced_usable_evidence
+        assert "became unreadable" in result.note
+
     async def test_each_phase_gets_compact_build_context_and_tool_guidance(self, project) -> None:
         repo, root = project
         await _ready_for_build(repo)
@@ -1290,6 +1518,7 @@ class _SecondPhaseReadsTheFirst(_WritingDispatcher):
             plot.write_bytes(PNG)
             payload = json.loads(_build_result(artifact=_virtual(produced), figure=_virtual(plot)))
             payload["provenance"]["inputs_examined"] = [upstream]
+            _with_phase_manifest(payload, unit=unit, entry_point=_virtual(produced))
             outcomes.append(DispatchOutcome(unit_id=unit.unit_id, text=json.dumps(payload)))
         return outcomes
 
@@ -1316,6 +1545,7 @@ class _SecondPhaseReadsTheFirstDirectory(_SecondPhaseReadsTheFirst):
             plot.write_bytes(PNG)
             payload = json.loads(_build_result(artifact=_virtual(produced), figure=_virtual(plot)))
             payload["provenance"]["inputs_examined"] = [upstream_directory]
+            _with_phase_manifest(payload, unit=unit, entry_point=_virtual(produced))
             outcomes.append(DispatchOutcome(unit_id=unit.unit_id, text=json.dumps(payload)))
         return outcomes
 
@@ -1457,6 +1687,118 @@ class TestAPhaseMayBuildOnThePhaseBeforeIt:
             )
 
 
+class TestTheServerOwnsThePhaseManifestVerdict:
+    async def test_a_compatible_build_result_shape_keeps_verified_work(self, project) -> None:
+        class _CompatibleShapeDispatcher(_WritingDispatcher):
+            async def __call__(self, units, *, budget):
+                outcomes = await super().__call__(units, budget=budget)
+                revised = []
+                for unit, outcome in zip(units, outcomes, strict=True):
+                    if unit.role != "phase" or not outcome.text:
+                        revised.append(outcome)
+                        continue
+                    payload = json.loads(outcome.text)
+                    payload["headline"] = payload.pop("summary")
+                    payload["outputs"] = [{"path": path} for path in payload.pop("artifact_refs")]
+                    payload["evidence"] = [item["reference"] for item in payload.pop("evidence_refs")]
+                    payload["findings"] = payload.pop("claims")
+                    payload["checks"] = {item["name"]: item["passed"] for item in payload.pop("quality_checks")}
+                    revised.append(DispatchOutcome(unit_id=outcome.unit_id, text=json.dumps(payload)))
+                return revised
+
+        repo, root = project
+        await _ready_for_build(repo)
+
+        result, _dispatcher = await _run_build(
+            repo,
+            root,
+            dispatcher=_CompatibleShapeDispatcher(plan=SINGLE_PHASE_PLAN),
+        )
+
+        assert result.produced_usable_evidence, result.note
+
+    @pytest.mark.parametrize(
+        ("mutation", "expected"),
+        [
+            (lambda provenance: provenance.pop("phase_manifest"), "valid versioned phase manifest"),
+            (lambda provenance: provenance["phase_manifest"].pop("version"), "valid versioned phase manifest"),
+            (lambda provenance: provenance["phase_manifest"].update(entry_point="/mnt/user-data/not-published.py"), "entry point"),
+            (lambda provenance: provenance["phase_manifest"].update(declared_outputs=["/mnt/user-data/not-published.bin"]), "exactly the outputs"),
+            (lambda provenance: provenance["phase_manifest"].update(completion_condition="A different condition."), "changed the versioned completion condition"),
+        ],
+        ids=("missing", "unversioned", "unpublished-entry-point", "wrong-outputs", "changed-completion"),
+    )
+    async def test_missing_or_unverified_manifest_authority_cannot_commit(self, project, mutation, expected) -> None:
+        class _InvalidManifestDispatcher(_WritingDispatcher):
+            async def __call__(self, units, *, budget):
+                outcomes = await super().__call__(units, budget=budget)
+                revised = []
+                for unit, outcome in zip(units, outcomes, strict=True):
+                    if unit.role != "phase" or not outcome.text:
+                        revised.append(outcome)
+                        continue
+                    payload = json.loads(outcome.text)
+                    mutation(payload["provenance"])
+                    revised.append(DispatchOutcome(unit_id=outcome.unit_id, text=json.dumps(payload)))
+                return revised
+
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        result, dispatcher = await _run_build(
+            repo,
+            root,
+            dispatcher=_InvalidManifestDispatcher(plan=TWO_PHASE_PLAN),
+        )
+
+        assert not result.produced_usable_evidence
+        assert len(dispatcher.phase_units) == 1
+        phases = (await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id))["phases"]
+        assert len(phases) == 1
+        assert phases[0]["status"] == StepState.FAILED.value
+        assert phases[0]["error_code"] == BuildErrorCode.EXECUTION_CONTRACT_REJECTED.value
+        assert expected in phases[0]["error_summary"]
+        worker_runs = await repo.list_worker_runs("cycle-1", project_id="project-1", stage="build")
+        assert worker_runs[-1]["status"] == "failed"
+
+    async def test_a_one_file_directory_is_not_guessed_as_the_entry_point(self, project) -> None:
+        class _DirectoryEntryPointDispatcher(_WritingDispatcher):
+            async def __call__(self, units, *, budget):
+                outcomes = await super().__call__(units, budget=budget)
+                revised = []
+                for unit, outcome in zip(units, outcomes, strict=True):
+                    if unit.role != "phase" or not outcome.text:
+                        revised.append(outcome)
+                        continue
+                    payload = json.loads(outcome.text)
+                    grant = _grant_from_prompt(unit.prompt)
+                    payload["artifact_refs"] = [_virtual(grant)]
+                    payload["figures"] = []
+                    payload["key_outcomes"] = []
+                    payload["provenance"]["phase_manifest"].update(
+                        entry_point=_virtual(grant),
+                        declared_outputs=[_virtual(grant)],
+                    )
+                    revised.append(DispatchOutcome(unit_id=outcome.unit_id, text=json.dumps(payload)))
+                return revised
+
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        result, _dispatcher = await _run_build(
+            repo,
+            root,
+            dispatcher=_DirectoryEntryPointDispatcher(plan=SINGLE_PHASE_PLAN, presentable_results=False),
+        )
+
+        assert not result.produced_usable_evidence
+        phases = (await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id))["phases"]
+        assert phases[0]["error_code"] == BuildErrorCode.EXECUTION_CONTRACT_REJECTED.value
+        assert "entry point" in phases[0]["error_summary"]
+
+
 class TestAPartialPhaseCannotAdvanceThePlan:
     async def test_a_failed_done_condition_stops_before_the_next_phase(self, project) -> None:
         repo, root = project
@@ -1474,6 +1816,8 @@ class TestAPartialPhaseCannotAdvanceThePlan:
         assert view["phases"][0]["error_code"] == BuildErrorCode.EXECUTION_CONTRACT_REJECTED.value
         assert "simulator and generated dataset" in result.note
         assert view["next_step"] == BuildStepKey.EXECUTE_PHASES.value
+        worker_runs = await repo.list_worker_runs("cycle-1", project_id="project-1", stage="build")
+        assert worker_runs[-1]["status"] == "failed"
 
     async def test_a_true_done_marker_cannot_override_a_failed_implementation_check(self, project) -> None:
         repo, root = project

@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from deerflow.agents.dbtl.live_stage.workspace import SHELL_WORKSPACE_IDIOM, STAGE_UNIT_WORKSPACE_PLACEHOLDER
 from deerflow.dbtl.agent_selector import AgentCandidate
@@ -30,6 +31,7 @@ from deerflow.dbtl.build_plan import PLANNER_CONTRACT, BuildPhase, BuildPhasePla
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_runner import BUILD_PLAN_OUTPUT, WorkUnit
 from deerflow.dbtl.stage_spec import StageSpec
+from deerflow.dbtl.worker_result import StageWorkerResult, WorkerStatus
 
 #: The seat that draws the plan. Read-only by role, like the summarizer: it
 #: writes nothing, runs nothing, and dispatches nobody.
@@ -38,6 +40,120 @@ PHASE_ROLE = "phase"
 PHASE_DONE_CHECK = "phase_done_condition"
 
 GENERALIST = "general-purpose"
+
+
+@dataclass(frozen=True, slots=True)
+class BuildPhaseManifest:
+    """The minimal worker declaration the server binds to workspace facts."""
+
+    entry_point: str
+    declared_outputs: tuple[str, ...]
+    completion_condition: str
+    declared_inputs: tuple[str, ...] = ()
+    version: int = 1
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = {
+            "version": self.version,
+            "entry_point": self.entry_point,
+            "declared_outputs": list(self.declared_outputs),
+            "completion_condition": self.completion_condition,
+        }
+        if self.version >= 2:
+            payload["declared_inputs"] = list(self.declared_inputs)
+        return payload
+
+
+def parse_phase_manifest(value: Any) -> BuildPhaseManifest | None:
+    if not isinstance(value, Mapping) or value.get("version") not in {1, 2} or isinstance(value.get("version"), bool):
+        return None
+    version = int(value["version"])
+    entry_point = value.get("entry_point")
+    outputs = value.get("declared_outputs")
+    completion = value.get("completion_condition")
+    if not isinstance(entry_point, str) or not entry_point.strip() or len(entry_point) > 1_024:
+        return None
+    if not isinstance(outputs, list) or not outputs or len(outputs) > 500:
+        return None
+    normalized: list[str] = []
+    for item in outputs:
+        if not isinstance(item, str) or not item.strip() or len(item) > 1_024:
+            return None
+        normalized.append(item.strip())
+    if len(set(normalized)) != len(normalized) or not isinstance(completion, str) or len(completion) > 600:
+        return None
+    raw_inputs = value.get("declared_inputs", [])
+    if version >= 2 and (not isinstance(raw_inputs, list) or len(raw_inputs) > 500):
+        return None
+    declared_inputs: list[str] = []
+    for item in raw_inputs if isinstance(raw_inputs, list) else []:
+        if not isinstance(item, str) or not item.strip() or len(item) > 1_024:
+            return None
+        declared_inputs.append(item.strip())
+    if len(set(declared_inputs)) != len(declared_inputs):
+        return None
+    return BuildPhaseManifest(
+        entry_point=entry_point.strip(),
+        declared_outputs=tuple(normalized),
+        completion_condition=completion.strip(),
+        declared_inputs=tuple(declared_inputs),
+        version=version,
+    )
+
+
+def verify_phase_manifest(
+    result: StageWorkerResult,
+    *,
+    published: Sequence[Mapping[str, Any]],
+    completion_condition: str,
+    required_version: int = 1,
+) -> tuple[BuildPhaseManifest | None, str]:
+    """Bind one worker manifest to the files the server actually published."""
+
+    manifest = parse_phase_manifest(result.provenance.get("phase_manifest"))
+    if manifest is None:
+        return None, "The Build phase did not return a valid versioned phase manifest."
+    if manifest.version != required_version:
+        return None, f"The Build phase manifest must use version {required_version}."
+    published_uris = tuple(str(item.get("uri") or "") for item in published if str(item.get("uri") or ""))
+    if set(manifest.declared_outputs) != set(published_uris) or len(manifest.declared_outputs) != len(published_uris):
+        return None, "The Build phase manifest does not name exactly the outputs the server published."
+    if manifest.entry_point not in published_uris:
+        return None, "The Build phase entry point is not one of its governed published files."
+    if manifest.completion_condition != completion_condition.strip():
+        return None, "The Build phase manifest changed the versioned completion condition from the recorded plan."
+    return manifest, ""
+
+
+def is_non_gating_build_check(name: str) -> bool:
+    """Whether Test, rather than Build, owns this failed check's verdict."""
+
+    normalized = " ".join(name.lower().replace("_", " ").replace("-", " ").split())
+    return "reproduc" in normalized or "repeat run" in normalized or "rerun" in normalized
+
+
+def gating_failed_phase_checks(result: StageWorkerResult, required_name: str = PHASE_DONE_CHECK) -> tuple[str, ...]:
+    """Name failed implementation checks eligible for one bounded correction."""
+
+    return tuple(item.name.strip() for item in result.quality_checks if item.name.strip() and not item.passed and (item.name.strip() == required_name or not is_non_gating_build_check(item.name)))
+
+
+def phase_completion_error(result: StageWorkerResult, required_name: str) -> str:
+    """Explain why a server-required Build phase assertion did not pass."""
+
+    if not required_name or result.status is not WorkerStatus.COMPLETED:
+        return ""
+    checks = [item for item in result.quality_checks if item.name.strip() == required_name]
+    if len(checks) != 1:
+        return f"The worker must return exactly one {required_name!r} quality check before this phase can finish."
+    if not checks[0].passed:
+        detail = checks[0].detail.strip()
+        return detail or f"The worker reported that {required_name!r} was not satisfied."
+    contradictions = [item for item in result.quality_checks if item.name.strip() != required_name and not item.passed and not is_non_gating_build_check(item.name)]
+    if contradictions:
+        names = ", ".join(item.name.strip() for item in contradictions[:4])
+        return f"The phase reported {required_name!r} as complete, but these implementation checks failed: {names}."
+    return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +272,9 @@ def phase_unit(
         "Use write_file or str_replace for source, configuration, and documentation. Use Bash",
         "only for short execution and verification commands; do not embed complete files in",
         "Bash heredocs or in a Python write_text wrapper.",
+        "Before changing an existing file, read its current version. After each successful edit,",
+        "re-read before editing that file again. If a tool returns a recoverable error, follow its",
+        "recommended next action or choose a different tool; do not repeat the identical failing call.",
         SHELL_WORKSPACE_IDIOM,
         "Your objective above was derived from the approved Design, so you normally do not need",
         "the Design itself. Project context names it and the manifest lists the project's files;",
@@ -174,6 +293,23 @@ def phase_unit(
                 "a limitation because Test and the human reviewer own that verdict.",
                 "report status=failed, name the missing work in its detail, and stop. Partial files",
                 "remain auditable, but they cannot advance this build plan.",
+                *(
+                    [
+                        f"In provenance.phase_manifest return version={'2' if 'narrow_implementation_inputs' in spec.validity_gates else '1'}, the executable entry_point path,",
+                        "declared_outputs containing every artifact_refs path exactly once, and",
+                        "completion_condition copied verbatim from Done when (or an empty string when none was recorded).",
+                        *(
+                            [
+                                "Also return declared_inputs containing only exact workspace files actually consumed to implement this phase.",
+                                "Do not include files read only for orientation, discovery, or restating project context.",
+                            ]
+                            if "narrow_implementation_inputs" in spec.validity_gates
+                            else []
+                        ),
+                    ]
+                    if "server_verified_phase_manifest" in spec.validity_gates
+                    else []
+                ),
             ]
             if spec.version >= 6
             else ["Report status=failed only when the work could not be done at all."]
@@ -189,6 +325,7 @@ def phase_unit(
         via_generalist=assignment.via_generalist,
         role=PHASE_ROLE,
         completion_check=PHASE_DONE_CHECK if spec.version >= 6 else "",
+        skills=phase.skills,
     )
 
 

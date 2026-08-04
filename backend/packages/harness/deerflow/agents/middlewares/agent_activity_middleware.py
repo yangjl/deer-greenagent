@@ -105,6 +105,31 @@ class AgentActivityMiddleware(AgentMiddleware[AgentState]):
         return None if handle is None or handle.settled else handle
 
     @override
+    def before_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Emit nothing on a synchronous run, and say so by existing.
+
+        Every surface this projection feeds is async, so only the async hooks
+        do real work — but LangGraph resolves a node's sync half by asking
+        whether the subclass *overrode* the hook, and raises *"No synchronous
+        function provided to abefore_agent"* when it did not. The embedded
+        ``DeerFlowClient.stream()``, the TUI, and the CLI all invoke the graph
+        synchronously, so an async-only middleware attached unconditionally to
+        the lead chain takes the whole embedded path down: an observability
+        feature breaking the product it observes.
+
+        Overriding with a no-op is what "a synchronous embedded caller emits
+        nothing rather than something half-wired" actually requires. Inheriting
+        the base hook looks identical from the outside and is not the same
+        thing.
+        """
+        return None
+
+    @override
+    def after_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """No row was opened synchronously, so there is none to settle."""
+        return None
+
+    @override
     async def abefore_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
         run_id = _run_id(runtime)
         if run_id is None or run_id in self._handles:
@@ -140,6 +165,30 @@ class AgentActivityMiddleware(AgentMiddleware[AgentState]):
         if run_id is not None:
             await self._settle(run_id, ActivityState.COMPLETED)
         return None
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        """Pass the call through untouched on a synchronous run.
+
+        The lifecycle hooks above may no-op because nothing downstream needs
+        their return value. A *wrapper* may not: returning ``None`` here would
+        drop the model call itself. Emitting no activity is the cost of a sync
+        run; swallowing the run is not.
+        """
+        return handler(request)
+
+    @override
+    def wrap_tool_call(
+        self,
+        request: Any,
+        handler: Callable[[Any], ToolMessage | Command],
+    ) -> ToolMessage | Command:
+        """Same rule as ``wrap_model_call``: observe nothing, block nothing."""
+        return handler(request)
 
     @override
     async def awrap_model_call(

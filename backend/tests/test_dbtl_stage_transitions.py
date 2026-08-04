@@ -371,6 +371,16 @@ async def test_test_assessment_appends_a_test_edge_with_the_recommended_route(tm
         code_revision="git:1234567",
         config_revision="config:sha256:def",
         environment={"python": "3.12", "platform": "linux"},
+        rerun_spec={
+            "version": 1,
+            "entry_point": "/mnt/user-data/build.py",
+            "command": "python build.py",
+            "seed": "",
+            "inputs": ["/mnt/user-data/reconciliation.json"],
+            "environment": {"python": "3.12"},
+            "configuration": [],
+            "expected_outputs": ["/mnt/user-data/outputs/model.bin"],
+        },
         input_artifacts=["artifact://approved-reconciliation"],
         output_artifacts=[{"uri": "/mnt/user-data/outputs/model.bin", "content_hash": HASH_B, "revision": 1}],
         deviations=[],
@@ -421,6 +431,16 @@ async def test_return_to_design_records_revisit_and_invalidates_forward_stage_st
         code_revision="git:1234567",
         config_revision="config:sha256:def",
         environment={"python": "3.12", "platform": "linux"},
+        rerun_spec={
+            "version": 1,
+            "entry_point": "/mnt/user-data/build.py",
+            "command": "python build.py",
+            "seed": "",
+            "inputs": ["/mnt/user-data/reconciliation.json"],
+            "environment": {"python": "3.12"},
+            "configuration": [],
+            "expected_outputs": ["/mnt/user-data/outputs/model.bin"],
+        },
         input_artifacts=["artifact://approved-reconciliation"],
         output_artifacts=[
             {

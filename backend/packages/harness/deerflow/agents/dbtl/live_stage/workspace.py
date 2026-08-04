@@ -203,6 +203,90 @@ def workspace_relative_path(reference: str, *, project_root: str) -> tuple[str, 
     return normalized, candidate
 
 
+def verified_workspace_files(
+    reference: str,
+    *,
+    project_root: str,
+    containment_reference: str | None = None,
+    max_files: int = 5_000,
+) -> tuple[tuple[str, Path], ...]:
+    """Resolve one file or expand one directory without following symlinks.
+
+    This is the shared filesystem half of Build's workspace verifier. Inputs
+    and outputs may apply different provenance rules after resolution, but they
+    must agree on what a contained regular file is. Returned paths are ordered
+    by project-relative POSIX name so directory publication is deterministic.
+
+    ``containment_reference`` narrows the accepted tree further, for example to
+    one stage worker's isolated write grant. Both references remain untrusted
+    until their lexical paths and every component have been checked.
+    """
+
+    if max_files < 1:
+        raise ValueError("workspace file limit must be positive")
+
+    root = Path(project_root).expanduser().resolve()
+    lexical = workspace_lexical_path(reference, project_root=project_root)
+    if lexical is None:
+        raise ValueError("reference is outside the project workspace")
+    _relative, candidate = lexical
+
+    containment = root
+    if containment_reference is not None:
+        contained = workspace_lexical_path(containment_reference, project_root=project_root)
+        if contained is None:
+            raise ValueError("containment root is outside the project workspace")
+        containment = contained[1]
+
+    try:
+        containment.relative_to(root)
+        candidate.relative_to(containment)
+    except ValueError:
+        raise ValueError("reference is outside the allowed workspace") from None
+
+    def resolve_without_symlinks(path: Path, *, lexical_root: Path, resolved_root: Path) -> Path:
+        try:
+            relative_path = path.relative_to(lexical_root)
+        except ValueError:
+            raise ValueError("reference is outside the allowed workspace") from None
+        cursor = lexical_root
+        if cursor.is_symlink():
+            raise ValueError("workspace path contains a symlink")
+        for part in relative_path.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise ValueError("workspace path contains a symlink")
+        resolved = path.resolve(strict=True)
+        try:
+            resolved.relative_to(resolved_root)
+        except ValueError:
+            raise ValueError("reference resolves outside the allowed workspace") from None
+        return resolved
+
+    # Check the containment path from the resolved project root before using it
+    # as the root for the candidate check. A symlinked outputs/ directory is not
+    # made trustworthy merely because it resolves back inside the project.
+    containment_host = resolve_without_symlinks(containment, lexical_root=root, resolved_root=root)
+    source = resolve_without_symlinks(candidate, lexical_root=containment, resolved_root=containment_host)
+
+    if source.is_file():
+        return ((source.relative_to(root).as_posix(), source),)
+    if not source.is_dir():
+        raise ValueError("reference is not a regular file or directory")
+
+    files: list[tuple[str, Path]] = []
+    for child in sorted(source.rglob("*"), key=lambda item: item.as_posix()):
+        resolved = resolve_without_symlinks(child, lexical_root=source, resolved_root=source)
+        if resolved.is_dir():
+            continue
+        if not resolved.is_file():
+            raise ValueError("workspace directory contains a non-regular file")
+        if len(files) >= max_files:
+            raise ValueError(f"workspace directory exceeds the {max_files}-file limit")
+        files.append((resolved.relative_to(root).as_posix(), resolved))
+    return tuple(files)
+
+
 def read_workspace_text(
     reference: str,
     *,

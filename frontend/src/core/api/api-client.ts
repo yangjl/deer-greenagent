@@ -11,7 +11,7 @@ import {
 } from "../threads/static-demo";
 import type { AgentThreadState } from "../threads/types";
 
-import { isStateChangingMethod, readCsrfCookie } from "./fetcher";
+import { ensureCsrfCookie, isStateChangingMethod } from "./fetcher";
 import { sanitizeRunStreamOptions } from "./stream-mode";
 
 /**
@@ -22,14 +22,17 @@ import { sanitizeRunStreamOptions } from "./stream-mode";
  * ``defaultHeaders`` at construction) handles login / logout / password
  * change cookie rotation transparently. Both the ``/api/langgraph/*`` SDK
  * path and the direct REST endpoints in ``fetcher.ts:fetchWithAuth``
- * share :func:`readCsrfCookie` and :const:`STATE_CHANGING_METHODS` so
- * the contract stays in lockstep.
+ * share :func:`ensureCsrfCookie` and :const:`STATE_CHANGING_METHODS` so
+ * recovery and header injection stay in lockstep.
  */
-function injectCsrfHeader(_url: URL, init: RequestInit): RequestInit {
+async function injectCsrfHeader(
+  _url: URL,
+  init: RequestInit,
+): Promise<RequestInit> {
   if (!isStateChangingMethod(init.method ?? "GET")) {
     return init;
   }
-  const token = readCsrfCookie();
+  const token = await ensureCsrfCookie();
   if (!token) return init;
   const headers = new Headers(init.headers);
   if (!headers.has("X-CSRF-Token")) {

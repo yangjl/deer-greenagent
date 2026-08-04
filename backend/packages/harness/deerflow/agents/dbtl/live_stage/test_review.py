@@ -8,9 +8,11 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.dbtl.live_stage.test_rerun import TestRerunRecord, TestRerunStatus, parse_test_rerun_record
 from deerflow.dbtl.cycle_state import StageStatus
 from deerflow.dbtl.reconciliation_policy import reconciliation_required
 from deerflow.dbtl.stage_meetings import review_meeting_recorded, surface_meeting_gate
+from deerflow.dbtl.stage_spec import StageSpecNotFound, resolve_spec_by_key
 from deerflow.dbtl.validity import (
     DEFAULT_VALIDITY_PACK,
     CheckStatus,
@@ -26,6 +28,7 @@ def validated_test_assessment(
     results: Sequence[StageWorkerResult],
     *,
     build_test: Mapping[str, Any] | None,
+    rerun: TestRerunRecord | None = None,
 ) -> dict[str, Any] | None:
     """Return the first complete Test assessment under the pinned pack.
 
@@ -49,6 +52,22 @@ def validated_test_assessment(
         try:
             metrics = [HeadlineMetric(**dict(item)) for item in raw_metrics if isinstance(item, Mapping)]
             checks = [ValidityCheck(**dict(item)) for item in raw_checks if isinstance(item, Mapping)]
+            if rerun is not None:
+                checks = [item for item in checks if item.check is not ValidityCheckName.REPRODUCIBILITY]
+                rerun_status = {
+                    TestRerunStatus.PASSED: CheckStatus.PASSED,
+                    TestRerunStatus.FAILED: CheckStatus.FAILED,
+                    TestRerunStatus.MISSING: CheckStatus.MISSING,
+                }[rerun.status]
+                rerun_evidence = tuple(str(item.get("path") or "") for item in (*rerun.logs, *rerun.outputs) if str(item.get("path") or ""))
+                checks.append(
+                    ValidityCheck(
+                        check=ValidityCheckName.REPRODUCIBILITY,
+                        status=rerun_status,
+                        detail=rerun.reason,
+                        evidence_refs=rerun_evidence,
+                    )
+                )
             if not reconciliation_required():
                 checks = [item for item in checks if item.check is not ValidityCheckName.RECONCILED_INPUTS]
                 if lineage:
@@ -98,9 +117,15 @@ class TestReviewService:
             return None
         stored = await self.repo.list_worker_runs(cycle_id, project_id=project_id, stage="test")
         parsed: list[StageWorkerResult] = []
+        rerun: TestRerunRecord | None = None
         for item in stored:
             raw = item.get("result") if isinstance(item, Mapping) else None
-            if not isinstance(raw, Mapping) or "validity_assessment" not in dict(raw.get("provenance") or {}):
+            if not isinstance(raw, Mapping):
+                continue
+            provenance = dict(raw.get("provenance") or {})
+            if "rerun_execution" in provenance and str(item.get("unit_id") or "").endswith("-build-rerun"):
+                rerun = rerun or parse_test_rerun_record(provenance.get("rerun_execution"))
+            if "validity_assessment" not in provenance:
                 continue
             try:
                 parsed.append(
@@ -114,7 +139,20 @@ class TestReviewService:
             except WorkerResultRejected:
                 continue
         build_test = await self.repo.build_test_view(cycle_id, project_id=project_id)
-        assessment = validated_test_assessment(parsed, build_test=build_test)
+        stage_spec_key = str(test.get("stage_spec_key") or "")
+        rerun_required = False
+        if stage_spec_key:
+            try:
+                rerun_required = "server_verified_build_rerun" in resolve_spec_by_key(stage_spec_key).validity_gates
+            except StageSpecNotFound:
+                return None
+        if rerun_required and rerun is None:
+            rerun = TestRerunRecord(
+                status=TestRerunStatus.MISSING,
+                command="",
+                reason="The current Test contract has no durable server-owned Build rerun record.",
+            )
+        assessment = validated_test_assessment(parsed, build_test=build_test, rerun=rerun)
         if assessment is None:
             return None
         artifacts = list(cycle.get("artifacts") or [])

@@ -143,6 +143,14 @@ def _setup_executor_classes():
         sys.modules["deerflow.subagents.executor"] = original_executor
     elif "deerflow.subagents.executor" in sys.modules:
         del sys.modules["deerflow.subagents.executor"]
+    # Importing the real child module above also stamps it on the persistent
+    # ``deerflow.subagents`` package object. Restore that attribute alongside
+    # ``sys.modules`` or later test files can patch one module object while an
+    # in-function import resolves the other.
+    _clear_stale_executor_package_attr()
+    subagents_pkg = sys.modules.get("deerflow.subagents")
+    if original_executor is not None and subagents_pkg is not None:
+        setattr(subagents_pkg, "executor", original_executor)
     if original_tool_search is not None:
         sys.modules["deerflow.tools.builtins.tool_search"] = original_tool_search
     else:

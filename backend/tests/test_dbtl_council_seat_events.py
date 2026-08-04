@@ -102,6 +102,34 @@ class TestSeatDescription:
 
 
 class TestTerminalSeatEvent:
+    def test_a_forced_build_phase_fails_the_live_lane(self):
+        event = _terminal_seat_event(
+            _unit(role="phase", capability="software_and_workflow_engineering"),
+            DispatchOutcome(
+                unit_id="dbtl-build-phase",
+                text=json.dumps(
+                    {
+                        "status": "completed",
+                        "summary": "Partial implementation.",
+                        "artifact_refs": [],
+                        "claims": [],
+                        "evidence_refs": [],
+                        "quality_checks": [{"name": "phase_done_condition", "passed": True, "detail": ""}],
+                        "limitations": [],
+                        "recommended_next_actions": [],
+                        "provenance": {},
+                    }
+                ),
+                forced_finalization=True,
+            ),
+            model="gpt-5.6-sol",
+            meeting_stage=None,
+            stage="build",
+        )
+
+        assert event["type"] == "task_failed"
+        assert "forcibly finalized" in event["error"]
+
     def test_a_build_planner_uses_the_plan_contract_in_the_live_lane(self):
         event = _terminal_seat_event(
             _unit(role="planner", capability="software_engineering", output_contract=BUILD_PLAN_OUTPUT),
@@ -379,19 +407,71 @@ class TestTerminalSeatEvent:
         assert json.loads(event["result"])["claims"] == ["Validation families must remain held out."]
 
     def test_prose_output_fails_the_live_lane_instead_of_claiming_completion(self):
+        """An unparseable answer inside budget is a contract failure and says so."""
         event = _terminal_seat_event(
             _unit(),
             DispatchOutcome(
                 unit_id="dbtl-abc-1-experimental_design",
-                text="I investigated the design but ran out of time.",
-                stop_reason="turn_capped",
+                text="I investigated the design but never wrote the result.",
             ),
             model="gpt-5.6-sol",
         )
 
         assert event["type"] == "task_failed"
-        assert event["stop_reason"] == "turn_capped"
         assert "returned prose" in event["error"]
+
+    def test_a_capped_worker_is_blamed_on_its_cap_rather_than_on_the_prose_it_left(self):
+        """The cap is the cause; prose is what survives it.
+
+        A worker stopped at its budget did not *choose* to answer in prose — it
+        was cut off before it could write its structured result. Reporting the
+        shape of the fragment sends a reader to fix the worker's formatting when
+        the actual lever is the budget, and hides that ~125K tokens of real work
+        were staged and discarded.
+        """
+        event = _terminal_seat_event(
+            _unit(),
+            DispatchOutcome(
+                unit_id="dbtl-abc-1-experimental_design",
+                text="I simulated the population and was still writing up when",
+                stop_reason="token_capped",
+            ),
+            model="gpt-5.6-sol",
+        )
+
+        assert event["type"] == "task_failed"
+        assert event["stop_reason"] == "token_capped"
+        assert "token budget" in event["error"]
+        assert "structured result" in event["error"]
+        assert "returned prose" not in event["error"]
+
+    def test_a_capped_structured_result_reports_the_guardrail_not_its_success_like_summary(self):
+        event = _terminal_seat_event(
+            _unit(completion_check="phase_done_condition"),
+            DispatchOutcome(
+                unit_id="dbtl-abc-1-experimental-design",
+                text=json.dumps(
+                    {
+                        "status": "completed",
+                        "summary": "Implemented and verified every requested output.",
+                        "artifact_refs": [],
+                        "claims": [],
+                        "evidence_refs": [],
+                        "limitations": [],
+                        "quality_checks": [],
+                        "recommended_next_actions": [],
+                        "provenance": {},
+                    }
+                ),
+                stop_reason="token_capped",
+            ),
+            model="gpt-5.6-sol",
+        )
+
+        assert event["type"] == "task_failed"
+        assert event["stop_reason"] == "token_capped"
+        assert "token budget" in event["error"]
+        assert "Implemented and verified" not in event["error"]
 
 
 class TestTerminalSeatEventCarriesItsActivityLineage:

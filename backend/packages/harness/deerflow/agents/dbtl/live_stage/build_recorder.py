@@ -182,9 +182,11 @@ class BuildStepRecorder:
                     capability=str(overrides.get("capability") or ""),
                     agent_name=str(overrides.get("agent_name") or ""),
                     via_generalist=bool(overrides.get("via_generalist")),
+                    skill_bindings=tuple(str(item) for item in overrides.get("skill_bindings") or ()),
                 )
             )
         digest = input_digest(step, predecessors=predecessors_digests, material=material)
+        repository_overrides = {key: value for key, value in overrides.items() if key != "skill_bindings"}
         try:
             payload, dispatched = await self._repo.open_step_attempt(
                 project_id=self._project_id,
@@ -195,14 +197,14 @@ class BuildStepRecorder:
                 input_digest=digest,
                 predecessor_step_run_ids=list(predecessor_ids),
                 parent_run_id=self._parent_run_id or None,
-                **overrides,
+                **repository_overrides,
             )
         except Exception as exc:  # noqa: BLE001 - translated to a bounded workflow refusal
             self._raise_recording_error(step, exc)
         bindings = {
             "predecessor_digests": tuple(predecessors_digests),
             "predecessor_ids": tuple(predecessor_ids),
-            "open_overrides": dict(overrides),
+            "open_overrides": dict(repository_overrides),
         }
         if not dispatched:
             # Already committed against this exact material. Advance the chain

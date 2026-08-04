@@ -565,7 +565,7 @@ FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWA
 
 CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (comma-separated exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned. Those clients also need `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): run-creating routes return the run's id in `Content-Location`, which is not CORS-safelisted, so JS cannot read it unless it is exposed. The LangGraph SDK resolves run metadata from that header alone — withhold it and `useStream`'s `onCreated` never fires, a new thread keeps its placeholder route, and every action gated on an established thread (edit, regenerate, branch) stays hidden until the page is reloaded. Same-origin nginx deployments never hit this because CORS does not apply.
 
-Browser auth sessions are owned by `app.gateway.auth.session_cookie`. Login accepts a `remember_me` form flag, but the Gateway never stores passwords. `SessionCookiePolicy` persists the `HttpOnly access_token` cookie only for HTTPS/trusted-forwarded HTTPS, direct-host localhost HTTP, or explicit operator opt-in for insecure persistence; public HTTP sandbox URLs degrade to session cookies. Session-creating handlers stamp the final `max_age` on `request.state`, and CSRF cookie creation mirrors that value so the double-submit cookie pair expires together, including explicit re-issue after password changes and OIDC callbacks. A small `HttpOnly` preference cookie preserves the user's remember choice across token re-issue paths. Logout clears all auth cookies and suppresses CSRF re-issue on the logout response.
+Browser auth sessions are owned by `app.gateway.auth.session_cookie`. Login accepts a `remember_me` form flag, but the Gateway never stores passwords. `SessionCookiePolicy` persists the `HttpOnly access_token` cookie only for HTTPS/trusted-forwarded HTTPS, direct-host localhost HTTP, or explicit operator opt-in for insecure persistence; public HTTP sandbox URLs degrade to session cookies. Session-creating handlers stamp the final `max_age` on `request.state`, and CSRF cookie creation mirrors that value so the double-submit cookie pair expires together, including explicit re-issue after password changes and OIDC callbacks. If a browser nevertheless retains the access cookie while evicting its JS-readable CSRF partner, an authenticated `GET /api/v1/auth/me` restores only the missing CSRF cookie using the preserved session preference and current deployment policy; it never rotates an existing token because concurrent session checks must not invalidate an in-flight mutation header. A small `HttpOnly` preference cookie preserves the user's remember choice across token re-issue paths. Logout clears all auth cookies and suppresses CSRF re-issue on the logout response.
 
 Localhost persistence deliberately reads the direct request `Host` and ignores `Forwarded` / `X-Forwarded-Host`. Scheme and auth-origin reconstruction still consume forwarding headers. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header, so the outer trusted proxy must replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 
@@ -732,7 +732,22 @@ vocabulary distinguishes; a per-tool vocabulary would leak tool names into a
 projection whose whole safety argument is that it carries none. Handles are keyed
 by `run_id` rather than held on the instance, because the middleware is built
 once per agent and the agent is cached, so an instance attribute would let one
-run close another's row. A handle held across hooks also resolves the stream
+run close another's row.
+
+**"Only the async hooks exist" has to be spelled, not inherited.** LangGraph
+decides a node's synchronous half by asking whether the subclass *overrode* the
+hook — not whether the attribute is callable, because `AgentMiddleware` always
+supplies one. An async-only middleware therefore raises *"No synchronous
+function provided to `abefore_agent`"* the moment a sync graph invocation
+reaches it, and this middleware is appended to the lead chain unconditionally.
+The embedded `DeerFlowClient.stream()`, the TUI, and the CLI all invoke
+synchronously, so the observability feature took down the entire embedded path —
+`tests/test_client_e2e.py` failed eleven ways with a `TypeError` naming a hook
+nobody had called. The sync hooks are now overridden explicitly: `before_agent`
+and `after_agent` no-op (emitting nothing is the documented fallback), while
+`wrap_model_call` and `wrap_tool_call` **must still call their handler** —
+a wrapper that returns `None` drops the model call itself. Observing nothing is
+the cost of a synchronous run; swallowing the run is not. A handle held across hooks also resolves the stream
 writer **per emit** rather than capturing one: a writer belongs to the node that
 asked for it, and a captured one is bound to a task that has already finished by
 the time `aafter_agent` runs. Only the async hooks exist — every surface this
@@ -2451,6 +2466,51 @@ fallback. Use the effective per-agent value after clamping, not the possibly
 higher stage budget, or a configured lower agent limit will abort before the
 deadline fires.
 
+**Turns are not the only budget a worker can run out of, and for Build they are
+not the binding one.** A Build worker gets 450 turns against 120K tokens, so the
+tokens go first and the turn deadline never fires. `TokenBudgetMiddleware` does
+hard-stop at the ceiling, but it strips tool calls from *the message the model
+just wrote* — mid-loop, that is prose — and records `token_capped`, so even a
+good answer is discarded as untrustworthy. The observed failure was a phase that
+spent 125.5K tokens and was reported as having "returned prose instead of a
+structured result": it had been cut off, not badly formatted. The middleware
+therefore takes an optional `max_tokens` and **warns without ever forcing** on
+that axis. Forcing would duplicate a working hard stop and relabel a worker that
+blew through its budget as one that met a deadline; the turn axis still forces
+because `recursion_limit` *raises* and nothing downstream can recover an answer
+from that. The warning fires at `DEFAULT_TOKEN_RESERVE_FRACTION` (25% held back
+— one more full call must re-send the conversation *and* produce the result, so
+a smaller reserve warns a worker that can no longer afford to answer) and
+removes tools, exactly as the turn axis does. There is **one** warning per run,
+on whichever axis binds first: the instruction and the tool removal are
+identical either way, so a second notice spends budget to change nothing on a
+run that is short of budget by definition.
+
+`_token_usage.accumulate_usage` is shared by the deadline and
+`TokenBudgetMiddleware` on purpose. A deadline that counted differently from the
+guard it front-runs would fire at the wrong moment and the disagreement would be
+invisible, because both numbers look plausible in isolation. The accounting is
+delta-per-message rather than a sum over history, because `TokenUsageMiddleware`
+rewrites a message's `usage_metadata` retroactively once its subagents report.
+`LiveStageAdapter` passes `max_tokens=_token_limit_for_worker(unit,
+dispatch_budget)` — the same resolver the executor's own token budget uses,
+pinned by a test that counts both call sites — and `None` (metered-only
+execution) leaves the axis inert.
+
+**A cap must be reported as a cap.** The deadline only helps if the failure it
+prevents is named correctly when it does happen. `_terminal_seat_event` checked
+`parse_worker_result` *before* the capped branch, so the capped message could
+only ever reach a worker whose output already parsed, and `collect_results` —
+the durable record — had the identical ordering. A capped worker's truncated
+prose was therefore reported as a contract violation in both the live lane and
+the audit trail, sending a reader to fix formatting when the budget was the only
+lever. Both now resolve through `stage_runner.worker_rejection_failure`; an
+unparseable answer *inside* budget still names the contract, because the two
+need opposite fixes. Separately, a Build that refuses for a **stage-level**
+reason — every worker healthy, no structured rerun record — used to print "Why
+each worker did not count:" followed by nothing; `MISSING_STRUCTURED_RERUN_REASON`
+is stated once and reaches both the durable workflow step and the note.
+
 **A turn is not two super-steps, and reading it that way made the deadline
 useless.** `recursion_limit` counts super-steps, and LangGraph gives *every*
 middleware `before_model`/`after_model` hook its own graph node — so a turn is
@@ -3651,6 +3711,122 @@ same switch:
   input between attempts reopens that phase and every dependent phase instead
   of attributing old work to new data.
 
+  A worker may declare either a regular file or a directory as an output.
+  `live_stage.workspace.verified_workspace_files` is the shared containment
+  rule for Build inputs and outputs: it refuses symlinks and non-regular files,
+  constrains output expansion to that worker's isolated grant, and returns a
+  stable project-relative file order. The publisher expands a directory into
+  individually hashed, content-addressed artifacts, flattens the worker's
+  durable `artifact_refs`, and remaps directory/file evidence plus figure paths
+  to the governed URIs. An empty directory is not evidence and fails the phase.
+  Keep future workspace verification on this resolver instead of adding a
+  second directory walker with different containment semantics. Tests:
+  `test_dbtl_live_stage_execution.py` and
+  `test_dbtl_build_workflow_execution.py::TestABuildStopsBeingOneOpaqueWorker`.
+
+  Build v8 introduced the `structured_rerun_spec` gate, parsed by
+  `dbtl.build_execution`, remapped
+  from the worker grant to governed published URIs, and stored on the existing
+  `DbtlBuildLineageRow`; do not introduce a parallel execution record. The
+  lineage writer enforces the pinned spec, so v8+ cannot persist without a valid
+  entry point, exact command, seed, declared inputs, non-empty environment,
+  configuration list, and expected outputs. Compatible multi-phase records
+  merge bound inputs/outputs, while conflicting commands fail closed.
+  Historical v4-v7 rows retain an empty object and project as
+  `rerun_unverified`. Human-facing rerun prose is derived from the typed command
+  and is never execution authority. Tests: `test_dbtl_build_summary_and_deck.py`,
+  `test_dbtl_build_test_repository.py`, and
+  `test_dbtl_build_workflow_execution.py`.
+
+  Build v9 introduced the
+  `server_verified_phase_manifest` gate reuses the per-phase publisher,
+  `phase_done_condition`, `BuildStepRecorder`, and phase output digest. After
+  publication remaps worker paths to individually hashed governed files, the
+  server requires a version-1 manifest whose `entry_point` is one exact
+  published file, whose `declared_outputs` name the complete published set,
+  and whose `completion_condition` is byte-for-byte the condition in the
+  recorded plan. A directory is never guessed to be an entry point, even when
+  it contains one file. Replay rechecks the manifest, current bytes, input
+  bindings, and completion marker before reusing a phase. A failure after the
+  model's typed response emits a correcting `task_failed` event and persists a
+  failed worker result, so the live lane and durable audit do not contradict
+  the failed workflow row. Historical v1-v8 attempts keep their pinned
+  contracts. Tests: `test_dbtl_build_workflow_execution.py` and
+  `test_dbtl_stage_contracts.py`.
+
+  Build phase workers reuse `build_subagent_runtime_middlewares`; do not copy
+  the lead-agent chain. That already supplies read-before-write, normalized
+  recoverable tool errors, progress, sandbox/output policy, durable context,
+  summarization without memory flush, and the token/loop guards while keeping
+  delegation, uploads, memory, chat controls, and title generation absent.
+  `BuildPhaseCorrectionMiddleware` adds one same-run correction only after an
+  explicit failed implementation check. It runs from `after_agent`, after the
+  native model guards have recorded their verdict, retains the failed AI report
+  so deadline accounting cannot refund the call, and refuses to jump after a
+  token/loop/safety stop or forced finalization. Its one-time graph nodes are
+  reserved as deadline headroom. A forced-finalized Build phase is a typed
+  failure in both the live task event and `collect_results`; older stage
+  contracts retain their historical limitation behavior. Tests:
+  `test_build_phase_correction_middleware.py`,
+  `test_finalization_deadline_middleware.py`, and
+  `test_dbtl_council_seat_events.py`.
+
+  Build v10 introduced `BuildPhase.skills` as the complete
+  per-phase allowlist: the planner may name at most eight enabled skill names,
+  the adapter resolves the same per-user registry `SubagentExecutor` uses,
+  hashes each winning `SKILL.md`, binds `skill:<name>:sha256:<digest>` into the
+  phase input material, and sets the child config's `skills` list (empty means
+  none). The live registry is re-resolved after execution; any missing or
+  changed skill fails the durable phase and emits a correcting live failure, so
+  work cannot commit against a revision it did not finish under. Do not add a
+  parallel skill loader or eagerly union passive skill policies.
+
+  V10 also requires phase-manifest v2. `declared_inputs` contains only exact
+  workspace files consumed to implement that phase. `_build_input_artifacts`
+  binds and re-hashes those files (plus durable datasets) and deliberately
+  ignores `inputs_examined` and evidence-reference fallbacks for v10, so files
+  read only for discovery/orientation do not invalidate execution. V9 keeps
+  manifest v1 and the historical broad provenance fallback. Tests:
+  `test_dbtl_build_plan.py`, `test_dbtl_build_workflow.py`,
+  `test_dbtl_build_workflow_execution.py`, and
+  `test_dbtl_live_stage_execution.py`.
+
+  Current Build is `generic:build:v11`. It keeps v10's inputs, capabilities,
+  validity gates, and enforced guard semantics, while raising only the
+  per-worker token ceiling from 120,000 to 500,000. V10 stays immutable and
+  resolvable, so its pinned attempts retain the budget under which they began.
+
+  `dbtl.build_worker_contract` is the rollout boundary for new, unpinned
+  phased Build attempts. `hardened_v11` is the default; `hardened_v10` and
+  `legacy_v9` are bounded rollbacks while matched-checkpoint evaluation
+  continues. A recorded
+  `stage_spec_key` always wins over the setting, and repository pinning still
+  arbitrates concurrent starters, so changing the configuration cannot rewrite
+  an active attempt's contract. Keep v9's parser and broad provenance fallback
+  until telemetry supports retiring them; do not add a second execution or
+  persistence path for rollback. Tests: `test_dbtl_config.py` and
+  `test_dbtl_build_workflow_execution.py`.
+
+  Current Test execution is pinned to `generic:test:v4`. The focused
+  `live_stage.test_rerun` module is the sole new owner for the rerun protocol;
+  it exists to keep command execution and byte verification out of the already
+  broad adapter while reusing `WorkUnit`, the native sandbox `bash_tool`, the
+  existing per-unit stage grant, `StageWorkerResult`, and the validity pack.
+  Its model-visible tool has no arguments and is return-direct: the exact
+  lineage command is held in server-only `WorkUnit.tool_contract`, may run once,
+  and writes fixed stdout/stderr/exit-status receipts. The wrapper caps every
+  created file at 512 MiB; verification accepts at most 5 MiB per log, 512 MiB
+  per output, 2 GiB total outputs, and 5,000 fresh files. Expected outputs must
+  have unique, non-reserved filenames and match the approved Build hashes.
+  Test overrides the worker's `reproducibility` check with this record; a
+  missing historical record becomes `missing`, while nonzero exit, changed
+  input/output, timeout/cap, containment failure, or ambiguous output becomes
+  `failed`. `TestReviewService` recovers only the server-owned rerun unit id and
+  fails closed if a v4 attempt has no such row. V1-v3 remain resolvable and do
+  not retroactively acquire the new execution contract. Tests:
+  `test_dbtl_test_rerun.py`, `test_dbtl_test_chat_review.py`, and
+  `test_dbtl_live_stage_execution.py`.
+
   **What the run itself published is an input like any other.** A phase's
   declared inputs were judged only against the pre-run workspace snapshot, and
   that snapshot cannot contain an earlier phase's output by construction — the
@@ -4133,7 +4309,9 @@ ToolMessage artifact. Retained cards before that input are never re-journaled.
 Live council terminal events report the validated stage contract, not merely a
 stopped child graph. Prose, malformed structured output, blocked/failed output,
 and unusable capped output emit `task_failed`, matching
-`dbtl_stage_worker_runs`; only contract-valid completed or needs-input results
+`dbtl_stage_worker_runs`; a capped failure names the guardrail and keeps the
+worker's partial success-like summary out of the error channel. Only
+contract-valid completed or needs-input results
 emit `task_completed`. The automatic kickoff is a hidden
 `dbtl_design_kickoff` HumanMessage so its owner answers reach
 `_latest_cycle_request_text` without appearing as user-authored chat.

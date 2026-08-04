@@ -31,7 +31,12 @@ from app.gateway.auth.oidc_state import (
     get_state_cookie,
     set_state_cookie,
 )
-from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME, SESSION_PERSISTENCE_COOKIE_NAME, set_session_cookie
+from app.gateway.auth.session_cookie import (
+    ACCESS_TOKEN_COOKIE_NAME,
+    SESSION_PERSISTENCE_COOKIE_NAME,
+    resolve_session_cookie_policy,
+    set_session_cookie,
+)
 from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_csrf_cookie_settings, generate_csrf_token, is_secure_request
@@ -438,9 +443,18 @@ async def change_password(request: Request, response: Response, body: ChangePass
 
 
 @router.get("/me", response_model=UserResponse)
-async def get_me(request: Request):
-    """Get current authenticated user info."""
+async def get_me(request: Request, response: Response):
+    """Get current authenticated user info and heal a split cookie session."""
     user = await get_current_user_from_request(request)
+
+    # A browser can retain the persistent HttpOnly access cookie while dropping
+    # the JS-readable CSRF cookie (for example after a PWA/browser restart).
+    # Re-issue only the missing half of an otherwise authenticated cookie
+    # session.  Do not rotate an existing token: concurrent /me requests could
+    # otherwise leave an in-flight mutation carrying the previous header value.
+    if request.cookies.get(ACCESS_TOKEN_COOKIE_NAME) and not request.cookies.get(CSRF_COOKIE_NAME):
+        _set_csrf_cookie(response, request, recover_session_policy=True)
+
     return UserResponse(
         id=str(user.id),
         email=user.email,
@@ -584,10 +598,14 @@ async def close_oidc_service() -> None:
         delattr(_get_oidc_service, "_instance")
 
 
-def _set_csrf_cookie(response: Response, request: Request) -> None:
+def _set_csrf_cookie(response: Response, request: Request, *, recover_session_policy: bool = False) -> None:
     """Set the CSRF double-submit cookie (needed for GET-based OIDC callback)."""
     csrf_token = generate_csrf_token()
-    secure, max_age = auth_csrf_cookie_settings(request)
+    if recover_session_policy:
+        policy = resolve_session_cookie_policy(request)
+        secure, max_age = policy.secure, policy.max_age
+    else:
+        secure, max_age = auth_csrf_cookie_settings(request)
     response.set_cookie(
         key=CSRF_COOKIE_NAME,
         value=csrf_token,

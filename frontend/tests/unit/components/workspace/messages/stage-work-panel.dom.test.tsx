@@ -16,7 +16,8 @@ rs.mock("@/components/workspace/messages/subtask-card", () => ({
 
 import { StageWorkPanel } from "@/components/workspace/messages/stage-work-panel";
 import { fetchStageWorkers, StageWorkerFetchError } from "@/core/tasks/api";
-import { SubtasksProvider } from "@/core/tasks/context";
+import { SubtaskContext, SubtasksProvider } from "@/core/tasks/context";
+import type { Subtask } from "@/core/tasks/types";
 
 const mockedFetchStageWorkers = rs.mocked(fetchStageWorkers);
 
@@ -38,6 +39,28 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function SeededTasks({
+  tasks,
+  children,
+}: {
+  tasks: Record<string, Subtask>;
+  children: React.ReactNode;
+}) {
+  return (
+    <SubtaskContext.Provider
+      value={{
+        tasks,
+        tasksRef: { current: tasks },
+        setTasks: () => {
+          /* static test fixture */
+        },
+      }}
+    >
+      {children}
+    </SubtaskContext.Provider>
+  );
+}
+
 afterEach(() => {
   cleanup();
   mockedFetchStageWorkers.mockReset();
@@ -55,7 +78,9 @@ describe("StageWorkPanel durable hydration", () => {
         <StageWorkPanel threadId="thread-1" runId="run-1" isLoading={false} />
       </SubtasksProvider>,
     );
-    await waitFor(() => expect(mockedFetchStageWorkers).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(mockedFetchStageWorkers).toHaveBeenCalledTimes(1),
+    );
     expect(
       await screen.findByText("worker-retried", {}, { timeout: 2_500 }),
     ).toBeTruthy();
@@ -72,7 +97,9 @@ describe("StageWorkPanel durable hydration", () => {
         <StageWorkPanel threadId="thread-1" runId="run-1" isLoading={false} />
       </SubtasksProvider>,
     );
-    await waitFor(() => expect(mockedFetchStageWorkers).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(mockedFetchStageWorkers).toHaveBeenCalledTimes(1),
+    );
     await act(
       () => new Promise((resolve) => globalThis.setTimeout(resolve, 700)),
     );
@@ -101,24 +128,37 @@ describe("StageWorkPanel durable hydration", () => {
   });
 
   it("ignores a hydration result from the previous thread epoch", async () => {
-    const oldRequest = deferred<Awaited<ReturnType<typeof fetchStageWorkers>>>();
+    const oldRequest =
+      deferred<Awaited<ReturnType<typeof fetchStageWorkers>>>();
     mockedFetchStageWorkers
       .mockReturnValueOnce(oldRequest.promise)
       .mockResolvedValueOnce([worker("worker-new", "run-new")]);
 
     const view = render(
       <SubtasksProvider>
-        <StageWorkPanel threadId="thread-old" runId="run-old" isLoading={false} />
+        <StageWorkPanel
+          threadId="thread-old"
+          runId="run-old"
+          isLoading={false}
+        />
       </SubtasksProvider>,
     );
-    await waitFor(() => expect(mockedFetchStageWorkers).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(mockedFetchStageWorkers).toHaveBeenCalledTimes(1),
+    );
 
     view.rerender(
       <SubtasksProvider>
-        <StageWorkPanel threadId="thread-new" runId="run-new" isLoading={false} />
+        <StageWorkPanel
+          threadId="thread-new"
+          runId="run-new"
+          isLoading={false}
+        />
       </SubtasksProvider>,
     );
-    await waitFor(() => expect(mockedFetchStageWorkers).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(mockedFetchStageWorkers).toHaveBeenCalledTimes(2),
+    );
     expect(await screen.findByText("worker-new")).toBeTruthy();
 
     oldRequest.resolve([worker("worker-stale", "run-old")]);
@@ -129,7 +169,8 @@ describe("StageWorkPanel durable hydration", () => {
   });
 
   it("rehydrates after a live run cancels an in-flight read in the same epoch", async () => {
-    const staleRequest = deferred<Awaited<ReturnType<typeof fetchStageWorkers>>>();
+    const staleRequest =
+      deferred<Awaited<ReturnType<typeof fetchStageWorkers>>>();
     mockedFetchStageWorkers
       .mockReturnValueOnce(staleRequest.promise)
       .mockResolvedValueOnce([worker("worker-settled", "run-1")]);
@@ -139,7 +180,9 @@ describe("StageWorkPanel durable hydration", () => {
         <StageWorkPanel threadId="thread-1" runId="run-1" isLoading={false} />
       </SubtasksProvider>,
     );
-    await waitFor(() => expect(mockedFetchStageWorkers).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(mockedFetchStageWorkers).toHaveBeenCalledTimes(1),
+    );
 
     view.rerender(
       <SubtasksProvider>
@@ -157,5 +200,55 @@ describe("StageWorkPanel durable hydration", () => {
     expect(await screen.findByText("worker-settled")).toBeTruthy();
     expect(screen.queryByText("worker-stale")).toBeNull();
     expect(mockedFetchStageWorkers).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("StageWorkPanel live run selection", () => {
+  it("follows the streamed worker instead of the previous transcript run", async () => {
+    const oldTask: Subtask = {
+      id: "old-planner",
+      status: "completed",
+      subagent_type: "subagent",
+      description: "Build planner",
+      prompt: "",
+      dbtlStage: "build",
+      runId: "run-old",
+    };
+    const liveTask: Subtask = {
+      id: "live-phase",
+      status: "in_progress",
+      subagent_type: "subagent",
+      description: "Run phase",
+      prompt: "",
+      dbtlStage: "build",
+      runId: "run-live",
+    };
+    const view = render(
+      <SeededTasks tasks={{ old: oldTask, live: liveTask }}>
+        <StageWorkPanel threadId="thread-1" runId="run-old" isLoading />
+      </SeededTasks>,
+    );
+
+    expect(screen.getByText("live-phase")).toBeTruthy();
+    expect(screen.queryByText("old-planner")).toBeNull();
+    await waitFor(() => expect(screen.getByText("live-phase")).toBeTruthy());
+
+    view.rerender(
+      <SeededTasks
+        tasks={{
+          old: oldTask,
+          live: {
+            ...liveTask,
+            status: "failed",
+            error: "Stopped",
+          },
+        }}
+      >
+        <StageWorkPanel threadId="thread-1" runId="run-old" isLoading />
+      </SeededTasks>,
+    );
+
+    expect(screen.getByText("live-phase")).toBeTruthy();
+    expect(screen.queryByText("old-planner")).toBeNull();
   });
 });

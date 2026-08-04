@@ -48,7 +48,12 @@ Design–Build–Test–Learn (DBTL) governance.
   presenting Build work as another Design meeting. A paused Build is shown as
   **Waiting for you** in both the stage row and Build plan, and the Human Input
   Card remains the only control that can resume it. Worker cards render bounded
-  prose while typed result JSON stays available as audit data. If a worker is
+  prose while typed result JSON stays available as audit data. During a live
+  Build, chat follows the current streamed phase rather than the prior planner
+  run, and a terminal phase keeps its bounded progress report visible even
+  while its tool transcript is collapsed. A capped phase names the token, turn,
+  or loop guard that stopped it; partial success-like prose is not presented as
+  the failure reason. If a worker is
   interrupted, DeerFlow releases that run's durable step immediately so Retry
   can continue without waiting for orphan cleanup. A rejected worker result
   leaves later steps visibly waiting and offers Retry/Replan/Restart/Hold; it
@@ -56,11 +61,49 @@ Design–Build–Test–Learn (DBTL) governance.
   package. Build also tolerates descriptive implementation-file labels such as
   `manifest`, `execution_log`, and `test_suite`: project-virtual paths carrying
   those labels are normalized to `workspace_file` before the usual containment,
-  publication, and hashing checks. A Build worker's compact boolean
+  publication, and hashing checks. A Build worker may declare an output
+  directory; DeerFlow expands it into a bounded, stable list of regular files,
+  hashes and publishes each file separately, and refuses empty directories,
+  symlinks, or paths outside that worker's isolated grant. A Build worker's
+  compact boolean
   `quality_checks` map is likewise normalized to named check rows; exact
   `"true"`/`"false"` spellings, path-only artifact objects, identical redundant
   evidence locators, and common Build field names are accepted without changing
-  their meaning. A missing Build status can be recovered only from the
+  their meaning. Current Build attempts also record a typed rerun contract: the
+  entry point, exact command, seed, bound inputs, pinned
+  environment/configuration, and expected outputs. DeerFlow stores it with
+  Build lineage and derives the review instructions from its command; a
+  summarizer cannot replace it. Historical lineage remains readable as
+  `rerun_unverified`, but only a valid typed record satisfies the current Build
+  contract. Each current Build phase also returns a small versioned manifest:
+  one exact entry-point file, the complete declared output set, and the plan's
+  exact completion condition. DeerFlow verifies it only after bounded
+  publication has established containment and hashes, and rechecks it during
+  replay. A missing or changed manifest fails the phase and corrects both its
+  live progress event and durable worker status; worker prose cannot commit it.
+  Build reuses the native subagent read-before-write, normalized tool-error,
+  progress, sandbox, context, summarization, token, and loop middleware. A
+  phase that honestly reports a failed implementation check gets one bounded
+  correction in the same child run, after native guardrails have settled; a
+  cap, timeout, safety stop, loop stop, or forced deadline remains an explicit
+  failed phase and cannot be retried around by that correction.
+  Build v10 also makes each phase's declared skills its complete skill
+  allowlist. DeerFlow resolves those names through the enabled per-user registry,
+  binds each exact `SKILL.md` hash into phase material, and rechecks the hashes
+  before commit. Its v2 phase manifest separately names only workspace inputs
+  actually consumed for implementation; orientation-only reads do not
+  invalidate the phase or enter Build lineage. Build v11 retains those gates
+  and raises only the enforced per-worker token ceiling from 120,000 to
+  500,000. New phased Build attempts use
+  `dbtl.build_worker_contract: hardened_v11`; operators can select
+  `hardened_v10` or `legacy_v9` as bounded rollback paths. Attempts already
+  pinned to a spec keep that spec when the setting changes.
+  Current Test attempts execute that command once in a fresh isolated
+  grant through a server-bound native Bash wrapper. The model cannot choose the
+  command or add tools; DeerFlow reads fixed stdout, stderr, and exit-status
+  receipts, hashes fresh outputs, and compares them with approved Build hashes.
+  Those facts override any worker-authored reproducibility status. A missing
+  Build status can be recovered only from the
   server-required `phase_done_condition` check or an explicit clarification
   question. Test still owns the verdict. Other stages, non-file references,
   ambiguous values, unsupported prose, untraceable claims, and failed checks
@@ -907,6 +950,11 @@ and the relevant `AGENTS.md` synchronized with architectural changes.
 Gateway hot reload watches backend runtime code and configuration, but excludes
 `backend/tests/` so editing or formatting tests does not interrupt the running
 development server.
+
+Authenticated browser sessions self-repair a missing CSRF cookie before the
+next state-changing request. The frontend performs one browser-side
+`/api/v1/auth/me` recovery, then retries the intended request with the restored
+header; signing in again is not required while the access cookie remains valid.
 
 ### Replay a DeerFlow run in LLM Space
 

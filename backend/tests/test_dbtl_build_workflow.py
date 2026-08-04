@@ -33,6 +33,7 @@ from deerflow.dbtl.build_workflow import (
     StepState,
     input_digest,
     phase_bundle_digest,
+    phase_step_material,
     project_workflow,
     resolve_build_workflow,
     resolve_build_workflow_by_key,
@@ -142,6 +143,19 @@ class TestInputDigests:
 
     def test_an_empty_bundle_is_stable(self):
         assert phase_bundle_digest(()) == phase_bundle_digest(())
+
+    def test_a_skill_content_change_changes_only_phase_material(self):
+        base = dict(
+            phase_key="fit",
+            plan_digest="plan",
+            capability="statistical_analysis",
+            agent_name="general-purpose",
+            via_generalist=True,
+        )
+        first = phase_step_material(**base, skill_bindings=("skill:r:sha256:aaa",))
+        second = phase_step_material(**base, skill_bindings=("skill:r:sha256:bbb",))
+
+        assert input_digest(BuildStepKey.EXECUTE_PHASES, material=first) != input_digest(BuildStepKey.EXECUTE_PHASES, material=second)
 
 
 def _attempt(step, *, attempt=1, state=StepState.SUCCEEDED, input_digest_value="", output="out", **kwargs) -> StepAttempt:

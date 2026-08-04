@@ -673,6 +673,14 @@ export const zhCN: Translations = {
     in_progress: "子任务运行中",
     completed: "子任务已完成",
     failed: "子任务失败",
+    progressReport: "进度报告",
+    failureReport: "失败报告",
+    stageTokenCapped:
+      "工作进程达到令牌预算后停止。所有已生成文件仍处于暂存状态，未被接受为阶段证据。",
+    stageTurnCapped:
+      "工作进程达到轮次上限后停止。所有已生成文件仍处于暂存状态，未被接受为阶段证据。",
+    stageLoopCapped:
+      "工作进程触发重复工具调用保护后停止。所有已生成文件仍处于暂存状态，未被接受为阶段证据。",
   },
 
   // Token Usage

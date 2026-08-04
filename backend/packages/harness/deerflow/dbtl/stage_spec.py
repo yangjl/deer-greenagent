@@ -494,6 +494,94 @@ BUILD_SPEC_V7 = StageSpec(
 )
 
 
+BUILD_SPEC_V8 = StageSpec(
+    stage="build",
+    domain_profile=GENERIC_PROFILE,
+    version=8,
+    title=BUILD_SPEC_V7.title,
+    purpose=BUILD_SPEC_V7.purpose,
+    cycle_classes=BUILD_SPEC_V7.cycle_classes,
+    cycle_weights=BUILD_SPEC_V7.cycle_weights,
+    required_inputs=BUILD_SPEC_V7.required_inputs,
+    required_artifact_types=BUILD_SPEC_V7.required_artifact_types,
+    output_schema="build_package.v8",
+    required_capabilities=BUILD_SPEC_V7.required_capabilities,
+    optional_capabilities=BUILD_SPEC_V7.optional_capabilities,
+    validity_gates=(
+        "server_bound_input_lineage",
+        "versioned_derived_outputs",
+        "structured_rerun_spec",
+    ),
+    memory_write_policy=BUILD_SPEC_V7.memory_write_policy,
+    budget=BUILD_SPEC_V7.budget,
+)
+
+
+BUILD_SPEC_V9 = StageSpec(
+    stage="build",
+    domain_profile=GENERIC_PROFILE,
+    version=9,
+    title=BUILD_SPEC_V8.title,
+    purpose=BUILD_SPEC_V8.purpose,
+    cycle_classes=BUILD_SPEC_V8.cycle_classes,
+    cycle_weights=BUILD_SPEC_V8.cycle_weights,
+    required_inputs=BUILD_SPEC_V8.required_inputs,
+    required_artifact_types=BUILD_SPEC_V8.required_artifact_types,
+    output_schema="build_package.v9",
+    required_capabilities=BUILD_SPEC_V8.required_capabilities,
+    optional_capabilities=BUILD_SPEC_V8.optional_capabilities,
+    validity_gates=(*BUILD_SPEC_V8.validity_gates, "server_verified_phase_manifest"),
+    memory_write_policy=BUILD_SPEC_V8.memory_write_policy,
+    budget=BUILD_SPEC_V8.budget,
+)
+
+BUILD_SPEC_V10 = StageSpec(
+    stage="build",
+    domain_profile=GENERIC_PROFILE,
+    version=10,
+    title=BUILD_SPEC_V9.title,
+    purpose=BUILD_SPEC_V9.purpose,
+    cycle_classes=BUILD_SPEC_V9.cycle_classes,
+    cycle_weights=BUILD_SPEC_V9.cycle_weights,
+    required_inputs=BUILD_SPEC_V9.required_inputs,
+    required_artifact_types=BUILD_SPEC_V9.required_artifact_types,
+    output_schema="build_package.v10",
+    required_capabilities=BUILD_SPEC_V9.required_capabilities,
+    optional_capabilities=BUILD_SPEC_V9.optional_capabilities,
+    validity_gates=(*BUILD_SPEC_V9.validity_gates, "phase_declared_skills", "narrow_implementation_inputs"),
+    memory_write_policy=BUILD_SPEC_V9.memory_write_policy,
+    budget=BUILD_SPEC_V9.budget,
+)
+
+
+BUILD_SPEC_V11 = StageSpec(
+    stage="build",
+    domain_profile=GENERIC_PROFILE,
+    version=11,
+    title=BUILD_SPEC_V10.title,
+    purpose=BUILD_SPEC_V10.purpose,
+    cycle_classes=BUILD_SPEC_V10.cycle_classes,
+    cycle_weights=BUILD_SPEC_V10.cycle_weights,
+    required_inputs=BUILD_SPEC_V10.required_inputs,
+    required_artifact_types=BUILD_SPEC_V10.required_artifact_types,
+    output_schema="build_package.v11",
+    required_capabilities=BUILD_SPEC_V10.required_capabilities,
+    optional_capabilities=BUILD_SPEC_V10.optional_capabilities,
+    validity_gates=BUILD_SPEC_V10.validity_gates,
+    memory_write_policy=BUILD_SPEC_V10.memory_write_policy,
+    # V11 changes only the enforced per-worker token ceiling. Keep v10
+    # immutable so an attempt already pinned at 120k remains auditable under
+    # the exact budget it started with.
+    budget=WorkerBudget(
+        max_workers=BUILD_SPEC_V10.budget.max_workers,
+        max_turns=BUILD_SPEC_V10.budget.max_turns,
+        max_tokens=500_000,
+        timeout_seconds=BUILD_SPEC_V10.budget.timeout_seconds,
+        token_limit_enforced=True,
+    ),
+)
+
+
 TEST_SPEC_V1 = StageSpec(
     stage="test",
     domain_profile=GENERIC_PROFILE,
@@ -563,6 +651,26 @@ TEST_SPEC_V3 = StageSpec(
     memory_write_policy=MemoryWritePolicy.NONE,
     budget=TEST_SPEC_V2.budget,
 )
+
+
+TEST_SPEC_V4 = StageSpec(
+    stage="test",
+    domain_profile=GENERIC_PROFILE,
+    version=4,
+    title=TEST_SPEC_V3.title,
+    purpose=TEST_SPEC_V3.purpose,
+    cycle_classes=TEST_SPEC_V3.cycle_classes,
+    cycle_weights=TEST_SPEC_V3.cycle_weights,
+    required_inputs=TEST_SPEC_V3.required_inputs,
+    required_artifact_types=TEST_SPEC_V3.required_artifact_types,
+    output_schema="validity_report.v3",
+    required_capabilities=TEST_SPEC_V3.required_capabilities,
+    optional_capabilities=TEST_SPEC_V3.optional_capabilities,
+    validity_gates=("generic-predictive:v2", "server_verified_build_rerun"),
+    memory_write_policy=TEST_SPEC_V3.memory_write_policy,
+    budget=TEST_SPEC_V3.budget,
+)
+
 
 LEARN_SPEC_V1 = StageSpec(
     stage="learn",
@@ -650,9 +758,14 @@ _REGISTRY: dict[str, StageSpec] = {
         BUILD_SPEC_V5,
         BUILD_SPEC_V6,
         BUILD_SPEC_V7,
+        BUILD_SPEC_V8,
+        BUILD_SPEC_V9,
+        BUILD_SPEC_V10,
+        BUILD_SPEC_V11,
         TEST_SPEC_V1,
         TEST_SPEC_V2,
         TEST_SPEC_V3,
+        TEST_SPEC_V4,
         LEARN_SPEC_V1,
         TEST_REVIEW_SPEC_V1,
         BUILD_REVIEW_SPEC_V1,
@@ -667,8 +780,8 @@ _CURRENT: MappingProxyType[tuple[str, str], int] = MappingProxyType(
     {
         (GENERIC_PROFILE, "design"): DESIGN_SPEC_V2.version,
         (GENERIC_PROFILE, "reconciliation"): RECONCILIATION_SPEC_V1.version,
-        (GENERIC_PROFILE, "build"): BUILD_SPEC_V7.version,
-        (GENERIC_PROFILE, "test"): TEST_SPEC_V3.version,
+        (GENERIC_PROFILE, "build"): BUILD_SPEC_V11.version,
+        (GENERIC_PROFILE, "test"): TEST_SPEC_V4.version,
         (GENERIC_PROFILE, "learn"): LEARN_SPEC_V1.version,
     }
 )

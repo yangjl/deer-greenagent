@@ -254,6 +254,34 @@ and existing Build workflow/live-stage tests.
 **Exit:** the same checkpoint can be restored and measured repeatedly, and each
 later phase has a before/after comparison. No product behavior changes.
 
+**Recorded baseline (Phase 0 complete):**
+
+- Scenario `test1-build` is content-addressed by database SHA-256
+  `8b7fb9ff5fa4ce8cea467c7a9ccfa93d08bd099feedf57678f0f0ed3e7a16f16`
+  and project-tree SHA-256
+  `96249aace17091f4095814f9e421a84f68e1db30864e88c13842d935e82c2fd1`.
+  It contains one cycle at `test` revision 10 and a matched cycle at
+  `ready_for_build` revision 4.
+- The completed Build is pinned to `generic:build:v6`; the current resolver
+  selects `generic:build:v7`. Both use `generic:build-workflow:v1` and its five
+  existing steps.
+- All recorded Build phases used the built-in `general-purpose` agent as an
+  explicit generalist stand-in. The captured attempt contains four durable
+  worker rows: three completed phase results and one rejected predecessor.
+- The recorded timeline spans 43 minutes 27 seconds from `load_design` opening
+  to review-deck completion, including human-triggered retries. Persisted
+  subagent usage records account for at least 574,752 Build tokens across two
+  planner calls, four phase executions, and one failed summary call.
+- The baseline rejected one completed validation result because an artifact
+  object lacked `id` and `path`, and initially rejected the summary because it
+  lacked `status`. These are the parser-brittleness controls for later phases.
+- Build lineage records hashes, revisions, environment, inputs, outputs, and a
+  review-document URI, but no structured executable rerun record. The Test
+  stage has no validity assessment and did not re-execute Build.
+- The restored proxy, frontend, and Gateway are healthy. The focused baseline
+  suite passes: 374 tests across stage contracts, workflow/digests, step runs,
+  lineage, live execution, validity, and the manual checkpoint pipeline.
+
 ### Phase 1 — Correct output publication
 
 Teach the existing Build publisher to expand a declared output directory into
@@ -269,6 +297,20 @@ current workspace/path helpers, `BuildStepRecorder`, and publication tests in
 **Exit:** output directories publish as governed files; symlinks, escaped paths,
 missing files, and changed bytes still fail closed; replay does not republish a
 committed phase.
+
+**Implementation record (Phase 1 complete):**
+
+- Added `verified_workspace_files` as the shared, symlink-refusing resolver for
+  Build input directories and worker output files/directories.
+- Output directories expand in stable order into individually hashed governed
+  artifacts. Artifact/evidence/figure references are remapped to published
+  URIs, overlapping declarations deduplicate, empty directories fail, and one
+  worker may publish at most 500 files.
+- OCR delegate review found and fixed unhandled hash-read failures, unbounded
+  directory expansion, and duplicate durable references.
+- Ruff passes; 156 focused execution tests and the 381-test affected DBTL suite
+  pass. `test1-build` restores to the same `test` revision 10 and
+  `ready_for_build` revision 4 states with proxy, frontend, and Gateway healthy.
 
 ### Phase 2 — Make the rerun record typed lineage
 
@@ -287,6 +329,29 @@ creating a second execution record.
 **Exit:** typed rerun data round-trips through persistence, API projections,
 review Markdown, and the Build deck without the summarizer rewriting it.
 
+**Implementation record (Phase 2 complete):**
+
+- Added immutable `generic:build:v8` with a `structured_rerun_spec` gate while
+  preserving v4-v7. The bounded record carries the entry point, exact command,
+  seed, declared inputs, environment, configuration, and expected outputs;
+  review prose is derived from its command.
+- Reused `BuildExecutionBundle` and `DbtlBuildLineageRow`. Migration 0030 adds
+  one JSON column with `{}` for historical rows, which remain readable through
+  the API as `rerun_unverified`.
+- Publication remaps rerun output paths to governed URIs. Compatible
+  multi-phase records merge their bound inputs and outputs; conflicting
+  commands or malformed/oversized fields leave no executable authority. The
+  pinned-spec repository boundary refuses a v8 lineage write without the typed
+  record.
+- OCR delegate review found and fixed missing write-boundary enforcement,
+  invalid-field coercion during publication, and first-worker authority when
+  multi-phase commands conflict.
+- Ruff passes; 422 focused and affected repository/workflow/migration tests
+  pass. `test1-build` restores with its historical v6 lineage readable, the
+  live database migrates to revision 0030, the captured cycles remain at
+  `test` revision 10 and `ready_for_build` revision 4, and proxy, frontend, and
+  Gateway all return HTTP 200.
+
 ### Phase 3 — Make Test perform the rerun
 
 Add a bounded Test rerun unit that receives the exact lineage record, executes
@@ -302,6 +367,36 @@ Do not add an unsandboxed server command runner.
 and changed-output cases deterministically produce the expected validity result.
 Strong headline metrics cannot override a failed rerun.
 
+**Implementation record (Phase 3 complete):**
+
+- Added immutable `generic:test:v4` and pinned it before dispatch. V1-v3 remain
+  resolvable; only v4 requires `server_verified_build_rerun`.
+- Added the focused `live_stage.test_rerun` protocol module because command
+  wrapping and byte verification are a distinct security boundary. It reuses
+  the existing `WorkUnit`, Test stage grant, native sandbox Bash tool, typed
+  worker row, whole-stage replay, and validity pack rather than adding a runner,
+  sandbox capability, persistence table, or unsandboxed subprocess.
+- The model receives one argument-free, return-direct tool. Its server-only
+  contract executes the exact lineage command once in the fresh Test workspace,
+  writes fixed stdout/stderr/exit-status receipts, and exposes no general Bash
+  or file tool. The server verifies contained regular files, stable hashes,
+  unique expected-output filenames, per-file/aggregate size bounds, changed
+  inputs, exit status, and equality with approved Build hashes.
+- `validated_test_assessment` replaces worker-authored `reproducibility` with
+  those facts. Snapshot recovery accepts the record only from the deterministic
+  rerun unit and fails closed when a v4 attempt lacks it; strong metrics cannot
+  override a failed rerun.
+- OCR delegate review found and fixed a forgeable model-authored receipt,
+  unrestricted output copying, ambiguous duplicate filenames, unbounded output
+  verification, premature success-like progress, and a recovery path that could
+  trust the worker when the durable v4 rerun row was absent.
+- Ruff passes; 439 affected DBTL, Test, persistence, and migration tests pass,
+  including success, nonzero exit, missing record, cap/timeout, changed input,
+  changed output, outside-workspace substitution, and current-vs-historical
+  contracts. `test1-build` restores at `test` revision 10 and
+  `ready_for_build` revision 4 with migration 0030 applied and all three manual
+  services returning HTTP 200.
+
 ### Phase 4 — Enforce the dual Build contract
 
 Verify workspace facts before a phase commits: entry point, declared outputs,
@@ -315,6 +410,33 @@ digests. Add checks to these owners rather than a parallel validator service.
 **Exit:** a compatible non-governing summary shape no longer discards verified
 work, while missing manifest authority, failed completion, absent outputs, or
 workspace violations cannot commit. This phase may ship only after Phase 3.
+
+**Implementation record (Phase 4 complete):**
+
+- Added immutable `generic:build:v9` with a
+  `server_verified_phase_manifest` gate; v1-v8 remain resolvable. The bounded
+  manifest contains one exact entry-point file, the complete declared output
+  set, and the recorded plan's completion condition.
+- Reused the existing per-phase publisher, `StageWorkerResult`,
+  `phase_done_condition`, `BuildStepRecorder`, phase output digest, and replay.
+  Publication establishes containment, regular-file status, stable hashes, and
+  governed URIs before manifest verification; no parallel validator or
+  persistence path was added.
+- Replay rechecks the committed result digest, input and output bytes,
+  completion marker, and manifest. A one-file directory is not guessed to be
+  an executable entry point. Compatible Build field and summary
+  representations still normalize without changing the governing manifest.
+- OCR delegate review found and fixed exact-entry-point inference plus a split
+  verdict where post-response verification failed but the live and durable
+  worker records still said completed. All server-side verification refusals
+  now emit the correcting terminal event, and manifest/completion/input
+  failures persist a failed worker result.
+- Ruff passes; 383 affected Build, Test, contract, workflow, review, and
+  repository tests pass, including missing/unversioned manifests, changed
+  completion conditions, output mismatch, exact entry points, directory
+  publication, compatible representations, and replay. `test1-build` restores
+  at `test` revision 10 and `ready_for_build` revision 4 with migration 0030
+  applied and proxy, frontend, and Gateway all returning HTTP 200.
 
 ### Phase 5 — Harden the existing worker interior
 
@@ -332,6 +454,34 @@ summarization/durable-context/tool-error middleware, file tools, and
 success, ungoverned files, or unexplained cost. Cap, timeout, loop-stop, and
 forced-finalization outcomes remain explicit failures.
 
+**Implementation record (Phase 5 complete):**
+
+- Audited `build_subagent_runtime_middlewares` before adding behavior. The
+  existing `SubagentExecutor` already supplies read-before-write, normalized
+  recoverable tool errors, progress, sandbox/output policy, durable context,
+  summarization without memory flush, and token/loop guards. Build continues to
+  omit delegation, uploads, memory, chat controls, and title generation; no lead
+  wrapper or duplicate middleware chain was added.
+- Strengthened the phase prompt around read/edit/reread and recoverable tool
+  next actions. Added one same-run correction only for a structured failed
+  implementation check; repeat-run/reproducibility checks stay owned by Test.
+  The failed result remains in child history and the correction runs at
+  `after_agent`, after native guardrails, so it cannot refund a model call or
+  jump around token, loop, safety, or forced-deadline enforcement.
+- Reserved the correction's three one-time graph steps as deadline headroom.
+  Forced-finalized Build work now produces an explicit failed live event and a
+  failed typed worker result; partial files remain staged and never satisfy the
+  phase contract. Existing cap, timeout, loop, and tool failures keep their
+  native failure paths.
+- OCR delegate plus senior review found and fixed the model-call refund and
+  guardrail-bypass ordering defects. The broader run also exposed and fixed a
+  pytest child-module restoration leak that made later live-stage tests patch a
+  different executor module object.
+- Ruff passes; 232 focused tests and the 513-test native middleware/DBTL
+  regression suite pass. `test1-build` restores at `test` revision 10 and
+  `ready_for_build` revision 4 with migration 0030 applied; proxy, frontend,
+  and Gateway all return HTTP 200.
+
 ### Phase 6 — Bind skills and narrow provenance
 
 Allow only phase-declared skills, resolved through the existing skill registry
@@ -346,6 +496,29 @@ workflow digest material, `_build_input_artifacts`, and lineage fingerprinting.
 dependent phase chain; changing an unrelated enabled skill or orientation-only
 file does not.
 
+**Implementation record (Phase 6 complete):**
+
+- Added immutable `generic:build:v10`; v1-v9 remain resolvable. The planner may
+  declare at most eight skill names per phase, and those names are part of the
+  plan digest.
+- Reused the enabled per-user skill registry, `SubagentExecutor`'s `skills`
+  allowlist, `SkillActivationMiddleware`, and `SkillToolPolicyMiddleware`.
+  Each enabled registry winner is bound as `skill:<name>:sha256:<SKILL.md>` in
+  phase workflow material; an empty declaration disables skills for that phase.
+  The registry and bytes are checked again after execution, so missing or
+  changed skill content fails before commit and corrects the live task verdict.
+- Manifest v2 adds `declared_inputs`. For v10, `_build_input_artifacts` hashes
+  only those implementation-consumed workspace paths plus durable datasets;
+  broad `inputs_examined` and evidence fallbacks remain only for historical
+  contracts. Orientation-only reads therefore do not invalidate the phase.
+- OCR delegate review found and fixed skill-content TOCTOU at commit, split
+  live/durable failure reporting on drift, non-scalar execution metadata, and
+  loose restored-plan skill shapes.
+- Ruff passes; 413 focused Build/subagent tests and the 461-test skill-policy
+  and DBTL regression suite pass. `test1-build` restores at `test` revision 10
+  and `ready_for_build` revision 4 with migration 0030 applied; proxy,
+  frontend, and Gateway all return HTTP 200.
+
 ### Phase 7 — Tune, simplify, and roll out
 
 Use matched checkpoints to tune worker limits and finalization timing. Retire a
@@ -359,3 +532,104 @@ checkpoint commands, compatibility parser, and targeted regression suites.
 **Exit:** the hardened worker improves completion or recovery at acceptable
 cost, reports progress and failures truthfully, and introduces no second agent,
 execution authority, publication path, or persistence model.
+
+**Implementation record (Phase 7 code complete; rollout evaluation remains):**
+
+- Added one validated setting at the existing DBTL boundary:
+  `dbtl.build_worker_contract: hardened_v10 | legacy_v9`. It selects only new,
+  unpinned phased Build attempts; a durable `stage_spec_key` always wins, and
+  repository pinning remains the concurrency authority.
+- `hardened_v10` is the shipped selection and `legacy_v9` is the bounded
+  rollback. Both reuse the same `LiveStageAdapter`, `WorkUnit`, step recorder,
+  worker middleware, publication, lineage, Test rerun, activity, and human
+  gate. No wrapper agent, table, endpoint, or parallel execution path was
+  added. Config schema version is 43.
+- Kept the v9 manifest parser and broad provenance fallback intact. They will
+  be removed only after matched-checkpoint telemetry shows they are unused;
+  this phase does not manufacture that evidence from unit tests.
+- OCR delegate selection and rule resolution covered the config, adapter, YAML,
+  manual-profile healer, and rollout tests. Host review found no material
+  defect. Ruff passes; 83 focused configuration/workflow tests, 404 broader
+  Build/Test/config regressions, and 27 manual-pipeline tests pass.
+- The existing manual-profile healer now adds the missing hardened selector
+  without overwriting an explicit `legacy_v9` choice. `test1-build` restores at
+  `test` revision 10 and `ready_for_build` revision 4 with migration 0030;
+  proxy, frontend, and Gateway docs return HTTP 200.
+- The remaining rollout gate is empirical: run repeated matched `test1-build`
+  trials in both modes and record completion, tokens, calls, wall time,
+  recovery, compatibility fallbacks, verification failures, and false-success
+  incidents. Tune limits only from those measurements; do not retire v9 until
+  the gate passes.
+
+**Post-implementation tuning (2026-08-04):**
+
+- Added immutable `generic:build:v11`, retaining every v10 governance gate and
+  changing only the enforced per-worker token ceiling from 120,000 to 500,000.
+  V10 and v9 remain resolvable and selectable; pinned attempts never inherit
+  the new budget.
+- `dbtl.build_worker_contract` now defaults to `hardened_v11`, with
+  `hardened_v10` and `legacy_v9` as explicit rollback choices. The isolated
+  manual profile defaults to v11 for new profiles while preserving explicit
+  rollback selections.
+
+**Implementation record (finalization timing — the token axis):**
+
+This phase's "tune finalization timing" had a precondition stated in its own
+exit criteria: cap and forced-finalization outcomes must be *explicit failures*.
+They were not — they were explicit **misattributions**, in three places, and all
+three were repaired before the deadline was touched.
+
+- **A cap was reported as a formatting problem.** A worker stopped at its token
+  ceiling is cut off mid-answer; prose is what survives. But the parse-failure
+  branch preceded the capped branch in `_terminal_seat_event`, so the capped
+  check could only ever fire for a worker whose output already parsed, and
+  `collect_results` — the durable record — had the identical ordering. A phase
+  that spent 125.5K tokens against a 120K ceiling was reported to its owner as
+  "returned prose instead of a structured result", which sends a reader to fix
+  the worker's formatting when the only lever is the budget. Both paths now
+  resolve through `stage_runner.worker_rejection_failure`; a genuinely
+  unparseable answer *inside* budget still names the contract, because those two
+  need opposite fixes.
+- **A stage-level refusal printed a blank explanation.** Where every worker
+  succeeded and the Build still refused for want of a structured rerun record,
+  the note emitted "Why each worker did not count:" and then nothing — no worker
+  had failed. `MISSING_STRUCTURED_RERUN_REASON` is stated once and reaches both
+  the durable workflow step and the conversation note.
+
+With classification honest, the deadline gained its **token axis**. The turn
+axis was never the binding one for Build: 450 turns against 120K tokens means
+the tokens run out first, so the turn deadline never fired.
+`TokenBudgetMiddleware` does hard-stop at the ceiling, but it strips tool calls
+from *the message the model just wrote* — mid-loop, that is prose — and records
+`token_capped`, so even a good answer is discarded as untrustworthy.
+
+- The axis **warns and never forces**. Forcing would duplicate a working hard
+  stop and, worse, relabel a worker that blew through its budget as one that met
+  a deadline. The turn axis still forces, because `recursion_limit` *raises* and
+  nothing downstream can recover an answer from that.
+- It fires at 75% (`DEFAULT_TOKEN_RESERVE_FRACTION`): one more full call must
+  re-send the conversation as input *and* produce the result as output, so too
+  small a reserve warns a worker that can no longer afford to answer. It removes
+  tools, so "write your result now" is mechanically true rather than advice —
+  the same rule that made the turn axis work.
+- One warning per run, on whichever axis binds first. The instruction is
+  identical either way and the tools go either way, so a second notice would
+  spend budget to change nothing, on a run short of budget by definition.
+- Both middlewares now share `_token_usage.accumulate_usage`. Not tidying: a
+  deadline counting differently from the guard it front-runs fires at the wrong
+  moment, and the disagreement is invisible because both numbers look plausible
+  alone. The accounting is delta-per-message rather than a sum, because
+  `TokenUsageMiddleware` rewrites a message's usage retroactively once its
+  subagents report.
+- `max_tokens` comes from `_token_limit_for_worker(unit, dispatch_budget)` — the
+  *same* resolver the executor's own budget uses, pinned by a test that counts
+  both call sites — and is `None` for metered-only execution, leaving the axis
+  inert.
+
+Two test-hygiene repairs came with it, both instances of a rule this repo
+already states: a test states the switch it exercises and never inherits one.
+`test_dbtl_stage_review_pages.py` inherited the ambient `build_workflow_steps`,
+so it failed on a developer machine and would pass in CI; and a
+`_model_call_budget` stub had not followed the new `extra_headroom_steps`
+keyword, failing eight progress tests with a `TypeError` about neither progress
+nor budgets.

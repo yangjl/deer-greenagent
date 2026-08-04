@@ -231,4 +231,4 @@ class TestTheTreeAReaderEndsUpWith:
         await worker.settle(ActivityState.COMPLETED)
 
         rows = reduce_activity_events(frames)
-        assert [row.display_name for row in active_leaves(rows)] == ["Build stage"]
+        assert [row.display_name for row in active_leaves(rows)] == ["Build coordinator"]

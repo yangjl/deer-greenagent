@@ -36,6 +36,40 @@ export function readCsrfCookie(): string | null {
   return null;
 }
 
+let csrfRecoveryPromise: Promise<string | null> | null = null;
+
+/**
+ * Restore the readable half of an authenticated double-submit session.
+ *
+ * A full-page workspace load authenticates through Next.js SSR. Any Set-Cookie
+ * header returned by that server-to-server ``/auth/me`` probe terminates at the
+ * Next.js process, so it cannot repair a browser that retained only its
+ * HttpOnly access cookie. Recover from the browser immediately before its next
+ * mutation instead. The shared promise prevents concurrent mutations from
+ * racing multiple token-rotating recovery responses.
+ */
+export async function ensureCsrfCookie(): Promise<string | null> {
+  const existing = readCsrfCookie();
+  if (existing || typeof document === "undefined") return existing;
+  if (csrfRecoveryPromise) return csrfRecoveryPromise;
+
+  const recovery = (async () => {
+    const response = await globalThis.fetch("/api/v1/auth/me", {
+      cache: "no-store",
+      credentials: "include",
+    });
+    if (!response.ok) return null;
+    return readCsrfCookie();
+  })();
+  csrfRecoveryPromise = recovery;
+
+  try {
+    return await recovery;
+  } finally {
+    if (csrfRecoveryPromise === recovery) csrfRecoveryPromise = null;
+  }
+}
+
 /**
  * Fetch with credentials and automatic CSRF protection.
  *
@@ -63,7 +97,7 @@ export async function fetch(
   // it to mirror the gateway's ``should_check_csrf`` logic exactly.
   let headers = init?.headers;
   if (isStateChangingMethod(init?.method ?? "GET")) {
-    const token = readCsrfCookie();
+    const token = await ensureCsrfCookie();
     if (token) {
       // Fresh Headers instance so we don't mutate caller-supplied objects.
       const merged = new Headers(headers);

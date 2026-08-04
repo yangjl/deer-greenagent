@@ -232,3 +232,40 @@ class TestTheMiddlewareIsInTheLeadChain:
             app_config=AppConfig(sandbox=SandboxConfig(use="test")),
         )
         assert sum(isinstance(item, AgentActivityMiddleware) for item in middlewares) == 1
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestWarning")
+class TestASynchronousRunIsNotBrokenByTheRow:
+    """Emitting nothing is the documented fallback; raising is not.
+
+    Every surface this feeds is async, so the middleware defines only async
+    hooks — but LangGraph resolves a hook by name and raises *"No synchronous
+    function provided to abefore_agent"* the moment a synchronous graph
+    invocation reaches it. The embedded ``DeerFlowClient.stream()``, the TUI,
+    and the CLI are all synchronous, so an unconditionally attached async-only
+    middleware takes the entire embedded path down — an observability feature
+    breaking the product it observes.
+    """
+
+    def test_the_sync_hooks_are_overridden_so_langgraph_can_resolve_them(self):
+        """Inheriting the base hook is not enough, and looks identical.
+
+        LangGraph decides a node's sync half by asking whether the subclass
+        *overrode* the hook, not whether the attribute is callable — the base
+        class always supplies one. So ``callable(...)`` passes on a middleware
+        that still takes the sync path down.
+        """
+        from langchain.agents.middleware import AgentMiddleware
+
+        assert AgentActivityMiddleware.before_agent is not AgentMiddleware.before_agent
+        assert AgentActivityMiddleware.after_agent is not AgentMiddleware.after_agent
+
+    def test_a_sync_run_emits_nothing_rather_than_half_a_row(self):
+        middleware = AgentActivityMiddleware()
+        runtime = _runtime("run-sync")
+
+        assert middleware.before_agent({"messages": []}, runtime) is None
+        assert middleware.after_agent({"messages": []}, runtime) is None
+        # No row was opened, so none can be left dangling for the run worker
+        # to settle as `interrupted` later.
+        assert middleware._handles == {}

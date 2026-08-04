@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchStageWorkers, StageWorkerFetchError } from "@/core/tasks/api";
 import { useReconcileSubtasks, useSubtaskContext } from "@/core/tasks/context";
 import {
+  runningStageWorkRunId,
   stageLabel,
   stageWorkGroups,
   stageWorkIsRunning,
@@ -54,9 +55,24 @@ export function StageWorkPanel({
 }) {
   const { tasks: taskMap } = useSubtaskContext();
   const reconcileSubtasks = useReconcileSubtasks();
+  const tasks = useMemo(() => Object.values(taskMap), [taskMap]);
+  const runningRunId = useMemo(() => runningStageWorkRunId(tasks), [tasks]);
+  const [streamRunId, setStreamRunId] = useState<string>();
+  useEffect(() => {
+    if (!isLoading) {
+      setStreamRunId(undefined);
+    } else if (runningRunId) {
+      // Keep the streamed run selected after its last worker becomes terminal
+      // but before the run's first transcript message has landed.
+      setStreamRunId(runningRunId);
+    }
+  }, [isLoading, runningRunId]);
+  const visibleRunId = isLoading
+    ? (runningRunId ?? streamRunId ?? runId)
+    : runId;
   const groups = useMemo(
-    () => stageWorkGroups(Object.values(taskMap), runId),
-    [taskMap, runId],
+    () => stageWorkGroups(tasks, visibleRunId),
+    [tasks, visibleRunId],
   );
 
   // Rebuild stage work for a page that missed the stream and reconcile a
@@ -99,6 +115,7 @@ export function StageWorkPanel({
             result: worker.result,
             displaySummary: worker.displaySummary,
             error: worker.error,
+            stopReason: worker.stopReason,
             modelName: worker.modelName,
             usage: worker.usage,
           })),

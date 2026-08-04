@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Protocol
+from typing import Any, Protocol
 
 from deerflow.dbtl.agent_selector import Assignment, SelectionResult, capability_brief, select_agents
 from deerflow.dbtl.stage_spec import StageSpec, WorkerBudget
@@ -41,6 +41,44 @@ STAGE_WORKER_OUTPUT = "stage_worker"
 BUILD_PLAN_OUTPUT = "build_plan"
 BUILD_SUMMARY_OUTPUT = "build_summary"
 BUILD_WORK_MEETING_OUTPUT = "build_work_meeting"
+TEST_RERUN_OUTPUT = "test_rerun"
+FORCED_BUILD_FINALIZATION_FAILURE = "The Build worker was forcibly finalized at its turn deadline; partial files remain staged, but the phase did not complete normally."
+
+#: What each guardrail actually stopped, in the worker's own terms.
+_CAPPED_WORKER_CAUSES = {
+    "token_capped": "reaching its token budget",
+    "turn_capped": "reaching its turn limit",
+    "loop_capped": "the repeated-tool-call guard firing",
+}
+
+
+def capped_worker_failure(stop_reason: str | None, *, wrote_structured_result: bool = True) -> str:
+    """Why a capped worker failed, or ``""`` when no cap applies.
+
+    **A cap is the cause; whatever survives it is the symptom.** A worker
+    stopped at its budget did not *choose* to answer in prose — it was cut off
+    before it could write its structured result, so reporting the shape of the
+    fragment ("returned prose instead of a structured result") sends a reader to
+    fix the worker's formatting when the only lever that would help is the
+    budget. It also hides the expensive part: a phase that spent its whole
+    allowance leaves real staged work behind, and the message that names a
+    formatting problem reads as though nothing was lost.
+
+    Both the live lane and the durable record resolve their failure text through
+    here, because one failure described two ways is how a reader ends up
+    debugging the wrong thing — and the two paths are required to agree.
+    """
+    cause = _CAPPED_WORKER_CAUSES.get(str(stop_reason or "").strip())
+    if not cause:
+        return ""
+    truncated = "" if wrote_structured_result else " before it could write its structured result"
+    return f"The worker stopped after {cause}{truncated}. Any generated files remain staged and were not accepted as stage evidence."
+
+
+def worker_rejection_failure(stop_reason: str | None, rejection: str) -> str:
+    """The failure text for a worker whose answer could not be parsed."""
+    capped = capped_worker_failure(stop_reason, wrote_structured_result=False)
+    return capped or f"The worker's result did not satisfy the stage contract: {rejection}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +119,12 @@ class WorkUnit:
     #: The live event layer must not grade those answers against the generic
     #: schema before their owning parser sees them.
     output_contract: str = STAGE_WORKER_OUTPUT
+    #: Skill names this unit alone may discover and activate. ``None`` keeps
+    #: the subagent's configured catalog; an empty tuple disables skills.
+    skills: tuple[str, ...] | None = None
+    #: Optional server-owned tool contract for a narrowly wrapped unit. The
+    #: model may see its prompt but cannot author or alter this payload.
+    tool_contract: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False, hash=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,8 +147,8 @@ class DispatchOutcome:
     #: The worker was stopped to make it write its answer. Not a
     #: ``stop_reason``: a run that met a deadline it was warned about is finished
     #: work, and routing it through the cap channel would discard the evidence.
-    #: It still narrows what the worker could examine, so it is recorded as a
-    #: limitation the human reviewer sees on the result.
+    #: It still narrows what the worker could examine. Build treats that as an
+    #: explicit failed phase; older stage contracts record it as a limitation.
     forced_finalization: bool = False
 
 
@@ -268,7 +312,7 @@ def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> st
         "",
         RESULT_CONTRACT,
     ]
-    if spec.stage == "build" and "recorded_rerun_procedure" in spec.validity_gates:
+    if spec.stage == "build" and ({"recorded_rerun_procedure", "structured_rerun_spec"} & set(spec.validity_gates)):
         lines.extend(
             [
                 "",
@@ -288,6 +332,19 @@ def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> st
                 "  a human reviewer; it is not yours to settle here.",
             ]
         )
+        if "structured_rerun_spec" in spec.validity_gates:
+            lines.extend(
+                [
+                    "- In provenance.rerun_spec return exactly this structured record:",
+                    '  {"version": 1, "entry_point": "/mnt/user-data/...", "command": "exact command",',
+                    '   "seed": "seed or empty", "inputs": ["/mnt/user-data/..."],',
+                    '   "environment": {"runtime": "version or requirement"},',
+                    '   "configuration": ["/mnt/user-data/..."], "expected_outputs": ["/mnt/user-data/..."]}.',
+                    "- The command must run unchanged from a fresh working directory. Use absolute /mnt/user-data paths for the entry point, inputs, and configuration.",
+                    "- Write each expected output into the current directory with the same filename it has in expected_outputs.",
+                    "- recorded_rerun_procedure prose is legacy display data and does not satisfy this contract.",
+                ]
+            )
     if spec.stage == "test":
         lines.extend(
             [
@@ -370,6 +427,15 @@ def collect_results(plan: StageExecutionPlan, outcomes: Sequence[DispatchOutcome
             )
             results.append(replace(failed, token_usage=dict(outcome.token_usage or {})))
             continue
+        if outcome.forced_finalization and plan.spec.stage == "build":
+            rejected.append(f"{unit.unit_id}: {FORCED_BUILD_FINALIZATION_FAILURE}")
+            failed = failed_result(
+                capability=unit.capability,
+                agent_name=unit.agent_name,
+                reason=FORCED_BUILD_FINALIZATION_FAILURE,
+            )
+            results.append(replace(failed, token_usage=dict(outcome.token_usage or {})))
+            continue
         try:
             payload = extract_result_payload(outcome.text)
             parsed = parse_worker_result(
@@ -391,7 +457,7 @@ def collect_results(plan: StageExecutionPlan, outcomes: Sequence[DispatchOutcome
             failed = failed_result(
                 capability=unit.capability,
                 agent_name=unit.agent_name,
-                reason=f"The worker's result did not satisfy the stage contract: {exc}",
+                reason=worker_rejection_failure(outcome.stop_reason, str(exc)),
                 stop_reason=outcome.stop_reason,
             )
             results.append(replace(failed, token_usage=dict(outcome.token_usage or {})))

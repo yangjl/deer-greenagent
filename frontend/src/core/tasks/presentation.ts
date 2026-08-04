@@ -39,8 +39,9 @@ export function subtaskResultForDisplay(task: Subtask): string | undefined {
             ? (phase as Record<string, unknown>).title
             : undefined,
         )
-        .filter((title): title is string =>
-          typeof title === "string" && title.trim().length > 0,
+        .filter(
+          (title): title is string =>
+            typeof title === "string" && title.trim().length > 0,
         );
       if (titles.length) {
         return `Build plan ready · ${titles.length} ${titles.length === 1 ? "phase" : "phases"}\n${titles
@@ -50,6 +51,22 @@ export function subtaskResultForDisplay(task: Subtask): string | undefined {
     }
   } catch {
     // An old malformed structured result is audit data, not display prose.
+  }
+  return undefined;
+}
+
+/** Bounded terminal prose that a governed card may show while collapsed. */
+export function terminalStageReportForDisplay(
+  task: Subtask,
+  cappedFailureMessages: Readonly<Record<string, string>> = {},
+): string | undefined {
+  if (!task.dbtlStage) return undefined;
+  if (task.status === "completed") return subtaskResultForDisplay(task);
+  if (task.status === "failed") {
+    return (
+      (task.stopReason ? cappedFailureMessages[task.stopReason] : undefined) ??
+      task.error
+    );
   }
   return undefined;
 }
@@ -86,7 +103,7 @@ export function shouldHideTrailingDbtlContract(
   const trailingStep = steps?.[steps.length - 1];
   return Boolean(
     trailingStep?.kind === "ai" &&
-      !trailingStep.tool_calls?.length &&
-      isDbtlStructuredResult(trailingStep.text),
+    !trailingStep.tool_calls?.length &&
+    isDbtlStructuredResult(trailingStep.text),
   );
 }

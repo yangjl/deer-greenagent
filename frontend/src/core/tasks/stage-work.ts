@@ -80,3 +80,21 @@ export function stageLabel(stage: string): string {
 export function stageWorkIsRunning(tasks: readonly Subtask[]): boolean {
   return tasks.some((task) => task.status === "in_progress");
 }
+
+/** The newest streamed governed-work run, if one is actively reporting. */
+export function runningStageWorkRunId(
+  subtasks: readonly Subtask[],
+): string | undefined {
+  let runId: string | undefined;
+  for (const task of subtasks) {
+    if (
+      task.status === "in_progress" &&
+      task.dbtlStage &&
+      !task.councilSeat &&
+      task.runId
+    ) {
+      runId = task.runId;
+    }
+  }
+  return runId;
+}

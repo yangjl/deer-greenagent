@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 from langchain_core.messages import HumanMessage
 
+from deerflow.agents.dbtl.live_stage.test_rerun import TestRerunRecord as RerunRecord
+from deerflow.agents.dbtl.live_stage.test_rerun import TestRerunStatus as RerunStatus
 from deerflow.agents.dbtl.live_stage.test_review import validated_test_assessment as _validated_test_assessment
 from deerflow.agents.dbtl.supervisor import (
     _test_card_messages,
@@ -100,6 +102,31 @@ def test_a_prose_pass_without_typed_test_evidence_is_not_reviewable():
     )
 
     assert _validated_test_assessment([result], build_test={}) is None
+
+
+def test_server_rerun_failure_overrides_worker_authored_reproducibility_pass(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.dbtl.live_stage.test_review.reconciliation_required",
+        lambda: False,
+    )
+    rerun = RerunRecord(
+        status=RerunStatus.FAILED,
+        command="python fit.py",
+        reason="The rerun output hash changed.",
+        exit_status=0,
+        inputs_verified=True,
+    )
+
+    snapshot = _validated_test_assessment(
+        [_assessment_result()],
+        build_test={"build_lineage": {"id": "lineage-1"}},
+        rerun=rerun,
+    )
+
+    assert snapshot is not None
+    reproducibility = next(item for item in snapshot["checks"] if item["check"] == "reproducibility")
+    assert reproducibility["status"] == "failed"
+    assert snapshot["evaluation"]["outcome"] == "invalidated"
 
 
 def test_chat_review_card_recovers_cycle_and_carries_bound_snapshot():

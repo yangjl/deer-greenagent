@@ -6,6 +6,7 @@ import {
   resolveSubtaskModelLabel,
   shouldHideTrailingDbtlContract,
   subtaskResultForDisplay,
+  terminalStageReportForDisplay,
 } from "@/core/tasks/presentation";
 import type { Subtask } from "@/core/tasks/types";
 
@@ -53,6 +54,50 @@ describe("subtaskResultForDisplay", () => {
   });
 });
 
+describe("terminalStageReportForDisplay", () => {
+  it("uses bounded completion prose and a failed worker's terminal report", () => {
+    expect(
+      terminalStageReportForDisplay(
+        task({ dbtlStage: "build", displaySummary: "Five phases planned." }),
+      ),
+    ).toBe("Five phases planned.");
+    expect(
+      terminalStageReportForDisplay(
+        task({
+          dbtlStage: "build",
+          status: "failed",
+          error: "Stopped at the token boundary.",
+        }),
+      ),
+    ).toBe("Stopped at the token boundary.");
+  });
+
+  it("uses the guardrail explanation instead of a capped worker's success-like summary", () => {
+    expect(
+      terminalStageReportForDisplay(
+        task({
+          dbtlStage: "build",
+          status: "failed",
+          error: "Implemented and verified every requested output.",
+          stopReason: "token_capped",
+        }),
+        { token_capped: "Stopped at the token budget." },
+      ),
+    ).toBe("Stopped at the token budget.");
+  });
+
+  it("does not surface running or ordinary delegated work", () => {
+    expect(
+      terminalStageReportForDisplay(
+        task({ dbtlStage: "build", status: "in_progress" }),
+      ),
+    ).toBeUndefined();
+    expect(
+      terminalStageReportForDisplay(task({ result: "Ordinary result" })),
+    ).toBeUndefined();
+  });
+});
+
 describe("isDbtlStructuredResult", () => {
   it("recognizes planner and stage-worker contracts", () => {
     expect(
@@ -72,9 +117,7 @@ describe("isDbtlStructuredResult", () => {
   });
 
   it("does not classify arbitrary JSON progress as a terminal contract", () => {
-    expect(isDbtlStructuredResult('{"progress":"reading inputs"}')).toBe(
-      false,
-    );
+    expect(isDbtlStructuredResult('{"progress":"reading inputs"}')).toBe(false);
     expect(isDbtlStructuredResult("not json")).toBe(false);
   });
 });

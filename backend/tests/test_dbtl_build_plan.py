@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from deerflow.agents.dbtl.live_stage.build_phases import planner_unit
+from deerflow.agents.dbtl.live_stage.build_phases import PhaseAssignment, phase_unit, planner_unit
 from deerflow.dbtl.build_plan import (
     BuildPhase,
     BuildPhasePlan,
@@ -25,6 +25,7 @@ from deerflow.dbtl.build_plan import (
 from deerflow.dbtl.build_workflow import MAX_BUILD_PHASES
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_runner import BUILD_PLAN_OUTPUT
+from deerflow.dbtl.stage_spec import resolve_stage_spec
 
 ENGINEERING = Capability.SOFTWARE_ENGINEERING.value
 
@@ -73,6 +74,34 @@ class TestAPlanIsData:
         parsed = parse_build_plan(_plan(_phase(1, pause_after=True), _phase(2)), objective="x")
 
         assert [phase.pause_after for phase in parsed.plan.phases] == [True, False]
+
+    def test_phase_skill_names_are_bounded_and_part_of_the_plan_digest(self) -> None:
+        one = parse_build_plan(_plan(_phase(1, skills=["python-analysis"]), _phase(2)), objective="x").plan
+        two = parse_build_plan(_plan(_phase(1, skills=["another-skill"]), _phase(2)), objective="x").plan
+
+        assert one.phases[0].skills == ("python-analysis",)
+        assert one.digest != two.digest
+        assert len(parse_build_plan(_plan(_phase(1, skills=[f"s{i}" for i in range(20)]), _phase(2)), objective="x").plan.phases[0].skills) == 8
+
+    def test_phase_unit_carries_the_complete_skill_allowlist(self) -> None:
+        phase = BuildPhase(
+            phase_key="fit",
+            title="Fit",
+            objective="Fit the model.",
+            capability=Capability.STATISTICAL_ANALYSIS,
+            skills=("analysis",),
+        )
+        unit = phase_unit(
+            PhaseAssignment(phase=phase, agent_name="general-purpose", via_generalist=True),
+            index=1,
+            attempt_id="attempt",
+            attempt_token="token",
+            spec=resolve_stage_spec("build"),
+            context="context",
+        )
+
+        assert unit.skills == ("analysis",)
+        assert "return version=2" in unit.prompt
 
     def test_duplicate_keys_are_disambiguated_rather_than_dropped(self) -> None:
         parsed = parse_build_plan(_plan(_phase(1, phase_key="fit"), _phase(2, phase_key="fit")), objective="x")

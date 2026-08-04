@@ -35,6 +35,7 @@ import {
   resolveSubtaskModelLabel,
   shouldHideTrailingDbtlContract,
   subtaskResultForDisplay,
+  terminalStageReportForDisplay,
 } from "@/core/tasks/presentation";
 import { taskTranscript } from "@/core/tasks/tool-transcript";
 import { explainLastToolCall } from "@/core/tools/utils";
@@ -76,6 +77,17 @@ export function SubtaskCard({
         : t.tokenUsage.unavailableShort
     : undefined;
   const displayResult = subtaskResultForDisplay(task);
+  const cappedFailureMessages = {
+    token_capped: t.subtasks.stageTokenCapped,
+    turn_capped: t.subtasks.stageTurnCapped,
+    loop_capped: t.subtasks.stageLoopCapped,
+  };
+  const terminalStageReport = terminalStageReportForDisplay(
+    task,
+    cappedFailureMessages,
+  );
+  const displayError =
+    task.status === "failed" ? (terminalStageReport ?? task.error) : task.error;
 
   // The card shows the subagent's step timeline (#3779): its reasoning turns
   // interleaved with the tools it ran. Each tool call is paired with the output
@@ -214,6 +226,26 @@ export function SubtaskCard({
             </div>
           </Button>
         </div>
+        {collapsed && terminalStageReport ? (
+          <div className="border-border/60 border-t px-4 py-3">
+            <div className="text-muted-foreground mb-1 text-[11px] font-medium tracking-wide uppercase">
+              {task.status === "failed"
+                ? t.subtasks.failureReport
+                : t.subtasks.progressReport}
+            </div>
+            <div
+              className={cn(
+                "text-foreground/80 text-sm",
+                task.status === "failed" && "text-red-600 dark:text-red-400",
+              )}
+            >
+              <MarkdownContent
+                content={terminalStageReport}
+                isLoading={false}
+              />
+            </div>
+          </div>
+        ) : null}
         <ChainOfThoughtContent className="px-4 pb-4">
           {task.prompt && (
             <ChainOfThoughtStep
@@ -264,7 +296,10 @@ export function SubtaskCard({
               <ChainOfThoughtStep
                 label={
                   displayResult ? (
-                    <MarkdownContent content={displayResult} isLoading={false} />
+                    <MarkdownContent
+                      content={displayResult}
+                      isLoading={false}
+                    />
                   ) : null
                 }
               ></ChainOfThoughtStep>
@@ -272,7 +307,7 @@ export function SubtaskCard({
           )}
           {task.status === "failed" && (
             <ChainOfThoughtStep
-              label={<div className="text-red-500">{task.error}</div>}
+              label={<div className="text-red-500">{displayError}</div>}
               icon={<XCircleIcon className="size-4 text-red-500" />}
             ></ChainOfThoughtStep>
           )}

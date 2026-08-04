@@ -165,6 +165,10 @@ def initialize_profile(
         if not isinstance(sandbox, dict):
             sandbox = {}
             loaded_profile["sandbox"] = sandbox
+        dbtl = loaded_profile.setdefault("dbtl", {})
+        if not isinstance(dbtl, dict):
+            dbtl = {}
+            loaded_profile["dbtl"] = dbtl
         changed = run_events.get("backend") != "db"
         if changed:
             run_events["backend"] = "db"
@@ -173,6 +177,11 @@ def initialize_profile(
         # the source config and production defaults remain untouched.
         if sandbox.get("allow_host_bash") is not True:
             sandbox["allow_host_bash"] = True
+            changed = True
+        # Make the Build contract under manual evaluation explicit while
+        # preserving an operator's deliberate legacy rollback selection.
+        if "build_worker_contract" not in dbtl:
+            dbtl["build_worker_contract"] = "hardened_v11"
             changed = True
         if changed:
             rendered = yaml.safe_dump(loaded_profile, sort_keys=False, allow_unicode=True)
@@ -232,6 +241,7 @@ def initialize_profile(
     # the project root, a plan nobody confirmed, a phase that stopped — has to
     # be discovered, rather than mid-experiment in somebody's real project.
     dbtl["build_workflow_steps"] = True
+    dbtl["build_worker_contract"] = "hardened_v11"
     dbtl["build_plan_confirmation"] = True
     dbtl["build_work_meetings"] = True
 

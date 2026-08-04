@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 42
+config_version: 44
 
 # ============================================================================
 # Logging
@@ -1289,6 +1289,12 @@ dbtl:
   # failure. Every option states what it costs, nothing is preselected, and the
   # answer is recorded with who gave it.
   build_workflow_steps: false
+  # Contract for new phased Build attempts. hardened_v11 keeps v10's declared
+  # skill and implementation-input bindings and raises the enforced per-worker
+  # token ceiling from 120,000 to 500,000. hardened_v10 and legacy_v9 remain
+  # bounded rollback paths. Attempts that already pinned a contract never
+  # change underneath an operator when this setting changes.
+  build_worker_contract: hardened_v11
   # Show the recorded plan before any phase runs: Start the build, Change the
   # plan, Hold here. Redirecting a build here costs a sentence; redirecting it
   # afterwards costs the run. "Change the plan" carries your words verbatim into

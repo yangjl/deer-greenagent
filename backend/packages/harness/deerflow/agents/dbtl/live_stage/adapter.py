@@ -32,11 +32,14 @@ from deerflow.agents.dbtl.live_stage.build_meeting import BUILD_WORK_MEETING_CON
 from deerflow.agents.dbtl.live_stage.build_phases import (
     GENERALIST,
     PLANNER_ROLE,
+    BuildPhaseManifest,
     PhaseAssignment,
     assign_phase,
+    phase_completion_error,
     phase_unit,
     plan_notes,
     planner_unit,
+    verify_phase_manifest,
 )
 from deerflow.agents.dbtl.live_stage.build_recorder import (
     DISABLED_RECORDER,
@@ -56,6 +59,15 @@ from deerflow.agents.dbtl.live_stage.build_review import (
 )
 from deerflow.agents.dbtl.live_stage.design_input import approved_design_artifact, resolve_build_inputs
 from deerflow.agents.dbtl.live_stage.replay import ReplayService
+from deerflow.agents.dbtl.live_stage.test_rerun import (
+    PreparedTestRerun,
+    TestRerunRecord,
+    build_test_rerun_tool,
+    prepare_test_rerun,
+    rerun_result,
+    test_rerun_unit,
+    validate_test_rerun,
+)
 from deerflow.agents.dbtl.live_stage.test_review import (
     TestReviewService,
 )
@@ -73,11 +85,17 @@ from deerflow.agents.dbtl.live_stage.workspace import (
     safe_token,
     sha256_file,
     unit_stage_workspace,
+    verified_workspace_files,
     workspace_lexical_path,
     workspace_relative_path,
 )
 from deerflow.agents.dbtl.model_access import authorize_model_use, filter_authorized_model_names
+from deerflow.agents.middlewares.build_phase_correction_middleware import (
+    BUILD_PHASE_CORRECTION_HEADROOM_STEPS,
+    BuildPhaseCorrectionMiddleware,
+)
 from deerflow.agents.middlewares.finalization_deadline_middleware import (
+    SUBAGENT_SUPERSTEPS_PER_TURN,
     FinalizationDeadlineMiddleware,
     model_call_budget,
 )
@@ -153,7 +171,9 @@ from deerflow.dbtl.stage_runner import (
     BUILD_PLAN_OUTPUT,
     BUILD_SUMMARY_OUTPUT,
     BUILD_WORK_MEETING_OUTPUT,
+    FORCED_BUILD_FINALIZATION_FAILURE,
     RESULT_CONTRACT,
+    TEST_RERUN_OUTPUT,
     WORKSPACE_PATH_NOTE,
     AsyncWorkerDispatcher,
     DispatchOutcome,
@@ -161,8 +181,10 @@ from deerflow.dbtl.stage_runner import (
     StageExecutionPlan,
     WorkUnit,
     arun_stage,
+    capped_worker_failure,
     collect_results,
     plan_stage,
+    worker_rejection_failure,
 )
 from deerflow.dbtl.stage_spec import (
     StageSpec,
@@ -270,6 +292,25 @@ def _runtime_view(config: RunnableConfig) -> dict[str, Any]:
     if isinstance(context, dict):
         merged.update(context)
     return merged
+
+
+def _initial_stage_spec(stage: str, dbtl_config: Any) -> StageSpec:
+    """Resolve the contract for a new attempt through the DBTL rollout boundary.
+
+    Durable attempts bypass this helper and resolve their recorded key. The
+    operator switch therefore changes only work that has not yet pinned a
+    contract; rollback cannot rewrite the rules under an active Build.
+    """
+    if stage != "build":
+        return resolve_stage_spec(stage)
+    contract = str(getattr(dbtl_config, "build_worker_contract", "hardened_v11") or "").strip()
+    if contract == "legacy_v9":
+        return resolve_stage_spec(stage, version=9)
+    if contract == "hardened_v10":
+        return resolve_stage_spec(stage, version=10)
+    if contract == "hardened_v11":
+        return resolve_stage_spec(stage, version=11)
+    raise StageSpecNotFound(f"Unknown DBTL Build worker contract {contract!r}.")
 
 
 def _bounded_text(value: Any, *, max_chars: int) -> str:
@@ -501,7 +542,7 @@ def _preview_context(cycle: Mapping[str, Any]) -> str:
     )
 
 
-def _model_call_budget(max_turns: int) -> int:
+def _model_call_budget(max_turns: int, *, extra_headroom_steps: int = 0) -> int:
     """How many model calls fit in a turn budget.
 
     Delegates to the middleware that enforces the deadline, so the number the
@@ -509,7 +550,11 @@ def _model_call_budget(max_turns: int) -> int:
     computation. See ``SUBAGENT_SUPERSTEPS_PER_TURN`` for why this is not simply
     half of ``max_turns``.
     """
-    return model_call_budget(max_turns)
+    return model_call_budget(
+        max_turns,
+        steps_per_turn=SUBAGENT_SUPERSTEPS_PER_TURN,
+        extra_headroom_steps=extra_headroom_steps,
+    )
 
 
 _FAILURE_REASON_CHARS = 300
@@ -541,6 +586,11 @@ def _failure_reasons(results: Sequence[dict[str, Any]]) -> list[str]:
             break
     return lines
 
+
+#: Why a Build with entirely healthy workers can still refuse. Stated once so
+#: the durable workflow step and the conversation note cannot drift into two
+#: descriptions of one refusal.
+MISSING_STRUCTURED_RERUN_REASON = "Build did not return the structured rerun record required by its pinned contract, so Test would have no command to re-execute. No review package was written."
 
 _SEAT_ROLE_LABELS = {
     "position": "Independent position",
@@ -643,6 +693,13 @@ def _terminal_seat_event(
             "error": outcome.error or "The worker returned no output.",
             "stop_reason": outcome.stop_reason,
         }
+    if stage == "build" and unit.role == "phase" and outcome.forced_finalization:
+        return {
+            "type": "task_failed",
+            **base,
+            "error": FORCED_BUILD_FINALIZATION_FAILURE,
+            "stop_reason": outcome.stop_reason,
+        }
     # Typed helper workers are deliberately not StageWorkerResult producers.
     # Their owning parser is the authority; applying the generic schema here
     # created a second, contradictory gate that could mark a successfully
@@ -741,6 +798,21 @@ def _terminal_seat_event(
             "display_summary": recommendation.summary or recommendation.outcome.replace("_", " ").title(),
             "stop_reason": outcome.stop_reason,
         }
+    if unit.output_contract == TEST_RERUN_OUTPUT:
+        if outcome.error:
+            return {
+                "type": "task_failed",
+                **base,
+                "error": outcome.error,
+                "stop_reason": outcome.stop_reason,
+            }
+        return {
+            "type": "task_completed",
+            **base,
+            "result": "The command attempt finished; the server is verifying its fixed receipt files.",
+            "display_summary": "Command attempt finished · verifying logs and output hashes",
+            "stop_reason": outcome.stop_reason,
+        }
     try:
         parsed = parse_worker_result(
             extract_result_payload(outcome.text),
@@ -753,10 +825,25 @@ def _terminal_seat_event(
         return {
             "type": "task_failed",
             **base,
-            "error": (f"The worker's result did not satisfy the stage contract: {exc}"),
+            # A capped worker was cut off before it could write its structured
+            # result, so the shape of the fragment is the symptom and the cap is
+            # the cause. Naming the fragment sends a reader to fix formatting
+            # when the budget is the only lever, and reads as though the
+            # phase's staged work was never worth anything.
+            "error": worker_rejection_failure(outcome.stop_reason, str(exc)),
             "stop_reason": outcome.stop_reason,
         }
-    completion_error = _completion_check_error(parsed, unit.completion_check)
+    if parsed.was_capped and parsed.status is not WorkerStatus.NEEDS_INPUT:
+        return {
+            "type": "task_failed",
+            **base,
+            # The worker's summary describes partial work, not why the phase
+            # failed. Presenting it as the error paints success-like prose red
+            # and hides the guardrail that made the result untrustworthy.
+            "error": capped_worker_failure(outcome.stop_reason),
+            "stop_reason": outcome.stop_reason,
+        }
+    completion_error = phase_completion_error(parsed, unit.completion_check)
     if completion_error:
         return {
             "type": "task_failed",
@@ -764,7 +851,7 @@ def _terminal_seat_event(
             "error": completion_error,
             "stop_reason": outcome.stop_reason,
         }
-    if parsed.status in {WorkerStatus.FAILED, WorkerStatus.BLOCKED} or (parsed.was_capped and parsed.status is not WorkerStatus.NEEDS_INPUT):
+    if parsed.status in {WorkerStatus.FAILED, WorkerStatus.BLOCKED}:
         return {
             "type": "task_failed",
             **base,
@@ -782,35 +869,6 @@ def _terminal_seat_event(
         "display_summary": parsed.summary,
         "stop_reason": outcome.stop_reason,
     }
-
-
-def _completion_check_error(result: StageWorkerResult, required_name: str) -> str:
-    """Explain why a server-required unit completion assertion did not pass."""
-    if not required_name or result.status is not WorkerStatus.COMPLETED:
-        return ""
-    checks = [item for item in result.quality_checks if item.name.strip() == required_name]
-    if len(checks) != 1:
-        return f"The worker must return exactly one {required_name!r} quality check before this phase can finish."
-    if not checks[0].passed:
-        detail = checks[0].detail.strip()
-        return detail or f"The worker reported that {required_name!r} was not satisfied."
-    # The completion marker cannot override the worker's own contrary evidence.
-    # Build deliberately does not require a demonstrated repeat run (Test owns
-    # reproducibility), but every other check the implementation worker chose
-    # to run must pass before the phase may advance. This catches the observed
-    # config/lock-only result whose marker said complete while simulator
-    # execution and implementation tests both said false.
-    contradictions = [item for item in result.quality_checks if item.name.strip() != required_name and not item.passed and not _is_non_gating_build_check(item.name)]
-    if contradictions:
-        names = ", ".join(item.name.strip() for item in contradictions[:4])
-        return f"The phase reported {required_name!r} as complete, but these implementation checks failed: {names}."
-    return ""
-
-
-def _is_non_gating_build_check(name: str) -> bool:
-    """The one failed check Build records for Test rather than self-grading."""
-    normalized = " ".join(name.lower().replace("_", " ").replace("-", " ").split())
-    return "reproduc" in normalized or "repeat run" in normalized or "rerun" in normalized
 
 
 def _build_plan_display_summary(plan: BuildPhasePlan) -> str:
@@ -1467,8 +1525,47 @@ _unit_stage_workspace = unit_stage_workspace
 _project_manifest = project_manifest
 _project_file_snapshot = project_file_snapshot
 _sha256_file = sha256_file
+
+
+async def _declared_skill_bindings(
+    names: Sequence[str],
+    *,
+    user_id: str,
+    app_config: Any,
+) -> dict[str, str]:
+    """Resolve enabled skill winners and bind their exact SKILL.md bytes."""
+
+    wanted = tuple(dict.fromkeys(str(name).strip() for name in names if str(name).strip()))
+    if not wanted:
+        return {}
+    from deerflow.skills.storage import get_or_new_user_skill_storage
+
+    storage = await asyncio.to_thread(
+        get_or_new_user_skill_storage,
+        user_id,
+        app_config=app_config,
+    )
+    skills = await asyncio.to_thread(storage.load_skills, enabled_only=True)
+    by_name = {skill.name: skill for skill in skills}
+    bindings: dict[str, str] = {}
+    for name in wanted:
+        skill = by_name.get(name)
+        if skill is None:
+            raise ValueError(f"Build skill {name!r} is not enabled for this user.")
+        path = Path(skill.skill_file)
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise OSError("not a regular file")
+            digest = await asyncio.to_thread(_sha256_file, path)
+        except OSError:
+            raise ValueError(f"Build skill {name!r} has no readable regular SKILL.md file.") from None
+        bindings[name] = f"skill:{name}:sha256:{digest}"
+    return bindings
+
+
 _workspace_lexical_path = workspace_lexical_path
 _workspace_relative_path = workspace_relative_path
+_verified_workspace_files = verified_workspace_files
 
 
 def _bind_stage_unit_workspaces(
@@ -1507,21 +1604,18 @@ def _directory_input_artifacts(
     index, and every byte/metadata binding is checked again.
     """
     prefix = relative.rstrip("/") + "/"
+    del path  # Resolution is shared with output publication; do not trust a caller-resolved path.
     try:
-        current: dict[str, Path] = {}
-        root = Path(project_root).resolve()
-        for child in path.rglob("*"):
-            if not child.is_file():
-                continue
-            try:
-                child_relative = child.relative_to(root).as_posix()
-            except ValueError:
-                child_relative = ""
-            resolved = _workspace_relative_path(f"/mnt/user-data/{child_relative}", project_root=project_root) if child_relative else None
-            if resolved is None or child.is_symlink():
-                raise ValueError(f"Build input directory {relative!r} contains a file outside the governed workspace.")
-            current[resolved[0]] = resolved[1]
-    except OSError:
+        current = dict(
+            _verified_workspace_files(
+                relative,
+                project_root=project_root,
+                containment_reference=relative,
+            )
+        )
+    except ValueError:
+        raise ValueError(f"Build input directory {relative!r} contains a file outside the governed workspace.") from None
+    except (FileNotFoundError, OSError):
         if required:
             raise ValueError(f"Build input directory {relative!r} is no longer readable.") from None
         return []
@@ -1569,6 +1663,7 @@ def _build_input_artifacts(
     pre_run_files: Mapping[str, tuple[int, int]],
     strict_workspace_inputs: bool = False,
     run_published: Mapping[str, str] | None = None,
+    implementation_inputs: Sequence[str] | None = None,
 ) -> list[str]:
     """Bind Build's actual inputs without a separate declaration ceremony.
 
@@ -1600,14 +1695,17 @@ def _build_input_artifacts(
             artifacts.append(f"dataset:{source_key}:{content_hash}")
 
     references: list[tuple[str, bool]] = []
-    for result in results:
-        inputs_examined = result.provenance.get("inputs_examined", ())
-        if isinstance(inputs_examined, Sequence) and not isinstance(inputs_examined, (str, bytes)):
-            references.extend((str(item), strict_workspace_inputs) for item in inputs_examined if isinstance(item, str))
-        # Evidence may describe a produced output as a workspace file. Keep the
-        # legacy discovery fallback, but only provenance-declared inputs are
-        # strict: a new output was not present in the pre-run snapshot by design.
-        references.extend((ref.reference, False) for ref in result.evidence_refs if ref.kind in {"workspace_file", "dataset"})
+    if implementation_inputs is not None:
+        references.extend((str(item), True) for item in implementation_inputs if isinstance(item, str))
+    else:
+        for result in results:
+            inputs_examined = result.provenance.get("inputs_examined", ())
+            if isinstance(inputs_examined, Sequence) and not isinstance(inputs_examined, (str, bytes)):
+                references.extend((str(item), strict_workspace_inputs) for item in inputs_examined if isinstance(item, str))
+            # Evidence may describe a produced output as a workspace file. Keep the
+            # legacy discovery fallback, but only provenance-declared inputs are
+            # strict: a new output was not present in the pre-run snapshot by design.
+            references.extend((ref.reference, False) for ref in result.evidence_refs if ref.kind in {"workspace_file", "dataset"})
 
     for reference, required in references:
         if reference.startswith("dataset:"):
@@ -2434,6 +2532,9 @@ def _atomic_copy(source: Path, destination: Path, *, expected_hash: str) -> None
             Path(temp_path).unlink(missing_ok=True)
 
 
+_MAX_BUILD_PUBLISHED_FILES_PER_UNIT = 500
+
+
 def _publish_build_worker_artifacts(
     *,
     project_root: str,
@@ -2468,7 +2569,10 @@ def _publish_build_worker_artifacts(
         unit_workspace = _unit_stage_workspace(stage_workspace, unit.unit_id)
         lexical_root = _workspace_lexical_path(unit_workspace, project_root=project_root)
         failure = ""
-        remapped: dict[str, str] = {}
+        remapped: dict[str, tuple[str, ...]] = {}
+        file_remapped: dict[str, str] = {}
+        published_sources: dict[str, str] = {}
+        published_uris: set[str] = set()
         unit_outputs: list[dict[str, Any]] = []
         if lexical_root is None:
             failure = "The adapter could not resolve the worker's isolated Build workspace."
@@ -2484,54 +2588,66 @@ def _publish_build_worker_artifacts(
             for reference in result.artifact_refs:
                 if failure:
                     break
-                lexical = _workspace_lexical_path(reference, project_root=project_root)
-                if lexical is None:
-                    failure = f"Build artifact {reference!r} is outside the project workspace."
+                remaining_files = _MAX_BUILD_PUBLISHED_FILES_PER_UNIT - len(published_sources)
+                if remaining_files < 1:
+                    failure = f"Build worker {unit.unit_id!r} declared more than {_MAX_BUILD_PUBLISHED_FILES_PER_UNIT} output files."
                     break
                 try:
-                    _relative, candidate = lexical
-                    candidate.relative_to(workspace_lexical)
-                    path_from_workspace = candidate.relative_to(workspace_lexical)
-                    cursor = workspace_lexical
-                    if workspace_lexical.is_symlink():
-                        raise ValueError("workspace is a symlink")
-                    for part in path_from_workspace.parts:
-                        cursor = cursor / part
-                        if cursor.is_symlink():
-                            raise ValueError("artifact path contains a symlink")
-                    source = candidate.resolve(strict=True)
-                    source.relative_to(workspace_host)
+                    sources = _verified_workspace_files(
+                        reference,
+                        project_root=project_root,
+                        containment_reference=unit_workspace,
+                        max_files=remaining_files,
+                    )
                 except FileNotFoundError:
                     failure = f"Build artifact {reference!r} does not exist in this worker's isolated workspace."
                     break
                 except OSError:
                     failure = f"Build artifact {reference!r} could not be read from this worker's isolated workspace."
                     break
-                except ValueError:
-                    failure = f"Build artifact {reference!r} is outside this worker's isolated workspace."
+                except ValueError as exc:
+                    detail = str(exc)
+                    if "file limit" in detail:
+                        failure = f"Build artifact directory {reference!r} exceeds the {_MAX_BUILD_PUBLISHED_FILES_PER_UNIT}-file publication limit."
+                    elif "not a regular file or directory" in detail:
+                        failure = f"Build artifact {reference!r} is not a regular file or directory."
+                    else:
+                        failure = f"Build artifact {reference!r} is outside this worker's isolated workspace."
                     break
-                if not source.is_file() or source.is_symlink():
-                    failure = f"Build artifact {reference!r} is not a regular file."
+                if not sources:
+                    failure = f"Build artifact directory {reference!r} contains no regular files."
                     break
-                content_hash = _sha256_file(source)
-                safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", source.name).strip("-.") or "artifact"
-                destination_relative = stage_dir / "artifacts" / attempt_id / _safe_token(unit.unit_id) / f"{content_hash[:16]}-{safe_name[:96]}"
-                destination = outputs_root / destination_relative
-                try:
-                    _atomic_copy(source, destination, expected_hash=content_hash)
-                except (OSError, ValueError):
-                    failure = f"Build artifact {reference!r} changed or became unreadable while it was being published."
+                reference_uris: list[str] = []
+                for source_relative, source in sources:
+                    uri = published_sources.get(source_relative)
+                    if uri is None:
+                        try:
+                            content_hash = _sha256_file(source)
+                            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", source.name).strip("-.") or "artifact"
+                            destination_relative = stage_dir / "artifacts" / attempt_id / _safe_token(unit.unit_id) / f"{content_hash[:16]}-{safe_name[:96]}"
+                            destination = outputs_root / destination_relative
+                            _atomic_copy(source, destination, expected_hash=content_hash)
+                        except (OSError, ValueError):
+                            failure = f"Build artifact {reference!r} changed or became unreadable while it was being published."
+                            break
+                        uri = f"{WORKSPACE_VIRTUAL_ROOT}/outputs/{destination_relative.as_posix()}"
+                        published_sources[source_relative] = uri
+                        if uri not in published_uris:
+                            published_uris.add(uri)
+                            unit_outputs.append(
+                                {
+                                    "uri": uri,
+                                    "content_hash": content_hash,
+                                    "revision": 1,
+                                    "unit_id": unit.unit_id,
+                                }
+                            )
+                    reference_uris.append(uri)
+                    file_remapped[source_relative] = uri
+                    file_remapped[f"{WORKSPACE_VIRTUAL_ROOT}/{source_relative}"] = uri
+                if failure:
                     break
-                uri = f"{WORKSPACE_VIRTUAL_ROOT}/outputs/{destination_relative.as_posix()}"
-                remapped[reference] = uri
-                unit_outputs.append(
-                    {
-                        "uri": uri,
-                        "content_hash": content_hash,
-                        "revision": 1,
-                        "unit_id": unit.unit_id,
-                    }
-                )
+                remapped[reference] = tuple(reference_uris)
 
         if failure:
             rejected.append(f"{unit.unit_id}: {failure}")
@@ -2547,26 +2663,79 @@ def _publish_build_worker_artifacts(
             )
             continue
 
-        evidence_refs = tuple(
-            EvidenceRef(
-                kind=("artifact" if ref.reference in remapped else ref.kind),
-                reference=remapped.get(ref.reference, ref.reference),
-                description=ref.description,
-            )
-            for ref in result.evidence_refs
-        )
+        evidence_refs: list[EvidenceRef] = []
+        for ref in result.evidence_refs:
+            targets = remapped.get(ref.reference)
+            if targets is None and ref.reference in file_remapped:
+                targets = (file_remapped[ref.reference],)
+            if targets is None:
+                evidence_refs.append(ref)
+                continue
+            evidence_refs.extend(EvidenceRef(kind="artifact", reference=target, description=ref.description) for target in targets)
+
+        def remap_single(reference: str) -> str:
+            direct = file_remapped.get(reference)
+            if direct is not None:
+                return direct
+            expanded = remapped.get(reference, ())
+            return expanded[0] if len(expanded) == 1 else reference
+
+        def remap_many(value: Any) -> list[Any]:
+            if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+                return []
+            mapped_values: list[Any] = []
+            for item in value:
+                if not isinstance(item, str):
+                    mapped_values.append(item)
+                    continue
+                direct = file_remapped.get(item)
+                expanded = remapped.get(item)
+                mapped_values.extend(expanded or ((direct,) if direct else (item,)))
+            deduplicated: list[Any] = []
+            seen_strings: set[str] = set()
+            for item in mapped_values:
+                if isinstance(item, str):
+                    if item in seen_strings:
+                        continue
+                    seen_strings.add(item)
+                deduplicated.append(item)
+            return deduplicated
+
+        provenance = dict(result.provenance)
+        raw_rerun = provenance.get("rerun_spec")
+        if isinstance(raw_rerun, Mapping):
+            rerun = dict(raw_rerun)
+            raw_entry_point = rerun.get("entry_point")
+            if isinstance(raw_entry_point, str):
+                # An entry point is one exact file. Expanding a one-file
+                # directory into that child would let the server guess a
+                # declaration the worker never made.
+                rerun["entry_point"] = file_remapped.get(raw_entry_point, raw_entry_point)
+            for field_name in ("inputs", "configuration", "expected_outputs"):
+                rerun[field_name] = remap_many(rerun.get(field_name))
+            provenance["rerun_spec"] = rerun
+        raw_phase_manifest = provenance.get("phase_manifest")
+        if isinstance(raw_phase_manifest, Mapping):
+            phase_manifest = dict(raw_phase_manifest)
+            raw_entry_point = phase_manifest.get("entry_point")
+            if isinstance(raw_entry_point, str):
+                phase_manifest["entry_point"] = file_remapped.get(raw_entry_point, raw_entry_point)
+            phase_manifest["declared_outputs"] = remap_many(phase_manifest.get("declared_outputs"))
+            provenance["phase_manifest"] = phase_manifest
+
         validated_results.append(
             replace(
                 result,
-                artifact_refs=tuple(remapped[reference] for reference in result.artifact_refs),
-                evidence_refs=evidence_refs,
+                artifact_refs=tuple(dict.fromkeys(uri for reference in result.artifact_refs for uri in remapped[reference])),
+                evidence_refs=tuple(evidence_refs),
+                provenance=provenance,
                 # Declarations are remapped alongside the artifacts they
                 # describe. A figure still naming the worker's own scratch path
                 # would fail verification against the published outputs and be
                 # reported as a plot that does not exist — when it does, at the
                 # governed path the server just wrote.
-                figures=tuple(replace(figure, path=remapped.get(figure.path, figure.path)) for figure in result.figures),
-                key_outcomes=tuple(replace(outcome, figure=remapped.get(outcome.figure, outcome.figure)) for outcome in result.key_outcomes),
+                figures=tuple(replace(figure, path=remap_single(figure.path)) for figure in result.figures),
+                key_outcomes=tuple(replace(outcome, figure=remap_single(outcome.figure)) for outcome in result.key_outcomes),
             )
         )
         published.extend(unit_outputs)
@@ -2891,9 +3060,19 @@ def _restore_phase(
         context="",
         result_contract="",
     )
-    if _completion_check_error(result, unit.completion_check):
+    if phase_completion_error(result, unit.completion_check):
         logger.warning("A recorded Build phase no longer satisfies its pinned completion contract; the phase will run again.")
         return None
+    if "server_verified_phase_manifest" in spec.validity_gates:
+        _manifest, manifest_error = verify_phase_manifest(
+            result,
+            published=published,
+            completion_condition=assignment.phase.done_condition,
+            required_version=(2 if "narrow_implementation_inputs" in spec.validity_gates else 1),
+        )
+        if manifest_error:
+            logger.warning("A recorded Build phase no longer satisfies its pinned manifest contract: %s", manifest_error)
+            return None
     # The recorded bindings travel out too: Build lineage is assembled from what
     # each phase actually read, and a replayed phase that contributed nothing
     # would quietly drop its inputs from the provenance record.
@@ -2949,6 +3128,29 @@ async def _settle_execution_step(
         ).encode("utf-8")
     ).hexdigest()
     await recorder.succeed(handle, digest, execution={"published_outputs": len(published)})
+
+
+async def _emit_build_verification_failure(unit: WorkUnit, error: str) -> None:
+    """Correct an earlier worker-completed event after server verification."""
+
+    try:
+        from langgraph.config import get_stream_writer
+
+        from deerflow.utils.custom_events import aemit_custom_event
+
+        await aemit_custom_event(
+            {
+                "type": "task_failed",
+                "task_id": unit.unit_id,
+                "error": error,
+                "display_summary": "Build output verification failed.",
+                "dbtl_stage": "build",
+            },
+            writer=get_stream_writer(),
+        )
+    except RuntimeError:
+        # Unit tests and non-stream callers have no LangGraph stream writer.
+        pass
 
 
 class LiveStageAdapter:
@@ -3610,6 +3812,11 @@ class LiveStageAdapter:
                     worker_config,
                     max_turns=dispatch_budget.max_turns,
                 )
+                if unit.role == "phase":
+                    # Phase declarations are the complete skill allowlist.
+                    # Empty means no skill discovery or activation for this
+                    # worker; no configured/global skill may widen it.
+                    worker_config = replace(worker_config, skills=list(unit.skills or ()))
             parent_model = metadata.get("model_name")
             # A seat that named its own model wins over the composer's. The name
             # was validated against the configured set when the roster was
@@ -3648,7 +3855,16 @@ class LiveStageAdapter:
                 include_upload_tool=False,
                 app_config=self._app_config,
             )
-            tools = _tools_for_unit(_tools_for_stage_budget(tools, dispatch_budget), unit)
+            if unit.role == "rerun":
+                if not unit_workspace:
+                    return DispatchOutcome(
+                        unit_id=unit.unit_id,
+                        text=None,
+                        error="The Test rerun has no isolated writable workspace.",
+                    )
+                tools = [build_test_rerun_tool(unit, unit_workspace=unit_workspace)]
+            else:
+                tools = _tools_for_unit(_tools_for_stage_budget(tools, dispatch_budget), unit)
             tools = _tools_for_virtual_workspace(tools, writable_workspace=unit_workspace)
             trace_id = str(metadata.get("trace_id") or "") or None
             # A stage worker is graded on its final message, but the turn budget
@@ -3662,9 +3878,35 @@ class LiveStageAdapter:
             deadline = FinalizationDeadlineMiddleware(
                 # Config may impose a lower per-agent turn limit than the
                 # versioned stage budget. Derive the deadline from the limit
-                # the executor will actually enforce.
-                max_model_calls=_model_call_budget(worker_config.max_turns),
+                # the executor will actually enforce. Build's correction uses
+                # one-time entry/exit nodes, reserved as extra headroom below.
+                max_model_calls=_model_call_budget(
+                    worker_config.max_turns,
+                    extra_headroom_steps=(BUILD_PHASE_CORRECTION_HEADROOM_STEPS if stage == "build" and unit.role == "phase" else 0),
+                ),
+                # The turn axis is not the binding one for Build: 450 turns
+                # against 120K tokens means the tokens run out first, the turn
+                # deadline never fires, and the worker dies mid-investigation
+                # with prose. The same ceiling the executor enforces is what the
+                # deadline warns ahead of; ``None`` (metered-only execution)
+                # leaves the token axis inert.
+                max_tokens=_token_limit_for_worker(unit, dispatch_budget),
             )
+            correction = (
+                BuildPhaseCorrectionMiddleware(
+                    capability=unit.capability,
+                    agent_name=unit.agent_name,
+                    retry_blocked=deadline.forced_finalization,
+                )
+                if stage == "build" and unit.role == "phase"
+                else None
+            )
+            extra_middlewares = [deadline]
+            if correction is not None:
+                # Correction runs at the agent-exit boundary, after the native
+                # loop/token/safety hooks and the deadline have had authority
+                # over the run. It therefore cannot jump around a guardrail.
+                extra_middlewares.append(correction)
             executor = SubagentExecutor(
                 config=worker_config,
                 tools=tools,
@@ -3693,7 +3935,7 @@ class LiveStageAdapter:
                 loop_detection_enabled=None,
                 dbtl_writable_paths=(() if unit.role in _READ_ONLY_ROLES else ((unit_workspace,) if unit_workspace else ())),
                 thinking_enabled=unit.reasoning == REASONING_EXTENDED,
-                extra_middlewares=([deadline] if deadline is not None else []),
+                extra_middlewares=extra_middlewares,
             )
             # One activity row per real work unit, opened after the guards above
             # so a worker that never ran does not appear to have started. A
@@ -3894,6 +4136,7 @@ class LiveStageAdapter:
         answer: str = "",
         meeting_available: bool = False,
         boundaries_released: bool = False,
+        user_id: str = "",
     ) -> _PhaseRun:
         """Run the plan's phases in order, each as its own attempt.
 
@@ -3947,6 +4190,24 @@ class LiveStageAdapter:
         failure_code: BuildErrorCode | None = None
         control_request: dict[str, Any] | None = None
 
+        declared_skill_names = tuple(name for assignment in assignments for name in assignment.phase.skills)
+        try:
+            skill_catalog = await _declared_skill_bindings(
+                declared_skill_names,
+                user_id=user_id,
+                app_config=self._app_config,
+            )
+        except Exception as exc:  # noqa: BLE001 - registry failure is a bounded phase refusal
+            logger.warning("Build could not bind its declared skill catalog.", exc_info=True)
+            return _PhaseRun(
+                outcome=StageExecutionOutcome(
+                    plan=StageExecutionPlan(spec=spec, selection=selection),
+                    rejected=(str(exc),),
+                ),
+                stopped=str(exc),
+                failure_code=BuildErrorCode.EXECUTION_CONTRACT_REJECTED,
+            )
+
         for index, assignment in enumerate(assignments, start=1):
             if not assignment.covered:
                 # Nothing registered can do this work. Refusing names the
@@ -3958,6 +4219,8 @@ class LiveStageAdapter:
                 failure_code = BuildErrorCode.PLAN_CAPABILITY_UNKNOWN
                 break
 
+            phase_skill_bindings = tuple(skill_catalog[name] for name in assignment.phase.skills)
+
             handle = await recorder.begin(
                 BuildStepKey.EXECUTE_PHASES,
                 phase_index=index,
@@ -3966,6 +4229,7 @@ class LiveStageAdapter:
                 capability=assignment.phase.capability.value,
                 agent_name=assignment.agent_name,
                 via_generalist=assignment.via_generalist,
+                skill_bindings=phase_skill_bindings,
                 execution={"title": assignment.phase.title},
             )
 
@@ -4037,6 +4301,34 @@ class LiveStageAdapter:
             phase_outcome = collect_results(phase_plan, dispatched)
             result = phase_outcome.results[0] if phase_outcome.results else None
             rejected.extend(phase_outcome.rejected)
+
+            # The registry is live and user-editable. Re-hash after the worker
+            # returns so work cannot commit against one skill revision after
+            # executing another. A later retry resolves the new winner and
+            # therefore opens a new phase input digest.
+            try:
+                current_skill_catalog = await _declared_skill_bindings(
+                    assignment.phase.skills,
+                    user_id=user_id,
+                    app_config=self._app_config,
+                )
+                current_skill_bindings = tuple(current_skill_catalog[name] for name in assignment.phase.skills)
+                if current_skill_bindings != phase_skill_bindings:
+                    raise ValueError("A declared Build skill changed while this phase was running; retry the phase against the new skill revision.")
+            except Exception as exc:  # noqa: BLE001 - registry/read drift is a phase failure
+                stopped = str(exc)
+                results.append(
+                    failed_result(
+                        capability=assignment.phase.capability.value,
+                        agent_name=assignment.agent_name,
+                        reason=stopped,
+                    )
+                )
+                rejected.append(stopped)
+                failure_code = BuildErrorCode.INPUT_CHANGED_DURING_EXECUTION
+                await _emit_build_verification_failure(unit, stopped)
+                await recorder.fail(handle, failure_code, stopped)
+                break
             if result is not None and result.status is WorkerStatus.NEEDS_INPUT:
                 question = str(result.clarification_question or "").strip()
                 request = worker_question_request(
@@ -4072,9 +4364,18 @@ class LiveStageAdapter:
                 await recorder.fail(handle, failure_code, stopped)
                 break
 
-            completion_error = _completion_check_error(result, unit.completion_check)
+            completion_error = phase_completion_error(result, unit.completion_check)
             if completion_error:
-                results.extend(phase_outcome.results)
+                results.append(
+                    replace(
+                        failed_result(
+                            capability=result.capability,
+                            agent_name=result.agent_name,
+                            reason=completion_error,
+                        ),
+                        token_usage=result.token_usage,
+                    )
+                )
                 rejected.append(completion_error)
                 stopped = completion_error
                 failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
@@ -4092,9 +4393,9 @@ class LiveStageAdapter:
                 attempt_id=attempt_id,
             )
             result = phase_outcome.results[0] if phase_outcome.results else None
-            results.extend(phase_outcome.results)
             rejected.extend(entry for entry in phase_outcome.rejected if entry not in rejected)
             if result is None or not result.is_trustworthy or not phase_published:
+                results.extend(phase_outcome.results)
                 stopped = "; ".join(phase_outcome.rejected) or f"Phase {assignment.phase.title!r} produced no output the server could verify."
                 failure_code = BuildErrorCode.EXECUTION_OUTPUT_MISSING
                 # The worker's structured JSON passed before the server
@@ -4102,25 +4403,35 @@ class LiveStageAdapter:
                 # emitted task_completed. Verification is authoritative; emit
                 # the correcting terminal event under the same task id so the
                 # UI cannot keep claiming a missing artifact completed.
-                try:
-                    from langgraph.config import get_stream_writer
-
-                    from deerflow.utils.custom_events import aemit_custom_event
-
-                    await aemit_custom_event(
-                        {
-                            "type": "task_failed",
-                            "task_id": unit.unit_id,
-                            "error": stopped,
-                            "display_summary": "Build output verification failed.",
-                            "dbtl_stage": "build",
-                        },
-                        writer=get_stream_writer(),
-                    )
-                except RuntimeError:
-                    pass
+                await _emit_build_verification_failure(unit, stopped)
                 await recorder.fail(handle, failure_code, stopped)
                 break
+
+            phase_manifest: BuildPhaseManifest | None = None
+            if "server_verified_phase_manifest" in spec.validity_gates:
+                phase_manifest, manifest_error = verify_phase_manifest(
+                    result,
+                    published=phase_published,
+                    completion_condition=assignment.phase.done_condition,
+                    required_version=(2 if "narrow_implementation_inputs" in spec.validity_gates else 1),
+                )
+                if manifest_error:
+                    stopped = manifest_error
+                    rejected.append(manifest_error)
+                    results.append(
+                        replace(
+                            failed_result(
+                                capability=result.capability,
+                                agent_name=result.agent_name,
+                                reason=manifest_error,
+                            ),
+                            token_usage=result.token_usage,
+                        )
+                    )
+                    failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
+                    await _emit_build_verification_failure(unit, stopped)
+                    await recorder.fail(handle, failure_code, stopped)
+                    break
 
             try:
                 phase_input_artifacts = _build_input_artifacts(
@@ -4133,13 +4444,26 @@ class LiveStageAdapter:
                     # with this phase's own outputs below, and a phase must not
                     # be able to bind what it just wrote as something it read.
                     run_published=_published_input_index(published, project_root=project_root),
+                    implementation_inputs=(phase_manifest.declared_inputs if phase_manifest is not None and "narrow_implementation_inputs" in spec.validity_gates else None),
                 )
             except ValueError as exc:
                 stopped = str(exc)
+                results.append(
+                    replace(
+                        failed_result(
+                            capability=result.capability,
+                            agent_name=result.agent_name,
+                            reason=stopped,
+                        ),
+                        token_usage=result.token_usage,
+                    )
+                )
                 failure_code = BuildErrorCode.INPUT_CHANGED_DURING_EXECUTION
+                await _emit_build_verification_failure(unit, stopped)
                 await recorder.fail(handle, failure_code, stopped)
                 break
 
+            results.append(result)
             published.extend(phase_published)
             _extend_unique(input_artifacts, phase_input_artifacts)
             await recorder.succeed(
@@ -4152,12 +4476,26 @@ class LiveStageAdapter:
                     published=phase_published,
                     input_artifacts=phase_input_artifacts,
                 ),
-                execution={"phase_key": assignment.phase.phase_key, "outputs": len(phase_published)},
+                execution={
+                    "phase_key": assignment.phase.phase_key,
+                    "outputs": len(phase_published),
+                    "skill_binding_count": len(phase_skill_bindings),
+                    **(
+                        {
+                            "entry_point": phase_manifest.entry_point,
+                            "completion_condition_hash": hashlib.sha256(phase_manifest.completion_condition.encode("utf-8")).hexdigest(),
+                        }
+                        if phase_manifest is not None
+                        else {}
+                    ),
+                },
                 payload={
                     "unit_id": unit.unit_id,
                     "result": result.as_dict(),
                     "published": phase_published,
                     "input_artifacts": phase_input_artifacts,
+                    "skill_bindings": list(phase_skill_bindings),
+                    **({"phase_manifest": phase_manifest.as_dict()} if phase_manifest is not None else {}),
                 },
             )
             completed.append(_phase_note(assignment, result))
@@ -5047,21 +5385,25 @@ class LiveStageAdapter:
                 cycle_id=cycle_id,
                 note=f"The {stage} stage is {status or 'unavailable'} and cannot accept worker evidence.",
             )
+        dbtl_config = getattr(self._app_config, "dbtl", None)
         recorded_spec_key = str((attempt or {}).get("stage_spec_key") or "").strip()
         try:
-            spec = resolve_spec_by_key(recorded_spec_key) if recorded_spec_key else resolve_stage_spec(stage)
+            spec = resolve_spec_by_key(recorded_spec_key) if recorded_spec_key else _initial_stage_spec(stage, dbtl_config)
         except StageSpecNotFound as exc:
             return LiveStageResult(
                 stage=stage,
                 cycle_id=cycle_id,
                 note=f"The stage records an unavailable execution contract ({recorded_spec_key}): {exc}",
             )
-        # Build is a resumable, multi-call workflow. Pin its version before
+        # Build is a resumable, multi-call workflow. Test also owns a
+        # server-verified rerun contract. Pin either version before dispatch so
+        # a deployment cannot change its output or validity authority midway
+        # through an attempt.
         # opening the first durable step so a deployment between phases cannot
         # change the output contract, prompt budget, or retry material for an
         # attempt that is already under way. The repository lock also resolves
         # two concurrent starters to the same pinned version.
-        if stage == "build":
+        if stage in {"build", "test"}:
             pin_stage_spec = getattr(self._repo, "pin_stage_spec", None)
             if callable(pin_stage_spec):
                 try:
@@ -5077,7 +5419,7 @@ class LiveStageAdapter:
                     return LiveStageResult(
                         stage=stage,
                         cycle_id=cycle_id,
-                        note=f"The Build execution contract could not be pinned safely: {exc}",
+                        note=f"The {stage.title()} execution contract could not be pinned safely: {exc}",
                     )
 
         datasets = await self._repo.list_datasets(cycle_id, project_id=project_id)
@@ -5178,7 +5520,6 @@ class LiveStageAdapter:
         # what makes that discoverable in the manual profile first rather than
         # in somebody's experiment. With the flag off, Build behaves exactly as
         # it did.
-        dbtl_config = getattr(self._app_config, "dbtl", None)
         build_workflow_enabled = stage == "build" and bool(getattr(dbtl_config, "build_workflow_steps", False))
         build_recorder = DISABLED_RECORDER
         build_inputs: BuildInputBundle | None = None
@@ -5708,6 +6049,8 @@ class LiveStageAdapter:
                 )
 
         proposal: CouncilProposal | None = None
+        test_rerun_record: TestRerunRecord | None = None
+        test_rerun_pair: tuple[WorkUnit, StageWorkerResult] | None = None
         resumed_chair: WorkUnit | None = None
         #: The positions the single-chair round re-weighs, whichever round it is.
         chair_positions: Sequence[Mapping[str, Any]] = resumed_positions
@@ -5844,8 +6187,100 @@ class LiveStageAdapter:
                     (build_control is not None and build_control.stage_attempt_id == str((attempt or {}).get("id") or "") and build_control.action in {BuildControlAction.CONTINUE_BUILD, BuildControlAction.RETRY_STEP})
                     or await control_gate.boundary_released(build_plan.digest)
                 ),
+                user_id=str(user_id),
             )
             outcome = phase_run.outcome
+        elif stage == "test" and "server_verified_build_rerun" in spec.validity_gates:
+            preliminary = plan_stage(spec, self._candidates(), attempt_id=attempt_id, context=stage_context)
+            if not preliminary.dispatchable:
+                logger.info("dbtl stage %s not dispatchable: %s", spec.spec_key, "; ".join(preliminary.selection.notes) or "no work units")
+                outcome = StageExecutionOutcome(plan=preliminary)
+            else:
+                lineage = dict((build_test or {}).get("build_lineage") or {})
+                prepared = await asyncio.to_thread(
+                    prepare_test_rerun,
+                    lineage,
+                    project_root=project_root,
+                )
+                selected = preliminary.units[0]
+                if isinstance(prepared, PreparedTestRerun):
+                    rerun_unit = test_rerun_unit(
+                        prepared,
+                        attempt_id=attempt_id,
+                        agent_name=selected.agent_name,
+                        via_generalist=selected.via_generalist,
+                    )
+                    rerun_budget = replace(
+                        spec.budget,
+                        max_workers=1,
+                        max_turns=min(spec.budget.max_turns, 80),
+                        max_tokens=min(spec.budget.max_tokens, 120_000),
+                        timeout_seconds=min(spec.budget.timeout_seconds, 600),
+                        token_limit_enforced=True,
+                    )
+                    dispatched_rerun = await dispatcher((rerun_unit,), budget=rerun_budget)
+                    dispatched_receipt = dispatched_rerun[0] if dispatched_rerun else DispatchOutcome(unit_id=rerun_unit.unit_id, text=None, error="The rerun worker returned no dispatch outcome.")
+                    worker_rerun = StageWorkerResult(
+                        status=(WorkerStatus.FAILED if dispatched_receipt.error else WorkerStatus.COMPLETED),
+                        summary=dispatched_receipt.error or "The command attempt returned; server verification owns its verdict.",
+                        capability=rerun_unit.capability,
+                        agent_name=rerun_unit.agent_name,
+                        stop_reason=dispatched_receipt.stop_reason,
+                        token_usage=dict(dispatched_receipt.token_usage or {}),
+                    )
+                    test_rerun_record = await asyncio.to_thread(
+                        validate_test_rerun,
+                        worker_rerun,
+                        prepared,
+                        project_root=project_root,
+                        unit_workspace=_unit_stage_workspace(stage_workspace, rerun_unit.unit_id),
+                    )
+                    test_rerun_pair = (
+                        rerun_unit,
+                        rerun_result(
+                            test_rerun_record,
+                            agent_name=worker_rerun.agent_name,
+                            token_usage=dict(worker_rerun.token_usage),
+                        ),
+                    )
+                    rerun_rejected = ()
+                else:
+                    test_rerun_record = prepared
+                    rerun_unit = WorkUnit(
+                        unit_id=f"{attempt_id}-build-rerun",
+                        capability="reproducibility_rerun",
+                        agent_name="server",
+                        prompt="The server refused the Build rerun before dispatch.",
+                        role="rerun",
+                        focus="records why the Build rerun could not start",
+                    )
+                    test_rerun_pair = (
+                        rerun_unit,
+                        rerun_result(test_rerun_record, agent_name="server"),
+                    )
+                    rerun_rejected = ()
+                test_context = "\n".join(
+                    [
+                        stage_context,
+                        "",
+                        "Server-owned Build rerun result (this overrides any worker-authored reproducibility check):",
+                        json.dumps(test_rerun_record.as_dict(), sort_keys=True, ensure_ascii=False),
+                    ]
+                )
+                outcome = await arun_stage(
+                    spec,
+                    self._candidates(),
+                    dispatcher,
+                    attempt_id=attempt_id,
+                    context=test_context,
+                )
+                if test_rerun_pair is not None:
+                    outcome = replace(
+                        outcome,
+                        plan=replace(outcome.plan, units=(test_rerun_pair[0], *outcome.plan.units)),
+                        results=(test_rerun_pair[1], *outcome.results),
+                        rejected=(*rerun_rejected, *outcome.rejected),
+                    )
         else:
             outcome = await arun_stage(
                 spec,
@@ -5930,6 +6365,7 @@ class LiveStageAdapter:
                 )
 
         published_build_artifacts: list[dict[str, Any]] = []
+        build_execution_record: BuildExecutionBundle | None = None
         if phase_run is not None:
             # Already published, one phase at a time, before each phase's own row
             # was settled. Running the bulk publisher again here would resolve
@@ -5946,6 +6382,17 @@ class LiveStageAdapter:
                 attempt_id=attempt_id,
             )
             unit_result_pairs = list(zip(outcome.plan.units, outcome.results, strict=True))
+        if stage == "build" and published_build_artifacts:
+            build_execution_record = execution_bundle(outcome.trustworthy_results, published=published_build_artifacts)
+        missing_structured_rerun = bool(stage == "build" and "structured_rerun_spec" in spec.validity_gates and (build_execution_record is None or build_execution_record.rerun_spec is None))
+        # **A stage can refuse for a reason no worker owns.** Every worker here
+        # may have returned a contract-valid result and the stage still not be
+        # completable — the pinned contract wants a structured rerun record and
+        # none arrived. Naming that reason once, here, is what keeps the two
+        # places that report it from describing one refusal two ways; without it
+        # the durable note fell through to the per-worker list, blamed the
+        # workers, and then listed nothing, because none of them had failed.
+        stage_refusal = MISSING_STRUCTURED_RERUN_REASON if missing_structured_rerun else ""
         if build_workflow_enabled:
             # Settled from the *published* artifacts, which is what makes the
             # step reusable: the bytes are already copied into the governed
@@ -5958,7 +6405,7 @@ class LiveStageAdapter:
                 await build_recorder.begin(BuildStepKey.EXECUTE_PHASES),
                 published=published_build_artifacts,
                 outcome=outcome,
-                incomplete_because=(phase_run.stopped_because if phase_run is not None and not phase_run.complete else ""),
+                incomplete_because=(phase_run.stopped_because if phase_run is not None and not phase_run.complete else stage_refusal),
             )
 
         results = [
@@ -6000,7 +6447,7 @@ class LiveStageAdapter:
             )
         )
         design_ready = stage != "design" or (design_debate_complete and chair_result is not None and chair_result.is_trustworthy and chair_result.status is WorkerStatus.COMPLETED)
-        test_assessment = _validated_test_assessment(outcome.trustworthy_results, build_test=build_test) if stage == "test" else None
+        test_assessment = _validated_test_assessment(outcome.trustworthy_results, build_test=build_test, rerun=test_rerun_record) if stage == "test" else None
         # **A plan that did not finish is not a Build.** Every phase that ran
         # ran truthfully, so `produced_usable_evidence` is true of a Build whose
         # second phase failed and of one that stopped at a `pause_after`
@@ -6008,7 +6455,7 @@ class LiveStageAdapter:
         # both, presenting a fraction of the planned work as the completed
         # thing a person approves and Test measures. The committed phases stay
         # committed and reusable; what they do not do is become evidence.
-        build_plan_incomplete = phase_run is not None and not phase_run.complete
+        build_plan_incomplete = (phase_run is not None and not phase_run.complete) or missing_structured_rerun
         produced_usable_evidence = outcome.produced_usable_evidence and design_ready and (stage != "test" or test_assessment is not None) and not build_plan_incomplete
         # Not opened at all when the plan did not finish. Opening it would
         # settle as `summary_contract_rejected` — a *presentational* code, which
@@ -6039,7 +6486,7 @@ class LiveStageAdapter:
             )
             artifact_type = spec.required_artifact_types[0]
         if build_summary_owns_evidence:
-            bundle = execution_bundle(outcome.trustworthy_results, published=published_build_artifacts)
+            bundle = build_execution_record or execution_bundle(outcome.trustworthy_results, published=published_build_artifacts)
             # The whole reason the write-up is its own step: a deck that failed
             # to render is retried against *this* package rather than against a
             # second, differently-hashed one nobody reviewed.
@@ -6248,6 +6695,7 @@ class LiveStageAdapter:
                     "executable": sys.executable,
                     "stage_runner": "LiveStageAdapter",
                 },
+                rerun_spec=(build_execution_record.rerun_spec.as_dict() if build_execution_record and build_execution_record.rerun_spec else None),
                 input_artifacts=input_artifacts,
                 output_artifacts=published_build_artifacts,
                 deviations=deviations,
@@ -6457,6 +6905,19 @@ class LiveStageAdapter:
                     "No review package was written, because a plan that has not finished is not the build a person would be approving.",
                 ]
             ).strip()
+        elif build_plan_incomplete and stage_refusal:
+            # Every worker succeeded and the stage still refused. The generic
+            # line below would say "none produced usable evidence" and then
+            # print an empty reason list — a blank explanation, which is worse
+            # than a wrong one, because it sends the reader to inspect three
+            # workers that did nothing wrong.
+            note = "\n".join(
+                [
+                    f"Ran {len(results)} bounded {stage} worker(s) and kept every outcome, but the stage could not be completed.",
+                    "",
+                    stage_refusal,
+                ]
+            )
         elif artifact_uri:
             # The digest carries what the council concluded. A reply that is only
             # a file path makes the reader open a file to learn anything at all.

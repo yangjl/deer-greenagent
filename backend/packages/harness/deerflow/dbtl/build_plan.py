@@ -98,6 +98,7 @@ class BuildPhase:
     capability: Capability
     inputs: tuple[str, ...] = ()
     outputs: tuple[str, ...] = ()
+    skills: tuple[str, ...] = ()
     done_condition: str = ""
     #: A phase whose result a person should see before the next one consumes it.
     #: A phase boundary is a committed, resumable state with no worker lease
@@ -112,6 +113,7 @@ class BuildPhase:
             "capability": self.capability.value,
             "inputs": list(self.inputs),
             "outputs": list(self.outputs),
+            "skills": list(self.skills),
             "done_condition": self.done_condition,
             "pause_after": self.pause_after,
         }
@@ -233,6 +235,10 @@ def restore_build_plan(payload: Any) -> BuildPhasePlan | None:
         raw_phases = payload.get("phases")
         if not isinstance(raw_phases, Sequence) or isinstance(raw_phases, (str, bytes)):
             return None
+        if any(
+            not isinstance(entry.get("skills", []), Sequence) or isinstance(entry.get("skills", []), (str, bytes)) or any(not isinstance(item, str) for item in entry.get("skills", [])) for entry in raw_phases if isinstance(entry, Mapping)
+        ):
+            return None
         phases = tuple(
             BuildPhase(
                 phase_key=str(entry["phase_key"]),
@@ -241,6 +247,7 @@ def restore_build_plan(payload: Any) -> BuildPhasePlan | None:
                 capability=Capability(str(entry["capability"])),
                 inputs=tuple(str(item) for item in entry.get("inputs") or ()),
                 outputs=tuple(str(item) for item in entry.get("outputs") or ()),
+                skills=tuple(dict.fromkeys(str(item) for item in entry.get("skills") or ()))[:8],
                 done_condition=str(entry.get("done_condition") or ""),
                 pause_after=entry.get("pause_after") is True,
             )
@@ -379,6 +386,7 @@ def parse_build_plan(raw: str, *, objective: str) -> PlanParse:
                 capability=capability,
                 inputs=_lines(entry.get("inputs")),
                 outputs=_lines(entry.get("outputs")),
+                skills=tuple(dict.fromkeys(_lines(entry.get("skills"), limit=8))),
                 done_condition=_text(entry.get("done_condition"), limit=600),
                 pause_after=entry.get("pause_after") is True,
             )
@@ -442,6 +450,7 @@ Return one JSON object and nothing else:
       "capability": "<one of the registered capabilities listed below>",
       "inputs": ["what this phase expects"],
       "outputs": ["what it should produce, including figures"],
+      "skills": ["enabled skill names this phase actually needs"],
       "done_condition": "something a later reader can check",
       "pause_after": false
     }}
@@ -458,6 +467,8 @@ Rules:
   rather than emitting a project plan.
 - `capability` must be one of the registered values. An unregistered one is refused and the
   whole plan is discarded — it is never quietly replaced by a generalist.
+- `skills` is optional and may contain at most 8 exact names from the enabled skill catalog.
+  Declare only skills this phase needs; an unknown or changed skill is refused at dispatch.
 - Set `pause_after` only when a person genuinely should see that phase's result before the
   next phase consumes it.
 - Use "needs_input" when the design leaves something you cannot resolve, or the work as

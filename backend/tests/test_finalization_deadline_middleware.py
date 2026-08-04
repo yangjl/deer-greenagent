@@ -224,9 +224,14 @@ class TestStageWiring:
     def test_the_stage_layer_uses_the_shared_budget(self):
         """One computation, so the deadline and the graph cannot disagree."""
         from deerflow.agents.dbtl.live_stage.adapter import _model_call_budget
+        from deerflow.agents.middlewares.build_phase_correction_middleware import BUILD_PHASE_CORRECTION_HEADROOM_STEPS
         from deerflow.agents.middlewares.finalization_deadline_middleware import model_call_budget
 
         assert _model_call_budget(120) == model_call_budget(120)
+        assert _model_call_budget(120, extra_headroom_steps=BUILD_PHASE_CORRECTION_HEADROOM_STEPS) == model_call_budget(
+            120,
+            extra_headroom_steps=BUILD_PHASE_CORRECTION_HEADROOM_STEPS,
+        )
 
 
 class TestTheTurnCostAssumption:
@@ -243,12 +248,23 @@ class TestTheTurnCostAssumption:
     def _hook_nodes() -> int:
         from langchain.agents.middleware import AgentMiddleware
 
+        from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+        from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
         def overrides(middleware, hook: str) -> bool:
             return getattr(type(middleware), hook, None) is not getattr(AgentMiddleware, hook, None)
 
-        middlewares = build_subagent_runtime_middlewares()
+        # Count the maximum real chain. Deferred MCP discovery contributes two
+        # conditional before_model nodes (routing + filtering); the shared
+        # constant must leave enough room when those integrations are active,
+        # regardless of the developer's local extensions configuration.
+        routing = McpRoutingMiddleware({"mcp_probe": {"priority": 1, "keywords": ["probe"]}}, "probe-hash", 1)
+        deferred = DeferredToolSetup(object(), frozenset({"mcp_probe"}), "probe-hash")
+        middlewares = build_subagent_runtime_middlewares(
+            deferred_setup=deferred,
+            mcp_routing_middleware=routing,
+        )
         before = sum(1 for m in middlewares if overrides(m, "before_model") or overrides(m, "abefore_model"))
         after = sum(1 for m in middlewares if overrides(m, "after_model") or overrides(m, "aafter_model"))
         return before + after
@@ -257,9 +273,11 @@ class TestTheTurnCostAssumption:
         from deerflow.agents.middlewares.finalization_deadline_middleware import SUBAGENT_SUPERSTEPS_PER_TURN
 
         # model node + every hook node + the tools node + this middleware's own
-        # after_model, which is appended through ``extra_middlewares``.
+        # after_model, which is appended through ``extra_middlewares``. Keep at
+        # most one conservative step of slack for configuration-dependent
+        # extension wiring; Build's correction hook is budgeted separately.
         expected = 1 + self._hook_nodes() + 1 + 1
-        assert SUBAGENT_SUPERSTEPS_PER_TURN == expected, f"The subagent middleware chain now costs {expected} super-steps per turn, not {SUBAGENT_SUPERSTEPS_PER_TURN}. Update the constant."
+        assert expected <= SUBAGENT_SUPERSTEPS_PER_TURN <= expected + 1, f"The maximum built-in subagent chain now costs {expected} super-steps per turn; the configured allowance is {SUBAGENT_SUPERSTEPS_PER_TURN}. Update the constant."
 
     def test_a_turn_costs_much_more_than_a_model_call_and_a_tool_call(self):
         """Guards the naive reading that produced the original bug."""
@@ -343,6 +361,39 @@ class TestCouncilBudgetsFitRealWork:
 
         assert outcome.results[0].limitations == ()
 
+    def test_a_forced_build_worker_is_an_explicit_failed_phase(self):
+        import json
+
+        from deerflow.dbtl.agent_selector import SelectionResult
+        from deerflow.dbtl.stage_runner import DispatchOutcome, StageExecutionPlan, WorkUnit, collect_results
+        from deerflow.dbtl.stage_spec import resolve_stage_spec
+
+        spec = resolve_stage_spec("build")
+        unit = WorkUnit(unit_id="build-1", capability="software_and_workflow_engineering", agent_name="general-purpose", prompt="p", role="phase")
+        plan = StageExecutionPlan(spec=spec, selection=SelectionResult(), units=(unit,))
+        payload = json.dumps(
+            {
+                "status": "completed",
+                "summary": "Partial implementation at the deadline.",
+                "artifact_refs": [],
+                "claims": [],
+                "evidence_refs": [],
+                "quality_checks": [{"name": "phase_done_condition", "passed": True, "detail": ""}],
+                "limitations": [],
+                "recommended_next_actions": [],
+                "provenance": {},
+            }
+        )
+
+        outcome = collect_results(
+            plan,
+            [DispatchOutcome(unit_id="build-1", text=payload, forced_finalization=True)],
+        )
+
+        assert outcome.results[0].status.value == "failed"
+        assert outcome.produced_usable_evidence is False
+        assert "forcibly finalized" in outcome.results[0].summary
+
 
 class TestDegenerateBudgets:
     def test_a_reserve_larger_than_the_budget_still_leaves_one_call(self):
@@ -357,3 +408,178 @@ class TestDegenerateBudgets:
 
         assert middleware._apply(_state(0), runtime) is None
         assert middleware.forced_finalization(runtime) is False
+
+
+def _ai_with_usage(input_tokens: int, output_tokens: int, *, msg_id: str, tool_calls=None) -> AIMessage:
+    message = _ai(tool_calls=tool_calls or [_tool_call(0)], msg_id=msg_id)
+    return message.model_copy(
+        update={
+            "usage_metadata": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+            }
+        }
+    )
+
+
+def _spent(*pairs: tuple[int, int]) -> dict:
+    """History whose AI turns carry provider-reported usage."""
+    messages: list = [HumanMessage(content="build the design")]
+    for index, (input_tokens, output_tokens) in enumerate(pairs):
+        messages.append(_ai_with_usage(input_tokens, output_tokens, msg_id=f"ai-{index}"))
+        if index < len(pairs) - 1:
+            messages.append(ToolMessage(content="ok", tool_call_id="call-0"))
+    return {"messages": messages}
+
+
+class TestTheTokenAxis:
+    """Turns are not the only budget a worker can run out of.
+
+    A Build worker with 450 turns and 120K tokens exhausts the tokens first, and
+    the turn deadline never fires. ``TokenBudgetMiddleware`` does hard-stop at
+    the ceiling, but it strips tool calls from *the message the model just
+    wrote* — mid-tool-loop that is prose — and records ``token_capped``, which
+    makes the result untrustworthy anyway. So the worker that spent 125K tokens
+    was reported as having "returned prose instead of a structured result".
+
+    What was missing is the same thing the turn axis provides: a warning early
+    enough to spend a whole model call writing the answer, with tools removed so
+    the instruction is mechanically true.
+    """
+
+    def test_it_stays_silent_while_the_worker_has_token_room(self):
+        middleware = FinalizationDeadlineMiddleware(max_model_calls=20, max_tokens=100_000)
+        runtime = _runtime()
+
+        assert middleware._apply(_spent((30_000, 2_000)), runtime) is None
+        assert middleware.drain_pending_notices(runtime) == []
+
+    def test_it_warns_once_the_token_reserve_opens(self):
+        middleware = FinalizationDeadlineMiddleware(max_model_calls=20, max_tokens=100_000)
+        runtime = _runtime()
+
+        middleware._apply(_spent((40_000, 2_000), (36_000, 2_000)), runtime)
+
+        notices = middleware.drain_pending_notices(runtime)
+        assert len(notices) == 1
+        assert "token" in notices[0].lower()
+        assert "80,000" in notices[0] or "80000" in notices[0]
+
+    def test_the_token_warning_removes_tools_so_the_instruction_is_true(self):
+        """Leaving tools available is how the turn axis originally failed."""
+        middleware = FinalizationDeadlineMiddleware(max_model_calls=20, max_tokens=100_000)
+        runtime = _runtime()
+        middleware._apply(_spent((40_000, 2_000), (36_000, 2_000)), runtime)
+
+        seen: dict = {}
+
+        def handler(req):
+            seen["tools"] = req.tools
+            seen["messages"] = req.messages
+            return MagicMock()
+
+        middleware.wrap_model_call(_make_request([HumanMessage(content="go")], runtime), handler)
+
+        assert seen["tools"] == []
+        assert any("[FINALIZATION DEADLINE]" in str(getattr(m, "content", "")) for m in seen["messages"])
+
+    def test_it_warns_only_once_per_run(self):
+        middleware = FinalizationDeadlineMiddleware(max_model_calls=20, max_tokens=100_000)
+        runtime = _runtime()
+
+        middleware._apply(_spent((40_000, 2_000), (36_000, 2_000)), runtime)
+        assert len(middleware.drain_pending_notices(runtime)) == 1
+
+        middleware._apply(_spent((40_000, 2_000), (36_000, 2_000), (10_000, 1_000)), runtime)
+        assert middleware.drain_pending_notices(runtime) == []
+
+    def test_the_token_axis_never_forces_because_the_budget_guard_owns_that(self):
+        """Forcing here would duplicate the hard stop and hide the cap.
+
+        ``recursion_limit`` *raises*, so the turn axis has to force. Tokens
+        already have a working hard stop that records ``token_capped`` — a
+        worker that blew through the ceiling despite being warned really is a
+        truncated investigation, and quietly relabelling it as a met deadline
+        would make an untrustworthy result look clean.
+        """
+        middleware = FinalizationDeadlineMiddleware(max_model_calls=20, max_tokens=100_000)
+        runtime = _runtime()
+
+        result = middleware._apply(_spent((90_000, 20_000)), runtime)
+
+        assert result is None
+        assert middleware.forced_finalization(runtime) is False
+        assert middleware.forced_any() is False
+
+    def test_without_a_ceiling_the_token_axis_is_inert(self):
+        """A metered-only worker has no fraction to be near."""
+        middleware = FinalizationDeadlineMiddleware(max_model_calls=20)
+        runtime = _runtime()
+
+        assert middleware._apply(_spent((900_000, 90_000)), runtime) is None
+        assert middleware.drain_pending_notices(runtime) == []
+
+    def test_retroactively_added_subagent_tokens_are_counted_once(self):
+        """The same accounting the budget guard uses, so the two agree.
+
+        ``TokenUsageMiddleware`` rewrites a message's usage after subagents
+        report, so a naive sum over history double-counts and the deadline
+        fires early.
+        """
+        middleware = FinalizationDeadlineMiddleware(max_model_calls=20, max_tokens=100_000)
+        runtime = _runtime()
+
+        middleware._apply(_spent((40_000, 2_000)), runtime)
+        assert middleware.drain_pending_notices(runtime) == []
+
+        # Same message id, usage revised upward once.
+        middleware._apply(_spent((78_000, 2_000)), runtime)
+        assert len(middleware.drain_pending_notices(runtime)) == 1
+
+    def test_each_run_tracks_its_own_spend(self):
+        middleware = FinalizationDeadlineMiddleware(max_model_calls=20, max_tokens=100_000)
+
+        middleware._apply(_spent((40_000, 2_000), (36_000, 2_000)), _runtime("run-a"))
+
+        assert len(middleware.drain_pending_notices(_runtime("run-a"))) == 1
+        assert middleware.drain_pending_notices(_runtime("run-b")) == []
+
+
+class TestTheStageDispatcherWiresTheSameCeiling:
+    """The deadline must warn ahead of the budget the executor enforces.
+
+    Two numbers derived independently would drift: the warning would fire at a
+    fraction of one ceiling while a different one actually stopped the worker,
+    and nothing would report the mismatch.
+    """
+
+    # A source-scraping check once lived here, asserting that
+    # ``_token_limit_for_worker(unit, dispatch_budget)`` appeared twice in
+    # ``_dispatch_units``. It passed alone and in pairs and failed in the full
+    # suite, because ``inspect.getsource`` depends on import and linecache state
+    # that other tests disturb. A test that goes red for reasons unrelated to
+    # its own claim is worse than no test: it trains a reader to ignore the
+    # colour. The property it wanted — one resolver, one ceiling — is carried by
+    # there being a single named function, documented in AGENTS.md, and the two
+    # cases below pin what that function returns.
+
+    def test_a_metered_only_budget_leaves_the_token_axis_inert(self):
+        from deerflow.agents.dbtl.live_stage.adapter import _token_limit_for_worker
+        from deerflow.dbtl.stage_runner import WorkUnit
+        from deerflow.dbtl.stage_spec import WorkerBudget
+
+        unit = WorkUnit(unit_id="u1", capability="software_engineering", agent_name="builder", prompt="…")
+        metered = WorkerBudget(max_workers=1, max_turns=100, max_tokens=500_000, timeout_seconds=60, token_limit_enforced=False)
+
+        assert _token_limit_for_worker(unit, metered) is None
+
+    def test_an_enforced_budget_supplies_the_ceiling(self):
+        from deerflow.agents.dbtl.live_stage.adapter import _token_limit_for_worker
+        from deerflow.dbtl.stage_runner import WorkUnit
+        from deerflow.dbtl.stage_spec import WorkerBudget
+
+        unit = WorkUnit(unit_id="u1", capability="software_engineering", agent_name="builder", prompt="…")
+        enforced = WorkerBudget(max_workers=1, max_turns=450, max_tokens=120_000, timeout_seconds=900, token_limit_enforced=True)
+
+        assert _token_limit_for_worker(unit, enforced) == 120_000

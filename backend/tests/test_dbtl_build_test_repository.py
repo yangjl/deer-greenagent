@@ -147,13 +147,25 @@ async def _ready_for_build(repo: DbtlCycleRepository) -> None:
     await _approve(repo, "reconciliation", "reconciliation")
 
 
-async def _record_lineage(repo: DbtlCycleRepository):
+async def _record_lineage(repo: DbtlCycleRepository, *, rerun_spec: dict | None = None, typed: bool = True):
+    if typed and rerun_spec is None:
+        rerun_spec = {
+            "version": 1,
+            "entry_point": "/mnt/user-data/fit.py",
+            "command": "uv run python fit.py --seed 7",
+            "seed": 7,
+            "inputs": ["/mnt/user-data/yield.csv"],
+            "environment": {"python": "3.12", "uv": "pinned lockfile"},
+            "configuration": ["/mnt/user-data/pyproject.toml"],
+            "expected_outputs": ["/mnt/user-data/outputs/model.bin"],
+        }
     return await repo.record_build_lineage(
         cycle_id="cycle-1",
         project_id="project-1",
         code_revision="git:1234567",
         config_revision="config:sha256:def",
         environment={"python": "3.12", "platform": "linux"},
+        rerun_spec=rerun_spec,
         input_artifacts=["artifact://approved-reconciliation"],
         output_artifacts=[
             {
@@ -207,9 +219,47 @@ async def test_build_lineage_binds_inputs_environment_and_outputs(tmp_path: Path
     assert lineage["dataset_fingerprint"]
     assert lineage["code_revision"] == "git:1234567"
     assert lineage["environment"]["python"] == "3.12"
+    assert lineage["rerun_status"] == "verified"
+    assert lineage["rerun_spec"]["command"] == "uv run python fit.py --seed 7"
     assert lineage["output_artifacts"][0]["content_hash"] == HASH_B
     view = await repo.build_test_view("cycle-1", project_id="project-1")
     assert view["build_lineage"]["id"] == lineage["id"]
+    assert view["build_lineage"]["rerun_spec"] == lineage["rerun_spec"]
+
+
+async def test_historical_build_lineage_is_readable_but_rerun_unverified(tmp_path: Path) -> None:
+    repo = await _repo(tmp_path)
+    await _ready_for_build(repo)
+    cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+    assert cycle is not None
+    build_attempt = next(item for item in cycle["stages"] if item["stage"] == "build")
+    await repo.pin_stage_spec(
+        project_id="project-1",
+        stage_attempt_id=build_attempt["id"],
+        stage_spec_key="generic:build:v7",
+    )
+
+    lineage = await _record_lineage(repo, typed=False)
+
+    assert lineage["rerun_spec"] == {}
+    assert lineage["rerun_status"] == "rerun_unverified"
+    assert lineage["stage_spec_key"] == "generic:build:v7"
+
+
+async def test_invalid_typed_rerun_record_is_refused_before_persistence(tmp_path: Path) -> None:
+    repo = await _repo(tmp_path)
+    await _ready_for_build(repo)
+
+    with pytest.raises(ValueError, match="invalid structured rerun"):
+        await _record_lineage(repo, rerun_spec={"command": "python fit.py"})
+
+
+async def test_current_build_contract_refuses_missing_typed_rerun_record(tmp_path: Path) -> None:
+    repo = await _repo(tmp_path)
+    await _ready_for_build(repo)
+
+    with pytest.raises(ValueError, match="generic:build:v11 requires"):
+        await _record_lineage(repo, typed=False)
 
 
 async def test_build_cannot_be_submitted_without_lineage(tmp_path: Path) -> None:

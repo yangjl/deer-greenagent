@@ -155,6 +155,7 @@ describe("fetchStageWorkers", () => {
                 task_id: "build-1",
                 status: "failed",
                 error: "Execution stopped.",
+                stop_reason: "token_capped",
               },
             },
             {
@@ -176,6 +177,7 @@ describe("fetchStageWorkers", () => {
       runId: "run-1",
       status: "failed",
       error: "Execution stopped.",
+      stopReason: "token_capped",
     });
     expect(workers[1]).toMatchObject({
       taskId: "build-2",

@@ -430,6 +430,15 @@ class DbtlBuildLineageRow(Base):
     code_revision: Mapped[str] = mapped_column(String(160), nullable=False)
     config_revision: Mapped[str] = mapped_column(String(160), nullable=False)
     environment: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    # Empty means the row predates the typed rerun contract. Keeping that
+    # distinction explicit lets Test read old lineage without treating prose as
+    # an executable, server-verified rerun record.
+    rerun_spec: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
+    )
     input_artifacts: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
     output_artifacts: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
     deviations: Mapped[list[Any]] = mapped_column(JSON, nullable=False)

@@ -11,6 +11,7 @@
 import { describe, expect, it } from "@rstest/core";
 
 import {
+  runningStageWorkRunId,
   stageLabel,
   stageWorkGroups,
   stageWorkIsRunning,
@@ -116,6 +117,48 @@ describe("a task belongs to the run it was observed in", () => {
     // Backfilling is addressed by (thread, run, task); the thread's latest run
     // is the wrong answer for every task from an earlier turn.
     expect(adopted[0]?.runId).toBe("run-7");
+  });
+
+  it("selects the newest actively reporting governed-work run", () => {
+    expect(
+      runningStageWorkRunId([
+        task({
+          id: "old-build",
+          dbtlStage: "build",
+          runId: "run-old",
+          status: "completed",
+        }),
+        task({
+          id: "live-build",
+          dbtlStage: "build",
+          runId: "run-live",
+        }),
+      ]),
+    ).toBe("run-live");
+  });
+
+  it("does not treat a meeting seat as the active stage-work lane", () => {
+    expect(
+      runningStageWorkRunId([
+        task({
+          id: "seat",
+          dbtlStage: "design",
+          runId: "run-meeting",
+          councilSeat: {
+            stage: "design",
+            role: "chair",
+            roleLabel: "Chair",
+            focus: "",
+            capability: "experimental_design",
+            agentName: "general-purpose",
+            viaGeneralist: true,
+            model: "m",
+            round: 1,
+            countsTowardStageOutput: true,
+          },
+        }),
+      ]),
+    ).toBeUndefined();
   });
 
   it("tolerates a task recorded before the run was known", () => {

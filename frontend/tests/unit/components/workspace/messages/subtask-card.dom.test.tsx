@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { useRef, useState } from "react";
 
 rs.mock("@/core/tasks/api", () => ({
@@ -13,6 +19,11 @@ rs.mock("@/core/i18n/hooks", () => ({
         in_progress: "Running",
         completed: "Completed",
         failed: "Failed",
+        progressReport: "Progress report",
+        failureReport: "Failure report",
+        stageTokenCapped: "Stopped at the token budget.",
+        stageTurnCapped: "Stopped at the turn limit.",
+        stageLoopCapped: "Stopped at the loop guard.",
       },
       tokenUsage: {
         label: "tokens",
@@ -79,6 +90,25 @@ function Harness() {
   );
 }
 
+function CardHarness({ task }: { task: Subtask }) {
+  const tasks = { [task.id]: task };
+  const tasksRef = useRef(tasks);
+  tasksRef.current = tasks;
+  return (
+    <SubtaskContext.Provider
+      value={{
+        tasks,
+        tasksRef,
+        setTasks: () => {
+          /* static test fixture */
+        },
+      }}
+    >
+      <SubtaskCard taskId={task.id} isLoading={false} />
+    </SubtaskContext.Provider>
+  );
+}
+
 function step(text: string, messageIndex: number) {
   return {
     kind: "ai" as const,
@@ -139,5 +169,95 @@ describe("SubtaskCard historical step backfill", () => {
     await Promise.resolve();
 
     expect(screen.queryByText("stale old run step")).toBeNull();
+  });
+});
+
+describe("SubtaskCard governed progress report", () => {
+  it("surfaces a completed stage summary while the details stay collapsed", () => {
+    render(
+      <CardHarness
+        task={{
+          id: "planner-report",
+          status: "completed",
+          subagent_type: "subagent",
+          description: "Build planner",
+          prompt: "",
+          dbtlStage: "build",
+          displaySummary: "Build plan ready · 5 phases",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Progress report")).toBeTruthy();
+    expect(screen.getByText("Build plan ready · 5 phases")).toBeTruthy();
+  });
+
+  it("surfaces a stopped stage report while the details stay collapsed", () => {
+    render(
+      <CardHarness
+        task={{
+          id: "failed-phase",
+          status: "failed",
+          subagent_type: "subagent",
+          description: "Reproduce the pilot population",
+          prompt: "",
+          dbtlStage: "build",
+          error: "Stopped after reaching the phase token budget.",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Failure report")).toBeTruthy();
+    expect(
+      screen.getByText("Stopped after reaching the phase token budget."),
+    ).toBeTruthy();
+  });
+
+  it("does not paint a capped worker's partial-success summary as its failure", () => {
+    render(
+      <CardHarness
+        task={{
+          id: "capped-phase",
+          status: "failed",
+          subagent_type: "subagent",
+          description: "Reproduce the pilot population",
+          prompt: "",
+          dbtlStage: "build",
+          stopReason: "token_capped",
+          error: "Implemented and verified every requested output.",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Stopped at the token budget.")).toBeTruthy();
+    expect(
+      screen.queryByText("Implemented and verified every requested output."),
+    ).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Reproduce the pilot population/i }),
+    );
+    expect(screen.getByText("Stopped at the token budget.")).toBeTruthy();
+    expect(
+      screen.queryByText("Implemented and verified every requested output."),
+    ).toBeNull();
+  });
+
+  it("keeps ordinary subtask results behind their disclosure", () => {
+    render(
+      <CardHarness
+        task={{
+          id: "ordinary-task",
+          status: "completed",
+          subagent_type: "subagent",
+          description: "Ordinary delegated work",
+          prompt: "",
+          result: "Private detailed result",
+        }}
+      />,
+    );
+
+    expect(screen.queryByText("Progress report")).toBeNull();
+    expect(screen.queryByText("Private detailed result")).toBeNull();
   });
 });

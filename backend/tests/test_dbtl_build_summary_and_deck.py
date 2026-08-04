@@ -93,6 +93,93 @@ class TestDeclarationsAreVerifiedNotTrusted:
 
         assert bundle.rerun_procedure == "python fit.py"
 
+    def test_typed_rerun_record_is_bounded_and_becomes_the_display_procedure(self) -> None:
+        bundle = parse_execution_bundle(
+            [
+                {
+                    "provenance": {
+                        "recorded_rerun_procedure": "summarizer may not replace this",
+                        "rerun_spec": {
+                            "version": 1,
+                            "entry_point": "/mnt/user-data/fit.py",
+                            "command": "uv run python fit.py --seed 7",
+                            "seed": 7,
+                            "inputs": ["/mnt/user-data/yield.csv"],
+                            "environment": {"python": "3.12"},
+                            "configuration": ["/mnt/user-data/pyproject.toml"],
+                            "expected_outputs": ["/mnt/user-data/outputs/model.bin"],
+                        },
+                    }
+                }
+            ],
+            published=PUBLISHED,
+        )
+
+        assert bundle.rerun_spec is not None
+        assert bundle.rerun_spec.seed == "7"
+        assert bundle.rerun_procedure == "uv run python fit.py --seed 7"
+        assert bundle.as_dict()["rerun_spec"]["expected_outputs"] == ["/mnt/user-data/outputs/model.bin"]
+
+    def test_compatible_phase_records_merge_their_bound_inputs_and_outputs(self) -> None:
+        shared = {
+            "version": 1,
+            "entry_point": "/mnt/user-data/fit.py",
+            "command": "uv run python fit.py --seed 7",
+            "seed": 7,
+            "environment": {"python": "3.12"},
+            "configuration": [],
+        }
+        bundle = parse_execution_bundle(
+            [
+                {"provenance": {"rerun_spec": {**shared, "inputs": ["a.csv"], "expected_outputs": ["a.bin"]}}},
+                {"provenance": {"rerun_spec": {**shared, "inputs": ["a.csv", "b.csv"], "expected_outputs": ["b.bin"]}}},
+            ],
+            published=PUBLISHED,
+        )
+
+        assert bundle.rerun_spec is not None
+        assert bundle.rerun_spec.inputs == ("a.csv", "b.csv")
+        assert bundle.rerun_spec.expected_outputs == ("a.bin", "b.bin")
+
+    def test_conflicting_phase_commands_leave_no_executable_authority(self) -> None:
+        def spec(command: str) -> dict:
+            return {
+                "version": 1,
+                "entry_point": "/mnt/user-data/fit.py",
+                "command": command,
+                "seed": 7,
+                "inputs": ["a.csv"],
+                "environment": {"python": "3.12"},
+                "configuration": [],
+                "expected_outputs": ["a.bin"],
+            }
+
+        bundle = parse_execution_bundle(
+            [{"provenance": {"rerun_spec": spec("python fit.py")}}, {"provenance": {"rerun_spec": spec("python other.py")}}],
+            published=PUBLISHED,
+        )
+
+        assert bundle.rerun_spec is None
+        assert bundle.rerun_procedure == ""
+
+    @pytest.mark.parametrize(
+        "rerun_spec",
+        [
+            None,
+            {},
+            {"version": 2, "entry_point": "fit.py", "command": "python fit.py", "environment": {"python": "3.12"}, "expected_outputs": ["model.bin"]},
+            {"version": 1, "entry_point": "fit.py", "command": "python fit.py", "environment": {}, "expected_outputs": ["model.bin"]},
+        ],
+    )
+    def test_malformed_typed_rerun_record_never_replaces_legacy_display(self, rerun_spec) -> None:
+        bundle = parse_execution_bundle(
+            [{"provenance": {"recorded_rerun_procedure": "legacy instructions", "rerun_spec": rerun_spec}}],
+            published=PUBLISHED,
+        )
+
+        assert bundle.rerun_spec is None
+        assert bundle.rerun_procedure == "legacy instructions"
+
 
 class TestTheSummarizerCannotCiteWhatDoesNotExist:
     def test_a_cited_figure_must_be_one_the_server_verified(self) -> None:

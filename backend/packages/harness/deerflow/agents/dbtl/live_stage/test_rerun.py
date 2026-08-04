@@ -1,0 +1,494 @@
+"""Server-verified Test execution of the typed Build rerun record."""
+
+from __future__ import annotations
+
+import json
+import re
+import shlex
+import threading
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Any
+
+from langchain.tools import tool
+from langchain_core.tools import BaseTool
+
+from deerflow.agents.dbtl.live_stage.workspace import (
+    STAGE_UNIT_WORKSPACE_PLACEHOLDER,
+    sha256_file,
+    verified_workspace_files,
+    workspace_relative_path,
+)
+from deerflow.dbtl.build_execution import BuildRerunSpec, parse_rerun_spec
+from deerflow.dbtl.stage_runner import RESULT_CONTRACT, TEST_RERUN_OUTPUT, WorkUnit
+from deerflow.dbtl.worker_result import EvidenceRef, QualityCheck, StageWorkerResult, WorkerStatus
+from deerflow.sandbox.tools import bash_tool
+from deerflow.tools.types import Runtime
+
+MAX_RERUN_LOG_BYTES = 5 * 1024 * 1024
+MAX_RERUN_OUTPUT_BYTES = 512 * 1024 * 1024
+MAX_RERUN_TOTAL_OUTPUT_BYTES = 2 * 1024 * 1024 * 1024
+_WORKSPACE_BINDING = re.compile(r"^workspace_file:(.+):sha256:([0-9a-f]{64})$")
+RERUN_STDOUT_NAME = "rerun.stdout.log"
+RERUN_STDERR_NAME = "rerun.stderr.log"
+RERUN_EXIT_STATUS_NAME = ".deerflow-rerun-exit-status"
+
+
+class TestRerunStatus(StrEnum):
+    PASSED = "passed"
+    FAILED = "failed"
+    MISSING = "missing"
+
+
+@dataclass(frozen=True, slots=True)
+class TestRerunRecord:
+    status: TestRerunStatus
+    command: str
+    reason: str
+    exit_status: int | None = None
+    logs: tuple[dict[str, Any], ...] = ()
+    outputs: tuple[dict[str, Any], ...] = ()
+    inputs_verified: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status.value,
+            "command": self.command,
+            "reason": self.reason,
+            "exit_status": self.exit_status,
+            "logs": [dict(item) for item in self.logs],
+            "outputs": [dict(item) for item in self.outputs],
+            "inputs_verified": self.inputs_verified,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTestRerun:
+    spec: BuildRerunSpec
+    output_hashes: dict[str, str]
+
+
+def parse_test_rerun_record(value: Any) -> TestRerunRecord | None:
+    """Read back only the bounded record shape written by this module."""
+
+    if not isinstance(value, dict):
+        return None
+    try:
+        status = TestRerunStatus(value.get("status"))
+    except ValueError:
+        return None
+    command = value.get("command")
+    reason = value.get("reason")
+    exit_status = value.get("exit_status")
+    if not isinstance(command, str) or not isinstance(reason, str):
+        return None
+    if exit_status is not None and (not isinstance(exit_status, int) or isinstance(exit_status, bool)):
+        return None
+
+    def records(field_name: str, *, limit: int) -> tuple[dict[str, Any], ...] | None:
+        raw = value.get(field_name)
+        if not isinstance(raw, list) or len(raw) > limit or any(not isinstance(item, dict) for item in raw):
+            return None
+        return tuple(dict(item) for item in raw)
+
+    logs = records("logs", limit=2)
+    outputs = records("outputs", limit=64)
+    if logs is None or outputs is None:
+        return None
+    return TestRerunRecord(
+        status=status,
+        command=command[:2_000],
+        reason=reason[:4_000],
+        exit_status=exit_status,
+        logs=logs,
+        outputs=outputs,
+        inputs_verified=value.get("inputs_verified") is True,
+    )
+
+
+def _failure(command: str, reason: str, *, status: TestRerunStatus = TestRerunStatus.FAILED) -> TestRerunRecord:
+    return TestRerunRecord(status=status, command=command, reason=reason)
+
+
+def prepare_test_rerun(
+    lineage: dict[str, Any],
+    *,
+    project_root: str,
+) -> PreparedTestRerun | TestRerunRecord:
+    """Revalidate every durable prerequisite before a Test worker is dispatched."""
+
+    spec = parse_rerun_spec(lineage.get("rerun_spec"))
+    if spec is None or str(lineage.get("rerun_status") or "") != "verified":
+        return _failure(
+            "",
+            "Build lineage has no verified structured rerun record.",
+            status=TestRerunStatus.MISSING,
+        )
+
+    try:
+        entrypoint = verified_workspace_files(
+            spec.entry_point,
+            project_root=project_root,
+            max_files=1,
+        )
+    except (FileNotFoundError, OSError, ValueError):
+        return _failure(spec.command, "The recorded Build entry point is missing, unreadable, or outside the project workspace.")
+    resolved_entrypoint = workspace_relative_path(spec.entry_point, project_root=project_root)
+    if len(entrypoint) != 1 or resolved_entrypoint is None or not resolved_entrypoint[1].is_file():
+        return _failure(spec.command, "The recorded Build entry point is not one regular project file.")
+
+    bound_hashes: dict[str, str] = {}
+    for binding in lineage.get("input_artifacts") or ():
+        if not isinstance(binding, str):
+            continue
+        match = _WORKSPACE_BINDING.fullmatch(binding)
+        if match is not None:
+            relative, content_hash = match.groups()
+            bound_hashes[relative] = content_hash
+        else:
+            candidate_hash = binding.rsplit(":", 1)[-1].lower()
+            if re.fullmatch(r"[0-9a-f]{64}", candidate_hash):
+                bound_hashes[f"hash:{candidate_hash}"] = candidate_hash
+
+    try:
+        for declared_input in spec.inputs:
+            files = verified_workspace_files(
+                declared_input,
+                project_root=project_root,
+                max_files=5_000,
+            )
+            if not files:
+                return _failure(spec.command, f"The declared rerun input {declared_input!r} contains no regular files.")
+            for relative, path in files:
+                current_hash = sha256_file(path)
+                if bound_hashes.get(relative) != current_hash and bound_hashes.get(f"hash:{current_hash}") != current_hash:
+                    return _failure(spec.command, f"The declared rerun input {relative!r} is not bound to the recorded Build lineage or has changed.")
+        for configuration in spec.configuration:
+            files = verified_workspace_files(
+                configuration,
+                project_root=project_root,
+                max_files=5_000,
+            )
+            if not files:
+                return _failure(spec.command, f"The recorded configuration {configuration!r} contains no regular files.")
+    except (FileNotFoundError, OSError, ValueError):
+        return _failure(spec.command, "A declared rerun input or configuration is missing, unreadable, or outside the project workspace.")
+
+    output_hashes = {
+        str(item.get("uri") or ""): str(item.get("content_hash") or "").lower() for item in lineage.get("output_artifacts") or () if isinstance(item, dict) and re.fullmatch(r"[0-9a-f]{64}", str(item.get("content_hash") or "").lower())
+    }
+    missing_outputs = [expected for expected in spec.expected_outputs if expected not in output_hashes]
+    if missing_outputs:
+        return _failure(spec.command, f"The rerun record names expected outputs that are not bound by Build lineage: {', '.join(missing_outputs[:4])}.")
+    output_names = [expected.rstrip("/").rsplit("/", 1)[-1] for expected in spec.expected_outputs]
+    if len(set(output_names)) != len(output_names):
+        return _failure(spec.command, "The rerun record has expected outputs with duplicate filenames, so fresh results could not be matched unambiguously.")
+    reserved_names = {RERUN_STDOUT_NAME, RERUN_STDERR_NAME, RERUN_EXIT_STATUS_NAME}
+    if any(name in reserved_names for name in output_names):
+        return _failure(spec.command, "The rerun record uses a filename reserved for the server-owned execution receipt.")
+    return PreparedTestRerun(spec=spec, output_hashes=output_hashes)
+
+
+def test_rerun_unit(
+    prepared: PreparedTestRerun,
+    *,
+    attempt_id: str,
+    agent_name: str,
+    via_generalist: bool,
+) -> WorkUnit:
+    """Build the one bounded Test unit that uses the existing sandbox tools."""
+
+    contract = {
+        "command": prepared.spec.command,
+        "entry_point": prepared.spec.entry_point,
+        "seed": prepared.spec.seed,
+        "inputs": list(prepared.spec.inputs),
+        "environment": dict(prepared.spec.environment),
+        "configuration": list(prepared.spec.configuration),
+        "expected_outputs": [{"expected": path, "build_hash": prepared.output_hashes[path]} for path in prepared.spec.expected_outputs],
+        "fresh_workspace": STAGE_UNIT_WORKSPACE_PLACEHOLDER,
+    }
+    prompt = "\n".join(
+        [
+            "You are the bounded reproducibility worker for Test.",
+            "Use the server-bound rerun tool to execute the exact recorded command once.",
+            "Run it with the fresh workspace below as the working directory. Read declared project inputs, but write only inside that workspace; never overwrite Build evidence.",
+            "Call execute_build_rerun exactly once. It is the only execution tool and owns the command, working directory, logs, and exit-status receipt.",
+            "Do not repair the Build or try to recreate evidence after the tool returns.",
+            "",
+            "Server-bound rerun contract:",
+            json.dumps(contract, sort_keys=True, ensure_ascii=False),
+            "",
+            "Return the shared stage-worker JSON contract after the tool finishes. The server reads the fixed receipt files and determines reproducibility; your prose and provenance do not.",
+            "Use status completed when the tool call finished, even when the recorded command exited non-zero.",
+            RESULT_CONTRACT,
+        ]
+    )
+    return WorkUnit(
+        unit_id=f"{attempt_id}-build-rerun",
+        capability="reproducibility_rerun",
+        agent_name=agent_name,
+        prompt=prompt,
+        via_generalist=via_generalist,
+        role="rerun",
+        focus="executes the exact Build rerun record in a fresh Test workspace",
+        output_contract=TEST_RERUN_OUTPUT,
+        tool_contract={
+            "kind": "build_rerun",
+            "command": prepared.spec.command,
+        },
+    )
+
+
+def build_test_rerun_tool(unit: WorkUnit, *, unit_workspace: str) -> BaseTool:
+    """Wrap native sandbox Bash so the model can execute only the bound command."""
+
+    if unit.tool_contract.get("kind") != "build_rerun":
+        raise ValueError("The Test rerun unit has no server-owned command contract.")
+    command = unit.tool_contract.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("The Test rerun unit has no executable command.")
+    workspace = unit_workspace.rstrip("/")
+    stdout_path = f"{workspace}/{RERUN_STDOUT_NAME}"
+    stderr_path = f"{workspace}/{RERUN_STDERR_NAME}"
+    status_path = f"{workspace}/{RERUN_EXIT_STATUS_NAME}"
+    shell_command = "\n".join(
+        [
+            "set +e",
+            f"mkdir -p {shlex.quote(workspace)}",
+            f"cd {shlex.quote(workspace)} || exit 97",
+            # Bound any single file the command creates to 512 MiB. Logs have a
+            # tighter acceptance cap below; this is the execution-time disk
+            # guard that prevents a failed check from first filling the mount.
+            "ulimit -f 1048576 || exit 98",
+            f"(\n{command}\n) > {shlex.quote(stdout_path)} 2> {shlex.quote(stderr_path)}",
+            "deerflow_rerun_status=$?",
+            f"printf '%s\\n' \"$deerflow_rerun_status\" > {shlex.quote(status_path)}",
+            "exit 0",
+        ]
+    )
+    call_lock = threading.Lock()
+    called = False
+
+    @tool("execute_build_rerun", parse_docstring=True, return_direct=True)
+    async def execute_build_rerun(runtime: Runtime) -> str:
+        """Execute the server-bound Build command once and retain its fixed receipt files."""
+
+        nonlocal called
+        with call_lock:
+            if called:
+                return "Error: the server-bound Build rerun has already been executed once."
+            called = True
+        coroutine = bash_tool.coroutine
+        if coroutine is None:  # pragma: no cover - configured by sandbox.tools at import
+            return "Error: the native sandbox Bash tool is unavailable."
+        result = await coroutine(
+            runtime,
+            "Execute the server-bound Build rerun and retain its receipt.",
+            shell_command,
+        )
+        return f"The server-bound rerun tool finished. Native sandbox response: {result}"
+
+    return execute_build_rerun
+
+
+def _verified_file(
+    reference: Any,
+    *,
+    project_root: str,
+    unit_workspace: str,
+    max_bytes: int,
+) -> tuple[str, int, str] | None:
+    if not isinstance(reference, str) or not reference.strip():
+        return None
+    resolved = workspace_relative_path(reference, project_root=project_root)
+    if resolved is None or not resolved[1].is_file():
+        return None
+    try:
+        files = verified_workspace_files(
+            reference,
+            project_root=project_root,
+            containment_reference=unit_workspace,
+            max_files=1,
+        )
+        if len(files) != 1 or files[0][0] != resolved[0]:
+            return None
+        before = resolved[1].stat()
+        content_hash = sha256_file(resolved[1])
+        after = resolved[1].stat()
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or after.st_size > max_bytes:
+        return None
+    return resolved[0], after.st_size, content_hash
+
+
+def validate_test_rerun(
+    result: StageWorkerResult,
+    prepared: PreparedTestRerun,
+    *,
+    project_root: str,
+    unit_workspace: str,
+) -> TestRerunRecord:
+    """Replace worker assertion with hashes and bounded files the server read."""
+
+    logs: list[dict[str, Any]] = []
+    for stream, filename in (("stdout", RERUN_STDOUT_NAME), ("stderr", RERUN_STDERR_NAME)):
+        verified = _verified_file(
+            f"{unit_workspace.rstrip('/')}/{filename}",
+            project_root=project_root,
+            unit_workspace=unit_workspace,
+            max_bytes=MAX_RERUN_LOG_BYTES,
+        )
+        if verified is None:
+            reason = f"The rerun {stream} log is missing, outside the fresh workspace, or too large."
+            if result.stop_reason:
+                reason = f"The rerun worker stopped with {result.stop_reason}; {reason}"
+            return _failure(prepared.spec.command, reason)
+        relative, size, content_hash = verified
+        logs.append(
+            {
+                "stream": stream,
+                "path": f"/mnt/user-data/{relative}",
+                "content_hash": content_hash,
+                "bytes": size,
+            }
+        )
+
+    status_file = _verified_file(
+        f"{unit_workspace.rstrip('/')}/{RERUN_EXIT_STATUS_NAME}",
+        project_root=project_root,
+        unit_workspace=unit_workspace,
+        max_bytes=32,
+    )
+    if status_file is None:
+        reason = "The server-bound rerun tool did not produce its exit-status receipt."
+        if result.stop_reason:
+            reason = f"The rerun worker stopped with {result.stop_reason}; {reason}"
+        return _failure(prepared.spec.command, reason)
+    status_relative, _status_size, _status_hash = status_file
+    resolved_status = workspace_relative_path(status_relative, project_root=project_root)
+    if resolved_status is None:
+        return _failure(prepared.spec.command, "The rerun exit-status receipt is no longer readable.")
+    try:
+        status_text = resolved_status[1].read_text(encoding="utf-8").strip()
+        exit_status = int(status_text)
+    except (OSError, UnicodeError, ValueError):
+        return _failure(prepared.spec.command, "The rerun exit-status receipt is not one integer.")
+    if not 0 <= exit_status <= 255:
+        return _failure(prepared.spec.command, "The rerun exit-status receipt is outside the shell status range.")
+
+    if exit_status != 0:
+        return TestRerunRecord(
+            status=TestRerunStatus.FAILED,
+            command=prepared.spec.command,
+            reason=f"The recorded command exited with status {exit_status}.",
+            exit_status=exit_status,
+            logs=tuple(logs),
+            inputs_verified=True,
+        )
+
+    def failed_after_execution(reason: str, *, outputs: tuple[dict[str, Any], ...] = ()) -> TestRerunRecord:
+        return TestRerunRecord(
+            status=TestRerunStatus.FAILED,
+            command=prepared.spec.command,
+            reason=reason,
+            exit_status=exit_status,
+            logs=tuple(logs),
+            outputs=outputs,
+            inputs_verified=True,
+        )
+
+    try:
+        fresh_files = verified_workspace_files(
+            unit_workspace,
+            project_root=project_root,
+            containment_reference=unit_workspace,
+            max_files=5_000,
+        )
+    except (FileNotFoundError, OSError, ValueError):
+        return failed_after_execution("The fresh rerun workspace is missing, unreadable, or exceeds its file limit.")
+    receipt_names = {RERUN_STDOUT_NAME, RERUN_STDERR_NAME, RERUN_EXIT_STATUS_NAME}
+    output_candidates = [item for item in fresh_files if item[1].name not in receipt_names]
+    try:
+        total_output_bytes = sum(path.stat().st_size for _relative, path in output_candidates)
+    except OSError:
+        return failed_after_execution("A fresh rerun output became unreadable before verification.")
+    if total_output_bytes > MAX_RERUN_TOTAL_OUTPUT_BYTES:
+        return failed_after_execution("The fresh rerun outputs exceed the 2 GiB verification limit.")
+
+    outputs: list[dict[str, Any]] = []
+    for expected in prepared.spec.expected_outputs:
+        basename = expected.rstrip("/").rsplit("/", 1)[-1]
+        matches = [relative for relative, path in output_candidates if path.name == basename]
+        if len(matches) != 1:
+            return failed_after_execution(f"The successful rerun produced {len(matches)} fresh files named {basename!r}; exactly one is required for {expected!r}.")
+        verified = _verified_file(
+            f"/mnt/user-data/{matches[0]}",
+            project_root=project_root,
+            unit_workspace=unit_workspace,
+            max_bytes=MAX_RERUN_OUTPUT_BYTES,
+        )
+        if verified is None:
+            return failed_after_execution(f"The rerun output for {expected!r} is missing, outside the fresh workspace, or too large.")
+        relative, size, content_hash = verified
+        build_hash = prepared.output_hashes[expected]
+        output_record = {
+            "expected": expected,
+            "path": f"/mnt/user-data/{relative}",
+            "content_hash": content_hash,
+            "build_hash": build_hash,
+            "bytes": size,
+        }
+        if content_hash != build_hash:
+            return failed_after_execution(
+                f"The rerun output for {expected!r} does not match the approved Build hash.",
+                outputs=(*tuple(outputs), output_record),
+            )
+        outputs.append(output_record)
+    return TestRerunRecord(
+        status=TestRerunStatus.PASSED,
+        command=prepared.spec.command,
+        reason="The exact recorded command exited zero and every expected output matched its approved Build hash.",
+        exit_status=exit_status,
+        logs=tuple(logs),
+        outputs=tuple(outputs),
+        inputs_verified=True,
+    )
+
+
+def rerun_result(
+    record: TestRerunRecord,
+    *,
+    agent_name: str,
+    token_usage: dict[str, int] | None = None,
+) -> StageWorkerResult:
+    """Create the durable worker row from server-verified facts only."""
+
+    artifact_refs = tuple(str(item["path"]) for item in (*record.logs, *record.outputs))
+    evidence_refs = tuple(
+        EvidenceRef(
+            kind="workspace_file",
+            reference=reference,
+            description="Server-hashed Test rerun evidence.",
+        )
+        for reference in artifact_refs
+    )
+    return StageWorkerResult(
+        status=(WorkerStatus.COMPLETED if record.status is TestRerunStatus.PASSED else WorkerStatus.FAILED),
+        summary=record.reason,
+        capability="reproducibility_rerun",
+        agent_name=agent_name,
+        artifact_refs=artifact_refs,
+        evidence_refs=evidence_refs,
+        provenance={"rerun_execution": record.as_dict()},
+        quality_checks=(
+            QualityCheck(
+                name="server_verified_build_rerun",
+                passed=record.status is TestRerunStatus.PASSED,
+                detail=record.reason,
+            ),
+        ),
+        recommended_next_actions=("Use the server-owned reproducibility check in the Test validity pack.",),
+        token_usage=dict(token_usage or {}),
+    )

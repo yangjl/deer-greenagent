@@ -88,7 +88,7 @@ The workspace-change card follows the same rule: it is resolved from `(threadId,
 
 Composer drafts are tab-scoped browser state. `core/threads/composer-draft.ts` stores only text plus the selected slash-skill name in `sessionStorage`, keyed by user, agent, and logical conversation scope. New-chat pages pass the stable scope `"new"` because their runtime `threadId` is a fresh UUID on every reload; established conversations use their real thread ID. `InputBox` waits for enabled skills before restoring a skill chip, degrades a missing/disabled skill back to editable slash text, and clears the stored draft through `SendMessageOptions.onSent` only after the send passes the in-flight guard. Attachments, sidecar quotes, voice state, and polish undo state are not persisted.
 
-Auth UI note: the login page's "keep me signed in" option submits only `remember_me` to the Gateway and may persist only the email address through `core/auth/remember-login.ts`. Passwords and tokens must never be stored in frontend storage; the `HttpOnly access_token` and readable `csrf_token` cookies remain Gateway-owned.
+Auth UI note: the login page's "keep me signed in" option submits only `remember_me` to the Gateway and may persist only the email address through `core/auth/remember-login.ts`. Passwords and tokens must never be stored in frontend storage; the `HttpOnly access_token` and readable `csrf_token` cookies remain Gateway-owned. A full-page workspace load authenticates server-side, where a Gateway `Set-Cookie` response cannot reach the browser. Therefore both the shared REST fetcher and LangGraph SDK request hook call the single-flight `core/api/fetcher.ts::ensureCsrfCookie` before a state-changing request when the readable cookie is absent; it performs one browser-side `/api/v1/auth/me` recovery and then injects the restored token. Keep new mutation paths on one of those two clients.
 
 `/goal` and `/compact` are built-in composer commands, not skill activations. `src/components/workspace/input-box.tsx` intercepts `/goal`, `/goal clear`, and `/goal <condition>` before normal chat submission, calling Gateway `GET/PUT/DELETE /api/threads/{thread_id}/goal`. Setting `/goal <condition>` also submits the condition text as the next user task so the agent starts running immediately; status and clear do not start a run. Goal and compact requests are tied to the current `threadId` with an `AbortController`, so switching threads or unmounting the composer aborts in-flight requests and stale responses cannot update the new thread's composer state. The chat pages render `GoalStatus` above the composer from `AgentThreadState.goal`, with local optimistic state until the next stream `values` update arrives. `/compact` calls `POST /api/threads/{thread_id}/compact` to summarize older active context while leaving the full visible chat history intact; it is skipped on new/empty threads and blocked server-side while a run is in flight. Thread rename uses the same serialized state-write route; the rename dialog stays open and surfaces the server error when an active run returns 409.
 
@@ -1052,7 +1052,15 @@ render-deferred ToolMessage path. Live custom `task_completed` and
 `task_failed` events likewise publish terminal state eagerly; only terminal
 ToolMessages parsed during `MessageList` render use the after-render path.
 Governed cards render `displaySummary` (or a
-safe legacy structured summary), never raw contract JSON. The Build rail
+safe legacy structured summary), never raw contract JSON. While a run is live,
+the panel follows the newest running governed worker's stamped run id instead
+of the previous persisted transcript anchor, and retains that run through its
+last terminal worker until the transcript catches up. A collapsed terminal
+governed card keeps its bounded progress report visible; expansion is for the
+prompt and tool transcript, not the only way to discover the outcome. A failed
+capped worker uses its server-owned `stopReason` to select the explanation in
+both the live and durable card; its partial success-like summary is not rendered as the error.
+The Build rail
 projects an open collaboration as **Waiting for you**. Its parent Build stage
 row also follows a terminal workflow phase: failed and cancelled phase attempts
 read **Stopped** or **Interrupted** instead of inheriting the cycle's broad

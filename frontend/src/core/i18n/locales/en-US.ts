@@ -701,6 +701,14 @@ export const enUS: Translations = {
     in_progress: "Running subtask",
     completed: "Subtask completed",
     failed: "Subtask failed",
+    progressReport: "Progress report",
+    failureReport: "Failure report",
+    stageTokenCapped:
+      "The worker stopped after reaching its token budget. Any generated files remain staged and were not accepted as stage evidence.",
+    stageTurnCapped:
+      "The worker stopped after reaching its turn limit. Any generated files remain staged and were not accepted as stage evidence.",
+    stageLoopCapped:
+      "The worker stopped after the repeated-tool-call guard fired. Any generated files remain staged and were not accepted as stage evidence.",
   },
 
   // Token Usage

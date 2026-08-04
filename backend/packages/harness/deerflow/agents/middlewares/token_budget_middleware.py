@@ -32,7 +32,6 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from typing import Any, override
 
 from langchain.agents import AgentState
@@ -42,6 +41,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares._bounded_dict import BoundedDict
+from deerflow.agents.middlewares._token_usage import TokenUsage, accumulate_usage
 from deerflow.config.token_budget_config import TokenBudgetConfig
 
 logger = logging.getLogger(__name__)
@@ -50,13 +50,6 @@ _BUDGET_WARNING_MSG = (
     "[TOKEN BUDGET WARNING] You have used {used:,} of your {budget:,} {reason} token budget ({percent:.0f}%). Wrap up your current work and produce a final answer. Avoid starting new tool calls unless absolutely necessary."
 )
 _BUDGET_EXCEEDED_MSG = "[TOKEN BUDGET EXCEEDED] The {reason} token usage ({used:,}) has exceeded the safety limit ({budget:,}). Producing final answer with results collected so far."
-
-
-@dataclass
-class TokenUsage:
-    input: int = 0
-    output: int = 0
-    total: int = 0
 
 
 class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
@@ -202,25 +195,11 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
             seen = self._seen_messages.setdefault(run_id, {})
             usage_accum = self._cumulative_usage.setdefault(run_id, TokenUsage())
 
-            for msg in messages:
-                if isinstance(msg, AIMessage) and msg.id and hasattr(msg, "usage_metadata"):
-                    usage = msg.usage_metadata or {}
-
-                    input_tokens = usage.get("input_tokens", 0)
-                    output_tokens = usage.get("output_tokens", 0)
-
-                    # Check what previously recorded for this exact message
-                    prev_input, prev_output = seen.get(msg.id, (0, 0))
-
-                    # Calculate if any new tokens were added (handles retroactive subagent tokens)
-                    diff_input = max(0, input_tokens - prev_input)
-                    diff_output = max(0, output_tokens - prev_output)
-
-                    if diff_input > 0 or diff_output > 0:
-                        usage_accum.input += diff_input
-                        usage_accum.output += diff_output
-                        usage_accum.total += diff_input + diff_output
-                        seen[msg.id] = (input_tokens, output_tokens)
+            # Shared with FinalizationDeadlineMiddleware, which warns *before*
+            # this ceiling. A deadline counting differently from the guard it
+            # front-runs would fire at the wrong moment, and the disagreement
+            # would be invisible because both numbers look plausible alone.
+            accumulate_usage(messages, seen, usage_accum)
 
             if usage_accum.total <= 0:
                 return None

@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 DbtlMode = Literal["disabled", "audit_only", "manual", "graph_enabled"]
+DbtlBuildWorkerContract = Literal["hardened_v11", "hardened_v10", "legacy_v9"]
 
 
 class DbtlStageMeetingsConfig(BaseModel):
@@ -79,6 +80,15 @@ class DbtlConfig(BaseModel):
             "past a phase boundary, or choose Retry / Replan / Restart / Hold after a failure — and every option states "
             "what it costs. Retrying one step from a button in the read model is deliberately not offered: the card owns "
             "that decision so it stays durable in the conversation."
+        ),
+    )
+
+    build_worker_contract: DbtlBuildWorkerContract = Field(
+        default="hardened_v11",
+        description=(
+            "Execution contract for new, unpinned phased Build attempts. hardened_v11 retains v10 governance with "
+            "a 500,000-token worker ceiling; hardened_v10 and legacy_v9 are bounded rollback paths. Already-pinned "
+            "attempts keep their recorded contract regardless of this setting."
         ),
     )
 

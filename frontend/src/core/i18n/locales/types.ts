@@ -583,6 +583,11 @@ export interface Translations {
     in_progress: string;
     completed: string;
     failed: string;
+    progressReport: string;
+    failureReport: string;
+    stageTokenCapped: string;
+    stageTurnCapped: string;
+    stageLoopCapped: string;
   };
 
   // Token Usage

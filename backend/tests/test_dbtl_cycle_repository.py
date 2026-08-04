@@ -449,6 +449,16 @@ async def test_the_full_manual_cycle_reaches_completed_without_state_lag(tmp_pat
         code_revision="git:1234567",
         config_revision="config:abc",
         environment={"python": "3.12"},
+        rerun_spec={
+            "version": 1,
+            "entry_point": "/mnt/user-data/build.py",
+            "command": "python build.py",
+            "seed": "",
+            "inputs": ["/mnt/user-data/reconciliation.json"],
+            "environment": {"python": "3.12"},
+            "configuration": [],
+            "expected_outputs": ["/mnt/user-data/outputs/model.bin"],
+        },
         input_artifacts=["artifact://reconciliation"],
         output_artifacts=[
             {

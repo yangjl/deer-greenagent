@@ -86,6 +86,7 @@ export interface StageWorkerRecord {
   result?: string;
   displaySummary?: string;
   error?: string;
+  stopReason?: string;
   modelName?: string;
   usage?: TokenUsage;
 }
@@ -191,6 +192,9 @@ export async function fetchStageWorkers(
           ? { displaySummary: text(content.display_summary) }
           : {}),
         ...(text(content.error) ? { error: text(content.error) } : {}),
+        ...(text(content.stop_reason)
+          ? { stopReason: text(content.stop_reason) }
+          : {}),
         ...(text(content.model_name)
           ? { modelName: text(content.model_name) }
           : {}),

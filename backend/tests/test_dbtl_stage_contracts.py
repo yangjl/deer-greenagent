@@ -39,6 +39,7 @@ from deerflow.dbtl.stage_spec import (
     TEST_SPEC_V1,
     TEST_SPEC_V2,
     TEST_SPEC_V3,
+    TEST_SPEC_V4,
     CycleWeight,
     MemoryWritePolicy,
     StageSpec,
@@ -117,8 +118,8 @@ class TestStageSpecRegistry:
         assert current_spec_keys() == (
             "generic:design:v2",
             "generic:reconciliation:v1",
-            "generic:build:v7",
-            "generic:test:v3",
+            "generic:build:v11",
+            "generic:test:v4",
             "generic:learn:v1",
         )
 
@@ -172,6 +173,11 @@ class TestStageSpecRegistry:
         assert TEST_SPEC_V2.budget.max_turns == 143
         assert TEST_SPEC_V3.validity_gates == ("generic-predictive:v2",)
         assert TEST_SPEC_V3.budget == TEST_SPEC_V2.budget
+        assert TEST_SPEC_V4.validity_gates == (
+            "generic-predictive:v2",
+            "server_verified_build_rerun",
+        )
+        assert TEST_SPEC_V4.budget == TEST_SPEC_V3.budget
 
     def test_a_spec_without_required_capabilities_is_refused(self) -> None:
         with pytest.raises(ValueError, match="no required capabilities"):
@@ -1028,6 +1034,33 @@ class TestStageFanOut:
         plan = plan_stage(RECONCILIATION_SPEC_V1, self._candidates(), attempt_id="a1")
         outcome = collect_results(plan, [DispatchOutcome(unit_id=plan.units[0].unit_id, text="all good!")])
         assert outcome.results[0].status is WorkerStatus.FAILED
+        assert "did not satisfy the stage contract" in outcome.results[0].summary
+        assert outcome.rejected and plan.units[0].unit_id in outcome.rejected[0]
+
+    def test_a_capped_worker_is_recorded_against_its_cap_rather_than_its_output_shape(self) -> None:
+        """The durable record must name the same cause the live lane shows.
+
+        A worker stopped at its budget leaves a fragment; recording that as a
+        contract violation blames the worker's formatting for a guardrail, and
+        the two paths must not describe one failure two ways.
+        """
+        plan = plan_stage(RECONCILIATION_SPEC_V1, self._candidates(), attempt_id="a1")
+        outcome = collect_results(
+            plan,
+            [
+                DispatchOutcome(
+                    unit_id=plan.units[0].unit_id,
+                    text="I was still writing the result when",
+                    stop_reason="token_capped",
+                )
+            ],
+        )
+
+        assert outcome.results[0].status is WorkerStatus.FAILED
+        assert "token budget" in outcome.results[0].summary
+        assert "structured result" in outcome.results[0].summary
+        assert "did not satisfy the stage contract" not in outcome.results[0].summary
+        # Still recorded as a rejection: the attempt produced no usable evidence.
         assert outcome.rejected and plan.units[0].unit_id in outcome.rejected[0]
 
     def test_build_collection_accepts_descriptive_kinds_for_workspace_files(self) -> None:
@@ -1109,25 +1142,36 @@ class TestBuildRecordsRerunInformationRatherThanProvingIt:
         assert "recorded_rerun_procedure" in BUILD_SPEC_V4.validity_gates
         assert "server_bound_input_lineage" in BUILD_SPEC_V4.validity_gates
 
-    def test_build_v7_is_current_and_restores_a_roomy_enforced_ceiling(self) -> None:
-        from deerflow.dbtl.stage_spec import BUILD_SPEC_V6, BUILD_SPEC_V7
+    def test_build_v11_is_current_and_raises_only_the_token_ceiling(self) -> None:
+        from deerflow.dbtl.stage_spec import BUILD_SPEC_V9, BUILD_SPEC_V10, BUILD_SPEC_V11
 
-        assert resolve_stage_spec("build").spec_key == "generic:build:v7"
-        assert BUILD_SPEC_V7.required_inputs == BUILD_SPEC_V6.required_inputs
-        assert BUILD_SPEC_V7.validity_gates == BUILD_SPEC_V6.validity_gates
-        assert BUILD_SPEC_V7.budget.max_turns == 450
-        assert BUILD_SPEC_V7.budget.max_tokens == 120_000
-        assert BUILD_SPEC_V7.budget.token_limit_enforced is True
-        assert BUILD_SPEC_V7.budget.timeout_seconds == 900
+        assert resolve_stage_spec("build").spec_key == "generic:build:v11"
+        assert BUILD_SPEC_V10.required_inputs == BUILD_SPEC_V9.required_inputs
+        assert BUILD_SPEC_V10.validity_gates == (
+            "server_bound_input_lineage",
+            "versioned_derived_outputs",
+            "structured_rerun_spec",
+            "server_verified_phase_manifest",
+            "phase_declared_skills",
+            "narrow_implementation_inputs",
+        )
+        assert BUILD_SPEC_V10.budget == BUILD_SPEC_V9.budget
+        assert BUILD_SPEC_V11.validity_gates == BUILD_SPEC_V10.validity_gates
+        assert BUILD_SPEC_V11.budget.max_tokens == 500_000
+        assert BUILD_SPEC_V11.budget.max_turns == BUILD_SPEC_V10.budget.max_turns
+        assert BUILD_SPEC_V11.budget.timeout_seconds == BUILD_SPEC_V10.budget.timeout_seconds
+        assert BUILD_SPEC_V11.budget.token_limit_enforced is True
 
     def test_the_older_build_contracts_are_unchanged(self) -> None:
-        from deerflow.dbtl.stage_spec import BUILD_SPEC_V2, BUILD_SPEC_V3, BUILD_SPEC_V4
+        from deerflow.dbtl.stage_spec import BUILD_SPEC_V2, BUILD_SPEC_V3, BUILD_SPEC_V4, BUILD_SPEC_V7
 
         # An approved attempt records the spec it ran under, so relaxing the
         # rule must add a version rather than rewrite the ones people approved.
         assert "reproducible_execution" in BUILD_SPEC_V2.validity_gates
         assert "reproducible_execution" in BUILD_SPEC_V3.validity_gates
         assert BUILD_SPEC_V4.budget == BUILD_SPEC_V3.budget
+        assert "recorded_rerun_procedure" in BUILD_SPEC_V7.validity_gates
+        assert "structured_rerun_spec" not in BUILD_SPEC_V7.validity_gates
 
     def test_test_still_requires_the_reproducibility_check(self) -> None:
         from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK, ValidityCheckName

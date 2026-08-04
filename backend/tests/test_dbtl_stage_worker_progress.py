@@ -99,7 +99,11 @@ def dispatch(monkeypatch):
 
     monkeypatch.setattr(adapter_module, "_stage_worker_config", lambda config, budget: config)
     monkeypatch.setattr(adapter_module, "_tools_for_stage_budget", lambda tools, budget: tools)
-    monkeypatch.setattr(adapter_module, "_model_call_budget", lambda turns: 6)
+    # Accept whatever keywords the real budget helper grows. This stub exists to
+    # pin the *step stream*, not the deadline arithmetic, so a new keyword there
+    # should not fail eight progress tests with a TypeError that says nothing
+    # about progress.
+    monkeypatch.setattr(adapter_module, "_model_call_budget", lambda turns, **_: 6)
     monkeypatch.setattr(adapter_module, "_report_subagent_token_usage", lambda config, result: None)
     monkeypatch.setattr(adapter_module, "_summarize_token_usage", lambda records: None)
 

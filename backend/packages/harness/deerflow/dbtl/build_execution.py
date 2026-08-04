@@ -31,6 +31,8 @@ from typing import Any
 MAX_FIGURES = 24
 MAX_KEY_OUTCOMES = 24
 MAX_TEXT_CHARS = 600
+MAX_RERUN_ITEMS = 64
+MAX_RERUN_COMMAND_CHARS = 2_000
 
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
 
@@ -91,12 +93,39 @@ class KeyOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class BuildRerunSpec:
+    """A bounded, executable Build rerun record carried into Test."""
+
+    entry_point: str
+    command: str
+    seed: str = ""
+    inputs: tuple[str, ...] = ()
+    environment: tuple[tuple[str, str], ...] = ()
+    configuration: tuple[str, ...] = ()
+    expected_outputs: tuple[str, ...] = ()
+    version: int = 1
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "entry_point": self.entry_point,
+            "command": self.command,
+            "seed": self.seed,
+            "inputs": list(self.inputs),
+            "environment": dict(self.environment),
+            "configuration": list(self.configuration),
+            "expected_outputs": list(self.expected_outputs),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class BuildExecutionBundle:
     """The server's verified account of one Build's execution."""
 
     outputs: tuple[str, ...] = ()
     figures: tuple[BuildFigure, ...] = ()
     key_outcomes: tuple[KeyOutcome, ...] = ()
+    rerun_spec: BuildRerunSpec | None = None
     rerun_procedure: str = ""
     deviations: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
@@ -117,6 +146,7 @@ class BuildExecutionBundle:
             "outputs": list(self.outputs),
             "figures": [figure.as_dict() for figure in self.figures],
             "key_outcomes": [outcome.as_dict() for outcome in self.key_outcomes],
+            "rerun_spec": self.rerun_spec.as_dict() if self.rerun_spec is not None else None,
             "rerun_procedure": self.rerun_procedure,
             "deviations": list(self.deviations),
             "limitations": list(self.limitations),
@@ -128,6 +158,69 @@ def _strings(value: Any, *, limit: int) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return ()
     return tuple(text for text in (_text(item) for item in value) if text)[:limit]
+
+
+def parse_rerun_spec(value: Any) -> BuildRerunSpec | None:
+    """Parse the structured rerun record fail-soft for legacy Build results."""
+
+    if not isinstance(value, Mapping):
+        return None
+    version = value.get("version", 1)
+    if version != 1 or isinstance(version, bool):
+        return None
+    raw_entry_point = value.get("entry_point")
+    raw_command = value.get("command")
+    if not isinstance(raw_entry_point, str) or not isinstance(raw_command, str):
+        return None
+    entry_point = raw_entry_point.strip()
+    command = raw_command.strip()
+    if not entry_point or len(entry_point) > 1024 or not command or len(command) > MAX_RERUN_COMMAND_CHARS:
+        return None
+
+    def exact_strings(field_name: str, *, required: bool) -> tuple[str, ...] | None:
+        raw = value.get(field_name)
+        if not isinstance(raw, (list, tuple)) or len(raw) > MAX_RERUN_ITEMS:
+            return None
+        items: list[str] = []
+        for item in raw:
+            if not isinstance(item, str):
+                return None
+            text = item.strip()
+            if not text or len(text) > 1024:
+                return None
+            items.append(text)
+        if required and not items:
+            return None
+        return tuple(items)
+
+    inputs = exact_strings("inputs", required=True)
+    configuration = exact_strings("configuration", required=False)
+    expected_outputs = exact_strings("expected_outputs", required=True)
+    raw_environment = value.get("environment")
+    if inputs is None or configuration is None or expected_outputs is None or not isinstance(raw_environment, Mapping) or len(raw_environment) > MAX_RERUN_ITEMS:
+        return None
+    environment: list[tuple[str, str]] = []
+    for raw_key, raw_value in raw_environment.items():
+        if not isinstance(raw_key, str) or not isinstance(raw_value, str):
+            return None
+        key = raw_key.strip()
+        item = raw_value.strip()
+        if not key or len(key) > 160 or not item or len(item) > 600:
+            return None
+        environment.append((key, item))
+    if not environment:
+        return None
+    seed_value = value.get("seed")
+    seed = str(seed_value)[:160] if isinstance(seed_value, (str, int, float)) and not isinstance(seed_value, bool) else ""
+    return BuildRerunSpec(
+        entry_point=entry_point,
+        command=command,
+        seed=seed,
+        inputs=inputs,
+        environment=tuple(environment),
+        configuration=configuration,
+        expected_outputs=expected_outputs,
+    )
 
 
 def parse_figures(value: Any) -> tuple[BuildFigure, ...]:
@@ -201,12 +294,39 @@ def parse_execution_bundle(
     limitations: list[str] = []
     unverified: list[str] = []
     rerun = ""
+    rerun_spec: BuildRerunSpec | None = None
+    rerun_conflict = False
+
+    def merge_rerun_specs(current: BuildRerunSpec, incoming: BuildRerunSpec) -> BuildRerunSpec | None:
+        if current.entry_point != incoming.entry_point or current.command != incoming.command or current.seed != incoming.seed or current.environment != incoming.environment:
+            return None
+        inputs = tuple(dict.fromkeys((*current.inputs, *incoming.inputs)))
+        configuration = tuple(dict.fromkeys((*current.configuration, *incoming.configuration)))
+        expected_outputs = tuple(dict.fromkeys((*current.expected_outputs, *incoming.expected_outputs)))
+        if max(len(inputs), len(configuration), len(expected_outputs)) > MAX_RERUN_ITEMS:
+            return None
+        return BuildRerunSpec(
+            entry_point=current.entry_point,
+            command=current.command,
+            seed=current.seed,
+            inputs=inputs,
+            environment=current.environment,
+            configuration=configuration,
+            expected_outputs=expected_outputs,
+        )
 
     for payload in payloads:
         if not isinstance(payload, Mapping):
             continue
         provenance = payload.get("provenance")
         provenance = provenance if isinstance(provenance, Mapping) else {}
+        parsed_rerun = parse_rerun_spec(provenance.get("rerun_spec"))
+        if parsed_rerun is not None and not rerun_conflict:
+            if rerun_spec is None:
+                rerun_spec = parsed_rerun
+            else:
+                rerun_spec = merge_rerun_specs(rerun_spec, parsed_rerun)
+                rerun_conflict = rerun_spec is None
         rerun = rerun or _text(provenance.get("recorded_rerun_procedure"))
         deviations.extend(_strings(payload.get("deviations"), limit=MAX_FIGURES))
         limitations.extend(_strings(payload.get("limitations"), limit=MAX_FIGURES))
@@ -230,7 +350,8 @@ def parse_execution_bundle(
         outputs=tuple(dict.fromkeys(outputs)),
         figures=tuple(figures[:MAX_FIGURES]),
         key_outcomes=tuple(outcomes[:MAX_KEY_OUTCOMES]),
-        rerun_procedure=rerun,
+        rerun_spec=(None if rerun_conflict else rerun_spec),
+        rerun_procedure=(rerun_spec.command if rerun_spec is not None else rerun),
         deviations=tuple(dict.fromkeys(deviations)),
         limitations=tuple(dict.fromkeys(limitations)),
         unverified=tuple(dict.fromkeys(unverified)),

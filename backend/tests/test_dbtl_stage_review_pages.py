@@ -25,6 +25,20 @@ from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_feedback import allowed_stage_feedback_intents
 from deerflow.dbtl.stage_runner import DispatchOutcome
 
+
+@pytest.fixture(autouse=True)
+def _shipped_dbtl_gates(build_workflow_steps_off):
+    """These cases are about the review *page*, not the Build workflow.
+
+    ``build_workflow_steps_enabled()`` reads the ambient ``config.yaml``, so a
+    developer running the phased Build workflow sent every Build case here down
+    the phased path, where the fake dispatcher's payload carries no phase
+    manifest and the stage correctly produces no usable evidence. The failure
+    then looks like a review-page regression and reproduces on one machine and
+    not in CI. State the switch rather than inheriting it.
+    """
+
+
 _STATES = {
     "build": "build",
     "learn": "learn",
@@ -135,7 +149,7 @@ class _Dispatcher:
 
     async def __call__(self, units, *, budget):
         outcomes = []
-        for unit in units:
+        for index, unit in enumerate(units):
             artifact_refs: list[str] = []
             evidence_refs = [{"kind": "workspace_file", "reference": "/mnt/user-data/outputs/run.json"}]
             if "Project context:\n" in unit.prompt:
@@ -159,7 +173,37 @@ class _Dispatcher:
                     "limitations": [],
                     "quality_checks": [{"name": "outputs versioned", "passed": True, "detail": ""}],
                     "recommended_next_actions": ["Review the record."],
-                    "provenance": {"inputs_examined": ["run log"]},
+                    "provenance": {
+                        "inputs_examined": ["run log"],
+                        # Build's pinned contract requires a structured rerun
+                        # record from v8 on — Test re-executes it, so a Build
+                        # without one cannot be reviewed. These cases are about
+                        # the review page, but they still have to satisfy the
+                        # contract the stage actually runs under.
+                        **(
+                            {
+                                "rerun_spec": {
+                                    "version": 1,
+                                    "entry_point": f"{stage_workspace}/artifacts/result.json",
+                                    "command": "uv run python run.py --seed 7",
+                                    "seed": 7,
+                                    # Non-empty by contract: a rerun that names
+                                    # nothing it consumes is not re-executable.
+                                    "inputs": ["/mnt/user-data/outputs/run.json"],
+                                    "environment": {"python": "3.12"},
+                                    "configuration": [],
+                                    "expected_outputs": [f"{stage_workspace}/artifacts/result.json"],
+                                }
+                            }
+                            # One Build, one rerun record. Every worker
+                            # declaring its own would remap to its own
+                            # published path and conflict, which the merge
+                            # correctly refuses — but that is a different
+                            # test than this file's.
+                            if artifact_refs and index == 0
+                            else {}
+                        ),
+                    },
                 }
             )
             outcomes.append(DispatchOutcome(unit_id=unit.unit_id, text=payload))
