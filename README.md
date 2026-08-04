@@ -920,6 +920,17 @@ views onto that folder, not owners of its data.
 # Full stack
 make dev
 
+# Backend
+cd backend
+make test
+make lint
+
+# Frontend
+cd frontend
+pnpm test
+pnpm check
+```
+
 After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes. Large, binary, or sensitive-looking files are shown as metadata only.
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes.
@@ -933,22 +944,6 @@ where both sides are guaranteed to share the same thread user-data directories
 can set `sandbox.thread_data_mounts: true` to skip that per-upload sandbox
 acquire and sync. Leave the field unset for automatic detection; setting it
 incorrectly can make uploaded files unavailable inside the sandbox.
-<<<<<<< HEAD
-=======
-
-This is the difference between a chatbot with tool access and an agent with an actual execution environment.
->>>>>>> 9c7cd4ca... feat(sandbox): add thread data mount override for upload sync (#4536)
-
-# Backend
-cd backend
-make test
-make lint
-
-# Frontend
-cd frontend
-pnpm test
-pnpm check
-```
 
 Backend features and bug fixes require tests. Keep user-facing documentation
 and the relevant `AGENTS.md` synchronized with architectural changes.

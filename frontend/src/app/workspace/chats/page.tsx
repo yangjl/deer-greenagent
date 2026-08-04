@@ -20,6 +20,7 @@ import { useInfiniteThreads } from "@/core/threads/hooks";
 import {
   channelSourceOfThread,
   pathOfThread,
+  sortPinnedThreads,
   titleOfThread,
 } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
@@ -33,7 +34,7 @@ export default function ChatsPage() {
     isFetchingNextPage,
   } = useInfiniteThreads();
   const threads = useMemo(
-    () => infiniteThreads?.pages.flat() ?? [],
+    () => sortPinnedThreads(infiniteThreads?.pages.flat() ?? []),
     [infiniteThreads],
   );
   const [search, setSearch] = useState("");
