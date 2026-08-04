@@ -1,9 +1,14 @@
 # Runtime agent activity and dispatch-lineage visibility
 
-**Status:** Proposed standalone implementation plan. No implementation is
-authorized by this document.
+**Status:** Core implementation shipped behind
+`run_events.agent_activity_visibility` (default off), but rollout is not
+complete. Phases 2–3 are complete; Phase 1 has contract drift, Phase 4 still
+has desktop UX/accessibility gaps, and Phase 5 still needs rollout evidence and
+flag cleanup. The 2026-08-03 implementation pass below records what was built,
+where the build deviated from this document, and the remaining work in priority
+order.
 
-**Date:** 2026-08-01 · design pass 2026-08-01
+**Date:** 2026-08-01 · design pass 2026-08-01 · implementation pass 2026-08-03
 
 **Backend pass:** §3–§5, §7, and the backend half of §8–§9 were re-checked
 against the runtime as built. Four claims did not survive: there is **no
@@ -24,6 +29,71 @@ identifiers, motion was reduced to a single indicator reusing the codebase's
 existing spinner, and the live-region, reduced-motion, collapsed-rail, and
 mobile gaps were closed or explicitly scoped out. The backend contract (§3–§5,
 §7) is unchanged.
+
+**Implementation pass (2026-08-03):** re-checked against the runtime as built —
+`deerflow/runtime/activity/` (envelope, vocabulary, emitter, spans, lineage,
+reducer, recovery, run_event), `agents/middlewares/agent_activity_middleware.py`,
+`runtime/runs/activity_buffer.py`, and `frontend/src/core/activity/` plus the
+rail components. The emitter/span rules, lead middleware, supervisor → adapter
+→ worker lineage, durable projection, orphan-recovery closer, thread-scoped
+read model, and the rail (compact block, collapsed item, sheet) all exist. The
+focused frontend activity suite passes (73 tests on 2026-08-03). The focused
+backend suite is **not green** after the later visible-name change: 212 tests
+pass and one stale lineage assertion still expects **Build stage** rather than
+**Build coordinator**. Deviations from this document, and what remains open:
+
+- **`paused` was added to the vocabulary.** `ActivityState` and
+  `ActivityTransition` gained `paused` beyond this plan's twelve states, and it
+  is terminal like `completed`: `LiveStageAdapter` settles a stage row as
+  `paused` when the work stops for a person, and the rail renders it as
+  **Waiting for you** (`CircleDashed`, muted, no spin) — which is how §6.7's
+  waiting state was actually delivered. **Open defect:**
+  `contracts/run_event_stream_contract.json` and
+  `backend/docs/RUN_EVENT_STREAM.md` still list only the original enums, and
+  the conformance test never drives a paused transition, so the drift is
+  invisible to CI. Fix the contract entry, the doc, and add a paused producer
+  case.
+- **The stage wrapper's visible name changed from `<Stage> stage` to
+  `<Stage> coordinator`.** This is the current server-owned vocabulary and is
+  clearer beside the DBTL stage-status surfaces. The plan, backend guide, and
+  one backend lineage test still carried the old wording. The sheet also now
+  names the immediate dispatcher on every child row, not only beyond the depth
+  cap, because a settled parent is filtered out of **Current actors**.
+- **The reducer semantics are canonical on the backend and intentionally
+  mirrored in the browser.** `runtime/activity/reducer.py` owns replay
+  idempotence, settled-row finality, open-before-update, `active_leaves`, and
+  seq-wrapper monotonicity; `core/activity/reducer.ts` re-enforces those rules
+  for reconnecting/out-of-order browser streams, and §6.6's provider exists as
+  `ThreadScopedActivityProvider`.
+- **The Phase 5 read model shipped with the feature, not after it.**
+  `list_thread_events` exists on the store base and all three implementations,
+  served by `GET /api/threads/{thread_id}/activity` with a `before_seq` cursor
+  bounded by `run_events.activity_page_limit` (default 200).
+- **Retention was decided as "no policy yet, and the UI says so"** (§5.4,
+  Phase 5): nothing deletes activity rows, the page limit bounds only what a
+  reader is served, and no expiry boundary was built on either side.
+- **The rollout flag is `run_events.agent_activity_visibility`** (this plan
+  called it `agent_activity_visibility`), published by `/api/features` as
+  `agent_activity: {enabled, durable}`; `durable` is false on the in-memory
+  run-event backend and the rail renders **Status unavailable** there.
+- **Both §5.4 gaps are closed as specified**: the activity buffer is fed before
+  `_publish_stream_item`'s namespace early-return, so persistence cannot depend
+  on a client's stream options; and
+  `runtime/activity/recovery.py::close_open_run_activity` — registered through
+  the Gateway's generic orphan-recovery callback, preserving the harness
+  boundary — writes the terminal transitions a fenced worker cannot.
+- **Still open before desktop rollout:** repair the stale backend assertion and
+  `paused` contract drift; make a terminal `paused` row produce a **Waiting**
+  header rather than today's contradictory **Done** header; finish the sheet's
+  auto-follow / **Jump to live** / reopen-position behaviour; render the
+  timeline's operation and run grouping; add the promised Runtime/accessibility
+  labels; and enforce/test the compact block's stable-height invariant. The
+  activity route itself also lacks focused endpoint coverage.
+- **Rollout-gated and deferred:** the static placeholder still renders when the
+  flag is off and should be removed only after persistent-backend rollout
+  evidence is clean. A mobile entry point remains explicitly out of this
+  phase's scope (§6.4); it is follow-up product work, not a desktop release
+  blocker.
 
 **Decision:** Replace the project rail's static Lead Agent dot with a compact,
 conversation-scoped activity window backed by server-authored events. The
@@ -77,7 +147,7 @@ A governed Build run with two parallel workers stays exactly as tall:
 AGENTS                              Live
 
  ⟳  Build worker 2             Computing
-    via Build stage · Cycle 01
+    via Build coordinator · Cycle 01
     Also running: Build worker 1
 
  Activity · 14 steps                   →
@@ -91,14 +161,14 @@ AGENT ACTIVITY — Cycle 01                    [Close]
 
   Current actors
     Cycle supervisor                     Routing
-      └─ Build stage                Coordinating
+      └─ Build coordinator          Coordinating
          ├─ Build worker 1             Thinking
          └─ Build worker 2            Computing
-            Dispatched by Build stage
+            Dispatched by Build coordinator
 
   Earlier                                10:42
     10:42:05  Build worker 1        Started
-    10:42:04  Build stage           Preparing Build
+    10:42:04  Build coordinator     Preparing Build
     10:42:03  Cycle supervisor       Routing
 ```
 
@@ -126,7 +196,7 @@ active component is thinking.
 | --- | --- | --- | --- |
 | Lead Agent | Converses, invokes a model and tools, and may delegate | Lead agent | Thinking, Computing, Dispatching, Waiting |
 | DBTL Supervisor | Deterministically resolves the governed route and invokes one branch | Cycle supervisor | Routing, Dispatching, Waiting |
-| Stage adapter (`LiveStageAdapter`) | Validates stage authority, builds work units, dispatches workers, validates results, and records evidence | `<Stage>` stage — e.g. **Build stage** | Preparing, Coordinating, Recording evidence, Waiting |
+| Stage adapter (`LiveStageAdapter`) | Validates stage authority, builds work units, dispatches workers, validates results, and records evidence | `<Stage>` coordinator — e.g. **Build coordinator** | Preparing, Coordinating, Recording evidence, Waiting |
 | Lead-delegated subagent | Performs a bounded delegated task using a model and tools | Its subagent name | Thinking, Computing |
 | DBTL stage worker | Executes one `WorkUnit` through `SubagentExecutor` | `<Stage>` worker `<n>` | Thinking, Computing |
 | Meeting participant | Same `WorkUnit` path, inside a convened meeting | Its validated seat label | Thinking, Computing |
@@ -194,8 +264,10 @@ It describes a transition, not a transcript:
 - `actor_kind` is one of `lead_agent`, `dbtl_supervisor`, `stage_adapter`,
   `subagent`, or `stage_worker` in version 1.
 - `state` is a bounded enum: `routing`, `preparing`, `thinking`, `computing`,
-  `dispatching`, `coordinating`, `recording`, `waiting`, `completed`,
-  `failed`, `cancelled`, or `interrupted`.
+  `dispatching`, `coordinating`, `recording`, `waiting`, `paused`, `completed`,
+  `failed`, `cancelled`, or `interrupted`. (`paused` was added during
+  implementation: a terminal state for a row that stopped for a person, rendered
+  as **Waiting for you**; a resume opens a new row.)
 - `operation` is a short server-owned display label selected from bounded
   templates. It is not arbitrary model prose.
 - `scope` contains only identifiers needed to reconcile activity with the
@@ -217,7 +289,7 @@ sharing `message` or `trace` would surface in a conversation. No migration is
 needed; `run_events` rows are generic over event type.
 
 Transitions are `started`, `updated`, and one terminal transition from
-`completed`, `failed`, `cancelled`, or `interrupted`. Each event also receives
+`paused`, `completed`, `failed`, `cancelled`, or `interrupted`. Each event also receives
 the run-event store's monotonic sequence number and server timestamp. Both are
 required for chronological history: sequence is the ordering authority and
 timestamp is only the human-readable label. The reducer is idempotent: repeated
@@ -362,7 +434,11 @@ a threshold, and in the worker's `finally`. This is not an optimization: `put()`
 is a documented low-frequency path that takes a per-thread advisory lock per
 call, and activity is the highest-frequency event type this system has proposed.
 
-Three things below were assumed and are not true.
+Three things below were assumed and are not true. *(All three were resolved in
+the build exactly as specified here — see the implementation pass: the buffer
+is fed before the namespace early-return, orphan recovery closes fenced
+workers' rows, retention was decided as no-policy-with-a-bounded-reader, and
+`list_thread_events` was added to the base and all three stores.)*
 
 **The worker's custom-event persistence is root-namespace-only, and the
 ordinary branch is a subgraph.** `_publish_stream_item` returns early for any
@@ -498,6 +574,7 @@ family**, and the icon carries the meaning so the mapping survives greyscale:
 | `thinking`, `computing`, `routing`, `coordinating`, `preparing`, `recording` | `Loader2Icon` + `animate-spin` | default foreground |
 | `dispatching` | static `Loader2Icon` (no spin) | `text-muted-foreground` |
 | `waiting` | `CircleDashed` | `text-muted-foreground` |
+| `paused` (rendered **Waiting for you**) | `CircleDashed` | `text-muted-foreground` |
 | `completed` | `CheckCircle2` | emerald pair |
 | `failed` | `AlertTriangle` | `text-destructive` |
 | `cancelled`, `interrupted` | `AlertTriangle` | amber pair |
@@ -568,18 +645,27 @@ It provides two views over the same conversation-scoped projection:
 
 - **Current actors** — the dispatch tree. Indentation is capped at three visual
   levels; a fourth-level DBTL chain renders flat with an explicit
-  `Dispatched by <name>` line rather than indenting off the edge. Parallel
-  workers are siblings.
+  `Dispatched by <name>` line rather than indenting off the edge. As built, the
+  immediate dispatcher is stated on **every** child row: settled parents are
+  filtered out of Current, so indentation alone can otherwise attribute a live
+  worker to the wrong visible ancestor. Parallel workers are siblings.
 - **Earlier** — the ordered timeline, newest first, grouped by run with a
-  separator carrying the run's start time and terminal result. Absolute
-  timestamps belong here, where there is width for them.
+  separator carrying the run's start time and terminal result. Each transition
+  shows the server-owned operation as well as actor/state. Absolute timestamps
+  belong here, where there is width for them. *(The current sheet is still a
+  flat actor/state list and does not render operation or run separators.)*
 
 Scrolling behaviour lives entirely in this surface, which is where the original
 plan's careful rules belong and where they are cheap: auto-follow only while
 pinned to the live edge, **Jump to live** when away from it, preserved position
-when events arrive or an older page is prepended, and lazy loading at the top.
+when live events are inserted at the top, and lazy loading at the **older end**
+of the newest-first list. Older pages append visually even though they are
+folded in server-sequence order; describing this as prepend-at-the-top would
+invert the implementation's cursor direction.
 Closing the sheet and reopening it restores the reader's position for the
-lifetime of the conversation view.
+lifetime of the conversation view. *(As built, pagination exists but the
+auto-follow / **Jump to live** / reopen-position behaviour is not implemented
+or covered — the open remainder of Phase 4.)*
 
 The surface is read-only. Starting, cancelling, approving, or retrying work is
 outside this feature.
@@ -594,7 +680,7 @@ onSelect }` — and renders each as a 32px button carrying `aria-label` and
 - `icon` is the deepest active state's icon from §6.1's table, so one glyph
   distinguishes running from waiting from failed from idle;
 - `label` is the same full sentence used as the row's accessible name —
-  *"Build worker 2, computing, dispatched by Build stage"* — which the frame
+  *"Build worker 2, computing, dispatched by Build coordinator"* — which the frame
   places on both `aria-label` and `title`, giving a hover tooltip for free; and
 - `onSelect` runs `scrollToRailSection(RAIL_SECTION_IDS.agents)`. The frame
   already calls `setCollapsed(false)` before `onSelect`, so the item only needs
@@ -645,14 +731,14 @@ becomes hostile. The rule:
   writes to directly — kept **outside** the block's own subtree so re-renders of
   the visual rows cannot trigger it. It carries only **actor-level** changes —
   who is working now and their state — coalesced to at most one announcement
-  every few seconds: *"Build worker 2, computing, via Build stage."* A state
+  every few seconds: *"Build worker 2, computing, via Build coordinator."* A state
   change on the same actor that does not cross an actor boundary updates the
   visual row silently.
 - The expanded timeline is `role="log"` with `aria-live="off"`, matching
   `ai-elements/conversation.tsx`. A reader who opened it is reading it, not
   being read to.
 - Each row's accessible name is the full sentence — *"Build worker 2,
-  computing, dispatched by Build stage"* — because the visual row splits that
+  computing, dispatched by Build coordinator"* — because the visual row splits that
   across three truncated lines.
 - The expand button carries `aria-expanded` and `aria-controls`; the collapsed
   rail item carries the same sentence as its `aria-label`.
@@ -661,10 +747,11 @@ becomes hostile. The rule:
 
 Add `ThreadScopedActivityProvider`, parallel to `ThreadScopedSubtasksProvider`
 and mounted the same way. Two different keys, and conflating them is a bug:
-the **provider** is scoped to `(thread_id, run_id)` — that is what gets torn
-down and rebuilt — while an individual activity's **identity** is
-`(thread_id, run_id, activity_id)`, which is what dedupes and orders rows
-within it. It should:
+the **provider** is scoped to `thread_id` — conversation navigation is what
+tears it down and rebuilds it — while an individual activity belongs to
+`(run_id, activity_id)` inside that conversation. The server guarantees an
+`activity_id` names one invocation, so the browser can key the row by that id
+while retaining `run_id` for grouping and audit. It should:
 
 - reduce live `agent_activity` events immediately;
 - attach children only when the parent id matches within the same run;
@@ -673,7 +760,8 @@ within it. It should:
 - append transitions to an ordered, deduplicated timeline;
 - expose the **active leaf** and its dispatcher chain as a derived value, so the
   compact block reads one selector rather than re-walking the tree;
-- prepend older pages without changing the reader's scroll position;
+- merge older pages in server-sequence order and append them at the older end
+  of the newest-first visual timeline;
 - close stale activities when the authoritative run is terminal; and
 - clear completely when navigation changes to another conversation.
 
@@ -711,13 +799,21 @@ Each of these is a distinct icon and a distinct word, so the four are
 distinguishable without colour and without motion — which matters most here,
 since three of the four have no motion by definition.
 
+The implemented `paused` terminal state supplies the no-animation handoff and
+the row label **Waiting for you**, but `activityView` currently classifies every
+terminal row as `settled`; `useActivityHeaderWord` therefore renders **Done** in
+the section header above a paused row. Treat `paused` as the waiting/resting
+mode for header copy while keeping it terminal for Current-tree filtering and
+replay finality.
+
 The compact block holds only the active leaf and its lineage. The expanded
-surface pages through durable conversation activity. **Retention is undecided —
-see §5.4 and Phase 5.** No run-event retention policy exists today, so the
-**Earlier activity is no longer retained** boundary is specified but must not be
-built until a policy exists to trigger it; building it first produces a control
-that can never fire and a claim the backend cannot keep. Ship the boundary in
-the same change as the policy, or not at all.
+surface pages through durable conversation activity. **Retention is decided:
+no policy yet, and the UI says so** (§5.4, Phase 5). Nothing deletes activity
+rows — they accumulate like every other run event — and
+`run_events.activity_page_limit` bounds only what a reader is served. The
+**Earlier activity is no longer retained** boundary was accordingly **not
+built** on either side; ship it in the same change as a real run-event
+retention policy, or not at all.
 This is operational history, not a permanent scientific audit record; durable
 DBTL decisions and evidence remain in their existing audit surfaces.
 
@@ -751,7 +847,10 @@ DBTL decisions and evidence remain in their existing audit surfaces.
 
 ## 8. Delivery phases
 
-### Phase 1 — Contract and reducer
+The core path is shipped, but the phases are not all closed. Per-phase status
+and the ordered remainder are recorded below.
+
+### Phase 1 — Contract and reducer — **implemented, contract repair required**
 
 Define the event schema, actor/state vocabulary, transition reducer, security
 allowlist, and **all five** run-event artifacts in §5.5 together — constants,
@@ -762,43 +861,84 @@ populate it from §2's visible-name column so no internal identifier can reach a
 screen. A contract test asserting that no `display_name` matches an
 `actor_kind`, a class name, or the word "adapter" is cheap and permanent.
 
-### Phase 2 — Root orchestration
+### Phase 2 — Root orchestration — **shipped**
 
 Instrument direct Lead runs, Supervisor routing, the ordinary branch, and the
 stage-adapter boundary. Persist their events and close them on every run
 terminal path. This phase makes the top-level owner truthful before showing
 individual workers.
 
-### Phase 3 — Delegation lineage
+### Phase 3 — Delegation lineage — **shipped**
 
 Enrich Lead `task_tool` and `LiveStageAdapter` worker events with activity and
 dispatcher ids. Cover parallel stage workers and Design/Test meeting seats.
 
-### Phase 4 — Project rail
+### Phase 4 — Project rail — **partially shipped**
 
 Add the thread-scoped provider, live reducer with its active-leaf selector, the
 fixed-height compact block, the collapsed-rail item, the expanded sheet with its
 timeline and current-tree views and scroll anchoring, the state/label maps, the
 motion and reduced-motion rules, the live-region policy, and explicit
-idle/waiting/unavailable states — behind an `agent_activity_visibility` rollout
-flag. Scoped to `md` and above; a mobile entry point is follow-up work (§6.4).
+idle/waiting/unavailable states — behind the `run_events.agent_activity_visibility`
+rollout flag. Scoped to `md` and above; a mobile entry point is follow-up work
+(§6.4). As built, the compact/collapsed surfaces and sheet pagination exist,
+but the sheet lacks auto-follow / **Jump to live** / reopen-position handling,
+run grouping, and operation copy; the Runtime and full-row accessibility labels
+are absent; `paused` produces contradictory header copy; and stable compact
+height is asserted in comments without a structural constraint or test.
 
-### Phase 5 — Reload and hardening
+### Phase 5 — Reload and hardening — **implemented, rollout pending**
 
 Backfill persisted activity on reload/reconnect, add the cross-run store method
 and its cursor-paginated endpoint, handle hidden runs and replay gaps, close the
 namespace and fenced-worker gaps from §5.4, add telemetry for orphaned/stale
 activities, and remove the static placeholder after rollout evidence is clean.
+As built: `list_thread_events` + `GET /api/threads/{id}/activity` exist, both
+§5.4 gaps are closed (`activity_buffer` fed before the namespace early-return;
+`recovery.py::close_open_run_activity` on the Gateway's orphan-recovery
+callback), and the static placeholder **still renders when the flag is off** —
+its removal awaits rollout evidence.
 
-**Decide retention here, explicitly.** There is no run-event retention policy to
-apply (§5.4). Either add one — a per-thread cap or age-based prune, new work
-that belongs in this phase — or record that activity grows unbounded like every
-other run event and remove §6.7's expiry boundary rather than shipping a control
-that never fires.
+**Retention was decided here, explicitly**: activity grows unbounded like every
+other run event, `run_events.activity_page_limit` bounds only the reader, and
+§6.7's expiry boundary was not built. A real retention policy — if one is ever
+added — belongs to run events generally, not to this event type alone.
+
+### Remaining work, in order
+
+1. **Restore a green contract/test baseline.** Add `paused` to the transition
+   and state enums in `contracts/run_event_stream_contract.json`, document it in
+   `backend/docs/RUN_EVENT_STREAM.md`, drive a real paused producer through
+   `test_run_event_stream_contract.py`, and update the stale **Build stage**
+   assertion to **Build coordinator**. Synchronize the same visible name and
+   open-item list in the backend/frontend module guides.
+2. **Finish the desktop reading contract.** Make `paused` render a Waiting
+   section header; add auto-follow only at the live edge, **Jump to live**,
+   preserved position across incoming events and sheet reopen; show operation
+   copy and run separators; render the Runtime/full accessible row labels; and
+   enforce the compact block's stable height.
+3. **Add coverage for what is still unproved.** Add focused coverage for
+   `GET /api/threads/{thread_id}/activity` (authorization, configured page cap,
+   cursor, metadata redaction, and empty results), DOM/browser coverage for sheet
+   anchoring and reopen, paused header copy, run grouping/operation rendering,
+   accessible labels, and the fixed-height invariant. The existing reducer/API
+   unit tests do not exercise these behaviours.
+4. **Roll out on a durable backend.** Enable the flag in a persistent-backend
+   environment and exercise ordinary, delegated, governed, hidden-run,
+   reconnect/replay-gap, parallel-worker, cancellation, and orphan-recovery
+   cases. Once evidence is clean, decide whether to default the flag on or
+   retire it, then remove `PLACEHOLDER_AGENTS` and its static green dot.
+5. **Keep mobile separate.** Add an activity entry point to the mobile
+   workspace shell only as a separately designed follow-up; the project rail
+   has no sub-`md` host today.
 
 ## 9. Verification
 
 ### Backend tests
+
+Most backend activity tests exist. The `paused` conformance case, the activity
+route test, and the stale coordinator-name assertion are the open items from
+the implementation pass.
 
 - Activity schema rejects unknown actors/states, unbounded labels, and private
   fields.
@@ -819,11 +959,19 @@ that never fires.
 - A fenced/orphan-recovered run leaves no open activity: the recovery path
   emits the terminal transition the worker could not write.
 - The contract conformance test agrees with the catalog, constants, and
-  producers; the payload stays flat and JSON-native across all three stores.
+  producers — including a real `paused` producer — and the payload stays flat
+  and JSON-native across all three stores.
 - The new cross-run store read exists on the base plus `memory`, `jsonl`, and
   `db`, and the blocking-IO gate has an anchor for its write path.
+- The authenticated thread-activity route honors the configured page cap and
+  `before_seq` cursor and returns an empty terminal page without inventing a
+  cursor.
 
 ### Frontend tests
+
+Reducer, API-client, provider, and compact-block suites exist and pass. The
+sheet/scroll, paused-header, run-grouping/operation, accessible-row, and stable-
+height cases below still need coverage.
 
 - Reducer tolerates duplicate, delayed, missing-parent, and out-of-order events.
 - Terminal activity cannot be reopened by an older update.
@@ -842,7 +990,7 @@ that never fires.
 - The compact block's height does not change between one worker, two workers,
   and four; long actor names truncate rather than wrap or overflow 224px.
 - No visible string is an internal identifier: the supervisor renders as
-  **Cycle supervisor** and the adapter as **`<Stage>` stage**.
+  **Cycle supervisor** and the adapter as **`<Stage>` coordinator**.
 - Exactly one animated indicator exists on screen at a time, and none exists in
   idle, waiting, failed, cancelled, or unavailable states.
 - Every animated indicator carries `motion-reduce:animate-none`.
@@ -853,7 +1001,14 @@ that never fires.
 - In the expanded sheet: auto-follow stays pinned at the live edge but pauses
   when the reader scrolls upward, and **Jump to live** restores it.
 - Opening, closing, and reopening the sheet preserve the reader's position.
-- Prepending a paginated history page does not move the visible row.
+- Loading an older page at the end of the newest-first timeline does not move
+  the visible row.
+- Timeline rows render their bounded operation and are grouped by run with a
+  start/result separator.
+- A paused terminal row renders **Waiting for you** with a **Waiting** header,
+  never a contradictory **Done** header.
+- Runtime rows and every timeline/current row expose the promised role/full
+  accessible sentence.
 - Tree indentation caps at three levels; a fourth-level chain renders flat with
   an explicit `Dispatched by <name>` line.
 - Conversation navigation clears the prior thread's tree.
@@ -870,7 +1025,7 @@ that never fires.
 2. Lead delegation: a subagent appears under Lead Agent and names Lead as its
    dispatcher.
 3. DBTL continuation: the rail reads **Cycle supervisor** routing, then
-   **Build stage** coordinating — never a class name — and each
+   **Build coordinator** coordinating — never a class name — and each
    Build/Test worker appears under the adapter.
 4. Design meeting: independent positions, red team, and chair retain their
    visible seat labels while sharing the adapter parent.
@@ -879,16 +1034,16 @@ that never fires.
    behind **Jump to live** without stealing the reader's position.
 7. Open the sheet, load an older page, close it, and reopen: history and scroll
    position remain coherent.
-10. Collapse the rail mid-run: the collapsed item still reports that work is in
-    flight, and selecting it returns to the Agents section.
-11. Watch the rail through a four-worker Build with the reduced-motion system
-    setting on and off: at most one indicator moves, and none under reduced
-    motion.
-12. Read the rail with a screen reader through a governed run: actor changes are
+8. Collapse the rail mid-run: the collapsed item still reports that work is in
+   flight, and selecting it returns to the Agents section.
+9. Watch the rail through a four-worker Build with the reduced-motion system
+   setting on and off: at most one indicator moves, and none under reduced
+   motion.
+10. Read the rail with a screen reader through a governed run: actor changes are
     announced, individual transitions are not, and the sheet reads on demand.
-8. Refresh mid-run and after completion: the same lineage, ordered history, and
+11. Refresh mid-run and after completion: the same lineage, ordered history, and
    terminal state return without a permanent spinner.
-9. Switch between two project conversations during a run: neither rail leaks
+12. Switch between two project conversations during a run: neither rail leaks
    the other's activity.
 
 ## 10. Acceptance criteria
