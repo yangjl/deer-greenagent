@@ -248,6 +248,13 @@ def test_ordinary_opt_out_suppresses_classifier_reentry_but_not_an_explicit_star
     assert explicit.source is RouteSource.EXPLICIT_REQUEST
 
 
+def test_ordinary_opt_out_also_suppresses_the_direct_proposal_fallback() -> None:
+    decision = route_request(_request(discovery_suppressed=True))
+
+    assert decision.kind is RouteKind.ORDINARY
+    assert decision.source is RouteSource.CLASSIFIER
+
+
 def test_ordinary_text_in_a_project_stays_ordinary() -> None:
     decision = route_request(_request(text=ORDINARY_TEXT))
     assert decision.kind is RouteKind.ORDINARY

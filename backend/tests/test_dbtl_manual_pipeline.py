@@ -4,7 +4,9 @@ import hashlib
 import importlib.util
 import json
 import sqlite3
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -474,6 +476,62 @@ def test_the_reload_trigger_is_a_watched_backend_source_file() -> None:
     # The dev launcher excludes tests/**, .deer-flow, and sandbox from the watcher.
     assert relative.parts[0] not in {"tests", ".deer-flow", "sandbox"}
     assert trigger.read_bytes() == b"", "the trigger must stay empty; only its mtime is ever changed"
+
+
+def test_manual_dev_pins_test_auth_and_config_in_the_child_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "manual-config.yaml"
+    profile.write_text("config_version: 19\n", encoding="utf-8")
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(dbtl_manual, "initialize_profile", lambda **_kwargs: profile)
+    monkeypatch.setattr(dbtl_manual, "manual_runtime_lock", lambda **_kwargs: nullcontext())
+    monkeypatch.setattr(dbtl_manual, "_backfill_checkpoint_history", lambda _path: 0)
+    monkeypatch.setattr(
+        dbtl_manual.subprocess,
+        "run",
+        lambda *_args, **kwargs: (captured.update(kwargs["env"]), SimpleNamespace(returncode=0))[1],
+    )
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "0")
+
+    assert dbtl_manual.main(["--manual-root", str(tmp_path), "dev"]) == 0
+    assert captured["DEER_FLOW_CONFIG_PATH"] == str(profile)
+    assert captured["DEER_FLOW_AUTH_DISABLED"] == "1"
+    assert captured["DEER_FLOW_MANUAL_PROFILE"] == "1"
+
+
+def test_manual_dev_services_are_loopback_only_and_restore_pinned_env_after_dotenv() -> None:
+    repo = SCRIPT_PATH.parents[1]
+    serve = (repo / "scripts" / "serve.sh").read_text(encoding="utf-8")
+    nginx = (repo / "docker" / "nginx" / "nginx.local.conf").read_text(encoding="utf-8")
+
+    assert 'DEER_FLOW_MANUAL_PROFILE_INHERITED="${DEER_FLOW_MANUAL_PROFILE:-}"' in serve
+    assert 'export DEER_FLOW_AUTH_DISABLED="1"' in serve
+    assert "--host 127.0.0.1 --port 8001" in serve
+    assert "run dev -- --hostname 127.0.0.1" in serve
+    assert "listen 127.0.0.1:2026;" in nginx
+    assert "listen [::1]:2026;" in nginx
+
+
+@pytest.mark.parametrize("name", ["DEER_FLOW_ENV", "ENVIRONMENT"])
+def test_manual_dev_refuses_an_explicit_production_environment(
+    name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def _run(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        nonlocal called
+        called = True
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setenv(name, "production")
+    monkeypatch.setattr(dbtl_manual.subprocess, "run", _run)
+
+    assert dbtl_manual.main(["--manual-root", str(tmp_path), "dev"]) == 2
+    assert called is False
 
 
 def test_tampered_scenario_database_is_not_restored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -114,13 +114,29 @@ class TestReviewService:
         stored = await self.repo.list_worker_runs(cycle_id, project_id=project_id, stage="test")
         parsed: list[StageWorkerResult] = []
         rerun: TestRerunRecord | None = None
-        for item in stored:
+        latest_rerun_prefix: str | None = None
+        # A Test stage may be retried several times before human review. Read
+        # newest-first so the snapshot is bound to the worker attempt that
+        # produced the latest review artifact, not an older failed diagnostic.
+        # Keeping ``rerun or`` below then selects the newest durable rerun, and
+        # validated_test_assessment sees the newest typed assessment first.
+        for item in reversed(stored):
             raw = item.get("result") if isinstance(item, Mapping) else None
             if not isinstance(raw, Mapping):
                 continue
             provenance = dict(raw.get("provenance") or {})
-            if "rerun_execution" in provenance and str(item.get("unit_id") or "").endswith("-build-rerun"):
-                rerun = rerun or parse_test_rerun_record(provenance.get("rerun_execution"))
+            unit_id = str(item.get("unit_id") or "")
+            if latest_rerun_prefix is None and unit_id.endswith("-build-rerun"):
+                latest_rerun_prefix = unit_id[: -len("-build-rerun")]
+                rerun = parse_test_rerun_record(provenance.get("rerun_execution"))
+        for item in reversed(stored):
+            raw = item.get("result") if isinstance(item, Mapping) else None
+            if not isinstance(raw, Mapping):
+                continue
+            unit_id = str(item.get("unit_id") or "")
+            if latest_rerun_prefix is not None and not unit_id.startswith(f"{latest_rerun_prefix}-"):
+                continue
+            provenance = dict(raw.get("provenance") or {})
             if "validity_assessment" not in provenance:
                 continue
             try:

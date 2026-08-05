@@ -142,6 +142,7 @@ async def handle_test_cards(
     render_continuation: Callable[[BranchDecision, str], str],
     present_artifacts: Callable[..., Sequence[BaseMessage]],
     build_test_card: Callable[..., tuple[BaseMessage, BaseMessage]],
+    build_stage_handoff: Callable[..., tuple[BaseMessage, BaseMessage]],
 ) -> HandlerResult:
     """Handle server-bound Test review and outcome card answers."""
     outcome_answer = answered_test_card(state, TEST_OUTCOME_PREFIX)
@@ -165,19 +166,35 @@ async def handle_test_cards(
             return HandlerResult(update={"messages": [AIMessage(content=f"The Test decision was not recorded: {exc}")]})
         assessment = dict(recorded.get("validity_assessment") or {}) if isinstance(recorded, dict) else {}
         next_state = dict(recorded.get("cycle") or {}).get("state") if isinstance(recorded, dict) else None
-        return HandlerResult(
-            update={
-                "messages": [
-                    AIMessage(
-                        content=(
-                            f"Recorded your Test decision as {assessment.get('recommendation', recommendation).replace('_', ' ')} "
-                            f"with outcome {str(assessment.get('outcome') or snapshot.get('evaluation', {}).get('outcome') or '').replace('_', ' ')}. "
-                            f"The cycle is now at {next_state or 'its recorded next stage'}."
-                        )
-                    )
-                ]
-            }
-        )
+        messages: list[BaseMessage] = [
+            AIMessage(
+                content=(
+                    f"Recorded your Test decision as {assessment.get('recommendation', recommendation).replace('_', ' ')} "
+                    f"with outcome {str(assessment.get('outcome') or snapshot.get('evaluation', {}).get('outcome') or '').replace('_', ' ')}. "
+                    f"The cycle is now at {next_state or 'its recorded next stage'}."
+                )
+            )
+        ]
+        cycle = dict(recorded.get("cycle") or {}) if isinstance(recorded, dict) else {}
+        if next_state == "learn" and recommendation == "advance_to_learn":
+            messages.extend(
+                build_stage_handoff(
+                    decision,
+                    {
+                        "cycle_id": str(cycle.get("id") or decision.cycle_id or ""),
+                        "cycle_revision": int(cycle.get("db_revision") or 0),
+                        "approved_stage": "test",
+                        "next_stage": "learn",
+                        "surface_id": str(
+                            snapshot.get("evidence_hash")
+                            or snapshot.get("stage_attempt_id")
+                            or request_id
+                        ),
+                    },
+                    request_nonce=request_nonce,
+                )
+            )
+        return HandlerResult(update={"messages": messages})
 
     review_answer = answered_test_card(state, TEST_REVIEW_PREFIX)
     if review_answer is None:

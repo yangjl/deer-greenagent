@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
+
 from deerflow.agents.dbtl.live_stage.test_rerun import (
     RERUN_EXIT_STATUS_NAME,
     RERUN_STDERR_NAME,
@@ -180,14 +182,48 @@ def test_changed_declared_input_fails_preflight_before_dispatch(tmp_path: Path) 
     assert "has changed" in record.reason
 
 
+def test_legacy_lineage_binding_in_rerun_inputs_is_normalized_to_its_project_path(tmp_path: Path) -> None:
+    lineage, _output = _project(tmp_path)
+    binding = lineage["input_artifacts"][0]
+    lineage["rerun_spec"]["inputs"].append(binding)
+
+    prepared = prepare_test_rerun(lineage, project_root=str(tmp_path))
+
+    assert isinstance(prepared, PreparedTestRerun)
+    assert prepared.spec.inputs == ("/mnt/user-data/yield.csv",)
+
+
+def test_published_entrypoint_rebinds_a_simple_relative_command_and_ignores_configuration_prose(tmp_path: Path) -> None:
+    lineage, _output = _project(tmp_path)
+    published = tmp_path / "outputs/dbtl/build/0123456789abcdef-fit.py"
+    published.parent.mkdir(parents=True, exist_ok=True)
+    published.write_text("print('fit')\n", encoding="utf-8")
+    lineage["rerun_spec"].update(
+        {
+            "entry_point": "/mnt/user-data/outputs/dbtl/build/0123456789abcdef-fit.py",
+            "command": "python fit.py",
+            "configuration": ["Run this from a clean workspace.", "/mnt/user-data/pyproject.toml"],
+        }
+    )
+
+    prepared = prepare_test_rerun(lineage, project_root=str(tmp_path))
+
+    assert isinstance(prepared, PreparedTestRerun)
+    assert prepared.spec.command == "python '/mnt/user-data/outputs/dbtl/build/0123456789abcdef-fit.py'"
+    assert prepared.spec.configuration == ("/mnt/user-data/pyproject.toml",)
+
+
 def test_duplicate_expected_output_filenames_fail_before_dispatch(tmp_path: Path) -> None:
     lineage, build_output = _project(tmp_path)
     duplicate_uri = "/mnt/user-data/outputs/dbtl/other/model.bin"
+    different = tmp_path / duplicate_uri.removeprefix("/mnt/user-data/")
+    different.parent.mkdir(parents=True, exist_ok=True)
+    different.write_bytes(b"different-model")
     lineage["rerun_spec"]["expected_outputs"].append(duplicate_uri)
     lineage["output_artifacts"].append(
         {
             "uri": duplicate_uri,
-            "content_hash": _sha(build_output.read_bytes()),
+            "content_hash": _sha(different.read_bytes()),
             "revision": 1,
         }
     )
@@ -196,7 +232,20 @@ def test_duplicate_expected_output_filenames_fail_before_dispatch(tmp_path: Path
 
     assert isinstance(record, RerunRecord)
     assert record.status is RerunStatus.FAILED
-    assert "duplicate filenames" in record.reason
+    assert "duplicate filenames and different approved hashes" in record.reason
+
+
+def test_published_hash_prefix_is_not_part_of_the_fresh_output_filename(tmp_path: Path) -> None:
+    lineage, build_output = _project(tmp_path)
+    published = "/mnt/user-data/outputs/dbtl/build/" + _sha(build_output.read_bytes())[:16] + "-model.bin"
+    lineage["rerun_spec"]["expected_outputs"] = [published]
+    lineage["output_artifacts"] = [{"uri": published, "content_hash": _sha(build_output.read_bytes()), "revision": 1}]
+
+    prepared = prepare_test_rerun(lineage, project_root=str(tmp_path))
+    assert isinstance(prepared, PreparedTestRerun)
+    record = validate_test_rerun(_result(tmp_path), prepared, project_root=str(tmp_path), unit_workspace=UNIT_WORKSPACE)
+
+    assert record.status is RerunStatus.PASSED
 
 
 def test_changed_output_hash_is_retained_and_fails_reproducibility(tmp_path: Path) -> None:
@@ -243,10 +292,41 @@ def test_rerun_unit_uses_the_existing_stage_workspace_and_exact_command(tmp_path
     assert COMMAND in unit.prompt
     assert "__DBTL_UNIT_WORKSPACE__" in unit.prompt
     assert unit.role == "rerun"
+    assert unit.tool_contract["granted_inputs"] == list(prepared.spec.inputs)
 
     tool = build_test_rerun_tool(
         unit,
         unit_workspace=UNIT_WORKSPACE,
     )
-    assert tool.return_direct is True
+    assert tool.return_direct is False
     assert tool.tool_call_schema.model_json_schema()["properties"] == {}
+
+
+@pytest.mark.anyio
+async def test_rerun_tool_executes_bound_command_then_returns_control_to_worker(monkeypatch, tmp_path: Path) -> None:
+    prepared = _prepared(tmp_path)
+    unit = make_test_rerun_unit(
+        prepared,
+        attempt_id="attempt-1",
+        agent_name="reviewer",
+        via_generalist=True,
+    )
+    calls: list[tuple[object, str, str]] = []
+
+    async def fake_bash(runtime, description: str, command: str) -> str:
+        calls.append((runtime, description, command))
+        return "ok"
+
+    from deerflow.agents.dbtl.live_stage import test_rerun
+
+    monkeypatch.setattr(test_rerun.bash_tool, "coroutine", fake_bash)
+    tool = build_test_rerun_tool(unit, unit_workspace=UNIT_WORKSPACE)
+    runtime = object()
+
+    result = await tool.coroutine(runtime)
+
+    assert tool.return_direct is False
+    assert result.endswith("Native sandbox response: ok")
+    assert calls[0][0] is runtime
+    assert calls[0][1] == "Execute the server-bound Build rerun and retain its receipt."
+    assert COMMAND in calls[0][2]

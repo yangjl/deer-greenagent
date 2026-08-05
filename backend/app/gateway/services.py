@@ -1443,6 +1443,11 @@ async def start_run(
             internal_owner_user=internal_owner_user,
             request_context=getattr(body, "context", None),
         )
+        # The per-run DBTL target is selected from runtime context, which only
+        # exists after the request overrides and durable project scope above
+        # have been applied.  The early resolution still fail-closes reserved
+        # assistant ids; this second resolution performs the one-run opt-in.
+        agent_factory = resolve_run_agent_factory(body.assistant_id, config)
 
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(

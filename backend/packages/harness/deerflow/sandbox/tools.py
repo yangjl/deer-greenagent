@@ -34,7 +34,7 @@ from deerflow.sandbox.heredoc import (
     heredoc_is_literal_data,
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
-from deerflow.sandbox.path_patterns import build_output_mask_pattern
+from deerflow.sandbox.path_patterns import build_output_mask_pattern, quote_resolved_command_path
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
@@ -1593,8 +1593,29 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         # translate today. ``$`` covers a command ending exactly at the root.
         pattern = re.compile(rf"{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>()]*)?")
 
+        def shell_quote_state(end: int) -> str | None:
+            quote: str | None = None
+            escaped = False
+            for char in result[:end]:
+                if escaped:
+                    escaped = False
+                elif char == "\\" and quote != "'":
+                    escaped = True
+                elif char in {"'", '"'}:
+                    if quote == char:
+                        quote = None
+                    elif quote is None:
+                        quote = char
+            return quote
+
         def replace_user_data_match(match: re.Match) -> str:
-            return replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
+            resolved = replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
+            quote = shell_quote_state(match.start())
+            if quote == "'":
+                return resolved.replace("'", "'\"'\"'")
+            if quote == '"':
+                return re.sub(r'([\\"$`])', r"\\\1", resolved)
+            return quote_resolved_command_path(match.group(0), resolved)
 
         result = pattern.sub(replace_user_data_match, result)
 
@@ -1679,6 +1700,52 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
     return sandbox
 
 
+def _ensure_project_thread_data(runtime: Runtime) -> tuple[str | None, str | None]:
+    """Restore project path state before a first lazy sandbox tool call."""
+
+    context = runtime.context or {}
+    project_id = context.get("project_id")
+    project_root = context.get("project_root")
+    if not isinstance(project_id, str) or not project_id or not isinstance(project_root, str) or not project_root:
+        return None, None
+    if runtime.state.get("thread_data") is None:
+        from deerflow.projects.storage import project_outputs_dir, project_uploads_dir, project_workspace_dir
+
+        root = Path(project_root)
+        runtime.state["thread_data"] = {
+            "workspace_path": str(project_workspace_dir(root)),
+            "uploads_path": str(project_uploads_dir(root)),
+            "outputs_path": str(project_outputs_dir(root)),
+        }
+    return project_id, project_root
+
+
+def _sandbox_state_matches_project(
+    sandbox_state: dict,
+    *,
+    project_id: str | None,
+    project_root: str | None,
+) -> bool:
+    """Whether a cached sandbox was acquired for the request's project scope."""
+    cached_id = sandbox_state.get("project_id")
+    cached_root = sandbox_state.get("project_root")
+    if project_id is None and project_root is None:
+        return cached_id is None and cached_root is None
+    return cached_id == project_id and cached_root == project_root
+
+
+def _sandbox_runtime_state(
+    sandbox_id: str,
+    *,
+    project_id: str | None,
+    project_root: str | None,
+) -> dict[str, str]:
+    state = {"sandbox_id": sandbox_id}
+    if project_id is not None and project_root is not None:
+        state.update(project_id=project_id, project_root=project_root)
+    return state
+
+
 def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     """Ensure sandbox is initialized, acquiring lazily if needed.
 
@@ -1703,12 +1770,18 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
 
+    project_id, project_root = _ensure_project_thread_data(runtime)
+
     # Check if sandbox already exists in state
     # Discarding fork_restored is safe: after_agent short-circuits on the
     # still-wrapped state before the context-based release branch, so this
     # reuse path never releases the parent sandbox.
     sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
-    if sandbox_state is not None:
+    if sandbox_state is not None and _sandbox_state_matches_project(
+        sandbox_state,
+        project_id=project_id,
+        project_root=project_root,
+    ):
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
             sandbox = get_sandbox_provider().get(sandbox_id)
@@ -1726,10 +1799,19 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
+    sandbox_id = provider.acquire(
+        thread_id,
+        user_id=resolve_runtime_user_id(runtime),
+        project_id=project_id,
+        project_root=project_root,
+    )
 
     # Update runtime state - this persists across tool calls
-    runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+    runtime.state["sandbox"] = _sandbox_runtime_state(
+        sandbox_id,
+        project_id=project_id,
+        project_root=project_root,
+    )
 
     # Retrieve and return the sandbox
     sandbox = provider.get(sandbox_id)
@@ -1754,10 +1836,16 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
 
+    project_id, project_root = _ensure_project_thread_data(runtime)
+
     # Same discard as the sync path above: the reuse path never releases,
     # because after_agent short-circuits on the still-wrapped state first.
     sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
-    if sandbox_state is not None:
+    if sandbox_state is not None and _sandbox_state_matches_project(
+        sandbox_state,
+        project_id=project_id,
+        project_root=project_root,
+    ):
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
             sandbox = get_sandbox_provider().get(sandbox_id)
@@ -1773,9 +1861,18 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+    sandbox_id = await provider.acquire_async(
+        thread_id,
+        user_id=resolve_runtime_user_id(runtime),
+        project_id=project_id,
+        project_root=project_root,
+    )
 
-    runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+    runtime.state["sandbox"] = _sandbox_runtime_state(
+        sandbox_id,
+        project_id=project_id,
+        project_root=project_root,
+    )
 
     sandbox = provider.get(sandbox_id)
     if sandbox is None:

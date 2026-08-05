@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -16,6 +15,11 @@ VERIFY_STDOUT = "logs/server-verification.stdout.log"
 VERIFY_STDERR = "logs/server-verification.stderr.log"
 VERIFY_STATUS = ".server-verification-exit-status"
 MAX_VERIFY_LOG_BYTES = 5 * 1024 * 1024
+
+
+def _quoted_path(value: str) -> str:
+    """Quote a virtual path before a local mount can add shell metacharacters."""
+    return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +44,7 @@ class BuildPhaseVerification:
 
 def entry_command(entry_point: str) -> str:
     suffix = PurePosixPath(entry_point).suffix.lower()
-    quoted = shlex.quote(entry_point)
+    quoted = _quoted_path(entry_point)
     interpreters = {
         ".py": "python",
         ".sh": "/bin/bash",
@@ -77,12 +81,12 @@ def verification_shell_command(
     shell = "\n".join(
         [
             "set +e",
-            f"mkdir -p {shlex.quote(workspace + '/logs')}",
-            f"cd {shlex.quote(workspace)} || exit 97",
+            f"mkdir -p {_quoted_path(workspace + '/logs')}",
+            f"cd {_quoted_path(workspace)} || exit 97",
             "ulimit -f 1048576 || exit 98",
-            f"({command}) > {shlex.quote(stdout)} 2> {shlex.quote(stderr)}",
+            f"({command}) > {_quoted_path(stdout)} 2> {_quoted_path(stderr)}",
             "dbtl_verify_status=$?",
-            f"printf '%s\\n' \"$dbtl_verify_status\" > {shlex.quote(status)}",
+            f"printf '%s\\n' \"$dbtl_verify_status\" > {_quoted_path(status)}",
             "exit 0",
         ]
     )

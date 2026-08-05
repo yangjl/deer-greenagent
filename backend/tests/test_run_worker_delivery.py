@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from deerflow.config.app_config import AppConfig
@@ -118,8 +118,135 @@ async def test_delivery_event_presented_zero_without_artifact_production():
     delivery = await _delivery_events(store, "thread-1", record.run_id)
     assert len(delivery) == 1
     assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+
+
+@pytest.mark.anyio
+async def test_worker_journal_reconciles_graph_authored_human_input_card():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-handoff")
+    store = MemoryRunEventStore()
+    request_id = "dbtl-stage-handoff__cycle-1__worker"
+    user = HumanMessage(id="handoff-input", content="Design approval is recorded.")
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            ai = AIMessage(
+                id=f"{request_id}:call",
+                content="",
+                tool_calls=[
+                    {
+                        "id": request_id,
+                        "name": "ask_clarification",
+                        "args": {"question": "Start Build?"},
+                        "type": "tool_call",
+                    }
+                ],
+            )
+            card = ToolMessage(
+                id=request_id,
+                content="Start Build?",
+                name="ask_clarification",
+                tool_call_id=request_id,
+                artifact={
+                    "human_input": {
+                        "request_id": request_id,
+                        "clarification_type": "dbtl_stage_handoff",
+                    }
+                },
+            )
+            final = {"messages": [user, ai, card]}
+            journal.on_chain_end(final, run_id=uuid4())
+            yield final
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={"messages": [user]},
+        config={},
+    )
+
+    messages = await store.list_messages("thread-handoff")
+    card_rows = [
+        row
+        for row in messages
+        if isinstance(row.get("content"), dict)
+        and isinstance(row["content"].get("artifact"), dict)
+        and row["content"]["artifact"].get("human_input", {}).get("request_id") == request_id
+    ]
+    assert len(card_rows) == 1
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_first_checkpointed_run_records_an_empty_journal_boundary(monkeypatch):
+    """No checkpoint is a known empty thread, not an unknown snapshot failure."""
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-first-card")
+    store = MemoryRunEventStore()
+    request_id = "dbtl-stage-handoff__cycle-1__first"
+    user = HumanMessage(content="Create the cycle and ask before Design.")
+
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker.aensure_checkpoint_mode_compatible",
+        AsyncMock(return_value=None),
+    )
+
+    class FirstRunAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(config={}, values={}, metadata={})
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            ai = AIMessage(
+                id=f"{request_id}:call",
+                content="",
+                tool_calls=[
+                    {
+                        "id": request_id,
+                        "name": "ask_clarification",
+                        "args": {"question": "Start Design?"},
+                        "type": "tool_call",
+                    }
+                ],
+            )
+            card = ToolMessage(
+                id=request_id,
+                content="Start Design?",
+                name="ask_clarification",
+                tool_call_id=request_id,
+                artifact={
+                    "human_input": {
+                        "request_id": request_id,
+                        "clarification_type": "dbtl_stage_handoff",
+                    }
+                },
+            )
+            final = {"messages": [user, ai, card]}
+            journal.on_chain_end(final, run_id=uuid4())
+            yield final
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=object(), event_store=store),
+        agent_factory=lambda *, config: FirstRunAgent(),
+        graph_input={"messages": [user]},
+        config={},
+    )
+
+    messages = await store.list_messages("thread-first-card")
+    assert any(
+        isinstance(row.get("content"), dict)
+        and row["content"].get("artifact", {}).get("human_input", {}).get("request_id") == request_id
+        for row in messages
+    )
 
 
 @pytest.mark.anyio

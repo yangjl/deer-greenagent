@@ -72,6 +72,9 @@ from deerflow.agents.dbtl.supervisor_support.card_history import (
     council_adjustment as _council_adjustment,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
+    declined_setup_confirmation as _declined_setup_confirmation,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
     emitted_card_request as _emitted_card_request,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
@@ -1507,7 +1510,7 @@ def build_supervisor_graph(
             state,
             await _conversation_cycle_id(config),
             str(active_discovery.get("id") or "") if active_discovery else None,
-            discovery_suppressed=discovery_suppressed,
+            discovery_suppressed=discovery_suppressed or _declined_setup_confirmation(state),
         )
         if decision.branch is SupervisorBranch.ORDINARY and context.project_id and context.selected_cycle_id is None and _stage_control_intent(_latest_user_text(state)) is not None:
             return SupervisorBranch.CYCLE_CONTINUATION.value
@@ -2043,9 +2046,44 @@ def build_supervisor_graph(
             render_continuation=_render_continuation,
             present_artifacts=_present_artifact_messages,
             build_test_card=_test_card_messages,
+            build_stage_handoff=_stage_handoff_message,
         )
         if test_cards.handled:
             return test_cards.update or {}
+
+        # A Test outcome can be recorded through the authenticated review API
+        # while chat is reloading. Recover the same visible Start/Hold control
+        # before any later request can dispatch Learn directly.
+        if handoff_answer is None:
+            recover_handoff = getattr(stage_adapter, "recover_test_learn_handoff", None)
+            if callable(recover_handoff):
+                marker = recover_handoff(project_id=context.project_id, cycle_id=decision.cycle_id)
+                if isawaitable(marker):
+                    marker = await marker
+                latest_request = _pending_stage_handoff_control(
+                    state,
+                    selected_cycle_id=str(marker.get("cycle_id") or "") if isinstance(marker, Mapping) else None,
+                )
+                marker_revision = marker.get("cycle_revision") if isinstance(marker, Mapping) else None
+                latest_revision = latest_request.get("cycle_revision") if isinstance(latest_request, Mapping) else None
+                if isinstance(marker, Mapping) and not (
+                    isinstance(latest_request, Mapping)
+                    and str(latest_request.get("dbtl_cycle_id") or "") == str(marker.get("cycle_id") or "")
+                    and isinstance(marker_revision, int)
+                    and not isinstance(marker_revision, bool)
+                    and latest_revision == marker_revision
+                    and str(latest_request.get("approved_stage") or "") == "test"
+                    and str(latest_request.get("next_stage") or "") == "learn"
+                ):
+                    return {
+                        "messages": list(
+                            _stage_handoff_message(
+                                decision,
+                                dict(marker),
+                                request_nonce=request_nonce,
+                            )
+                        )
+                    }
 
         request_text = f"Start the governed {str(handoff_answer[1].get('next_stage') or '').replace('_', ' ')} stage now." if handoff_answer is not None and handoff_answer[0] == "start_next_stage" else _latest_cycle_request_text(state)
         review_intent = _review_intent(request_text)
@@ -2452,6 +2490,35 @@ def build_supervisor_graph(
                 "messages": presented,
                 "artifacts": [path for path in (artifact_uri, deck_uri) if path],
             }
+        # Test evidence becomes reviewable only after the human submits it.
+        # That submit is a separate request from the run that created the
+        # artifact, so recovery must render the card even when this continuation
+        # correctly refuses to run an awaiting-review stage again. Without this
+        # branch the only code that could emit the card ran too early (while the
+        # stage was still in_progress), leaving the documented chat gate
+        # unreachable after submit or refresh.
+        if getattr(result, "stage", None) == "test":
+            snapshot_reader = getattr(stage_adapter, "test_review_snapshot", None)
+            snapshot = None
+            if callable(snapshot_reader):
+                snapshot = snapshot_reader(
+                    project_id=str(context.project_id or ""),
+                    cycle_id=str(decision.cycle_id or ""),
+                )
+                if isawaitable(snapshot):
+                    snapshot = await snapshot
+            if isinstance(snapshot, dict):
+                requirement = str(dict(snapshot.get("meeting") or {}).get("requirement") or "skipped")
+                return {
+                    "messages": list(
+                        _test_card_messages(
+                            decision,
+                            snapshot,
+                            request_nonce=request_nonce,
+                            outcome=requirement in {"skipped", "complete"},
+                        )
+                    )
+                }
         return {
             "messages": [
                 receipt_message(

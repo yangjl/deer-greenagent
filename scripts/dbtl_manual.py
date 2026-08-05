@@ -954,9 +954,13 @@ def main(argv: list[str] | None = None) -> int:
             if result["hot"]:
                 print("HARD-REFRESH the browser (Cmd+Shift+R / Ctrl+Shift+R) so it drops the previous scenario's cached state.")
         elif args.command == "dev":
+            if any(os.environ.get(name, "").strip().lower() in {"prod", "production"} for name in ("DEER_FLOW_ENV", "ENVIRONMENT")):
+                raise ManualPipelineError("The auth-disabled manual DBTL profile cannot run in an explicit production environment.")
             profile = initialize_profile(manual_root=args.manual_root)
             environment = os.environ.copy()
             environment["DEER_FLOW_CONFIG_PATH"] = str(profile)
+            environment["DEER_FLOW_AUTH_DISABLED"] = "1"
+            environment["DEER_FLOW_MANUAL_PROFILE"] = "1"
             with manual_runtime_lock(manual_root=args.manual_root, starting_stack=True):
                 _backfill_checkpoint_history(_database_path(args.manual_root))
                 return subprocess.run(["make", "dev"], cwd=REPO_ROOT, env=environment, check=False).returncode

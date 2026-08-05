@@ -78,7 +78,7 @@ class LocalSandboxProvider(SandboxProvider):
         self._thread_sandboxes: OrderedDict[tuple[str, str], LocalSandbox] = OrderedDict()
         # Project scope each cached sandbox was built for, so a conversation
         # that gets filed into a project is rebuilt instead of reused.
-        self._thread_projects: dict[tuple[str, str], str | None] = {}
+        self._thread_projects: dict[tuple[str, str], tuple[str | None, str | None]] = {}
         self._max_cached_threads = max_cached_threads
         self._lock = threading.Lock()
 
@@ -465,26 +465,33 @@ class LocalSandboxProvider(SandboxProvider):
         # mutations for that user. Acceptable for an editing-frequency event.
         skill_projection = self._ensure_skills_projection(effective_user_id)
         key = self._thread_key(thread_id, effective_user_id)
+        project_scope = (
+            project_id,
+            str(Path(project_root).resolve()) if project_root else None,
+        )
 
         # Fast path under lock. A cached sandbox is only reusable when it was
         # built for the same project scope: filing a conversation into a
         # project has to stop it writing into its own tree.
         with self._lock:
             cached = self._thread_sandboxes.get(key)
-            if cached is not None and self._thread_projects.get(key) == project_id:
+            if cached is not None and self._thread_projects.get(key) == project_scope:
                 # Mark as most-recently used so frequently-touched threads
                 # survive eviction.
                 self._thread_sandboxes.move_to_end(key)
+            else:
+                cached = None
         if cached is not None:
             return cached.id
 
         # ``_build_thread_path_mappings`` touches the filesystem
         # (``ensure_thread_dirs``); release the lock during I/O.
-        new_mappings = list(self._path_mappings)
+        new_mappings = self._static_mappings_for_project(project_root)
         self._append_public_skill_mapping(new_mappings, skill_projection)
         new_mappings += self._build_thread_path_mappings(
             thread_id,
             user_id=effective_user_id,
+            project_root=project_root,
             skill_projection=skill_projection,
         )
 
@@ -492,10 +499,10 @@ class LocalSandboxProvider(SandboxProvider):
             # Re-check after the lock-free I/O: another caller may have
             # populated the cache while we were computing mappings.
             cached = self._thread_sandboxes.get(key)
-            if cached is None or self._thread_projects.get(key) != project_id:
+            if cached is None or self._thread_projects.get(key) != project_scope:
                 cached = LocalSandbox(self._sandbox_id_for_thread(thread_id, effective_user_id), path_mappings=new_mappings)
                 self._thread_sandboxes[key] = cached
-                self._thread_projects[key] = project_id
+                self._thread_projects[key] = project_scope
                 self._evict_until_within_cap_locked()
             else:
                 self._thread_sandboxes.move_to_end(key)

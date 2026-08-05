@@ -6,13 +6,15 @@ import json
 import re
 import shlex
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Any
 
 from langchain.tools import tool
 from langchain_core.tools import BaseTool
 
+from deerflow.agents.dbtl.live_stage.build_phase_verification import entry_command
 from deerflow.agents.dbtl.live_stage.workspace import (
     STAGE_UNIT_WORKSPACE_PLACEHOLDER,
     sha256_file,
@@ -30,6 +32,7 @@ MAX_RERUN_LOG_BYTES = 5 * 1024 * 1024
 MAX_RERUN_OUTPUT_BYTES = 512 * 1024 * 1024
 MAX_RERUN_TOTAL_OUTPUT_BYTES = 2 * 1024 * 1024 * 1024
 _WORKSPACE_BINDING = re.compile(r"^workspace_file:(.+):sha256:([0-9a-f]{64})$")
+_PUBLISHED_NAME = re.compile(r"^[0-9a-f]{16}-(.+)$")
 RERUN_STDOUT_NAME = "rerun.stdout.log"
 RERUN_STDERR_NAME = "rerun.stderr.log"
 RERUN_EXIT_STATUS_NAME = ".deerflow-rerun-exit-status"
@@ -67,6 +70,34 @@ class TestRerunRecord:
 class PreparedTestRerun:
     spec: BuildRerunSpec
     output_hashes: dict[str, str]
+
+
+def _rerun_output_name(expected: str) -> str:
+    name = expected.rstrip("/").rsplit("/", 1)[-1]
+    match = _PUBLISHED_NAME.fullmatch(name)
+    return match.group(1) if match is not None else name
+
+
+def _server_bound_simple_command(spec: BuildRerunSpec) -> str:
+    """Rebind only a simple relative command to its published entry point.
+
+    Publication changes ``fit.py`` into a content-addressed path. Older worker
+    records remapped ``entry_point`` but left ``python fit.py`` unchanged. A
+    two-token command with the same unprefixed filename has no arguments to
+    preserve, so the server-owned interpreter mapping is unambiguous. Anything
+    more complex remains byte-for-byte worker-authored and fails closed later.
+    """
+    try:
+        tokens = shlex.split(spec.command)
+    except ValueError:
+        return spec.command
+    if len(tokens) != 2:
+        return spec.command
+    recorded_name = PurePosixPath(tokens[1]).name
+    published_name = _rerun_output_name(spec.entry_point)
+    if recorded_name != published_name:
+        return spec.command
+    return entry_command(spec.entry_point)
 
 
 def parse_test_rerun_record(value: Any) -> TestRerunRecord | None:
@@ -126,6 +157,26 @@ def prepare_test_rerun(
             status=TestRerunStatus.MISSING,
         )
 
+    # Compatibility for phased Build records written before the driver kept
+    # executable paths separate from hash-bound lineage strings.  The hash is
+    # still revalidated against ``input_artifacts`` below; only the path-shaped
+    # view belongs in the rerun spec.
+    normalized_inputs: list[str] = []
+    for declared_input in spec.inputs:
+        match = _WORKSPACE_BINDING.fullmatch(declared_input)
+        normalized = f"/mnt/user-data/{match.group(1)}" if match is not None else declared_input
+        if normalized not in normalized_inputs:
+            normalized_inputs.append(normalized)
+    spec = replace(spec, inputs=tuple(normalized_inputs))
+    spec = replace(
+        spec,
+        command=_server_bound_simple_command(spec),
+        # The contract defines configuration as project files. Some older
+        # workers put explanatory sentences here; treating prose as a path made
+        # an otherwise executable rerun fail before dispatch.
+        configuration=tuple(item for item in spec.configuration if item.startswith("/mnt/user-data/")),
+    )
+
     try:
         entrypoint = verified_workspace_files(
             spec.entry_point,
@@ -181,9 +232,15 @@ def prepare_test_rerun(
     missing_outputs = [expected for expected in spec.expected_outputs if expected not in output_hashes]
     if missing_outputs:
         return _failure(spec.command, f"The rerun record names expected outputs that are not bound by Build lineage: {', '.join(missing_outputs[:4])}.")
-    output_names = [expected.rstrip("/").rsplit("/", 1)[-1] for expected in spec.expected_outputs]
-    if len(set(output_names)) != len(output_names):
-        return _failure(spec.command, "The rerun record has expected outputs with duplicate filenames, so fresh results could not be matched unambiguously.")
+    unique_outputs: dict[str, str] = {}
+    for expected in spec.expected_outputs:
+        name = _rerun_output_name(expected)
+        previous = unique_outputs.get(name)
+        if previous is not None and output_hashes[previous] != output_hashes[expected]:
+            return _failure(spec.command, "The rerun record has expected outputs with duplicate filenames and different approved hashes.")
+        unique_outputs.setdefault(name, expected)
+    spec = replace(spec, expected_outputs=tuple(unique_outputs.values()))
+    output_names = list(unique_outputs)
     reserved_names = {RERUN_STDOUT_NAME, RERUN_STDERR_NAME, RERUN_EXIT_STATUS_NAME}
     if any(name in reserved_names for name in output_names):
         return _failure(spec.command, "The rerun record uses a filename reserved for the server-owned execution receipt.")
@@ -237,6 +294,7 @@ def build_test_rerun_unit(
         tool_contract={
             "kind": "build_rerun",
             "command": prepared.spec.command,
+            "granted_inputs": list(prepared.spec.inputs),
         },
     )
 
@@ -258,6 +316,8 @@ def build_test_rerun_tool(unit: WorkUnit, *, unit_workspace: str) -> BaseTool:
             "set +e",
             f"mkdir -p {shlex.quote(workspace)}",
             f"cd {shlex.quote(workspace)} || exit 97",
+            f"export DBTL_WORKSPACE={shlex.quote(workspace)}",
+            "export DBTL_PROJECT_ROOT=/mnt/user-data",
             # Bound any single file the command creates to 512 MiB. Logs have a
             # tighter acceptance cap below; this is the execution-time disk
             # guard that prevents a failed check from first filling the mount.
@@ -271,7 +331,7 @@ def build_test_rerun_tool(unit: WorkUnit, *, unit_workspace: str) -> BaseTool:
     call_lock = threading.Lock()
     called = False
 
-    @tool("execute_build_rerun", parse_docstring=True, return_direct=True)
+    @tool("execute_build_rerun", parse_docstring=True)
     async def execute_build_rerun(runtime: Runtime) -> str:
         """Execute the server-bound Build command once and retain its fixed receipt files."""
 
@@ -389,20 +449,23 @@ def validate_test_rerun(
 
     outputs: list[dict[str, Any]] = []
     for expected in prepared.spec.expected_outputs:
-        basename = expected.rstrip("/").rsplit("/", 1)[-1]
+        basename = _rerun_output_name(expected)
         matches = [relative for relative, path in output_candidates if path.name == basename]
-        if len(matches) != 1:
-            return failed_after_execution(f"The successful rerun produced {len(matches)} fresh files named {basename!r}; exactly one is required for {expected!r}.")
-        verified = verified_workspace_file(
-            f"/mnt/user-data/{matches[0]}",
-            project_root=project_root,
-            containment_reference=unit_workspace,
-            max_bytes=MAX_RERUN_OUTPUT_BYTES,
-        )
-        if verified is None:
-            return failed_after_execution(f"The rerun output for {expected!r} is missing, outside the fresh workspace, or too large.")
-        relative, size, content_hash = verified
+        if not matches:
+            return failed_after_execution(f"The successful rerun produced 0 fresh files named {basename!r}; at least one is required for {expected!r}.")
         build_hash = prepared.output_hashes[expected]
+        verified_matches = [
+            verified_workspace_file(
+                f"/mnt/user-data/{match}",
+                project_root=project_root,
+                containment_reference=unit_workspace,
+                max_bytes=MAX_RERUN_OUTPUT_BYTES,
+            )
+            for match in matches
+        ]
+        if any(item is None for item in verified_matches):
+            return failed_after_execution(f"A rerun output for {expected!r} is outside the fresh workspace or too large.")
+        relative, size, content_hash = next(item for item in verified_matches if item is not None)
         output_record = {
             "expected": expected,
             "path": f"/mnt/user-data/{relative}",
@@ -410,9 +473,9 @@ def validate_test_rerun(
             "build_hash": build_hash,
             "bytes": size,
         }
-        if content_hash != build_hash:
+        if any(item[2] != build_hash for item in verified_matches if item is not None):
             return failed_after_execution(
-                f"The rerun output for {expected!r} does not match the approved Build hash.",
+                f"Fresh files named {basename!r} disagree with the approved Build hash for {expected!r}.",
                 outputs=(*tuple(outputs), output_record),
             )
         outputs.append(output_record)

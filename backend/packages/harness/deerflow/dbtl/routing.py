@@ -232,8 +232,10 @@ def route_request(request: RoutingRequest) -> RoutingDecision:
         ),
     )
     if result.decision is ClassifierDecision.PROPOSE_CYCLE:
-        if request.discovery_enabled and request.discovery_classifier_entry:
-            kind = RouteKind.ORDINARY if request.discovery_suppressed else RouteKind.DISCOVERY
+        if request.discovery_suppressed:
+            kind = RouteKind.ORDINARY
+        elif request.discovery_enabled and request.discovery_classifier_entry:
+            kind = RouteKind.DISCOVERY
         else:
             kind = RouteKind.PROPOSAL
     else:

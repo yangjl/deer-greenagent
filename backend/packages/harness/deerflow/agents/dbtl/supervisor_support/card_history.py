@@ -347,6 +347,23 @@ def confirmation_answer(state: dict) -> str | None:
     return answered[1].strip().lower()
 
 
+def declined_setup_confirmation(state: dict) -> bool:
+    """Whether the newest prior setup decision kept this conversation ordinary."""
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if not response or response.get("source") != "ask_clarification":
+            continue
+        request_id = str(response.get("request_id") or "")
+        if not request_id.startswith(SETUP_CONFIRMATION_PREFIX):
+            continue
+        if emitted_card_request(state, request_id) is None:
+            return False
+        return str(response.get("value") or "").strip().lower() == "keep_ordinary"
+    return False
+
+
 def has_emitted_card(state: dict, prefix: str) -> bool:
     for message in state.get("messages") or []:
         artifact = getattr(message, "artifact", None)

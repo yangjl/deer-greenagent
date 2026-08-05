@@ -593,6 +593,7 @@ async def run_agent(
     # earlier runs on the same thread — without it, one stale fallback in
     # history would mark every subsequent run on this thread as ``error``.
     pre_existing_message_ids: set[str] = set()
+    pre_run_messages: list[Any] | None = None
 
     # Bound agent graph accessor + captured pre-run rollback point; assigned
     # inside the try block so the finally rollback path can fork the pre-run
@@ -871,7 +872,14 @@ async def run_agent(
                     logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
                 if rollback_point is not None:
                     pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
-                    pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(rollback_point.messages)})
+                    pre_run_messages = list(rollback_point.messages)
+                    pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": pre_run_messages})
+                elif not snapshot_capture_failed:
+                    # No checkpoint on a brand-new thread is a known empty
+                    # boundary, not a failed snapshot. Journal it explicitly
+                    # so id-less graph-authored cards are still recognized as
+                    # output from this first run.
+                    pre_run_messages = []
 
                 # Resuming from an older checkpoint is a fork, and a delta fork
                 # materializes the abandoned sibling's writes back into state
@@ -889,8 +897,14 @@ async def run_agent(
                 # The graph now starts from the selected state, so the
                 # current-run message boundary is that state, not the head we
                 # captured for rollback.
-                pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(resumed_messages)})
+                pre_run_messages = list(resumed_messages)
+                pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": pre_run_messages})
                 initial_runnable_config = RunnableConfig(**config)
+
+        if journal is not None:
+            journal.record_input(graph_input)
+            if pre_run_messages is not None:
+                journal.record_pre_run_message_identities(pre_run_messages)
 
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         _install_runtime_context(config, runtime_ctx)

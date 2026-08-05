@@ -92,6 +92,35 @@ def test_replace_virtual_paths_in_command_preserves_trailing_slash() -> None:
     assert "/tmp/deer-flow/threads/t1/user-data/workspace/" in result, f"Trailing slash lost in: {result!r}"
 
 
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("python /mnt/user-data/fit.py", "python '/tmp/project with spaces/fit.py'"),
+        ("ROOT=/mnt/user-data", "ROOT='/tmp/project with spaces'"),
+        ("python '/mnt/user-data/fit.py'", "python '/tmp/project with spaces/fit.py'"),
+    ],
+)
+def test_replace_virtual_paths_in_command_quotes_host_project_paths_with_spaces(command: str, expected: str) -> None:
+    thread_data = {
+        "workspace_path": "/tmp/project with spaces",
+        "uploads_path": "/tmp/project with spaces/uploads",
+        "outputs_path": "/tmp/project with spaces/outputs",
+    }
+
+    assert replace_virtual_paths_in_command(command, thread_data) == expected
+
+
+@pytest.mark.parametrize("suffix", ["*.csv", "$NAME.csv", "{train,test}.csv"])
+def test_replace_virtual_paths_keeps_unquoted_shell_expansion(suffix: str) -> None:
+    thread_data = {
+        "workspace_path": "/tmp/project with spaces",
+        "uploads_path": "/tmp/project with spaces/uploads",
+        "outputs_path": "/tmp/project with spaces/outputs",
+    }
+
+    assert replace_virtual_paths_in_command(f"ls /mnt/user-data/{suffix}", thread_data) == f"ls '/tmp/project with spaces'/{suffix}"
+
+
 # ---------- mask_local_paths_in_output ----------
 
 

@@ -24,6 +24,7 @@ from __future__ import annotations
 import shlex
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from deerflow.agents.dbtl.live_stage.build_phase_verification import entry_command
 from deerflow.dbtl.build_execution import BuildRerunSpec
@@ -84,8 +85,8 @@ def render_driver_script(phases: Sequence[DriverPhase], *, workspace_root: str, 
         "# Written by DeerFlow from the verified phase manifests; do not edit.",
         "set -euo pipefail",
         "",
-        f"export {WORKSPACE_ENV}={shlex.quote(workspace_root)}",
-        f"export {PROJECT_ROOT_ENV}={shlex.quote(project_root)}",
+        f'if [ -z "${{{WORKSPACE_ENV}:-}}" ]; then export {WORKSPACE_ENV}={shlex.quote(workspace_root)}; fi',
+        f'if [ -z "${{{PROJECT_ROOT_ENV}:-}}" ]; then export {PROJECT_ROOT_ENV}={shlex.quote(project_root)}; fi',
     ]
     for position, phase in enumerate(runnable, start=1):
         lines.extend(_phase_block(phase, position=position))
@@ -95,6 +96,27 @@ def render_driver_script(phases: Sequence[DriverPhase], *, workspace_root: str, 
 
 def _ordered_unique(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for value in values if value.strip()))
+
+
+def _bound_input_path(binding: str) -> str:
+    """Turn a lineage binding back into the project path Test can open.
+
+    Build lineage deliberately stores ``workspace_file:<relative>:sha256:<hash>``
+    so a path and its bytes stay bound together.  A rerun spec, however, is an
+    executable declaration and accepts paths only.  Passing the binding through
+    verbatim made every phased Build's server-owned Test rerun fail before it
+    could execute.
+    """
+    value = binding.strip()
+    if value.startswith("/mnt/user-data/"):
+        return value
+    if not value.startswith("workspace_file:"):
+        return ""
+    relative, marker, digest = value[len("workspace_file:") :].rpartition(":sha256:")
+    path = PurePosixPath(relative)
+    if marker and len(digest) == 64 and all(character in "0123456789abcdef" for character in digest.lower()) and relative and not path.is_absolute() and ".." not in path.parts:
+        return f"/mnt/user-data/{path.as_posix()}"
+    return ""
 
 
 def driver_rerun_spec(
@@ -109,11 +131,11 @@ def driver_rerun_spec(
     """The rerun record naming the driver, or `None` when there is none to name.
 
     `bound_inputs` is what the Build actually read, as the server bound it into
-    lineage. It is unioned with the phases' runtime inputs rather than replacing
-    them, because the two answer different questions: the runtime inputs are
-    what the entry points consume (and are all a pre-v3 manifest can report,
-    which is none), while lineage is the full set Test verifies has not changed
-    under the record.
+    lineage. Its path is unioned with the phases' runtime inputs rather than
+    replacing them, because the two answer different questions: the runtime
+    inputs are what the entry points consume (and are all a pre-v3 manifest can
+    report, which is none), while the separate lineage record retains the hashes
+    Test verifies have not changed.
 
     Returning `None` rather than an empty spec keeps the gate meaningful: a
     Build with no runnable entry point has not recorded how to re-run itself,
@@ -126,7 +148,7 @@ def driver_rerun_spec(
         entry_point=driver_path,
         command=f"/bin/bash {shlex.quote(driver_path)}",
         seed=seed,
-        inputs=_ordered_unique((*(path for phase in runnable for path in phase.execution_inputs), *bound_inputs)),
+        inputs=_ordered_unique((*(path for phase in runnable for path in phase.execution_inputs), *(_bound_input_path(binding) for binding in bound_inputs))),
         environment=dict(environment),
         configuration=(),
         expected_outputs=_ordered_unique(expected_outputs),

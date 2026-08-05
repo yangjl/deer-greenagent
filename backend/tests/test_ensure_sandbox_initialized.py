@@ -52,10 +52,24 @@ class _RecordingProvider(SandboxProvider):
     def __init__(self) -> None:
         self.sandbox = _StubSandbox("stub")
 
-    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+    def acquire(
+        self,
+        thread_id: str | None = None,
+        *,
+        user_id: str | None = None,
+        project_id: str | None = None,
+        project_root: str | None = None,
+    ) -> str:
         raise AssertionError("state already carries a sandbox; acquire must not run")
 
-    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+    async def acquire_async(
+        self,
+        thread_id: str | None = None,
+        *,
+        user_id: str | None = None,
+        project_id: str | None = None,
+        project_root: str | None = None,
+    ) -> str:
         raise AssertionError("state already carries a sandbox; acquire must not run")
 
     def get(self, sandbox_id: str) -> Sandbox | None:
@@ -72,14 +86,28 @@ class _FallthroughProvider(SandboxProvider):
 
     def __init__(self) -> None:
         self.sandbox = _StubSandbox("fresh")
-        self.acquired: list[str | None] = []
+        self.acquired: list[tuple[str | None, str | None, str | None]] = []
 
-    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
-        self.acquired.append(thread_id)
+    def acquire(
+        self,
+        thread_id: str | None = None,
+        *,
+        user_id: str | None = None,
+        project_id: str | None = None,
+        project_root: str | None = None,
+    ) -> str:
+        self.acquired.append((thread_id, project_id, project_root))
         return "fresh-sandbox"
 
-    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
-        self.acquired.append(thread_id)
+    async def acquire_async(
+        self,
+        thread_id: str | None = None,
+        *,
+        user_id: str | None = None,
+        project_id: str | None = None,
+        project_root: str | None = None,
+    ) -> str:
+        self.acquired.append((thread_id, project_id, project_root))
         return "fresh-sandbox"
 
     def get(self, sandbox_id: str) -> Sandbox | None:
@@ -89,6 +117,19 @@ class _FallthroughProvider(SandboxProvider):
 
     def release(self, sandbox_id: str) -> None:
         return None
+
+
+class _ProjectScopeChangeProvider(_FallthroughProvider):
+    """A cached conversation sandbox that predates project membership."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.old_sandbox = _StubSandbox("old")
+
+    def get(self, sandbox_id: str) -> Sandbox | None:
+        if sandbox_id == "conversation-sandbox":
+            return self.old_sandbox
+        return super().get(sandbox_id)
 
 
 def _make_runtime(state: dict) -> ToolRuntime:
@@ -160,7 +201,7 @@ def test_ensure_sandbox_initialized_acquires_fresh_when_parent_missing() -> None
     finally:
         reset_sandbox_provider()
 
-    assert provider.acquired == ["t-1"]
+    assert provider.acquired == [("t-1", None, None)]
     assert sandbox is provider.sandbox
     assert runtime.state["sandbox"] == {"sandbox_id": "fresh-sandbox"}
     assert runtime.context["sandbox_id"] == "fresh-sandbox"
@@ -194,7 +235,67 @@ async def test_ensure_sandbox_initialized_async_acquires_fresh_when_parent_missi
     finally:
         reset_sandbox_provider()
 
-    assert provider.acquired == ["t-1"]
+    assert provider.acquired == [("t-1", None, None)]
     assert sandbox is provider.sandbox
     assert runtime.state["sandbox"] == {"sandbox_id": "fresh-sandbox"}
     assert runtime.context["sandbox_id"] == "fresh-sandbox"
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.anyio
+async def test_ensure_sandbox_initialized_preserves_project_scope_on_lazy_acquire(async_mode: bool) -> None:
+    provider = _FallthroughProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({})
+        runtime.context.update(
+            {
+                "thread_id": "t-project",
+                "project_id": "project-1",
+                "project_root": "/projects/one",
+            }
+        )
+        if async_mode:
+            sandbox = await ensure_sandbox_initialized_async(runtime)
+        else:
+            sandbox = ensure_sandbox_initialized(runtime)
+    finally:
+        reset_sandbox_provider()
+
+    assert sandbox is provider.sandbox
+    assert provider.acquired == [("t-project", "project-1", "/projects/one")]
+    assert runtime.state["thread_data"] == {
+        "workspace_path": "/projects/one",
+        "uploads_path": "/projects/one/uploads",
+        "outputs_path": "/projects/one/outputs",
+    }
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.anyio
+async def test_cached_conversation_sandbox_is_rebuilt_after_project_filing(async_mode: bool) -> None:
+    provider = _ProjectScopeChangeProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({"sandbox": {"sandbox_id": "conversation-sandbox"}})
+        runtime.context.update(
+            {
+                "thread_id": "t-filed",
+                "project_id": "project-1",
+                "project_root": "/projects/one",
+            }
+        )
+        if async_mode:
+            sandbox = await ensure_sandbox_initialized_async(runtime)
+        else:
+            sandbox = ensure_sandbox_initialized(runtime)
+    finally:
+        reset_sandbox_provider()
+
+    assert sandbox is provider.sandbox
+    assert provider.acquired == [("t-filed", "project-1", "/projects/one")]
+    assert runtime.state["sandbox"] == {
+        "sandbox_id": "fresh-sandbox",
+        "project_id": "project-1",
+        "project_root": "/projects/one",
+    }

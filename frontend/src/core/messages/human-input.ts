@@ -774,6 +774,16 @@ function extractPlainMessageText(message: Message): string {
   return "";
 }
 
+function requiresBoundHumanInputResponse(request: HumanInputRequest): boolean {
+  const clarificationType = request.clarification_type ?? "";
+  return (
+    clarificationType.startsWith("dbtl_") ||
+    clarificationType.startsWith("cycle_") ||
+    clarificationType.startsWith("council_") ||
+    clarificationType.startsWith("design_")
+  );
+}
+
 export function deriveHumanInputThreadState(
   messages: Message[],
   isVisibleMessage: (message: Message) => boolean = (message) =>
@@ -831,7 +841,11 @@ export function deriveHumanInputThreadState(
         latestUnansweredId === undefined
           ? undefined
           : seenRequests.get(latestUnansweredId);
-      if (latestUnansweredId !== undefined && request) {
+      if (
+        latestUnansweredId !== undefined &&
+        request &&
+        !requiresBoundHumanInputResponse(request)
+      ) {
         answeredResponses.set(latestUnansweredId, {
           version: 1,
           kind: "human_input_response",

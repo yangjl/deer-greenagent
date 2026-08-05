@@ -48,15 +48,20 @@ class TestThePhasesRunInTheOrderTheyRan:
             _phase("Shell", "/mnt/user-data/src/c.sh"),
         )
 
-        assert "python /mnt/user-data/src/a.py" in script
-        assert "Rscript /mnt/user-data/src/b.R" in script
-        assert "/bin/bash /mnt/user-data/src/c.sh" in script
+        assert "python '/mnt/user-data/src/a.py'" in script
+        assert "Rscript '/mnt/user-data/src/b.R'" in script
+        assert "/bin/bash '/mnt/user-data/src/c.sh'" in script
 
     def test_a_failing_phase_stops_the_script(self) -> None:
         # Without this a phase that failed would be stepped over and the script
         # would still exit 0 — Test would record a successful reproduction of a
         # Build that did not reproduce.
         assert "set -euo pipefail" in _render(_phase("One", "/mnt/user-data/src/a.py"))
+
+    def test_test_can_override_the_build_workspace_with_its_fresh_workspace(self) -> None:
+        script = _render(_phase("One", "/mnt/user-data/src/a.py"))
+
+        assert 'if [ -z "${DBTL_WORKSPACE:-}" ]' in script
 
 
 class TestInputsAreNumberedWithinTheirOwnPhase:
@@ -122,6 +127,24 @@ class TestTheRerunRecordNamesTheDriver:
         assert spec is not None
         assert spec.inputs == ("/mnt/user-data/trials.csv", "/mnt/user-data/pilot.parquet")
         assert spec.expected_outputs == ("/mnt/user-data/out/x.json",)
+
+    def test_lineage_bindings_become_paths_and_never_enter_the_executable_spec(self) -> None:
+        digest = "a" * 64
+        spec = driver_rerun_spec(
+            [_phase("One", "/mnt/user-data/src/a.py", "/mnt/user-data/data/train.csv")],
+            driver_path="/mnt/user-data/outputs/dbtl/c1/build/rerun-build.sh",
+            expected_outputs=["/mnt/user-data/out/x.json"],
+            environment={"runtime": "python3.12"},
+            bound_inputs=[
+                f"workspace_file:data/train.csv:sha256:{digest}",
+                f"workspace_file:data/holdout.csv:sha256:{digest}",
+                f"hash:{digest}",
+            ],
+        )
+
+        assert spec is not None
+        assert spec.inputs == ("/mnt/user-data/data/train.csv", "/mnt/user-data/data/holdout.csv")
+        assert all(not path.startswith("workspace_file:") for path in spec.inputs)
 
     def test_a_build_with_nothing_runnable_records_no_rerun(self) -> None:
         # An empty spec would satisfy the gate while promising a reproduction

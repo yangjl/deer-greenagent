@@ -56,6 +56,53 @@ def test_command_paths_resolved_to_local(tmp_path):
     assert sb._resolve_paths_in_command("cat /mnt/user-data/workspace/foo.txt") == out
 
 
+def test_unquoted_command_path_with_spaces_is_shell_quoted(tmp_path):
+    workspace = tmp_path / "project with spaces"
+    workspace.mkdir()
+    sb = LocalSandbox(
+        id="test",
+        path_mappings=[PathMapping(container_path="/mnt/user-data/workspace", local_path=str(workspace))],
+    )
+
+    resolved = sb._resolve_paths_in_command("STAGE=/mnt/user-data/workspace/outputs python \"$STAGE/fit.py\"")
+
+    assert resolved.startswith(f"STAGE='{workspace}/outputs' python")
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected_suffix"),
+    [
+        ("*.csv", "*.csv"),
+        ("$NAME.csv", "$NAME.csv"),
+        ("{train,test}.csv", "{train,test}.csv"),
+    ],
+)
+def test_unquoted_command_keeps_shell_expansion_after_resolved_prefix(tmp_path, suffix, expected_suffix):
+    workspace = tmp_path / "project with spaces"
+    workspace.mkdir()
+    sb = LocalSandbox(
+        id="test",
+        path_mappings=[PathMapping(container_path="/mnt/user-data/workspace", local_path=str(workspace))],
+    )
+
+    resolved = sb._resolve_paths_in_command(f"ls /mnt/user-data/workspace/{suffix}")
+
+    assert resolved == f"ls '{workspace}'/{expected_suffix}"
+
+
+def test_quoted_command_path_with_spaces_keeps_its_existing_quotes(tmp_path):
+    workspace = tmp_path / "project with spaces"
+    workspace.mkdir()
+    sb = LocalSandbox(
+        id="test",
+        path_mappings=[PathMapping(container_path="/mnt/user-data/workspace", local_path=str(workspace))],
+    )
+
+    resolved = sb._resolve_paths_in_command('cat "/mnt/user-data/workspace/input.csv"')
+
+    assert resolved == f'cat "{workspace}/input.csv"'
+
+
 def test_segment_boundary_not_matched_inside_longer_name(tmp_path):
     sb = _make_sandbox(tmp_path)
     # "/mnt/skills-extra" must NOT be rewritten by the "/mnt/skills" mapping.

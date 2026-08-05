@@ -31,10 +31,26 @@ cd "$REPO_ROOT"
 
 # ── Load .env ────────────────────────────────────────────────────────────────
 
+DEER_FLOW_MANUAL_PROFILE_INHERITED="${DEER_FLOW_MANUAL_PROFILE:-}"
+DEER_FLOW_MANUAL_CONFIG_INHERITED="${DEER_FLOW_CONFIG_PATH:-}"
 if [ -f "$REPO_ROOT/.env" ]; then
     set -a
     source "$REPO_ROOT/.env"
     set +a
+fi
+
+# The manual DBTL launcher is an explicit test-only contract. A repository
+# .env must not silently replace its isolated config or turn login back on.
+if [ "$DEER_FLOW_MANUAL_PROFILE_INHERITED" = "1" ]; then
+    case ":${DEER_FLOW_ENV:-}:${ENVIRONMENT:-}:" in
+        *:production:*|*:prod:*)
+            echo "The auth-disabled manual DBTL profile cannot run in an explicit production environment." >&2
+            exit 2
+            ;;
+    esac
+    export DEER_FLOW_MANUAL_PROFILE="1"
+    export DEER_FLOW_CONFIG_PATH="$DEER_FLOW_MANUAL_CONFIG_INHERITED"
+    export DEER_FLOW_AUTH_DISABLED="1"
 fi
 
 _pick_python() {
@@ -304,7 +320,7 @@ export DEERFLOW_PNPM_PYTHON DEERFLOW_PNPM_RUNNER
 
 # Frontend command
 if $DEV_MODE; then
-    FRONTEND_CMD='"$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev'
+    FRONTEND_CMD='"$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev -- --hostname 127.0.0.1'
 else
     FRONTEND_CMD="env BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run preview"
 fi
@@ -464,7 +480,7 @@ mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp
 
 # 1. Gateway API
 run_service "Gateway" \
-    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
+    "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 127.0.0.1 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
     8001 30
 
 # 2. Frontend

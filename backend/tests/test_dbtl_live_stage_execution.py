@@ -1496,6 +1496,8 @@ async def test_test_runs_build_command_first_and_records_server_verified_reprodu
                         "produced_outputs": [{"expected": approved_uri, "path": payload["artifact_refs"][2]}],
                     }
                 else:
+                    assert '"criterion_values": ["gte", "lte"]' in unit.prompt
+                    assert "Never emit `equal_to`, `greater_than`, or prose synonyms." in unit.prompt
                     payload = json.loads(_structured_result())
                     payload["provenance"]["validity_assessment"] = {
                         "metrics": [

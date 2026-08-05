@@ -170,7 +170,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 17
+    assert len(middlewares) == 18
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
@@ -179,6 +179,8 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     assert any(isinstance(m, SafetyFinishReasonMiddleware) for m in middlewares)
     activation_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillActivationMiddleware))
     policy_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillToolPolicyMiddleware))
+    assert sum(isinstance(m, SkillActivationMiddleware) for m in middlewares) == 1
+    assert sum(isinstance(m, SkillToolPolicyMiddleware) for m in middlewares) == 1
     assert policy_idx == activation_idx + 1
     assert middlewares[activation_idx]._slash_source_owner_token == middlewares[policy_idx]._slash_source_owner_token
     # DurableContextMiddleware is present but not last: the coalescer (#4040) is

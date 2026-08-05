@@ -177,6 +177,28 @@ def test_server_shell_profile_can_restrict_reads_to_issued_inputs() -> None:
     assert f'(allow file-read-data (subpath "{workspace}"))' in command
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is the local macOS process boundary")
+def test_stage_shell_keeps_an_unquoted_mount_assignment_with_spaces(tmp_path) -> None:
+    from deerflow.agents.middlewares.dbtl_output_policy_middleware import sandbox_exec_command
+    from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+
+    project = tmp_path / "project with spaces"
+    stage = project / "outputs" / "stage"
+    stage.mkdir(parents=True)
+    sandbox = LocalSandbox(
+        "test",
+        path_mappings=[
+            PathMapping(container_path="/mnt/user-data", local_path=str(project)),
+            PathMapping(container_path="/mnt/user-data/outputs", local_path=str(project / "outputs")),
+        ],
+    )
+    command = 'STAGE=/mnt/user-data/outputs/stage; printf "ok\\n" > "$STAGE/result.txt"'
+
+    sandbox.execute_command(sandbox_exec_command(command, writable_paths=("/mnt/user-data/outputs/stage",)))
+
+    assert (stage / "result.txt").read_text(encoding="utf-8") == "ok\n"
+
+
 def test_remote_server_command_hides_the_project_except_for_the_grant() -> None:
     from deerflow.agents.middlewares.dbtl_output_policy_middleware import bubblewrap_exec_command
 
@@ -482,7 +504,10 @@ PY'''
 
     assert result.content == "ran"
     assert "__DEERFLOW_VIRTUAL_LITERAL_" not in seen[0]
-    assert seen[0].count(workspace) >= 3
+    # The command wrapper may quote the virtual mount root separately so a
+    # later local-path rewrite cannot split on spaces. The stage-relative
+    # suffix must still survive in the profile, redirect, and literal data.
+    assert seen[0].count(".dbtl-stage-work/attempt-1/build/unit-1") >= 3
 
 
 def test_unquoted_data_heredoc_does_not_protect_expanding_virtual_paths() -> None:

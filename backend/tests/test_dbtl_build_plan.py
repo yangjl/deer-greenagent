@@ -103,6 +103,8 @@ class TestAPlanIsData:
         assert unit.skills == ("analysis",)
         assert "return version=3" in unit.prompt
         assert "execution_inputs" in unit.prompt
+        assert "A numeric\n  result mentioned in summary, claims, evidence, or an output file must also\n  appear in `key_outcomes`" in unit.prompt
+        assert "expected_outputs contains only files the entry point itself creates" in unit.prompt
 
     def test_duplicate_keys_are_disambiguated_rather_than_dropped(self) -> None:
         parsed = parse_build_plan(_plan(_phase(1, phase_key="fit"), _phase(2, phase_key="fit")), objective="x")

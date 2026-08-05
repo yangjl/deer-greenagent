@@ -4064,7 +4064,12 @@ same switch:
   answerable `stage_review`. Registration without that bridge is forbidden in
   practice: it advertises an actionable surface whose persisted HTML cannot
   emit an intent. Test remains owned by its typed chat cards; this Build
-  exception does not move Test authority back into a deck.
+  exception does not move Test authority back into a deck. Once Test has a
+  complete server-readable validity pack, the live-stage adapter submits that
+  evidence into `awaiting_review` itself; submission is not an outcome verdict,
+  and this is what makes the chat card reachable while the Test deck stays
+  deliberately inert. A Test left `in_progress` with registered evidence has no
+  human path and is a workflow defect.
   `BUILD_DECK_SURFACE_VERSION` participates in Build's deterministic surface
   id and must be bumped when the bridge-bearing Build deck structure changes.
   Design ids deliberately retain their older derivation. This prevents a

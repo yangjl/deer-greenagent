@@ -34,6 +34,32 @@ _SHELL_PROTECTED_PATH = re.compile(
 _BLOCKED = "Error: {tool} blocked — DBTL outputs are governed by the stage adapter and are read-only without an exact stage-work grant."
 _UNISOLATED_SHELL = "Error: bash blocked — this sandbox cannot enforce the DBTL worker's exact writable directory."
 _VIRTUAL_DATA_PATH = re.compile(r"/mnt/user-data(?=/|$|[^\w./-])(?:/[^\s\"']*)?")
+_VIRTUAL_COMMAND_ROOT = re.compile(r"/mnt/user-data(?:/(?:workspace|uploads|outputs))?(?=/|$|[^\w./-])")
+
+
+def _quote_unquoted_virtual_command_roots(command: str) -> str:
+    """Keep a mount root one shell word if local resolution later adds spaces."""
+    parts: list[str] = []
+    cursor = 0
+    quote: str | None = None
+    escaped = False
+    for match in _VIRTUAL_COMMAND_ROOT.finditer(command):
+        for char in command[cursor : match.start()]:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote != "'":
+                escaped = True
+            elif char in {"'", '"'}:
+                if quote == char:
+                    quote = None
+                elif quote is None:
+                    quote = char
+        parts.append(command[cursor : match.start()])
+        root = match.group(0)
+        parts.append(root if quote is not None else f"'{root}'")
+        cursor = match.end()
+    parts.append(command[cursor:])
+    return "".join(parts)
 
 
 def sandbox_exec_command(
@@ -71,7 +97,8 @@ def sandbox_exec_command(
         rules.extend(f"(allow file-read-data (subpath {_profile_path(path)}))" for path in canonical if path)
         rules.extend(f"(allow file-read-data (literal {_profile_path(path)}))" for path in readable if path)
     profile = " ".join(["(version 1)", "(allow default)", *rules])
-    return f"sandbox-exec -p {shlex.quote(profile)} /bin/bash --noprofile --norc -c {shlex.quote(command)}"
+    protected_command = _quote_unquoted_virtual_command_roots(command)
+    return f"sandbox-exec -p {shlex.quote(profile)} /bin/bash --noprofile --norc -c {shlex.quote(protected_command)}"
 
 
 def bubblewrap_exec_command(

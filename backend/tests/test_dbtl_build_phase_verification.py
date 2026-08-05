@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from deerflow.agents.dbtl.live_stage.build_phase_verification import (
 )
 from deerflow.agents.dbtl.live_stage.build_phases import BuildPhaseManifest
 from deerflow.dbtl.build_grant import INPUT_ENV_PREFIX, WORKSPACE_ENV
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 
 
 def _workspace(root: Path) -> tuple[str, Path]:
@@ -73,6 +75,41 @@ def test_the_server_issues_paths_and_derives_a_passing_receipt(tmp_path: Path) -
     assert isinstance(env, dict)
     assert env[WORKSPACE_ENV] == workspace
     assert env[f"{INPUT_ENV_PREFIX}1"] == "/mnt/user-data/trial.csv"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is the local macOS process boundary")
+def test_local_server_verifier_handles_a_project_path_with_spaces(tmp_path: Path) -> None:
+    from deerflow.agents.middlewares.dbtl_output_policy_middleware import sandbox_exec_command
+
+    project_root = tmp_path / "project with spaces"
+    project_root.mkdir()
+    workspace, _host = _workspace(project_root)
+    issued = project_root / "trial.csv"
+    issued.write_text("x\n1\n", encoding="utf-8")
+    sandbox = LocalSandbox(
+        "test",
+        path_mappings=[PathMapping(container_path="/mnt/user-data", local_path=str(project_root))],
+    )
+
+    def execute(command: str, env: dict[str, str], timeout: float) -> str:
+        isolated = sandbox_exec_command(
+            command,
+            writable_paths=(workspace,),
+            readable_paths=("/mnt/user-data/trial.csv",),
+            restricted_read_roots=("/mnt/user-data",),
+        )
+        return sandbox.execute_command(isolated, env=env, timeout=timeout)
+
+    record = execute_and_verify_phase(
+        _manifest(workspace, inputs=("/mnt/user-data/trial.csv",)),
+        project_root=str(project_root),
+        unit_workspace=workspace,
+        execute=execute,
+        timeout_seconds=45,
+        issued_inputs=("/mnt/user-data/trial.csv",),
+    )
+
+    assert record.passed is True, record.reason
 
 
 def test_a_nonzero_server_execution_is_a_failure(tmp_path: Path) -> None:
@@ -189,8 +226,17 @@ def test_python_entry_points_have_a_server_owned_command() -> None:
 
     command, _env = verification_shell_command(_manifest(workspace), unit_workspace=workspace)
 
-    assert f"python {workspace}/src/run.py" in command
+    assert f"python '{workspace}/src/run.py'" in command
     assert "server-verification.stdout.log" in command
+
+
+def test_verifier_quotes_virtual_paths_before_local_mount_rewrite() -> None:
+    workspace = "/mnt/user-data/outputs/.dbtl-stage-work/a/build/p"
+
+    command, _env = verification_shell_command(_manifest(workspace), unit_workspace=workspace)
+
+    assert f"cd '{workspace}'" in command
+    assert f"> '{workspace}/.server-verification-exit-status'" in command
 
 
 def test_declared_script_languages_use_their_server_owned_interpreter() -> None:
@@ -212,7 +258,7 @@ def test_declared_script_languages_use_their_server_owned_interpreter() -> None:
             version=3,
         )
         command, _env = verification_shell_command(manifest, unit_workspace=workspace)
-        assert f"{interpreter} {workspace}/src/run{suffix}" in command
+        assert f"{interpreter} '{workspace}/src/run{suffix}'" in command
 
 
 def test_remote_verification_fails_preflight_without_a_read_boundary(monkeypatch: pytest.MonkeyPatch) -> None:

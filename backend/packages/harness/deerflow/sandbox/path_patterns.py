@@ -24,6 +24,7 @@ The two sites are *not* identical, and the difference is deliberate — see
 from __future__ import annotations
 
 import re
+import shlex
 
 # Only match where a host base ends at a real path-segment boundary, so a mount
 # root does not match inside a sibling that merely shares its prefix
@@ -66,3 +67,16 @@ def build_output_mask_pattern(base: str, *, separator_agnostic: bool = False) ->
     if separator_agnostic:
         escaped = escaped.replace(r"\\", r"[/\\]")
     return re.compile(escaped + _SEGMENT_BOUNDARY + _PATH_TAIL)
+
+
+def quote_resolved_command_path(matched_path: str, resolved_path: str) -> str:
+    """Quote the literal host prefix while preserving unquoted shell expansion."""
+    expansion = min((matched_path.find(char) for char in "*$?[{" if char in matched_path), default=-1)
+    if expansion < 0:
+        return shlex.quote(resolved_path)
+    slash = matched_path.rfind("/", 0, expansion)
+    if slash < 0:
+        return shlex.quote(resolved_path)
+    suffix = matched_path[slash:]
+    resolved_prefix = resolved_path[: -len(suffix)] if suffix else resolved_path
+    return f"{shlex.quote(resolved_prefix)}{suffix}"

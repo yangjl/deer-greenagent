@@ -1422,8 +1422,16 @@ async def test_thread_metadata_timeout_logs_and_run_still_starts(_stub_app_confi
 
     metadata_started = asyncio.Event()
     run_agent_called = asyncio.Event()
+    lookup_count = 0
 
     async def get_thread(_thread_id):
+        nonlocal lookup_count
+        lookup_count += 1
+        # Project scope is resolved before the admitted run starts. This test
+        # exercises the later metadata timeout, so leave that first lookup
+        # unfiled and stall only the metadata setup task.
+        if lookup_count == 1:
+            return None
         metadata_started.set()
         await asyncio.Event().wait()
 
@@ -1458,6 +1466,54 @@ async def test_thread_metadata_timeout_logs_and_run_still_starts(_stub_app_confi
     assert record.status == RunStatus.running
     assert (await run_manager.get(record.run_id)).status == RunStatus.running
     assert "Timed out ensuring thread_meta for thread-timeout-meta" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_start_run_resolves_per_run_agent_after_context_and_project_scope(_stub_app_config):
+    """The HTTP run path must actually use the runtime-only DBTL selector."""
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    early_factory = object()
+    selected_factory = object()
+    captured = {}
+
+    async def apply_project_scope(config, *_args, **_kwargs):
+        config.setdefault("context", {})["project_id"] = "project-1"
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["agent_factory"] = kwargs["agent_factory"]
+
+    run_manager = RunManager(store=MemoryRunStore())
+    request = _make_start_run_request(run_manager)
+    body = _run_create_request(
+        context={"dbtl_supervisor_enabled": True},
+        assistant_id="lead_agent",
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=early_factory),
+        patch(
+            "app.gateway.services.resolve_run_agent_factory",
+            return_value=selected_factory,
+        ) as resolve_run,
+        patch(
+            "app.gateway.services.apply_project_scope_context",
+            side_effect=apply_project_scope,
+        ),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, "thread-dbtl-target", request)
+        assert record.task is not None
+        await record.task
+
+    resolved_config = resolve_run.call_args.args[1]
+    assert resolved_config["context"]["dbtl_supervisor_enabled"] is True
+    assert resolved_config["context"]["project_id"] == "project-1"
+    assert captured["agent_factory"] is selected_factory
 
 
 def test_context_merges_into_configurable():

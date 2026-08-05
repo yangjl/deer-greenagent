@@ -713,6 +713,24 @@ test("a visible human message before the request does not close it", () => {
   expect(state.latestOpenRequestId).toBe("clarification:call-form");
 });
 
+test("plain chat cannot answer a governed DBTL handoff", () => {
+  const handoff = {
+    ...requestPayload,
+    request_id: "dbtl-stage-handoff__cycle-1__abc",
+    clarification_type: "dbtl_stage_handoff",
+  };
+  const state = deriveHumanInputThreadState([
+    toolMessage(handoff),
+    {
+      type: "human",
+      content: "run the design meeting again",
+    } as unknown as Message,
+  ]);
+
+  expect(state.answeredResponses.has(handoff.request_id)).toBe(false);
+  expect(state.latestOpenRequestId).toBe(handoff.request_id);
+});
+
 test("hidden non-response messages do not close an open request", () => {
   const state = deriveHumanInputThreadState([
     toolMessage(formPayload),

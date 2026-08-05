@@ -41,6 +41,28 @@ PLANNER_ROLE = "planner"
 PHASE_ROLE = "phase"
 PHASE_DONE_CHECK = "phase_done_condition"
 
+BUILD_PRESENTATION_RESULT_NOTE = """
+Build result declarations (required in addition to the shared result):
+- Return `key_outcomes` as a list of every verified numeric result this phase
+  produced: [{"name": "metric or result", "value": 0.0, "unit": "optional"}].
+- Return `figures` as a list of every figure this phase produced:
+  [{"path": "/mnt/user-data/...", "caption": "what it is", "shows": "what it demonstrates"}].
+- Use an empty list only when this phase genuinely produced none. A numeric
+  result mentioned in summary, claims, evidence, or an output file must also
+  appear in `key_outcomes`; otherwise the verified Build cannot be presented
+  for human review.
+""".strip()
+
+BUILD_RERUN_RESULT_NOTE = """
+Build rerun declaration (required in provenance.rerun_spec):
+- Return {"version": 1, "entry_point": "/mnt/user-data/...", "command": "exact command",
+  "seed": "", "inputs": ["/mnt/user-data/..."], "environment": {"runtime": "version"},
+  "configuration": [], "expected_outputs": ["/mnt/user-data/..."]}.
+- expected_outputs contains only files the entry point itself creates when run
+  in a fresh DBTL_WORKSPACE. Do not include source code, worker-created audit
+  logs, or files that merely existed before the entry point ran.
+""".strip()
+
 GENERALIST = "general-purpose"
 
 
@@ -449,6 +471,10 @@ def phase_unit(
             else ["Report status=failed only when the work could not be done at all."]
         ),
         "",
+        BUILD_PRESENTATION_RESULT_NOTE,
+        "",
+        BUILD_RERUN_RESULT_NOTE,
+        "",
         result_contract,
     ]
     return WorkUnit(
@@ -507,6 +533,10 @@ def phase_correction_unit(
         "execution_inputs is a subset of declared_inputs and does not renumber DBTL_INPUT_n.",
         f"Return exactly one {PHASE_DONE_CHECK!r} check, passed only after the corrected entry point runs and the Done when condition holds.",
         "Return the complete phase manifest and shared structured result.",
+        "",
+        BUILD_PRESENTATION_RESULT_NOTE,
+        "",
+        BUILD_RERUN_RESULT_NOTE,
         "",
         result_contract,
     ]

@@ -124,7 +124,7 @@ from deerflow.dbtl.build_control import (
 )
 from deerflow.dbtl.build_deck import BUILD_DECK_SURFACE_VERSION
 from deerflow.dbtl.build_driver import DriverPhase, driver_rerun_spec, render_driver_script
-from deerflow.dbtl.build_execution import BuildExecutionBundle, BuildRerunSpec
+from deerflow.dbtl.build_execution import BuildExecutionBundle, BuildRerunSpec, parse_rerun_spec
 from deerflow.dbtl.build_grant import INPUT_ENV_PREFIX, build_input_grant
 from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError, restore_build_input_bundle
 from deerflow.dbtl.build_plan import BuildPhasePlan, parse_build_plan, restore_build_plan, single_phase_plan
@@ -2529,7 +2529,8 @@ def _write_build_driver(
         if manifest is None:
             continue
         phases.append(DriverPhase(title=result.summary[:80], entry_point=manifest.entry_point, execution_inputs=tuple(manifest.execution_inputs)))
-        outputs.extend(manifest.declared_outputs)
+        phase_rerun = parse_rerun_spec((result.provenance or {}).get("rerun_spec"))
+        outputs.extend(phase_rerun.expected_outputs if phase_rerun is not None else (path for path in manifest.declared_outputs if path != manifest.entry_point))
     script = render_driver_script(phases, workspace_root=WORKSPACE_VIRTUAL_ROOT, project_root=WORKSPACE_VIRTUAL_ROOT)
     if not script:
         return None
@@ -3498,6 +3499,37 @@ class LiveStageAdapter:
             expected_stage=expected_stage,
         )
 
+    async def recover_test_learn_handoff(
+        self,
+        *,
+        project_id: str | None,
+        cycle_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Recover the visible Learn start control after a Test API write."""
+        if not project_id or not cycle_id:
+            return None
+        cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
+        if cycle is None or cycle.get("state") != "learn":
+            return None
+        stages = {
+            str(item.get("stage") or ""): str(item.get("status") or "")
+            for item in cycle.get("stages", [])
+        }
+        if stages.get("test") != "approved" or stages.get("learn") != "in_progress":
+            return None
+        view = await self._repo.build_test_view(cycle_id, project_id=project_id)
+        assessment = dict((view or {}).get("validity_assessment") or {})
+        if assessment.get("recommendation") != "advance_to_learn":
+            return None
+        return {
+            "version": 1,
+            "cycle_id": cycle_id,
+            "cycle_revision": int(cycle.get("db_revision") or 0),
+            "approved_stage": "test",
+            "next_stage": "learn",
+            "surface_id": str(assessment.get("id") or cycle_id),
+        }
+
     async def active_cycle_status(self, *, project_id: str) -> list[dict[str, Any]]:
         """The project's live cycles, as read-only orientation for ordinary work.
 
@@ -4200,7 +4232,10 @@ class LiveStageAdapter:
                         project_root=WORKSPACE_VIRTUAL_ROOT,
                         declared_inputs=tuple(unit.tool_contract.get("granted_inputs") or ()),
                     )
-                    if stage == "build" and unit.role == "phase" and unit_workspace
+                    if (
+                        unit_workspace
+                        and ((stage == "build" and unit.role == "phase") or (stage == "test" and unit.role == "rerun"))
+                    )
                     else None
                 ),
             )
@@ -6233,6 +6268,14 @@ class LiveStageAdapter:
                 {
                     "pack_key": DEFAULT_VALIDITY_PACK.pack_key,
                     "required_checks": [check.value for check in DEFAULT_VALIDITY_PACK.required_checks],
+                    "metric_schema": {
+                        "required_fields": ["name", "value", "threshold", "criterion", "plausible_max", "unit"],
+                        "criterion_values": ["gte", "lte"],
+                        "instruction": (
+                            "Use only `gte` or `lte` for every metric criterion. For an exact target, use `gte` with value and threshold equal; "
+                            "the named validity checks carry exactness and direction semantics. Never emit `equal_to`, `greater_than`, or prose synonyms."
+                        ),
+                    },
                     "authoritative_rules": [
                         "Only required_checks may determine the overall Test outcome. Do not invent or require an additional gate.",
                         (
@@ -6935,6 +6978,11 @@ class LiveStageAdapter:
         )
         design_ready = stage != "design" or (design_debate_complete and chair_result is not None and chair_result.is_trustworthy and chair_result.status is WorkerStatus.COMPLETED)
         test_assessment = _validated_test_assessment(outcome.trustworthy_results, build_test=build_test, rerun=test_rerun_record) if stage == "test" else None
+        if stage == "test" and outcome.produced_usable_evidence and test_assessment is None:
+            stage_refusal = (
+                "The Test workers returned evidence, but no complete server-readable validity assessment was present. "
+                "Every headline metric must use criterion `gte` or `lte`, and the check set must exactly match the pinned validity pack."
+            )
         # **A plan that did not finish is not a Build.** Every phase that ran
         # ran truthfully, so `produced_usable_evidence` is true of a Build whose
         # second phase failed and of one that stopped at a `pause_after`
@@ -7357,6 +7405,28 @@ class LiveStageAdapter:
             # somebody a deck that can never answer its gate.
             raise registration_error
 
+        # Test's decision surface is the typed chat card, not its evidence
+        # deck. The card reader intentionally accepts only ``awaiting_review``
+        # so a person can never decide against a half-written validity pack.
+        # Once the server has accepted the complete typed pack, move it across
+        # that non-decision boundary here; otherwise the only visible submit
+        # control is inside the deliberately inert Test deck and the workflow
+        # can never reach its human gate.
+        if stage == "test" and produced_usable_evidence and artifact_uri and artifact_hash:
+            submitter = getattr(self._repo, "submit_stage_for_review", None)
+            if callable(submitter):
+                current = await self._repo.get_cycle(cycle_id, project_id=project_id)
+                if current is None:  # pragma: no cover - scope was verified above
+                    raise RuntimeError("Cycle disappeared before Test could enter human review.")
+                await submitter(
+                    cycle_id=cycle_id,
+                    project_id=project_id,
+                    stage="test",
+                    expected_db_revision=int(current["db_revision"]),
+                    actor_user_id=str(user_id),
+                    idempotency_key=f"{execution_key}:test-auto-submit",
+                )
+
         # A revision round has to say which route it took and why. The failure
         # this replaces was silence: four workers ran, three of them died, and
         # the only visible symptom was a card that never came back.
@@ -7409,6 +7479,14 @@ class LiveStageAdapter:
             # The digest carries what the council concluded. A reply that is only
             # a file path makes the reader open a file to learn anything at all.
             note = artifact_digest or f"Ran {len(results)} bounded {stage} worker(s) and attached a review package at {artifact_uri}."
+        elif stage_refusal:
+            note = "\n".join(
+                [
+                    f"Ran {len(results)} bounded {stage} worker(s) and recorded every outcome, but the stage could not create review evidence.",
+                    "",
+                    stage_refusal,
+                ]
+            )
         else:
             # No package is written when nothing is trustworthy, so the review
             # Markdown that normally carries "Work units not included" never

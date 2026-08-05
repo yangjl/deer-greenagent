@@ -51,6 +51,7 @@ class _Repo:
         self.cycle = _cycle()
         self.surfaces: list[dict] = []
         self.recorded: list[dict] = []
+        self.submissions: list[dict] = []
 
     async def get_cycle(self, cycle_id: str, *, project_id: str):
         return dict(self.cycle)
@@ -93,6 +94,12 @@ class _Repo:
     async def register_stage_feedback_surface(self, **kwargs):
         self.surfaces.append(kwargs)
         return {"surface_id": kwargs["surface_id"], **kwargs}
+
+    async def submit_stage_for_review(self, **kwargs):
+        self.submissions.append(kwargs)
+        self.cycle["db_revision"] += 1
+        next(item for item in self.cycle["stages"] if item["stage"] == kwargs["stage"])["status"] = "awaiting_review"
+        return dict(self.cycle)
 
 
 class _Dispatcher:
@@ -178,6 +185,25 @@ async def _run(repo, tmp_path: Path, *, progressive_gate: bool = True):
 
 
 class TestTheTestStageGetsAReviewPage:
+    @pytest.mark.asyncio
+    async def test_complete_typed_evidence_is_submitted_so_chat_can_render_its_human_gate(self, tmp_path: Path):
+        repo = _Repo()
+
+        result = await _run(repo, tmp_path)
+
+        assert result.produced_usable_evidence
+        assert repo.submissions == [
+            {
+                "cycle_id": "cycle-1",
+                "project_id": "project-1",
+                "stage": "test",
+                "expected_db_revision": 7,
+                "actor_user_id": "user-1",
+                "idempotency_key": "dbtl-stage:run-1:cycle-1:test-auto-submit",
+            }
+        ]
+        assert next(item for item in repo.cycle["stages"] if item["stage"] == "test")["status"] == "awaiting_review"
+
     @pytest.mark.asyncio
     async def test_a_test_surface_is_registered_against_the_test_attempt(self, tmp_path: Path):
         repo = _Repo()

@@ -183,8 +183,10 @@ Design–Build–Test–Learn (DBTL) governance.
   successor remains bound to the original Build record, Test validity pack, or
   Learn synthesis—not to the meeting's newer chair-summary attachment.
   Test's actual human path is chat-first: a typed, server-evaluated Test package
-  produces a Human Input Card that offers the configured review meeting, then
-  a second card records one outcome-compatible route. The right-side stage
+  automatically crosses the non-decision submission boundary into human review
+  and produces a Human Input Card that offers the configured review meeting,
+  then a second card records one outcome-compatible route. The evidence deck
+  remains inert; it is not a second gate. The right-side stage
   sheet is a read-only evidence and audit inspector; free-form PASS prose and
   files created by ordinary chat do not unlock Learn.
 - **One native setup interaction** — DBTL setup and confirmation are emitted

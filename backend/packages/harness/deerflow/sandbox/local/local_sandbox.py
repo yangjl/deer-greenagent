@@ -15,7 +15,7 @@ from typing import NamedTuple
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
-from deerflow.sandbox.path_patterns import build_output_mask_pattern
+from deerflow.sandbox.path_patterns import build_output_mask_pattern, quote_resolved_command_path
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 
@@ -401,11 +401,32 @@ class LocalSandbox(Sandbox):
         if pattern is None:
             return command
 
+        def shell_quote_state(end: int) -> str | None:
+            quote: str | None = None
+            escaped = False
+            for char in command[:end]:
+                if escaped:
+                    escaped = False
+                elif char == "\\" and quote != "'":
+                    escaped = True
+                elif char in {"'", '"'}:
+                    if quote == char:
+                        quote = None
+                    elif quote is None:
+                        quote = char
+            return quote
+
         def replace_match(match: re.Match) -> str:
             matched_path = match.group(0)
             # Normalize to forward slashes so bash doesn't interpret Windows
             # backslash sequences (\\U, \\a, \\d, \\s, \\n, \\t) as escapes.
-            return self._resolve_path(matched_path).replace("\\", "/")
+            resolved = self._resolve_path(matched_path).replace("\\", "/")
+            quote = shell_quote_state(match.start())
+            if quote == "'":
+                return resolved.replace("'", "'\"'\"'")
+            if quote == '"':
+                return re.sub(r'([\\"$`])', r"\\\1", resolved)
+            return quote_resolved_command_path(matched_path, resolved)
 
         return pattern.sub(replace_match, command)
 

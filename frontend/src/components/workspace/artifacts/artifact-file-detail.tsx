@@ -857,7 +857,7 @@ export function ArtifactFilePreview({
     () => createHtmlPreviewScrollKey(scrollKey),
     [scrollKey],
   );
-  const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string>();
+  const [htmlPreviewContent, setHtmlPreviewContent] = useState<string>();
   const [deckProgress, setDeckProgress] = useState<DeckProgress | null>(null);
   const deckChannelRef = useRef<string | null>(null);
   const deckSurfaceRef = useRef<DesignFeedbackSurface | null>(null);
@@ -1482,7 +1482,7 @@ export function ArtifactFilePreview({
 
   useEffect(() => {
     if (language !== "html") {
-      setHtmlPreviewUrl(undefined);
+      setHtmlPreviewContent(undefined);
       return;
     }
 
@@ -1490,15 +1490,7 @@ export function ArtifactFilePreview({
       appendHtmlPreviewBaseHref(content ?? "", url),
       scrollKey,
     );
-    const blob = new Blob([previewContent], {
-      type: "text/html;charset=utf-8",
-    });
-    const objectUrl = URL.createObjectURL(blob);
-    setHtmlPreviewUrl(objectUrl);
-
-    return () => {
-      URL.revokeObjectURL(objectUrl);
-    };
+    setHtmlPreviewContent(previewContent);
   }, [content, language, scrollKey, url]);
 
   if (language === "markdown") {
@@ -1585,7 +1577,7 @@ export function ArtifactFilePreview({
           // opaque origin prevents access to parent.document and cookies,
           // and postMessage(..., "*") works fine from it.
           sandbox="allow-scripts allow-forms"
-          src={htmlPreviewUrl}
+          srcDoc={htmlPreviewContent}
         />
       </div>
     );
