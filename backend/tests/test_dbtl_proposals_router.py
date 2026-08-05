@@ -1,10 +1,9 @@
-"""Phase 4: the shadow-evaluation and proposal API.
+"""The DBTL shadow-evaluation and outcome API.
 
 The demo path is exercised end to end — ordinary requests stay ordinary, a
-research request produces a proposal, an explicit request goes straight to
-setup, a selected cycle continues rather than forking — and so are the two
-things that must never happen: an evaluation creating a durable record, and a
-confident classifier bypassing confirmation.
+research request is identified, an explicit request goes straight to setup,
+and a selected cycle continues rather than forking. Evaluation must never
+create a durable record or bypass native confirmation.
 """
 
 from __future__ import annotations
@@ -61,14 +60,14 @@ async def _make_repos(tmp_path: Path):
     return WorkspaceRepository(session_factory), ClassifierEvaluationRepository(session_factory), session_factory
 
 
-def _make_app(workspace_repo, evaluation_repo, *, mode: str = "manual", proposals_visible: bool = True, user_factory=_user):
+def _make_app(workspace_repo, evaluation_repo, *, mode: str = "manual", user_factory=_user):
     app = make_authed_test_app(user_factory=user_factory)
     app.state.workspace_repo = workspace_repo
     app.state.classifier_evaluation_repo = evaluation_repo
     session_factory = get_session_factory()
     app.state.dbtl_cycle_repo = DbtlCycleRepository(session_factory) if session_factory is not None else None
     app.state.dbtl_discovery_repo = DbtlDiscoveryRepository(session_factory) if session_factory is not None else None
-    app.state.dbtl_config_override = DbtlConfig(mode=mode, proposals_visible=proposals_visible)
+    app.state.dbtl_config_override = DbtlConfig(mode=mode)
     app.include_router(workspaces.router)
     app.include_router(dbtl_proposals.router)
     return app
@@ -90,32 +89,26 @@ def _evaluate(client, project_id: str, **overrides) -> dict:
 # ── The demo path ────────────────────────────────────────────────────────
 
 
-def test_ordinary_requests_produce_no_proposal(tmp_path: Path) -> None:
+def test_ordinary_requests_are_reported_as_ordinary(tmp_path: Path) -> None:
     workspace_repo, evaluation_repo, _ = anyio.run(_make_repos, tmp_path)
     with TestClient(_make_app(workspace_repo, evaluation_repo)) as client:
         project_id = _seed_project(client)
         for index, text in enumerate(("Explain this README", "Create a small chart")):
             body = _evaluate(client, project_id, text=text, idempotency_key=f"ordinary-{index}")
             assert body["route_kind"] == "ordinary"
-            assert body["proposal"] is None
 
 
-def test_a_research_request_produces_a_no_record_proposal(tmp_path: Path) -> None:
+def test_a_research_request_is_reported_for_shadow_telemetry(tmp_path: Path) -> None:
     workspace_repo, evaluation_repo, _ = anyio.run(_make_repos, tmp_path)
     with TestClient(_make_app(workspace_repo, evaluation_repo)) as client:
         project_id = _seed_project(client)
         body = _evaluate(client, project_id)
 
         assert body["route_kind"] == "proposal"
-        proposal = body["proposal"]
-        assert proposal is not None
-        assert proposal["creates_record"] is False
-        assert proposal["notice"] == "No cycle has been created yet."
-        assert proposal["requires_confirmation"] is True
-        assert "target trait" in proposal["missing_fields"]
+        assert set(body) == {"evaluation_id", "route_kind", "route_source"}
 
 
-def test_a_data_request_produces_a_high_confidence_proposal(tmp_path: Path) -> None:
+def test_a_data_request_is_classified_for_shadow_telemetry(tmp_path: Path) -> None:
     workspace_repo, evaluation_repo, _ = anyio.run(_make_repos, tmp_path)
     with TestClient(_make_app(workspace_repo, evaluation_repo)) as client:
         project_id = _seed_project(client)
@@ -127,7 +120,6 @@ def test_a_data_request_produces_a_high_confidence_proposal(tmp_path: Path) -> N
         )
 
         assert body["route_kind"] == "proposal"
-        assert body["proposal"] is not None
 
 
 def test_classifier_entry_reports_discovery_and_status_is_server_derived(tmp_path: Path) -> None:
@@ -136,7 +128,6 @@ def test_classifier_entry_reports_discovery_and_status_is_server_derived(tmp_pat
         workspace_repo,
         evaluation_repo,
         mode="graph_enabled",
-        proposals_visible=False,
     )
     app.state.dbtl_config_override = DbtlConfig(
         mode="graph_enabled",
@@ -148,7 +139,6 @@ def test_classifier_entry_reports_discovery_and_status_is_server_derived(tmp_pat
         body = _evaluate(client, project_id)
         assert body["route_kind"] == "discovery"
         assert body["route_source"] == "classifier"
-        assert body["proposal"] is None
 
         empty = client.get(
             f"/api/projects/{project_id}/dbtl/discovery/status",
@@ -219,7 +209,6 @@ def test_fresh_project_prior_is_reflected_in_shadow_evaluation(tmp_path: Path) -
         )
 
         assert body["route_kind"] == "proposal"
-        assert body["proposal"] is not None
 
 
 def test_an_explicit_request_routes_to_setup_without_classification(tmp_path: Path) -> None:
@@ -237,7 +226,6 @@ def test_a_selected_cycle_produces_a_continuation_not_a_new_cycle(tmp_path: Path
         project_id = _seed_project(client)
         body = _evaluate(client, project_id, selected_cycle_id="cycle-3")
         assert body["route_kind"] == "cycle_continuation"
-        assert body["proposal"] is None
 
 
 def test_an_explicit_choice_overrides_the_classifier(tmp_path: Path) -> None:
@@ -247,7 +235,6 @@ def test_an_explicit_choice_overrides_the_classifier(tmp_path: Path) -> None:
         body = _evaluate(client, project_id, explicit_choice="ordinary")
         assert body["route_kind"] == "ordinary"
         assert body["route_source"] == "explicit_choice"
-        assert body["proposal"] is None
 
 
 # ── The no-go ────────────────────────────────────────────────────────────
@@ -266,27 +253,6 @@ def test_evaluating_never_creates_a_dbtl_record(tmp_path: Path) -> None:
             return int((await session.execute(select(func.count()).select_from(DbtlCycleRow))).scalar_one())
 
     assert anyio.run(_count) == 0
-
-
-def test_a_proposal_is_never_returned_when_proposals_are_not_visible(tmp_path: Path) -> None:
-    """Shadow mode still measures; it just does not interrupt anyone."""
-    workspace_repo, evaluation_repo, _ = anyio.run(_make_repos, tmp_path)
-    with TestClient(_make_app(workspace_repo, evaluation_repo, proposals_visible=False)) as client:
-        project_id = _seed_project(client)
-        body = _evaluate(client, project_id)
-        assert body["proposal"] is None
-        assert body["route_kind"] == "proposal", "the evaluation is still recorded honestly"
-        assert body["proposals_visible"] is False
-
-
-def test_proposals_are_not_shown_while_the_workflow_is_off(tmp_path: Path) -> None:
-    """Offering an upgrade that cannot be accepted would be a dead end."""
-    workspace_repo, evaluation_repo, _ = anyio.run(_make_repos, tmp_path)
-    with TestClient(_make_app(workspace_repo, evaluation_repo, mode="audit_only")) as client:
-        project_id = _seed_project(client)
-        body = _evaluate(client, project_id)
-        assert body["proposal"] is None
-        assert body["proposals_visible"] is False
 
 
 # ── Outcomes ─────────────────────────────────────────────────────────────

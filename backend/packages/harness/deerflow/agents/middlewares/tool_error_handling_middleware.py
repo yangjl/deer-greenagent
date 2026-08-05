@@ -289,26 +289,19 @@ def _build_runtime_middlewares(
     # on every result before ToolProgressMiddleware reads it in _update_state_from_result.
     # Framework rule: first in list = outermost (types.py: "compose with first in list as outermost layer").
     tool_progress_config = app_config.tool_progress
-    _ToolProgressMiddleware = None
     if tool_progress_config.enabled:
-        from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware as _ToolProgressMiddleware
+        from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
 
-        tail.append(_ToolProgressMiddleware.from_config(tool_progress_config))
+        tail.append(ToolProgressMiddleware.from_config(tool_progress_config))
 
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
 
-    # Guard: ToolProgressMiddleware (outer) must appear before ToolErrorHandlingMiddleware (inner)
-    # so that its wrap_tool_call chain encloses the stamping step.  Fail loudly at build time
-    # rather than silently no-oping at runtime if a future insertion reverses the order.
-    # Uses isinstance (not type().__name__) so subclasses and renames are covered.
-    if _ToolProgressMiddleware is not None:
-        _progress_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, _ToolProgressMiddleware)), None)
-        _error_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware)), None)
-        if _progress_idx is not None and _error_idx is not None and _progress_idx > _error_idx:
-            raise RuntimeError(f"ToolProgressMiddleware must be outer (index {_progress_idx}) of ToolErrorHandlingMiddleware (index {_error_idx}) — check middleware append order")
-
+    # Ordering invariants are declared in deerflow.extensions.ordering and
+    # validated once at the end of the composing builder, after extension
+    # contributions are merged in — otherwise a contribution could silently
+    # reverse an invariant this builder had already checked.
     return middlewares
 
 
@@ -345,6 +338,7 @@ def build_subagent_runtime_middlewares(
     token_budget_enabled: bool | None = None,
     loop_detection_enabled: bool | None = None,
     dbtl_writable_paths: tuple[str, ...] = (),
+    extensions=None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
     if app_config is None:
@@ -360,6 +354,31 @@ def build_subagent_runtime_middlewares(
         authorization_provider=authorization_provider,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
         dbtl_writable_paths=dbtl_writable_paths,
+    )
+
+    # Enabled/configured skills are discoverable metadata, not automatically
+    # active authority. Mirror the lead agent's activation + policy pair so a
+    # subagent keeps its ordinary tool set until a slash command or a completed
+    # SKILL.md read activates the corresponding allowed-tools declaration.
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+
+    slash_source_owner_token = secrets.token_urlsafe(24)
+    middlewares.append(
+        SkillActivationMiddleware(
+            available_skills=available_skills,
+            app_config=app_config,
+            user_id=user_id,
+            slash_source_owner_token=slash_source_owner_token,
+        )
+    )
+    middlewares.append(
+        SkillToolPolicyMiddleware(
+            available_skills=available_skills,
+            app_config=app_config,
+            user_id=user_id,
+            slash_source_owner_token=slash_source_owner_token,
+        )
     )
 
     # Enabled/configured skills are discoverable metadata, not automatically
@@ -562,4 +581,31 @@ def build_subagent_runtime_middlewares(
 
     middlewares.append(SystemMessageCoalescingMiddleware())
 
-    return middlewares
+    from deerflow_extension_api import AgentScope
+
+    from deerflow.extensions import get_agent_build_extensions
+    from deerflow.extensions.stack import compose_with_extensions
+
+    resolved_extensions = extensions if extensions is not None else get_agent_build_extensions()
+    if not resolved_extensions.has_middleware_contributors:
+        return compose_with_extensions(middlewares, AgentScope.SUBAGENT, None, resolved_extensions)
+
+    from deerflow_extension_api import AgentBuildContext
+
+    from deerflow.extensions.policy import project_host_policy
+
+    return compose_with_extensions(
+        middlewares,
+        AgentScope.SUBAGENT,
+        AgentBuildContext(
+            scope=AgentScope.SUBAGENT,
+            agent_name=agent_name,
+            model_name=model_name,
+            policy=project_host_policy(
+                app_config,
+                token_budget_config=token_budget_config,
+                max_subagents_per_run=None,
+            ),
+        ),
+        resolved_extensions,
+    )

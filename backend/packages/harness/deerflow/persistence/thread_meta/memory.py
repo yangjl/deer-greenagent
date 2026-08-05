@@ -125,7 +125,6 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         project_id: str | None,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> None:
-        """File a conversation into a project, or return it to the inbox."""
         record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.set_conversation_scope")
         if record is None:
             return
@@ -143,7 +142,6 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         offset: int = 0,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict[str, Any]]:
-        """Conversations filed into ``project_id``, newest first."""
         resolved_user_id = resolve_user_id(user_id, method_name="MemoryThreadMetaStore.list_by_project")
         filter_dict: dict[str, Any] = {"project_id": project_id}
         if resolved_user_id is not None:
@@ -154,7 +152,6 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         return rows
 
     async def clear_project_scope(self, project_id: str) -> None:
-        """Return every conversation in a removed project to the inbox."""
         while True:
             items = await self._store.asearch(
                 THREADS_NS,

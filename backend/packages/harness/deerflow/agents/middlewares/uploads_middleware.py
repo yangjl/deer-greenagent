@@ -226,20 +226,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 thread_id = get_config().get("configurable", {}).get("thread_id")
             except RuntimeError:
                 pass
-        context_project_root = (runtime.context or {}).get("project_root") if runtime is not None else None
-        if not isinstance(context_project_root, str) or not context_project_root:
-            context_project_root = None
-        if thread_id and context_project_root:
-            from deerflow.projects.storage import project_uploads_dir
-
-            uploads_dir = project_uploads_dir(Path(context_project_root))
-        elif thread_id:
-            # Upstream #4538: the runtime carries the LangGraph Server identity,
-            # which ambient ``get_effective_user_id()`` does not see. A project
-            # run resolves its own folder above and never reaches this branch.
-            uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=resolve_runtime_user_id(runtime))
-        else:
-            uploads_dir = None
+        uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=resolve_runtime_user_id(runtime)) if thread_id else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []

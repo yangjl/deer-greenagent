@@ -190,7 +190,7 @@ def prepare_test_rerun(
     return PreparedTestRerun(spec=spec, output_hashes=output_hashes)
 
 
-def test_rerun_unit(
+def build_test_rerun_unit(
     prepared: PreparedTestRerun,
     *,
     attempt_id: str,

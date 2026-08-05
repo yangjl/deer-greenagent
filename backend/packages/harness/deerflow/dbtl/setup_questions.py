@@ -9,7 +9,7 @@ out in full.
 So the model writes the questions instead, and answers each one with its own
 recommendation, leaving the human to accept or correct rather than compose.
 That trade is only safe with two rules enforced here rather than in the prompt,
-for the same reason :mod:`deerflow.dbtl.setup_draft` enforces its own:
+for the same reason every DBTL model-authored setup value is revalidated:
 
 1. **A recommendation carries provenance.** ``grounded`` is true only when the
    request itself supports the value; anything else renders as a suggestion.

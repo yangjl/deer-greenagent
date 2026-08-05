@@ -3,28 +3,14 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 
 const evaluation = {
   evaluation_id: "eval-1",
-  route: "cycle_setup",
-  proposals_visible: true,
-  proposal: {
-    evaluation_id: "eval-1",
-    kind: "cycle_setup",
-    proposed_objective: "Rank candidate lines",
-    missing_fields: [],
-    band: "low",
-    confidence: 0,
-    project_name: "test1",
-    cycle_id: null,
-    creates_record: true,
-    requires_confirmation: true,
-    notice: "",
-  },
+  route_kind: "cycle_setup",
+  route_source: "explicit_request",
 };
 
 const evaluateMock = rs.fn(async () => evaluation);
 const outcomeMock = rs.fn();
 
 rs.mock("@/core/dbtl", () => ({
-  outcomeForAction: (action: string) => action,
   useEvaluateRequest: () => ({ mutateAsync: evaluateMock }),
   useRecordProposalOutcome: () => ({ mutate: outcomeMock }),
 }));

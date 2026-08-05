@@ -1152,23 +1152,6 @@ export function getVisibleOptimisticMessages(
   return optimisticMessages;
 }
 
-/**
- * Whether switching to `nextThreadId` may re-baseline the human-message count.
- *
- * The baseline exists so an optimistic user bubble survives until the server's
- * copy arrives. It is captured at send time — but a send that *creates* the
- * thread changes `threadId` afterwards, and re-baselining then sets the
- * baseline to a count that already includes the server's copy. The
- * "has a new human message arrived?" test can never become true after that, so
- * the optimistic bubble is stranded and the user sees their message twice.
- * That is the DBTL new-cycle flow exactly: send, thread created, classifier
- * card raised, message rendered twice for the rest of the run.
- *
- * Carrying the baseline across that transition is safe because the optimistic
- * messages being carried are the ones this send just created for this very
- * thread; a switch to any *other* thread still re-baselines, and its
- * optimistic messages are dropped by the sibling effect.
- */
 export function shouldRebaselineHumanCount(
   optimisticThreadId: string | null,
   nextThreadId: string | null | undefined,
@@ -1868,11 +1851,6 @@ export function useThreadStream({
           : undefined;
 
       if (eventType === "stream_replay_gap") {
-        // A gap invalidates optimistic activity wholesale: rows opened before
-        // it may already have closed inside the events nobody received, and
-        // showing them as running is the false spinner this projection exists
-        // to remove. Backfill is authoritative from here.
-        void reloadActivity();
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
@@ -2751,6 +2729,11 @@ type ThreadHistoryOptions = {
   pendingSupersededRunIds?: ReadonlySet<string>;
 };
 
+export const THREAD_HISTORY_QUERY_POLICY = {
+  refetchOnWindowFocus: false,
+  staleTime: 5 * 60 * 1_000,
+} as const;
+
 export function useThreadHistory(
   threadId: string,
   { enabled = true, pendingSupersededRunIds }: ThreadHistoryOptions = {},
@@ -2762,6 +2745,7 @@ export function useThreadHistory(
     ReturnType<typeof threadHistoryQueryKey>,
     number | null
   >({
+    ...THREAD_HISTORY_QUERY_POLICY,
     queryKey: threadHistoryQueryKey(threadId),
     enabled: enabled && Boolean(threadId),
     initialPageParam: null,

@@ -353,17 +353,6 @@ def apply_resolution(
     )
 
 
-def dataset_readiness_reasons(datasets: Sequence[DatasetBinding]) -> tuple[str, ...]:
-    """Why these declared inputs are not usable evidence, if they are not.
-
-    Public because these two guarantees — a result names the data it ran on,
-    and raw inputs are declared immutable — outlive the reconciliation gate
-    itself. When a deployment does not require reconciliation, Build enforces
-    them at the point it records lineage instead.
-    """
-    return _dataset_reasons(datasets)
-
-
 def _dataset_reasons(datasets: Sequence[DatasetBinding]) -> tuple[str, ...]:
     if not datasets:
         return ("No data sources have been declared, so nothing can be reconciled.",)

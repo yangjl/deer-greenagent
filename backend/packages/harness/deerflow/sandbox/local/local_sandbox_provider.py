@@ -280,7 +280,13 @@ class LocalSandboxProvider(SandboxProvider):
         return (user_id, thread_id)
 
     @staticmethod
-    def _build_thread_path_mappings(thread_id: str, *, user_id: str | None = None, project_root: str | None = None, skill_projection=None) -> list[PathMapping]:
+    def _build_thread_path_mappings(
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+        project_root: str | None = None,
+        skill_projection=None,
+    ) -> list[PathMapping]:
         """Build per-thread path mappings for /mnt/user-data, /mnt/acp-workspace,
         and /mnt/skills/custom.
 
@@ -469,16 +475,16 @@ class LocalSandboxProvider(SandboxProvider):
                 # Mark as most-recently used so frequently-touched threads
                 # survive eviction.
                 self._thread_sandboxes.move_to_end(key)
-                return cached.id
+        if cached is not None:
+            return cached.id
 
         # ``_build_thread_path_mappings`` touches the filesystem
         # (``ensure_thread_dirs``); release the lock during I/O.
-        new_mappings = self._static_mappings_for_project(project_root)
+        new_mappings = list(self._path_mappings)
         self._append_public_skill_mapping(new_mappings, skill_projection)
         new_mappings += self._build_thread_path_mappings(
             thread_id,
             user_id=effective_user_id,
-            project_root=project_root,
             skill_projection=skill_projection,
         )
 

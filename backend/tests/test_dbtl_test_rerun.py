@@ -22,7 +22,7 @@ from deerflow.agents.dbtl.live_stage.test_rerun import (
     TestRerunStatus as RerunStatus,
 )
 from deerflow.agents.dbtl.live_stage.test_rerun import (
-    test_rerun_unit as make_test_rerun_unit,
+    build_test_rerun_unit as make_test_rerun_unit,
 )
 from deerflow.dbtl.worker_result import StageWorkerResult, WorkerStatus
 

@@ -1373,16 +1373,8 @@ async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_ap
     from deerflow.runtime.runs.store.memory import MemoryRunStore
 
     metadata_started = asyncio.Event()
-    get_calls = 0
 
-    async def get_thread(_thread_id, user_id=None):
-        # The fork's project-scope resolution reads thread metadata before run
-        # admission; only the post-admission ``_ensure_thread_metadata`` call
-        # (inside the attached worker) should hang for this scenario.
-        nonlocal get_calls
-        get_calls += 1
-        if get_calls == 1:
-            return None
+    async def get_thread(_thread_id):
         metadata_started.set()
         try:
             await asyncio.Event().wait()
@@ -1430,15 +1422,8 @@ async def test_thread_metadata_timeout_logs_and_run_still_starts(_stub_app_confi
 
     metadata_started = asyncio.Event()
     run_agent_called = asyncio.Event()
-    get_calls = 0
 
-    async def get_thread(_thread_id, user_id=None):
-        # First call is the fork's pre-admission project-scope read; only the
-        # post-admission metadata setup should hang for this scenario.
-        nonlocal get_calls
-        get_calls += 1
-        if get_calls == 1:
-            return None
+    async def get_thread(_thread_id):
         metadata_started.set()
         await asyncio.Event().wait()
 
@@ -2309,126 +2294,6 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
     assert context.get("langgraph_auth_user_id") is None
 
 
-def test_start_run_session_files_new_thread_before_first_project_run(
-    _stub_app_config,
-    tmp_path,
-):
-    """A normal browser user must get the same atomic project filing as IM.
-
-    Regression: ``start_run`` previously resolved ``owner_user_id`` only from
-    the trusted internal-owner header. For session callers it was therefore
-    ``None``, so ``file_thread_into_requested_project`` returned early. The UI's
-    later PUT eventually filed the thread, but the first model call had already
-    loaded user-global memory and answered for the wrong project.
-    """
-    import asyncio
-    from types import SimpleNamespace
-    from unittest.mock import patch
-
-    from langgraph.checkpoint.memory import InMemorySaver
-    from langgraph.store.memory import InMemoryStore
-
-    from app.gateway.services import start_run
-    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
-    from deerflow.runtime import RunManager
-    from deerflow.runtime.runs.store.memory import MemoryRunStore
-
-    project_root = tmp_path / "test2"
-
-    class _WorkspaceRepo:
-        async def get_project(self, project_id: str, *, user_id: str):
-            if project_id != "project-test2" or user_id != "browser-user":
-                return None
-            return {
-                "id": project_id,
-                "workspace_id": "workspace-1",
-                "root_path": str(project_root),
-            }
-
-        async def get_project_record(self, project_id: str):
-            if project_id != "project-test2":
-                return None
-            return {
-                "id": project_id,
-                "name": "test2",
-                "root_path": str(project_root),
-            }
-
-        async def update_project_root(self, project_id: str, root_path: str):
-            raise AssertionError("stored root should not require backfill")
-
-    async def _scenario():
-        thread_store = MemoryThreadMetaStore(InMemoryStore())
-        run_store = MemoryRunStore()
-        state = SimpleNamespace(
-            stream_bridge=SimpleNamespace(),
-            run_manager=RunManager(store=run_store),
-            checkpointer=InMemorySaver(),
-            store=InMemoryStore(),
-            run_event_store=MemoryRunEventStore(),
-            run_events_config=None,
-            thread_store=thread_store,
-            workspace_repo=_WorkspaceRepo(),
-        )
-        request = SimpleNamespace(
-            headers={},
-            state=SimpleNamespace(
-                auth_source="session",
-                user=SimpleNamespace(id="browser-user", system_role="user"),
-            ),
-            app=SimpleNamespace(state=state),
-        )
-        body = SimpleNamespace(
-            assistant_id="lead_agent",
-            input={"messages": [{"role": "human", "content": "Which project?"}]},
-            metadata={},
-            config=None,
-            context={"project_id": "project-test2"},
-            on_disconnect="cancel",
-            multitask_strategy="reject",
-            stream_mode=None,
-            stream_subgraphs=False,
-            interrupt_before=None,
-            interrupt_after=None,
-        )
-        captured_context: dict[str, object] = {}
-
-        async def fake_run_agent(*args, **kwargs):
-            captured_context.update(kwargs["config"]["context"])
-
-        with (
-            patch(
-                "app.gateway.services.resolve_agent_factory",
-                return_value=object(),
-            ),
-            patch(
-                "app.gateway.services.run_agent",
-                side_effect=fake_run_agent,
-            ),
-        ):
-            record = await start_run(body, "thread-first-project-run", request)
-            await record.task
-
-        return (
-            captured_context,
-            await thread_store.get(
-                "thread-first-project-run",
-                user_id="browser-user",
-            ),
-            await run_store.get(record.run_id, user_id="browser-user"),
-        )
-
-    context, thread_record, run_record = asyncio.run(_scenario())
-
-    assert context["project_id"] == "project-test2"
-    assert context["project_root"] == str(project_root)
-    assert context["user_id"] == "browser-user"
-    assert thread_record is not None
-    assert thread_record["project_id"] == "project-test2"
-    assert run_record is not None
-    assert run_record["user_id"] == "browser-user"
-
-
 def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
     import asyncio
     from types import SimpleNamespace
@@ -3027,110 +2892,3 @@ async def test_start_run_rejects_invalid_thread_id_before_resolving_dependencies
 
     assert exc_info.value.status_code == 422
     assert "Invalid thread_id" in exc_info.value.detail
-
-
-@pytest.mark.anyio
-async def test_checkpoint_history_seed_race_writes_history_once():
-    """Two Gateway workers can both observe an empty feed before either has
-    written; the durable claim on the seed batch's first event (put_if_absent
-    under the store's writer lock) makes the loser stand down instead of
-    duplicating the transcript."""
-    from unittest.mock import AsyncMock, patch
-
-    from langchain_core.messages import AIMessage, HumanMessage
-
-    from app.gateway.services import ensure_checkpoint_history_seeded
-
-    event_store = MemoryRunEventStore()
-    checkpointer = SimpleNamespace(
-        aget_tuple=AsyncMock(return_value=SimpleNamespace(checkpoint={})),
-    )
-    snapshot = SimpleNamespace(
-        values={
-            "messages": [
-                HumanMessage(id="legacy-human", content="old question"),
-                AIMessage(id="legacy-ai", content="old answer"),
-            ]
-        }
-    )
-    accessor = SimpleNamespace(aget=AsyncMock(return_value=snapshot))
-    request = SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(
-                checkpointer=checkpointer,
-                run_event_store=event_store,
-            )
-        )
-    )
-
-    # Both callers read a stale empty feed, as two workers do when the second
-    # checks before the first worker's rows commit.
-    with (
-        patch.object(event_store, "list_messages", AsyncMock(return_value=[])),
-        patch(
-            "app.gateway.services.build_checkpoint_state_accessor",
-            return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}),
-        ),
-    ):
-        await ensure_checkpoint_history_seeded(request, thread_id="thread-1", assistant_id="lead_agent")
-        await ensure_checkpoint_history_seeded(request, thread_id="thread-1", assistant_id="lead_agent")
-
-    rows = await event_store.list_messages("thread-1", limit=10)
-    assert [row["content"]["id"] for row in rows] == ["legacy-human", "legacy-ai"]
-
-
-@pytest.mark.anyio
-async def test_a_crashed_seed_leaves_no_partial_history_to_lock_in():
-    """The seed must stay all-or-nothing. A claim committed separately from
-    the rest of the batch would leave one message behind after a crash, and
-    the empty-feed guard reads any message as 'already seeded' -- so the rest
-    of the inherited transcript could never be written, silently and
-    permanently truncating the thread."""
-    from unittest.mock import AsyncMock, patch
-
-    from langchain_core.messages import AIMessage, HumanMessage
-
-    from app.gateway.services import ensure_checkpoint_history_seeded
-
-    event_store = MemoryRunEventStore()
-    checkpointer = SimpleNamespace(
-        aget_tuple=AsyncMock(return_value=SimpleNamespace(checkpoint={})),
-    )
-    snapshot = SimpleNamespace(
-        values={
-            "messages": [
-                HumanMessage(id="legacy-human", content="old question"),
-                AIMessage(id="legacy-ai", content="old answer"),
-            ]
-        }
-    )
-    accessor = SimpleNamespace(aget=AsyncMock(return_value=snapshot))
-    request = SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(
-                checkpointer=checkpointer,
-                run_event_store=event_store,
-            )
-        )
-    )
-    patched_accessor = patch(
-        "app.gateway.services.build_checkpoint_state_accessor",
-        return_value=(accessor, {"configurable": {"thread_id": "thread-1"}}),
-    )
-
-    # The process dies partway through committing the seed.
-    with (
-        patched_accessor,
-        patch.object(event_store, "put_batch_if_absent", AsyncMock(side_effect=RuntimeError("worker killed"))),
-        pytest.raises(RuntimeError),
-    ):
-        await ensure_checkpoint_history_seeded(request, thread_id="thread-1", assistant_id="lead_agent")
-
-    assert await event_store.list_messages("thread-1", limit=10) == []
-
-    # The next run must therefore still see an empty feed and seed it whole.
-    with patched_accessor:
-        await ensure_checkpoint_history_seeded(request, thread_id="thread-1", assistant_id="lead_agent")
-
-    rows = await event_store.list_messages("thread-1", limit=10)
-    assert [row["content"]["id"] for row in rows] == ["legacy-human", "legacy-ai"]

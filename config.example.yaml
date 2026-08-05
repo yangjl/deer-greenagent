@@ -1233,11 +1233,9 @@ dbtl:
   discovery_global_memory: false
   discovery_classifier_entry: false
   discovery_auto_offer: false
-  # Model used to pre-fill the cycle setup form from the user's own request, so
-  # starting a cycle is a review-and-confirm step rather than data entry.
-  # Drafted values the request does not support come back marked as assumptions
-  # and are shown as such; a human confirmation still creates the record.
-  # null disables drafting and the form opens blank.
+  # Model used by fail-soft DBTL one-shot helpers: setup questions, intent
+  # interpretation, meeting rosters, and short meeting summaries. null keeps
+  # their deterministic fallbacks.
   setup_draft_model_name: null
   # Default model for design-meeting participants whose seat does not name one.
   # null inherits whatever model the composer is set to, so a meeting convened
@@ -1245,11 +1243,6 @@ dbtl:
   # Set this to what a routine meeting should cost; a seat may still name a
   # different model, and any seat can be overridden on the meeting setup card.
   council_model_name: null
-  # Show the DBTL Upgrade Proposal card to users. Off by default so shadow
-  # evaluation can be measured before anyone is interrupted; turn on only
-  # after reviewing the false-upgrade and missed-cycle rates in
-  # Settings -> DBTL readiness. Also requires mode=manual or graph_enabled.
-  proposals_visible: true
   # Design meetings ask follow-up questions and collect the Design verdict in
   # the registered feedback deck. Set false for the one-release rollback path;
   # durable deck responses and reviews are retained.
@@ -2355,6 +2348,9 @@ run_ownership:
 #
 #   wecom:
 #     enabled: false
+#
+#   buzz:
+#     enabled: false
 
 # ============================================================================
 # IM Channels Configuration
@@ -2472,6 +2468,20 @@ run_ownership:
 #     mention_only: false             # If true, only respond when the bot is mentioned
 #     allowed_channels: []              # Optional: channel IDs exempt from mention_only (bot responds without mention)
 #     thread_mode: false               # If true, group a channel conversation into a thread
+#
+#   # Buzz (https://github.com/block/buzz) — Nostr-relay team workspace.
+#   # DeerFlow joins as a member identity; generate a keypair and register it as
+#   # a relay member, then @mention or DM DeerFlow in Buzz. Requires the `buzz`
+#   # dependency extra (uv sync --extra buzz).
+#   buzz:
+#     enabled: false
+#     relay_url: wss://buzz.example.com
+#     private_key: $BUZZ_PRIVATE_KEY        # hex or nsec1…
+#     allowed_users: []                     # pubkeys (hex or npub) allowed to trigger runs.
+#                                           # DENY-BY-DEFAULT (unlike other channels): empty
+#                                           # means nobody, and DeerFlow logs a startup warning.
+#     require_mention: true                 # @mention needed in channels
+#     mention_free_channels: []             # channel UUIDs that respond to every message
 
 # ============================================================================
 # Guardrails Configuration
@@ -2666,3 +2676,35 @@ authorization:
 #         # Security features (enabled by default):
 #         pkce_enabled: true               # PKCE (S256) for authorization code flow
 #         nonce_enabled: true              # Nonce validation in ID tokens
+
+# --- Plugins ----------------------------------------------------------------
+# Extension packages, loaded once at startup in the order listed here. Each
+# entry names an install entry point as "module.path:install"; the `config`
+# block is handed to that package verbatim and validated by the package itself.
+#
+# Loading is explicit on purpose: an installed package does nothing until it is
+# listed here, and the list order is what fixes middleware ordering.
+#
+# This is deliberately separate from the `extensions:` block above (MCP servers,
+# skills, config-declared middlewares). That one is backed by
+# extensions_config.json, which the Gateway can rewrite through an HTTP
+# endpoint; a list that causes code to be imported must stay in this
+# operator-controlled file only.
+#
+# This initial extension-system slice accepts middleware contributors. Their
+# install functions register semantically placed middlewares for the lead and/or
+# subagent stack; the examples below intentionally cover only that surface.
+#
+# plugins:
+#   - use: acme_request_observer:install
+#     config:
+#       enabled: true
+#       placement: model_logical
+#   - use: acme_tool_observer:install
+#     config:
+#       enabled: true
+#       placement: tool_raw
+#   # `required: true` turns a load failure into a startup failure. Use it for
+#   # packages whose absence changes behaviour rather than just observability.
+#   - use: acme_required_middleware:install
+#     required: true

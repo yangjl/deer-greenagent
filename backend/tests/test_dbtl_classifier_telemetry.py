@@ -18,7 +18,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import deerflow.persistence.models  # noqa: F401  — registers every table with Base.metadata
 from deerflow.dbtl.classifier import ConfidenceBand
-from deerflow.dbtl.proposal import ProposalOutcome
 from deerflow.dbtl.routing import RouteKind, RouteSource
 from deerflow.persistence.base import Base
 from deerflow.persistence.telemetry import (
@@ -95,7 +94,7 @@ async def test_a_human_choice_is_attached_to_its_evaluation(repo) -> None:
         evaluation_id="eval-1",
         project_id="proj-1",
         user_id="user-1",
-        outcome=ProposalOutcome.KEEP_ORDINARY,
+        outcome="keep_ordinary",
     )
     assert updated["human_choice"] == "keep_ordinary"
     assert updated["decided_at"] is not None
@@ -108,7 +107,7 @@ async def test_an_outcome_for_another_project_is_refused(repo) -> None:
             evaluation_id="eval-1",
             project_id="proj-other",
             user_id="user-1",
-            outcome=ProposalOutcome.KEEP_ORDINARY,
+            outcome="keep_ordinary",
         )
         is None
     )
@@ -122,7 +121,7 @@ async def test_an_outcome_from_another_user_is_refused(repo) -> None:
             evaluation_id="eval-1",
             project_id="proj-1",
             user_id="intruder",
-            outcome=ProposalOutcome.DISMISSED,
+            outcome="dismissed",
         )
         is None
     )
@@ -131,8 +130,8 @@ async def test_an_outcome_from_another_user_is_refused(repo) -> None:
 async def test_the_first_outcome_wins(repo) -> None:
     """A card is answered once; a late second click must not rewrite history."""
     await repo.record_evaluation(**_payload())
-    await repo.record_outcome(evaluation_id="eval-1", project_id="proj-1", user_id="user-1", outcome=ProposalOutcome.KEEP_ORDINARY)
-    again = await repo.record_outcome(evaluation_id="eval-1", project_id="proj-1", user_id="user-1", outcome=ProposalOutcome.START_SETUP)
+    await repo.record_outcome(evaluation_id="eval-1", project_id="proj-1", user_id="user-1", outcome="keep_ordinary")
+    again = await repo.record_outcome(evaluation_id="eval-1", project_id="proj-1", user_id="user-1", outcome="start_setup")
     assert again is not None
     assert again["human_choice"] == "keep_ordinary"
 
@@ -144,13 +143,13 @@ async def test_concurrent_outcomes_cannot_overwrite_each_other(repo) -> None:
             evaluation_id="eval-1",
             project_id="proj-1",
             user_id="user-1",
-            outcome=ProposalOutcome.KEEP_ORDINARY,
+            outcome="keep_ordinary",
         ),
         repo.record_outcome(
             evaluation_id="eval-1",
             project_id="proj-1",
             user_id="user-1",
-            outcome=ProposalOutcome.START_SETUP,
+            outcome="start_setup",
         ),
     )
     assert first is not None and second is not None
@@ -161,13 +160,13 @@ async def test_concurrent_outcomes_cannot_overwrite_each_other(repo) -> None:
 async def test_false_upgrade_and_missed_cycle_rates_are_derivable(repo) -> None:
     """The exit review needs both rates from the stored rows alone."""
     await repo.record_evaluation(**_payload(evaluation_id="e1"))
-    await repo.record_outcome(evaluation_id="e1", project_id="proj-1", user_id="user-1", outcome=ProposalOutcome.KEEP_ORDINARY)
+    await repo.record_outcome(evaluation_id="e1", project_id="proj-1", user_id="user-1", outcome="keep_ordinary")
 
     await repo.record_evaluation(**_payload(evaluation_id="e2"))
-    await repo.record_outcome(evaluation_id="e2", project_id="proj-1", user_id="user-1", outcome=ProposalOutcome.START_SETUP)
+    await repo.record_outcome(evaluation_id="e2", project_id="proj-1", user_id="user-1", outcome="start_setup")
 
     await repo.record_evaluation(**_payload(evaluation_id="e3", route_kind=RouteKind.ORDINARY, band=ConfidenceBand.LOW, confidence=0.1))
-    await repo.record_outcome(evaluation_id="e3", project_id="proj-1", user_id="user-1", outcome=ProposalOutcome.START_SETUP)
+    await repo.record_outcome(evaluation_id="e3", project_id="proj-1", user_id="user-1", outcome="start_setup")
 
     stats = await repo.evaluation_stats("proj-1")
     assert stats["proposed"] == 2
@@ -189,7 +188,7 @@ async def test_explicit_setup_is_not_counted_as_a_classifier_miss(repo) -> None:
         evaluation_id="explicit",
         project_id="proj-1",
         user_id="user-1",
-        outcome=ProposalOutcome.START_SETUP,
+        outcome="start_setup",
     )
 
     stats = await repo.evaluation_stats("proj-1")

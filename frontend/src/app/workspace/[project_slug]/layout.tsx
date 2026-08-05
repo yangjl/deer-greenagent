@@ -1,4 +1,4 @@
-import { ChatProviders } from "@/app/workspace/chats/[thread_id]/providers";
+import { ChatProviders } from "@/components/workspace/chats/chat-providers";
 
 import { ProjectRailShell } from "./project-rail-shell";
 

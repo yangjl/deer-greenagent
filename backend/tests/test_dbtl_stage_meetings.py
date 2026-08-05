@@ -6,8 +6,8 @@ from deerflow.dbtl.agent_selector import Assignment
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_meetings import (
     MeetingRequirement,
-    attach_meeting_to_core_evidence,
     meeting_gate,
+    sanitize_meeting_attachment,
 )
 from deerflow.dbtl.stage_spec import resolve_review_stage_spec
 
@@ -65,26 +65,22 @@ def test_explicit_downward_override_unlocks_high_stakes_meeting() -> None:
 
 
 def test_test_meeting_cannot_rewrite_computed_outcome() -> None:
-    attached = attach_meeting_to_core_evidence(
-        stage="test",
-        core_evidence={"computed_outcome": "invalidated", "validity_pack_hash": "abc"},
-        meeting_output={"computed_outcome": "supported", "recommendation": "repeat_test"},
+    attached = sanitize_meeting_attachment(
+        "test",
+        {"computed_outcome": "supported", "recommendation": "repeat_test"},
     )
-    assert attached["computed_outcome"] == "invalidated"
-    assert "computed_outcome" not in attached["review_meeting"]
-    assert attached["review_meeting"]["recommendation"] == "repeat_test"
+    assert "computed_outcome" not in attached
+    assert attached["recommendation"] == "repeat_test"
 
 
 def test_learn_meeting_cannot_promote_or_publish() -> None:
-    attached = attach_meeting_to_core_evidence(
-        stage="learn",
-        core_evidence={"candidate_ids": ["candidate-1"], "promoted": False},
-        meeting_output={
+    attached = sanitize_meeting_attachment(
+        "learn",
+        {
             "recommendation": "candidate-1 merits promotion",
             "promoted": True,
             "published": True,
         },
     )
-    assert attached["promoted"] is False
-    assert "promoted" not in attached["review_meeting"]
-    assert "published" not in attached["review_meeting"]
+    assert "promoted" not in attached
+    assert "published" not in attached

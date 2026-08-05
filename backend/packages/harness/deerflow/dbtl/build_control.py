@@ -761,22 +761,6 @@ def change_plan_request(
     )
 
 
-def summarize_actions(request: Mapping[str, Any]) -> Sequence[str]:
-    """Plain-language lines for a text-only channel (IM, a receipt).
-
-    A card that renders as nothing outside the web UI is a control that does not
-    exist there, and DBTL conversations reach Feishu and Slack too.
-    """
-    lines: list[str] = []
-    for option in request.get("options", []) if isinstance(request, Mapping) else []:
-        if not isinstance(option, Mapping):
-            continue
-        label = str(option.get("label") or "")
-        description = str(option.get("description") or "")
-        lines.append(f"- **{label}** — {description}" if description else f"- **{label}**")
-    return tuple(lines)
-
-
 __all__ = [
     "MAX_CONTROL_OPTIONS",
     "BuildControlAction",
@@ -790,6 +774,5 @@ __all__ = [
     "plan_rows",
     "resolve_answer",
     "step_failure_request",
-    "summarize_actions",
     "worker_question_request",
 ]

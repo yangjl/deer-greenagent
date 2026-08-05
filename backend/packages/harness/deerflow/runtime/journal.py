@@ -309,6 +309,11 @@ class RunJournal(BaseCallbackHandler):
         self._produced_artifacts: list[tuple[str, str | None]] = []
         self._produced_artifact_keys: set[tuple[str, str | None]] = set()
 
+        # Artifact-production tracking for the terminal run.delivery event
+        # (#4272 slice 1). Deduped by (path, tool_name); insertion order kept.
+        self._produced_artifacts: list[tuple[str, str | None]] = []
+        self._produced_artifact_keys: set[tuple[str, str | None]] = set()
+
     # -- Lifecycle callbacks --
 
     @staticmethod
@@ -653,7 +658,7 @@ class RunJournal(BaseCallbackHandler):
                 artifact_tool_names: set[str] = set()
                 for message in messages:
                     if isinstance(message, BaseMessage):
-                        self._persist_tool_result_message(message, caller=caller)
+                        self._persist_tool_result_message(message)
                         if artifacts and isinstance(message, ToolMessage):
                             tool_call_id = getattr(message, "tool_call_id", None)
                             if isinstance(tool_call_id, str):

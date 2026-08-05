@@ -209,42 +209,6 @@ class JsonlRunEventStore(RunEventStore):
             await asyncio.to_thread(self._write_record, record)
             return record, True
 
-    async def put_batch_if_absent(self, events):
-        if not events:
-            return [], False
-        thread_ids = {e["thread_id"] for e in events}
-        if len(thread_ids) > 1:
-            raise ValueError(f"put_batch_if_absent requires all events to belong to the same thread; got {thread_ids!r}")
-        claim = events[0]
-        thread_id = claim["thread_id"]
-        # The check and the writes share the thread's write lock, so a
-        # concurrent claim cannot interleave. Records are grouped per run file
-        # and appended in one call each; this backend is local-development
-        # storage and offers no cross-file transaction.
-        async with self._get_write_lock(thread_id):
-            for event in await asyncio.to_thread(self._read_run_events, thread_id, claim["run_id"]):
-                if event.get("event_type") == claim["event_type"]:
-                    return [], False
-            await self._ensure_seq_loaded(thread_id)
-            by_run: dict[str, list[dict[str, Any]]] = {}
-            records: list[dict[str, Any]] = []
-            for ev in events:
-                record = {
-                    "thread_id": thread_id,
-                    "run_id": ev["run_id"],
-                    "event_type": ev["event_type"],
-                    "category": ev["category"],
-                    "content": ev.get("content", ""),
-                    "metadata": ev.get("metadata") or {},
-                    "seq": self._next_seq(thread_id),
-                    "created_at": ev.get("created_at") or datetime.now(UTC).isoformat(),
-                }
-                by_run.setdefault(ev["run_id"], []).append(record)
-                records.append(record)
-            for run_id, run_records in by_run.items():
-                await asyncio.to_thread(self._append_records, self._run_file(thread_id, run_id), run_records)
-            return records, True
-
     async def _write_batch_async(self, thread_id: str, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
         async with self._get_write_lock(thread_id):
             await self._ensure_seq_loaded(thread_id)

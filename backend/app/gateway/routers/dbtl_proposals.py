@@ -1,23 +1,22 @@
-"""Classifier shadow evaluation and the DBTL Upgrade Proposal (Phase 4).
+"""Classifier shadow evaluation and its human-outcome telemetry.
 
 Three endpoints, and the boundary between them is the phase's whole point:
 
 ``POST .../evaluate``
     Runs deterministic-first routing over one request and records what it
     concluded. It **creates no DBTL record** — it cannot, because it holds a
-    telemetry repository and nothing else. Whether the caller is shown a card
-    is a separate question answered by ``dbtl.proposals_visible``.
+    telemetry repository and nothing else. Visible setup interactions are
+    emitted by the supervisor as native Human Input Cards.
 
 ``POST .../{evaluation_id}/outcome``
-    Attaches what the human did. Dismissal is recorded like any other choice,
-    because a card that gets ignored is exactly the false-upgrade signal.
+    Attaches what the human did in the native setup interaction.
 
 ``GET .../evaluations``
     The internal evaluation drawer. Admin-only, since it is a review surface
     for people calibrating thresholds rather than a product feature.
 
-Creating an actual cycle stays where it already was: the Phase 3 endpoint,
-behind its own confirmation. Nothing here can shortcut it.
+Creating an actual cycle stays behind the supervisor's confirmation. Nothing
+here can shortcut it.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.gateway.authz import is_model_use_authorized, require_permission
+from app.gateway.authz import require_permission
 from app.gateway.deps import (
     get_classifier_evaluation_repo,
     get_config,
@@ -39,17 +38,7 @@ from app.gateway.deps import (
     require_admin_user,
 )
 from deerflow.config.app_config import AppConfig
-from deerflow.dbtl.proposal import (
-    CONFIRMATION_REQUIRED_NOTICE,
-    RECORD_EFFECT,
-    REQUIRED_GATES,
-    ProposalOutcome,
-    UpgradeProposal,
-    build_proposal,
-)
 from deerflow.dbtl.routing import ExplicitChoice, RouteKind, RoutingRequest, route_request
-from deerflow.dbtl.setup_draft import SetupDraft, build_draft_prompt, empty_draft, parse_draft_response
-from deerflow.models import create_chat_model
 from deerflow.persistence.telemetry import ClassifierEvaluationConflict
 
 router = APIRouter(prefix="/api", tags=["dbtl-proposals"])
@@ -73,27 +62,6 @@ class EvaluateRequest(BaseModel):
     # This field cannot create a record and no longer mounts a client card.
     is_new_conversation: bool = False
     idempotency_key: str = Field(min_length=1, max_length=128)
-
-    @field_validator("text")
-    @classmethod
-    def text_must_have_content(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("must contain text")
-        return value
-
-
-class DraftSetupRequest(BaseModel):
-    """A request to pre-fill the setup form.
-
-    ``fields`` is echoed from the proposal the client is showing rather than
-    chosen by the client freely: the server drops anything outside it when
-    parsing, so a client cannot widen the record's shape through this call.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    text: str = Field(min_length=1, max_length=MAX_REQUEST_TEXT)
-    fields: list[str] = Field(default_factory=list, max_length=24)
 
     @field_validator("text")
     @classmethod
@@ -154,58 +122,6 @@ def _request_fingerprint(body: EvaluateRequest) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _serialize_proposal(proposal: UpgradeProposal) -> dict:
-    # The cycle class is the user's choice on the card, so it is not decided
-    # here; only the class-independent parts of the confirmation are sent.
-    return {
-        "kind": str(proposal.kind),
-        "proposed_objective": proposal.proposed_objective,
-        "missing_fields": list(proposal.missing_fields),
-        "band": str(proposal.band),
-        "confidence": proposal.confidence,
-        "project_name": proposal.project_name,
-        "cycle_id": proposal.cycle_id,
-        # Constants, echoed so the client renders the reviewed wording rather
-        # than its own paraphrase of it.
-        "creates_record": proposal.creates_record,
-        "requires_confirmation": proposal.requires_confirmation,
-        "notice": proposal.notice,
-        "confirmation": {
-            "project_name": proposal.project_name,
-            "required_gates": list(REQUIRED_GATES),
-            "record_effect": RECORD_EFFECT,
-            "notice": CONFIRMATION_REQUIRED_NOTICE,
-        },
-    }
-
-
-def _serialize_draft(draft: SetupDraft, *, enabled: bool) -> dict:
-    """The wire shape.
-
-    ``assumed`` travels as its own list rather than being folded into the values
-    so the UI cannot lose the distinction between what the scientist said and
-    what the model proposed.
-    """
-    return {
-        "enabled": enabled,
-        "title": draft.title,
-        "fields": dict(draft.fields),
-        "assumed_fields": sorted(draft.assumed),
-    }
-
-
-def _response_text(response: object) -> str:
-    """Pull plain text out of a chat response, tolerating block content."""
-    content = getattr(response, "content", response)
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        # Reasoning models interleave thinking blocks; only text blocks count.
-        parts = [block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"]
-        return "\n".join(part for part in parts if part)
-    return ""
-
-
 @router.post("/projects/{project_id}/dbtl/proposals/evaluate")
 @require_permission("threads", "write")
 async def evaluate_request(
@@ -216,7 +132,7 @@ async def evaluate_request(
     repo=Depends(get_classifier_evaluation_repo),
 ):
     """Classify one request in shadow mode. Creates no DBTL record, ever."""
-    project, user_id = await _require_project(project_id, request)
+    _project, user_id = await _require_project(project_id, request)
     dbtl_config = _dbtl_config(request, config)
     project_cycle_count: int | None = None
     has_unfinished_cycles: bool | None = None
@@ -275,8 +191,6 @@ async def evaluate_request(
             discovery_suppressed=discovery_suppressed,
         )
     )
-    proposal = build_proposal(decision, project_name=str(project.get("name") or ""))
-
     evaluation_id = _evaluation_id(project_id, user_id, body.idempotency_key)
     if dbtl_config.classifier_shadow_enabled:
         classifier = decision.classifier
@@ -293,7 +207,7 @@ async def evaluate_request(
                 confidence=classifier.confidence if classifier else 0.0,
                 rule_hits=[{"rule_id": hit.rule_id, "weight": hit.weight, "evidence": hit.evidence} for hit in (classifier.rule_hits if classifier else ())],
                 missing_fields=list(classifier.missing_fields) if classifier else [],
-                proposed_objective=proposal.proposed_objective if proposal else "",
+                proposed_objective=classifier.proposed_objective if classifier else "",
                 policy_version=dbtl_config.policy_version,
             )
         except ClassifierEvaluationConflict as exc:
@@ -304,76 +218,11 @@ async def evaluate_request(
             # product it is measuring.
             logger.warning("Failed to record DBTL classifier evaluation for project %s", project_id, exc_info=True)
 
-    # Routing is reported honestly even when the card is hidden, so the drawer
-    # and the stored row agree; visibility only governs what the user sees.
-    proposals_visible = bool(dbtl_config.proposals_enabled)
     return {
         "evaluation_id": evaluation_id,
         "route_kind": str(decision.kind),
         "route_source": str(decision.source),
-        "proposals_visible": proposals_visible,
-        "proposal": _serialize_proposal(proposal) if (proposal and proposals_visible) else None,
     }
-
-
-@router.post("/projects/{project_id}/dbtl/proposals/draft-setup")
-@require_permission("threads", "write")
-async def draft_setup(
-    project_id: str,
-    body: DraftSetupRequest,
-    request: Request,
-    config: AppConfig = Depends(get_config),
-):
-    """Pre-fill the setup form from the user's request. Creates no record.
-
-    Deliberately a separate call from ``evaluate``: evaluation runs beside every
-    message the user sends, so putting a model round trip there would tax every
-    turn. Drafting is needed only once, when the setup step actually opens.
-
-    Every failure path returns an empty draft rather than an error. The setup
-    form must remain usable when the model is slow, misconfigured, or down —
-    degrading to the blank form users had before drafting existed.
-    """
-    project, _user_id = await _require_project(project_id, request)
-    dbtl_config = _dbtl_config(request, config)
-
-    fields = [f for f in (body.fields or []) if isinstance(f, str) and f.strip()]
-    if not dbtl_config.setup_draft_enabled or not body.text.strip() or not fields:
-        return _serialize_draft(empty_draft(), enabled=dbtl_config.setup_draft_enabled)
-
-    # ``model:use`` is enforced for the drafting model like any other model
-    # invocation the caller triggers; a denial degrades to the blank form the
-    # setup step had before drafting existed rather than erroring.
-    if not await is_model_use_authorized(request, dbtl_config.setup_draft_model_name):
-        logger.warning(
-            "DBTL setup drafting model %r is not authorized for this caller; returning a blank form",
-            dbtl_config.setup_draft_model_name,
-        )
-        return _serialize_draft(empty_draft(), enabled=True)
-
-    prompt = build_draft_prompt(
-        request_text=body.text,
-        project_name=str(project.get("name") or ""),
-        fields=fields,
-    )
-    try:
-        model = create_chat_model(
-            name=dbtl_config.setup_draft_model_name,
-            thinking_enabled=False,
-            attach_tracing=False,
-            app_config=config,
-        )
-        response = await model.ainvoke(prompt)
-        draft = parse_draft_response(_response_text(response), fields=fields)
-    except Exception:
-        logger.warning(
-            "DBTL setup drafting failed for project %s; returning a blank form",
-            project_id,
-            exc_info=True,
-        )
-        draft = empty_draft()
-
-    return _serialize_draft(draft, enabled=True)
 
 
 @router.post("/projects/{project_id}/dbtl/proposals/{evaluation_id}/outcome")
@@ -391,7 +240,7 @@ async def record_outcome(
         evaluation_id=evaluation_id,
         project_id=project_id,
         user_id=user_id,
-        outcome=str(ProposalOutcome(body.outcome)),
+        outcome=body.outcome,
     )
     if stored is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Evaluation not found")

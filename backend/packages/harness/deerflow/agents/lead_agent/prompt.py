@@ -716,13 +716,8 @@ def _get_memory_context(
         agent_name: If provided, loads per-agent memory. If None, loads global memory.
         app_config: Explicit application config. When provided, memory options
             are read from this value instead of the global config singleton.
-        user_id: Explicit memory bucket. When omitted, resolves the current
-            Gateway or standalone LangGraph Server identity's global bucket.
-        shared_user_ids: Project-wide buckets to append after the private one
-            (Phase 2). Rendered in their own labeled section so the model does
-            not present another member's approved fact as this user's private
-            context. A bucket that fails to load is skipped rather than
-            blanking the whole injection.
+        user_id: Explicit user bucket. When omitted, resolves the current
+            Gateway or standalone LangGraph Server identity.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
@@ -744,8 +739,6 @@ def _get_memory_context(
 
         manager = get_memory_manager()
         memory_content = manager.get_context(
-            # Upstream #4538: an omitted bucket resolves the runtime identity,
-            # which covers standalone LangGraph Server as well as the Gateway.
             user_id=user_id or resolve_runtime_user_id(None),
             agent_name=agent_name,
         )

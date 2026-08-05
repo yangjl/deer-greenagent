@@ -214,16 +214,3 @@ def sanitize_meeting_attachment(stage: str, payload: Mapping[str, Any]) -> dict[
         "publication",
     }
     return {str(key): value for key, value in payload.items() if str(key) not in forbidden}
-
-
-def attach_meeting_to_core_evidence(
-    *,
-    stage: str,
-    core_evidence: Mapping[str, Any],
-    meeting_output: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Attach bounded review evidence without mutating the core result."""
-    return {
-        **dict(core_evidence),
-        "review_meeting": sanitize_meeting_attachment(stage, meeting_output),
-    }

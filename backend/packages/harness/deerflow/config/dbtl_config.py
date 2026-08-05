@@ -38,13 +38,6 @@ class DbtlConfig(BaseModel):
         default=True,
         description="Record classifier shadow evaluations. Observation only: an evaluation never creates or advances a cycle.",
     )
-    proposals_visible: bool = Field(
-        default=False,
-        description=(
-            "Show the DBTL Upgrade Proposal card to users. Defaults to off so shadow evaluation can run and be measured "
-            "before anyone is interrupted by a card — the human exit review approves thresholds and wording before this is turned on."
-        ),
-    )
     conversational_discovery: bool = Field(
         default=False,
         description=("Route explicit new-cycle requests into a durable, read-only conversation before cycle creation. This interaction switch does not grant workflow authority and requires graph_enabled."),
@@ -170,10 +163,8 @@ class DbtlConfig(BaseModel):
     setup_draft_model_name: str | None = Field(
         default=None,
         description=(
-            "Model used to pre-fill the cycle setup form from the user's request. "
-            "null disables drafting and the form opens blank — the behaviour before drafting existed. "
-            "Drafted values are proposals only: values the request does not support are marked as assumptions, "
-            "and a human confirmation is still what creates the durable record."
+            "Model used by fail-soft DBTL one-shot helpers: setup questions, intent interpretation, meeting rosters, "
+            "and short meeting summaries. null keeps their deterministic fallbacks."
         ),
     )
 
@@ -193,25 +184,9 @@ class DbtlConfig(BaseModel):
         return self.mode in {"manual", "graph_enabled"}
 
     @property
-    def setup_draft_enabled(self) -> bool:
-        return bool(self.setup_draft_model_name)
-
-    @property
     def graph_execution_enabled(self) -> bool:
         return self.mode == "graph_enabled"
 
     @property
     def conversational_discovery_enabled(self) -> bool:
         return self.graph_execution_enabled and self.conversational_discovery
-
-    @property
-    def proposals_enabled(self) -> bool:
-        """Whether a card may be shown.
-
-        Two switches, because they answer different questions. Shadow
-        evaluation is measurement and is safe to leave on; showing a card
-        interrupts someone's work and is gated on both the DBTL mode being at
-        least ``manual`` (a proposal the user accepts must be able to become a
-        cycle) and an explicit operator opt-in after the exit review.
-        """
-        return self.proposals_visible and self.mutations_enabled

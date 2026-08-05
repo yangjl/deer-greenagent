@@ -11,6 +11,7 @@ from unittest import mock
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deerflow.agents.memory.scope import scoped_memory_user_id
+from deerflow.agents.memory.scopes.adapter import publication_bucket_id
 from deerflow.agents.memory.scopes.reader import shared_bucket_for_scope_value
 from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
@@ -156,7 +157,10 @@ def test_project_scoped_run_loads_only_its_project_memory():
         None,
         app_config=None,
         user_id=scoped_memory_user_id("user-1", project_context),
-        shared_user_ids=(shared_bucket_for_scope_value("project-test2"),),
+        shared_user_ids=(
+            shared_bucket_for_scope_value("project-test2"),
+            publication_bucket_id("project-test2"),
+        ),
     )
     assert "user-1" not in get_memory.call_args.kwargs["shared_user_ids"]
     assert result is not None

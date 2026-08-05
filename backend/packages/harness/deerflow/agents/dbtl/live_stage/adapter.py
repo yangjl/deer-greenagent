@@ -70,9 +70,9 @@ from deerflow.agents.dbtl.live_stage.test_rerun import (
     PreparedTestRerun,
     TestRerunRecord,
     build_test_rerun_tool,
+    build_test_rerun_unit,
     prepare_test_rerun,
     rerun_result,
-    test_rerun_unit,
     validate_test_rerun,
 )
 from deerflow.agents.dbtl.live_stage.test_review import (
@@ -6678,7 +6678,7 @@ class LiveStageAdapter:
                 )
                 selected = preliminary.units[0]
                 if isinstance(prepared, PreparedTestRerun):
-                    rerun_unit = test_rerun_unit(
+                    rerun_unit = build_test_rerun_unit(
                         prepared,
                         attempt_id=attempt_id,
                         agent_name=selected.agent_name,

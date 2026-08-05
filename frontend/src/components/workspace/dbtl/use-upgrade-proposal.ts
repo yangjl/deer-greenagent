@@ -5,8 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type DbtlExplicitChoice,
   type EvaluationResponse,
-  type ProposalAction,
-  outcomeForAction,
+  type ProposalOutcome,
   useEvaluateRequest,
   useRecordProposalOutcome,
 } from "@/core/dbtl";
@@ -59,7 +58,11 @@ export function useDbtlUpgradeProposal(projectId: string | null | undefined) {
           idempotencyKey: `eval-${uuid()}`,
         });
         if (sequence === evaluationSequence.current) {
-          setEvaluation(result.proposal ? result : null);
+          setEvaluation(
+            result.route_kind === "proposal" || result.route_kind === "cycle_setup"
+              ? result
+              : null,
+          );
         }
       } catch {
         // Ordinary chat is the safe default when classification is unavailable.
@@ -72,14 +75,14 @@ export function useDbtlUpgradeProposal(projectId: string | null | undefined) {
   );
 
   const recordOutcome = useCallback(
-    (action: ProposalAction) => {
+    (outcome: ProposalOutcome) => {
       const current = evaluation;
       if (!current) return;
       setEvaluation(null);
       runOutcome(
         {
           evaluationId: current.evaluation_id,
-          outcome: outcomeForAction(action),
+          outcome,
         },
         // Telemetry only. A lost outcome must not disturb the conversation.
         { onError: () => undefined },

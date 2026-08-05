@@ -18,7 +18,6 @@ export * from "./readiness";
 export * from "./reconciliation-api";
 export * from "./reconciliation-hooks";
 export * from "./reconciliation-view";
-export * from "./setup-draft-merge";
 export * from "./validity-api";
 export * from "./validity-hooks";
 export * from "./validity-view";

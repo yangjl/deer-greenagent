@@ -3123,28 +3123,3 @@ async def test_worker_skips_execution_and_finalization_after_ownership_loss():
     thread_store.update_status.assert_not_awaited()
     on_run_completed.assert_not_awaited()
     bridge.publish_end.assert_awaited_once_with(record.run_id)
-
-
-def test_install_runtime_context_overrides_a_caller_supplied_run_id():
-    """This run's identity is the server's to state, never the caller's.
-
-    ``config["context"]`` carries the client's own ``body.context`` by the time
-    this runs, so defaulting the key let a request name its own run. Consumers
-    read ``run_id`` as proof of which run they are in: the per-run delegation
-    cap counts current-run ledger entries by it (so a supplied value resets that
-    budget every request) and the activity projection keys every row on it.
-    """
-    config = {"context": {"run_id": "attacker-run"}}
-
-    _install_runtime_context(config, {"thread_id": "record-thread", "run_id": "run-1"})
-
-    assert config["context"]["run_id"] == "run-1"
-
-
-def test_install_runtime_context_stamps_the_run_id_into_a_caller_context():
-    config = {"context": {"unrelated": "value"}}
-
-    _install_runtime_context(config, {"thread_id": "record-thread", "run_id": "run-1"})
-
-    assert config["context"]["run_id"] == "run-1"
-    assert config["context"]["unrelated"] == "value"

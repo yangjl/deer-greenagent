@@ -25,7 +25,6 @@ from deerflow.dbtl.stage_runner import (
     DispatchOutcome,
     collect_results,
     plan_stage,
-    run_stage,
 )
 from deerflow.dbtl.stage_spec import (
     BUILD_SPEC_V12,
@@ -43,13 +42,9 @@ from deerflow.dbtl.stage_spec import (
     StageSpec,
     StageSpecNotFound,
     WorkerBudget,
-    current_spec_keys,
     describe_specs,
-    parse_cycle_weight,
-    registered_spec_keys,
     resolve_spec_by_key,
     resolve_stage_spec,
-    specs_for_cycle,
 )
 from deerflow.dbtl.worker_result import (
     CAPPED_STOP_REASONS,
@@ -75,6 +70,19 @@ def _valid_payload(**overrides) -> dict:
     return payload
 
 
+ALL_SPECS = (
+    DESIGN_SPEC_V1,
+    DESIGN_SPEC_V2,
+    RECONCILIATION_SPEC_V1,
+    BUILD_SPEC_V12,
+    TEST_SPEC_V1,
+    TEST_SPEC_V2,
+    TEST_SPEC_V3,
+    TEST_SPEC_V4,
+    LEARN_SPEC_V1,
+)
+
+
 class TestStageSpecRegistry:
     """A stage is versioned data, and an attempt must be able to name its version."""
 
@@ -98,8 +106,8 @@ class TestStageSpecRegistry:
     def test_a_recorded_spec_key_round_trips(self) -> None:
         # The invalidation rule depends on this: an attempt records a key and a
         # later check has to fetch back the exact contract it ran under.
-        for key in registered_spec_keys():
-            assert resolve_spec_by_key(key).spec_key == key
+        for spec in ALL_SPECS:
+            assert resolve_spec_by_key(spec.spec_key) is spec
 
     def test_an_unregistered_key_is_refused_rather_than_defaulted(self) -> None:
         with pytest.raises(StageSpecNotFound):
@@ -112,25 +120,11 @@ class TestStageSpecRegistry:
         with pytest.raises(StageSpecNotFound):
             resolve_stage_spec("design", domain_profile="maize-gs")
 
-    def test_current_keys_cover_every_executable_stage(self) -> None:
-        assert current_spec_keys() == (
-            "generic:design:v2",
-            "generic:reconciliation:v1",
-            "generic:build:v12",
-            "generic:test:v4",
-            "generic:learn:v1",
-        )
-
-    def test_both_specs_apply_to_every_cycle_class_and_weight(self) -> None:
-        for cycle_class in CycleClass:
-            for weight in CycleWeight:
-                assert len(specs_for_cycle(cycle_class, weight)) == 5
-
     def test_no_spec_permits_agent_approval(self) -> None:
         # Human reviewers approve all gates initially; the design allows
         # revisiting that only through a separately reviewed policy change.
-        for key in registered_spec_keys():
-            assert resolve_spec_by_key(key).human_gate_policy.allows_agent_approval is False
+        for spec in ALL_SPECS:
+            assert spec.human_gate_policy.allows_agent_approval is False
 
     def test_design_requires_operational_criteria(self) -> None:
         assert "operational_success_criteria" in DESIGN_SPEC_V2.validity_gates
@@ -210,12 +204,6 @@ class TestStageSpecRegistry:
         described = describe_specs([DESIGN_SPEC_V1, RECONCILIATION_SPEC_V1])
         json.dumps(described)
         assert described[0]["spec_key"] == "generic:design:v1"
-
-    def test_cycle_weight_defaults_to_full(self) -> None:
-        assert parse_cycle_weight(None) is CycleWeight.FULL
-        assert parse_cycle_weight("") is CycleWeight.FULL
-        with pytest.raises(ValueError):
-            parse_cycle_weight("enormous")
 
 
 class TestCapabilities:
@@ -1033,43 +1021,6 @@ class TestStageFanOut:
     def test_an_unsatisfiable_plan_is_not_dispatchable(self) -> None:
         plan = plan_stage(RECONCILIATION_SPEC_V1, [], attempt_id="a1")
         assert not plan.dispatchable
-
-    def test_an_unsatisfiable_plan_is_never_dispatched(self) -> None:
-        # Running the workers that could be matched while a required capability
-        # went uncovered produces partial evidence that looks complete.
-        calls: list[object] = []
-
-        def dispatcher(units, *, budget):
-            calls.append(units)
-            return []
-
-        outcome = run_stage(RECONCILIATION_SPEC_V1, [], dispatcher, attempt_id="a1")
-        assert calls == []
-        assert outcome.results == ()
-        assert not outcome.produced_usable_evidence
-
-    def test_a_stage_run_never_satisfies_a_gate(self) -> None:
-        # Carried over from the Phase 5 stub: a gate is closed by a typed human
-        # review, and a graph node is not a reviewer.
-        def dispatcher(units, *, budget):
-            return [DispatchOutcome(unit_id=unit.unit_id, text=json.dumps(_valid_payload())) for unit in units]
-
-        outcome = run_stage(RECONCILIATION_SPEC_V1, self._candidates(), dispatcher, attempt_id="a1")
-        assert outcome.satisfies_gate is False
-        assert outcome.produced_usable_evidence
-
-    def test_the_complete_worker_budget_comes_from_the_spec(self) -> None:
-        seen: list[WorkerBudget] = []
-
-        def dispatcher(units, *, budget):
-            seen.append(budget)
-            return [DispatchOutcome(unit_id=unit.unit_id, text=json.dumps(_valid_payload())) for unit in units]
-
-        run_stage(RECONCILIATION_SPEC_V1, self._candidates(), dispatcher, attempt_id="a1")
-        assert seen == [RECONCILIATION_SPEC_V1.budget]
-        assert seen[0].max_turns == RECONCILIATION_SPEC_V1.budget.max_turns
-        assert seen[0].max_tokens == RECONCILIATION_SPEC_V1.budget.max_tokens
-        assert seen[0].timeout_seconds == RECONCILIATION_SPEC_V1.budget.timeout_seconds
 
     def test_a_worker_that_never_reported_becomes_a_failed_result(self) -> None:
         plan = plan_stage(RECONCILIATION_SPEC_V1, self._candidates(), attempt_id="a1")

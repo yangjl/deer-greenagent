@@ -48,14 +48,14 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/workspace/chats/[thread_id]` (chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
+- **`app/`** — Next.js App Router. Routes include `/` (landing), `/showcase/[thread_id]` (allowlisted public read-only demos), `/workspace/chats/[thread_id]` (authenticated chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
 - **`components/`** — React components:
   - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
   - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
   - `workspace/` — Chat page components (messages, artifacts, settings)
   - `landing/` — Landing page sections
   - `docs/` — Docs / MDX rendering components
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `files/` (workspace file-tree listing via `GET /api/threads/{id}/files` plus the per-thread project link APIs under `/api/threads/{id}/project`), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
+- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
 - **`content/`** — MDX content (blog posts, docs) rendered by the app
@@ -71,6 +71,11 @@ The frontend is a stateful chat application. Users create **threads** (conversat
    `ThreadState.artifacts` remains the authoritative artifact list. The artifacts provider persists only thread-scoped panel UI state (`open`, selected path, and a refresh bootstrap cache) in session storage; an initial empty stream value must not overwrite that restored state before history finishes loading.
    Formal artifact content is refreshed once when the run finishes; transient `write-file:` previews remain message-driven.
    The detail view exposes explicit editing only for an already-opened formal UTF-8 text artifact under `/mnt/user-data/outputs`. Drafts stay in provider memory until Save so switching right-side panels cannot discard them, render in Markdown/HTML preview, and are protected from remote refreshes by the loaded SHA-256 revision. Saving is disabled during an active run; a changed revision preserves the draft and surfaces a conflict instead of overwriting agent output.
+   Regular artifact text loads request at most the first 1 MiB through an HTTP
+   byte range. A truncated preview must stay lightweight and expose an explicit
+   full-file action; do not mount CodeMirror for that artifact until the user
+   requests and receives the complete content. The Gateway retains range
+   ownership and returns 206/416 through `FileResponse`.
 3. `useThreadHistory` loads persisted conversation pages from `GET /api/threads/{id}/messages/page`, preserving the backend's thread-global event `seq`; rendering overlays checkpoint/live copies at their matching canonical identities (a summarized checkpoint may contain a protected early input plus a recent tail). Context-compaction rescue diffs every retained visible identity rather than slicing at the first anchor, and keeps a run-scoped ledger of committed visible messages so replacement updates and repeated rolling checkpoint windows cannot erase an already displayed step. The resolver suppresses checkpoint/transient prefixes whose canonical position is still behind an unloaded cursor page instead of collapsing that unknown gap before a recent anchor, then adds optimistic messages without timestamp re-sorting. History invalidation preserves already-loaded pages so their established ordering positions are not discarded. Dynamic context re-keys the submitted user message from `X` to `X__user`; UI identity matching normalizes that reserved suffix only for human messages so the submitted frame and checkpoint replacement remain one visible turn. A locally submitted turn also records its pre-submit identity baseline: if `messages-tuple` publishes new AI/tool steps before `values` publishes that turn's human message, render ordering moves only those non-baseline visible steps behind the new human while leaving history, hidden controls, and reconnected runs untouched. Keep that local order anchor through finish, stop, and stream error because the SDK's settled frame can retain transient event order; replace it on the next local submit and clear it on thread switch or replay-gap recovery.
 4. Stop actions call the LangGraph SDK stream stop path; `core/threads/hooks.ts` invalidates current-thread, thread-history, token-usage, and sidebar/search caches immediately and schedules one follow-up refetch because SDK stop may finish via abort + fire-and-forget cancel before backend title finalization commits
 5. TanStack Query manages server state; localStorage stores user settings. The
@@ -92,6 +97,8 @@ Auth UI note: the login page's "keep me signed in" option submits only `remember
 
 `/goal` and `/compact` are built-in composer commands, not skill activations. `src/components/workspace/input-box.tsx` intercepts `/goal`, `/goal clear`, and `/goal <condition>` before normal chat submission, calling Gateway `GET/PUT/DELETE /api/threads/{thread_id}/goal`. Setting `/goal <condition>` also submits the condition text as the next user task so the agent starts running immediately; status and clear do not start a run. Goal and compact requests are tied to the current `threadId` with an `AbortController`, so switching threads or unmounting the composer aborts in-flight requests and stale responses cannot update the new thread's composer state. The chat pages render `GoalStatus` above the composer from `AgentThreadState.goal`, with local optimistic state until the next stream `values` update arrives. `/compact` calls `POST /api/threads/{thread_id}/compact` to summarize older active context while leaving the full visible chat history intact; it is skipped on new/empty threads and blocked server-side while a run is in flight. Thread rename uses the same serialized state-write route; the rename dialog stays open and surfaces the server error when an active run returns 409.
 
+`/goal` and `/compact` are built-in composer commands, not skill activations. `src/components/workspace/input-box.tsx` intercepts `/goal`, `/goal clear`, and `/goal <condition>` before normal chat submission, calling Gateway `GET/PUT/DELETE /api/threads/{thread_id}/goal`. Setting `/goal <condition>` also submits the condition text as the next user task so the agent starts running immediately; status and clear do not start a run. Goal and compact requests are tied to the current `threadId` with an `AbortController`, so switching threads or unmounting the composer aborts in-flight requests and stale responses cannot update the new thread's composer state. The chat pages render `GoalStatus` above the composer from `AgentThreadState.goal`, with local optimistic state until the next stream `values` update arrives. `/compact` calls `POST /api/threads/{thread_id}/compact` to summarize older active context while leaving the full visible chat history intact; it is skipped on new/empty threads and blocked server-side while a run is in flight. Thread rename uses the same serialized state-write route; the rename dialog stays open and surfaces the server error when an active run returns 409.
+
 The `/` skill list stays reachable after a skill is selected: typing `/` in the editable text beside the chip reopens it, and picking an entry swaps the chip rather than adding a second one, because the wire format carries exactly one leading `/skill`. That list offers skills only while a chip is selected — a builtin command owns the whole composer line, so `/goal` behind a selected skill would submit as chat text instead of running the command. The trigger itself is unchanged: a slash only opens the list at the start of the input (`getLeadingSlashSkillQuery`), pinned by `tests/e2e/chat.spec.ts`.
 
 Human input requests are a structured message protocol layered on normal chat history. The backend writes request payloads to `ToolMessage.artifact.human_input`, `src/core/messages/human-input.ts` owns the runtime validators/types, and `src/components/workspace/messages/human-input-card.tsx` renders the reusable card. The protocol is versioned on the request side only: v1 covers `free_text` / `choice_with_other`, and v2 adds `form` (typed fields — text/textarea/number/select/multi_select/checkbox/date — with required-field validation in the card). Replies deliberately stay on the v1 response protocol: the form card submits a `response_kind: "text"` reply whose value is the human-readable summary plus one JSON block keyed by stable field names (`buildHumanInputFormSubmissionValue` — the readable part alone is ambiguous because labels/values may contain the separators), so the model can reconstruct the submitted mapping without a structured response kind. The validators reject unknown versions/modes (and field names colliding with JS `Object.prototype` members) so future protocol bumps degrade to the plain-text ToolMessage fallback rather than rendering a broken card. Form values are read through own-property access only (`readHumanInputFormValue`); select fields stay controlled from their empty-string placeholder state through selection; checkbox fields are native `<input type="checkbox">` controls seeded to an explicit `false` (`buildInitialHumanInputFormValues`) so an untouched checkbox submits as "no" while a `required` checkbox keeps must-agree semantics (no HTML `required` attribute — native constraint validation would intercept the custom submit path), and form controls carry label/`htmlFor`, `aria-required` plus a visually-hidden localized "required" marker, and `aria-invalid`/error associations whose error node stays mounted while any field is still invalid. Composer-bypass closure: `deriveHumanInputThreadState` treats a visible plain human message as answering the latest unanswered request opened before it (only the latest — nothing guarantees a single outstanding request across runs, and closing all would silently swallow older decisions; an older request left open simply becomes the active card again). This lets current users bypass a structured form through the normal composer and preserves compatibility with old v1-only frontends that degrade a v2 request to plain text. `MessageList` owns answered/latest/pending state for visible cards, but derives answered responses from raw `thread.messages` because replies are hidden; pending cards clear when the hidden reply appears, when dispatch is dropped, or when a new `thread.error` reports an async stream failure. Page-level card submit callbacks must send a normal human message and put `hide_from_ui: true` plus the response payload in the fourth `sendMessage(..., options)` argument as `options.additionalKwargs`; the third argument remains run context such as `{ agent_name }`. Composer entry points remain enabled while a human-input request is open; a normal visible message intentionally bypasses the card and starts the next run without structured response metadata.
@@ -108,6 +115,13 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
 ### Key Patterns
 
 - **Server Components by default**, `"use client"` only for interactive components
+- **Static root boundary** — `src/app/layout.tsx` must not read cookies or import
+  chat-only KaTeX/Streamdown styles. Auth and workspace layouts own the cookie-derived
+  locale provider; docs derive locale from their route, and blog owns its preference
+  cookie. Public server routes load one dictionary at a time through
+  `core/i18n/translations.ts`; the interactive auth/workspace client provider owns both
+  formatter-bearing dictionaries because functions cannot cross the RSC boundary.
+  Keep public `/` static and keep rich-content CSS on the routes that render it.
 - **Thread hooks** (`useThreadStream`, `useSubmitThread`, `useThreads`) are the primary API interface
 - **Thread routes** — construct Web UI chat paths through `core/threads/utils.ts::pathOfThread()`, which percent-encodes both custom agent names and thread IDs before inserting them into route segments
 - **LangGraph client** is a singleton obtained via `getAPIClient()` in `core/api/`
@@ -258,34 +272,20 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
   parent forwards it only when the server's read model lists it.
   Cycle creation records both class and workflow weight. A project may run
   several live top-level cycles at once (backend migration 0018 dropped the
-  single-active-cycle rule), so the dialog must not gate creation on an
+  single-active-cycle rule), so cycle setup must not gate creation on an
   existing live cycle; a computational child under a live season/program
-  parent remains available as before. The stage sheet displays only evidence bound
-  to the selected stage and includes the manual URI + SHA-256 attachment form
-  required to drive Phase 3 without a graph. Its evidence fields stay visibly
-  labeled and required, and both evidence attachment and stage submission name
-  the missing prerequisite beside their native disabled action. Artifact,
-  blocker, and resolution calls carry the displayed durable revision plus a
-  fresh idempotency key.
-  Action buttons use native `disabled` state while incomplete or pending so a
-  keyboard activation cannot bypass the same duplicate-submit protection as a
-  pointer click.
-  Phase 4 adds the Upgrade Proposal to the same module: `proposal-view.ts` is
-  **pure and React-free** (the three actions and each one's stated
-  consequence, clarification prompts and completion, the confirmation lines,
-  and the two exit-review rates), `proposals-api.ts` owns
-  `/api/projects/{id}/dbtl/proposals/*`, and `proposal-hooks.ts` the TanStack
-  hooks. `hasProposalToShow` keys on the server's payload rather than the
-  route kind, so a client-side heuristic has no way to manufacture a card the
-  server withheld — the client has no classifier and must not appear to.
-  `PROPOSAL_ACTIONS` is a fixed list, not a derived one, so adding a
-  confirmation-skipping shortcut has to be a conscious edit. Reviewed wording
-  (the notice, the required gates, the record effect) is rendered from the
-  server payload rather than re-typed here. False-upgrade and missed-cycle
-  rates use **different denominators** on purpose: one measures what was
-  proposed, the other only classifier-sourced ordinary decisions; explicit
-  setup routes are not classifier misses. A shared denominator would hide the
-  trade-off between them.
+  parent remains available as before. The generic stage sheet is an
+  evidence/history inspector only. It mounts no generic attachment, blocker,
+  submission, or verdict inputs; those decisions belong to the originating
+  conversation's Human Input/deck surfaces. Specialized Reconciliation,
+  Build/Test, and Learn review controls remain explicit exceptions.
+  Classifier observation stays in `proposal-view.ts`, `proposals-api.ts`, and
+  `proposal-hooks.ts`: the evaluate response carries routing identity for
+  telemetry, while visible setup and confirmation come only from the
+  supervisor's native Human Input Card. False-upgrade and missed-cycle rates
+  use **different denominators** on purpose: one measures what was proposed,
+  the other only classifier-sourced ordinary decisions; explicit setup routes
+  are not classifier misses.
   Phase 6 adds the data readiness bridge: `reconciliation-view.ts` is **pure
   and React-free** (row/gate/blocker vocabulary, ordering, what a person may
   decide and what each decision does, the approval-invalidation notice),
@@ -404,14 +404,12 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
   choosing Create invokes the existing authenticated cycle endpoint.
   `cycle_continuation` instead runs `LiveStageAdapter` directly and never raises
   a proposal card alongside that work.
-- **Creating a cycle and starting its Design council are two steps.** The debate
+- **Creating a cycle and starting its Design meeting are two steps.** The debate
   is a `continue_cycle`-scoped request, so it cannot be sent before a cycle id
   exists. The chat page starts it after handling the native setup confirmation,
-  which is why
-  `useDbtlUpgradeProposal.createFromNativeSetup` **returns the created
-  `CycleRecord`** instead of discarding it (`null` on failure, so a failed
-  confirmation cannot start a debate about a record that does not exist).
-  A creation route without the kickoff leaves a cycle that never gets designed.
+  A failed confirmation cannot start a debate about a record that does not
+  exist; a creation route without the kickoff leaves a cycle that never gets
+  designed.
 - **On the conversational path the kickoff is armed, not sent.** Approving the
   native confirmation calls `armDesignKickoff`; the supervisor answers that
   same approval with its design questions, and `releaseDesignKickoff(answer)`
@@ -547,6 +545,12 @@ designNotes` and are handed to the council as the owner's decisions rather
 - `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own active-goal display state for their composer overlays.
 - `src/components/workspace/messages/message-list.tsx` owns human-input card answered/latest/pending gating; entry pages only translate a submitted card response into `sendMessage` calls.
 - `src/components/workspace/browser-view/browser-view-panel.tsx` forwards each physical pointer click as one `click` input; do not also emit `down`/`up` for the same gesture because the remote Playwright click would run twice.
+- `src/components/workspace/browser-view/use-browser-stream.ts` requests binary JPEG
+  frames with `frame_format=binary`; status, URL, tabs, and navigation rejection
+  messages remain JSON. `LatestBrowserFrameBuffer` keeps only the newest pending
+  frame, publishes through `useSyncExternalStore` at most once per animation
+  frame, and owns object-URL revocation. Keep the Gateway's legacy JSON/base64
+  frame path for older clients.
 - `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
 - `src/components/workspace/chats/chat-box.tsx` owns the desktop right-panel layout, and **all three** right panels (artifacts, sidecar, browser) share one `ResizablePanelGroup` — do not fork a non-resizable branch per panel kind, which is how the artifacts divider silently lost its drag handle (#4465). Open/close is `collapse()` / `resize()` on the side panel's imperative handle, not conditional rendering, so the width can animate. Three constraints hold that together: the size transition is applied from the group as `[&>[data-panel]]:transition-[flex-grow]` because the sized flex item is the library's own `[data-panel]` element rather than the child `className` lands on; it is applied only while an open/close is in flight, so a drag is not interpolated frame by frame; and during the animation the panel content is held at its final width in `cqw` and clipped, because a reflowing message list re-runs its scroll-to-bottom (pinned by `tests/e2e/sidecar-chat.spec.ts`'s no-animated-scroll test) and a re-wrapping composer changes which responsive labels it shows. Because the panel is `collapsible`, the library can also collapse it to `0%` on its own when a drag crosses `minSize`, without going through the state that owns it. `onResize` records the last positive size while the pointer moves, but the owning `sidecar` / `browserView` / `artifactsOpen` state must only mirror a final `0%` layout from `onLayoutChanged`, after pointer release; closing on the first `0%` resize frame breaks a continuous drag that reaches the edge and then reverses before release.
 
@@ -588,511 +592,11 @@ When adding features:
 4. Run `pnpm check` before committing
 5. Update this `AGENTS.md` when architecture, commands, or conventions change
 
-## The Build plan in the project rail
-
-`src/core/dbtl/build-plan-view.ts` is the pure layer and
-`project-rail/build-plan-block.tsx` renders it. It replaced the rail's Blockers
-section, which was the only place a person could look while a Build ran and said
-nothing about the Build.
-
-**One source, two projections.** The rail and the transcript's workflow block
-read the same server view (`GET .../stages/{stage}/workflow`, via
-`useStageWorkflow`, shared through the query cache rather than fetched twice). A
-rail that derived its own notion of progress would eventually disagree with the
-transcript and the person would have no way to tell which was right, so nothing
-here recomputes a status — it only decides how to say one.
-
-**Read-only.** No retry, no hold, no answer, no confirm; selecting a phase opens
-the stage. Mutation stays in the chat card, where the decision becomes durable.
-
-The constraints are the rail's, not this feature's. `ProjectRailFrame` is
-`w-64` — about 224px of content — and scrolls as one column shared with Cycles,
-Agents, and Conversations, so a phase row is `StageRow`'s existing shape and
-nothing more: a `size-3.5` state icon, a truncated title, and a right-aligned
-`text-[11px]` state word. Titles **truncate, never wrap** (a wrapping title
-changes the rail's height as work moves; the full title lives in
-`title`/`aria-label` and in the transcript), capability rides in the accessible
-name because there is no room for a third column and the transcript already
-names it, and `MAX_RAIL_PHASES` (8) mirrors the backend's own bound so an
-uncollapsed list is safe in a shared scroll column.
-
-**Exactly one thing moves**, on the running phase only, with
-`motion-reduce:animate-none` — the same rule the Agents section directly below
-applies, and a property of the rail rather than of either feature. `movingRow`
-returns a single key rather than a per-row flag, so two spinners are
-unrepresentable rather than merely unlikely, and the icon is keyed by phase so a
-state change updates the row without remounting and restarting the rotation.
-Tone pairs are reused from `STATUS_MARK` (no new hue family); the _keys_ differ
-because these are step states, not DBTL stage statuses.
-
-The plan supplies phases that have not started — a rail that could only show
-rows that exist would say a four-phase Build has one phase until the fourth
-finished — while a recorded row wins wherever both describe the same phase,
-since a row is what actually happened, and the newest attempt of a retried phase
-is the one shown.
-
-**Blockers do not disappear.** Open work items are how a person learns
-Reconciliation is unsettled, and deleting that surface to make room would trade
-one real signal for another. Reconciliation-kind rows ride as a count on the
-stage row they belong to (in words, never colour alone); the rest keep a
-collapsed line beneath the Build plan, which is the plan's own stated fallback.
-
-## Runtime agent activity
-
-`src/core/activity/` owns the rail's live presence-and-lineage projection, and
-it is **pure and React-free** except for `context.tsx`. `reducer.ts` restates
-the three rules the backend reducer enforces rather than trusting them from
-upstream, because the browser sees a _different_ stream — one that reconnects,
-replays, and joins mid-flight: replay is not new information (folding twice, or
-a prefix then the whole thing, gives the same rows), a settled row is closed for
-good (later frames including another `started` are refused), and a row must be
-opened before it can be updated (an `updated` for an unknown id is dropped;
-backfill supplies the opening, and a synthesised row would misreport lineage the
-reader never saw).
-
-**Coalescing lives in the reducer, not the view.** An update that changes
-neither actor, state, operation, nor lineage returns the **same state object**,
-so React bails out of the render entirely. That is not only a wasted-work
-concern: a remounted `animate-spin` restarts its rotation, so a token-rate
-stream would make the one moving thing on screen stutter. Two rules follow — the
-leaf selector is memoized on that object (`view.ts`, a `WeakMap`), and the
-spinner is keyed by `activity_id` alone so a state change on the same actor
-updates the row without remounting the icon.
-
-`view.ts::activityView` is the single derived value the block reads: the active
-leaf (deepest actor genuinely working, ties broken by highest sequence), its
-dispatcher chain, its siblings, and one of five modes. `live` / `waiting` /
-`settled` / `idle` / `unavailable` replace the old static green dot, which
-looked like proof the Lead Agent was active. `waiting` is only honest when
-_nothing_ is working — one actor waiting on a person while another computes is
-still a live run — and `unavailable` is never guessed as active: the in-memory
-run-event backend loses rows on restart, which the rail states rather than
-papering over.
-
-Display names come from the **server's** registry (`Cycle supervisor`,
-`Build stage`, `Build worker 2`, a seat's validated role label); the frontend
-keeps only `ACTIVITY_STATE_LABELS` for the state words, and an unknown state
-degrades to its raw value rather than blanking the row. `labels.ts` lives in
-`core/activity` rather than `core/dbtl` because activity describes every
-conversation, including projectless ones with no cycle near them.
-`paused` is a terminal Activity state labelled **Waiting for you**: it removes
-the actor from Current while preserving the exact handoff in Earlier. This is
-distinct from the transient `waiting` state used while an actor is still live.
-
-`ThreadScopedActivityProvider` is mounted beside `ThreadScopedSubtasksProvider`
-in `ChatProviders`, keyed the same way. Two keys, and conflating them is a bug:
-the _provider_ is scoped to the conversation, which is what gets torn down,
-while an activity's identity is `(run_id, activity_id)`, which dedupes rows
-inside it. On mount, replay gaps, stream errors, and terminal runs, the provider
-reconciles the live tail with `GET /api/threads/{thread_id}/activity`. Live
-frames are buffered while that read is in flight; persisted rows are folded in
-server `seq` order and reject stale overlaps. A failed authoritative read makes
-the rail say **Unavailable**, never **Idle**. The sheet pages backward through
-the same endpoint as the reader reaches the end of its scroll (with an explicit
-Load earlier control as the keyboard-accessible equivalent); older pages are
-merged and the projection rebuilt in sequence order rather than appended in
-arrival order.
-
-`project-rail/agent-activity-block.tsx` is **fixed height with no internal
-scrolling and every line truncated**: at ~224px of content width a wrapped actor
-name changes the block's height, and a block whose height changes as work moves
-is the flicker this design exists to avoid. Banned outright, because each
-reintroduces a constraint the rail already has: an internal scroll container,
-any grow-in-place disclosure (`Collapsible`/`Accordion`), a virtualized list, and
-a height that varies with sibling count. If it needs more room, that is the
-signal to put content in the sheet.
-
-**Exactly one thing moves** — one `Loader2` with `animate-spin`, on the active
-leaf. Ancestors are static, `dispatching` uses a static glyph, and every
-animated indicator carries `motion-reduce:animate-none`. Colour is never the
-only signal: each state has a distinct icon shape and its word is always
-present, and the tone pairs are reused from `STATUS_MARK` (no new hue family) —
-but those keys are DBTL _stage statuses_ and these are _activity states_, so
-reuse the tones, not the key names. This applies to the expanded sheet as well
-as the compact block: every active row is visible there, but only the leaf
-selected by `activityView` animates.
-
-**The block is not an `aria-live` region and no ancestor of it may be one.** Its
-DOM churns on every transition; announcing that would flood a screen reader
-during a governed run, for a surface the reader did not ask to monitor.
-Announcements come from one `sr-only role="status" aria-live="polite"` sibling
-the provider writes to, kept **outside** the block's subtree, carrying only
-actor-level changes coalesced to at most one every few seconds. The expanded
-timeline is `role="log"` with `aria-live="off"` — a reader who opened it is
-reading it, not being read to.
-
-`agent-activity-sheet.tsx` is the expanded surface, following
-`cycle-stage-sheet`'s convention rather than growing in the rail (which would
-push Cycles/Blockers/Conversations out of view and nest a second scroll region).
-Tree indentation caps at three levels. Every child row explicitly names its
-immediate dispatcher with `Dispatched by …`, not only rows beyond the depth cap:
-settled parents are filtered from the live view, so indentation alone can make
-an active worker appear to have been dispatched by the wrong visible ancestor.
-Completed history is run-level, not transition-level: `activityFootprints`
-collapses Routing → Dispatching → Done into one row, prefers the stage
-coordinator for governed work and the Lead agent for ordinary work, and keeps
-the Cycle supervisor as secondary `via …` provenance. The compact block counts
-runs for the same reason. Transition rows remain durable for replay/recovery;
-condensation is a read projection and never discards audit data.
-
-Gated by `useAgentActivityFeature()` → `/api/features -> agent_activity`, which
-carries `enabled` (rollout) and `durable` (false on the in-memory run-event
-backend). Both fail closed on a missing or failed read, so an older backend
-shows today's placeholder rather than an empty block that never fills. Scoped to
-`md` and above, because `ProjectRailFrame` does not render below it — a mobile
-entry point is follow-up work, not a sheet with no host.
-
-Note for tests that mock `react`: `core/threads/hooks.ts` imports
-`useActivityContext` from `@/core/activity/context`, so a node test mocking
-React must mock that module the same way it already mocks `@/core/tasks/context`.
-
-## Design meeting chat sequence
-
-Design meetings surface in chat as one durable, run-scoped `DebatePanel`, then
-the run's ordinary assistant conclusion or `present_files` output. A successful
-round anchors the panel immediately above its files so the Design slide deck is
-always below the meeting; a failed round anchors it above the assistant's
-refusal so the failed participant remains visible instead of collapsing into a
-generic sentence. The durable participant ledger is the single meeting
-footprint, and agent activity remains the deeper audit surface.
-
-The task ledger is **conversation-scoped**, even though project layouts persist
-while navigating between conversations. `ChatProviders` keys
-`ThreadScopedSubtasksProvider` by the routed `thread_id`, so a paused meeting
-remains visible when its conversation is reopened but cannot render over
-`/workspace/<project>/new` or another thread. The native-history transition
-from a new-chat route to the UUID created by its first send can leave Next's
-route param as `"new"`; `useThreadStream` therefore also clears the ledger when
-its canonical `currentViewThreadId` changes. Do not move the unkeyed
-`SubtasksProvider` back to project scope: it makes a clean new-chat transcript
-inherit the previous conversation's worker activity and can make its pending
-decision look project-global.
-
-Each participant lane is clickable and opens
-`meeting-participant-inspector.tsx`, a right-side sheet showing that
-participant's steps: reasoning turns, tool calls paired with their output, and
-the closing position, with a timeline on the left and the selected step's
-request/output on the right. `src/core/tasks/meeting-transcript.ts` is the pure
-layer for it, and the pairing half now lives in
-`src/core/tasks/tool-transcript.ts` because nothing about it was
-meeting-specific — a council seat and an ordinary delegated subagent record
-steps in exactly the same shape, so both read the same way and a Build worker
-never needs a renderer of its own. `parseMeetingResult` renders a participant's closing position as
-sections rather than the validated JSON it is transmitted as — **contested
-items before the synthesis**, because where the meeting disagreed is what tells
-a reader whether the synthesis is a conclusion or an average, and it is
-worthless once they have read the synthesis as settled. An unresolved
-disagreement keeps its empty resolution and renders as "Not resolved"; prose or
-a malformed payload degrades to the raw text rather than costing the reader the
-result. `tool-transcript.ts` handles pairing a tool result to the call that asked for it (position is
-the only honest join; the recorded step shape carries a tool name but no call
-id), keeping a result whose requesting turn was compacted away, and marking a
-still-running call `pending` rather than rendering it as an empty success. Its
-one option, `dropTrailingAnswer`, removes a completed task's closing turn (which
-the caller already renders as `task.result`) _before_ pairing, so the tool-call
-turns it depends on are still intact — the meeting inspector deliberately does
-not use it, because a participant's final position is part of its transcript.
-`meeting-transcript.ts` keeps the meeting's own vocabulary and appends the
-closing answer. Lanes also show the latest step inline, so a three-minute
-meeting reports what it is doing rather than spinning. A reloaded run has no
-live SSE steps, so the lane backfills once via `fetchSubtaskSteps` — the same
-endpoint the subtask card uses — which is why `DebatePanel` takes `threadId`
-and `runId`.
-
-**A tool row opens to show what was asked and what came back**
-(`subtask-tool-step.tsx`). The card named the tool and stopped there, while the
-request arguments and the tool's output sat unread in the step model — which is
-exactly the information that explains a failure (which path was denied, what the
-command printed, why a contract was rejected). Bounded twice on purpose: the
-backend truncates what it persists (`SUBAGENT_STEP_MAX_CHARS`) and the row caps
-what it renders, and **both say so** rather than trailing off silently. A
-pending call still opens, because "no output recorded yet" is the answer during
-a live run and is deliberately distinguished from "the tool returned no output".
-
-**Governed stage work gets a transcript anchor** (`stage-work-panel.tsx`,
-`src/core/tasks/stage-work.ts`). A `SubtaskCard` is mounted from an assistant
-message's `task` tool call; a DBTL stage worker is dispatched by the stage
-adapter and its task id is a work-unit id, so it had no message to hang from and
-rendered nowhere at all — a Build ran invisibly and the only evidence was a
-package appearing at the end. The panel adopts tasks whose **server-set**
-`dbtlStage` is present and that carry no `councilSeat`; both exclusions matter,
-since adopting too little makes Build invisible again and adopting too much
-renders a meeting seat twice (here and in `DebatePanel`). Never infer the stage
-from a task id or description. `dbtlStage` rides on the terminal event as well
-as `task_started`, because a page joining mid-run can miss the start entirely.
-
-The backend sends a `council_seat` block on every `task_started` /
-`task_completed` / `task_failed` event. **Do not derive the seat from the task
-id** — every field on it is technically recoverable from the id today, which is
-exactly why it must not be: a view that parses identifiers to decide who is
-speaking is one rename away from labelling every seat wrong, silently.
-`readCouncilSeat` is defensive in one direction only: a malformed or absent
-block means "ordinary subtask", never a seat with guessed fields.
-
-Three things are shown live that previously appeared only afterwards in the
-review package, by which time it is too late to intervene: which seat is the red
-team, that a differently-labelled expert is actually a stand-in generalist, and
-which lane's answer counts toward the stage. `debateRounds` sorts by debate role
-rather than arrival, because a reader is following an argument rather than a
-race.
-
-`consensusState` is **derived** from the seats rather than reported alongside
-them — a separate field would be a second source of truth about something the
-seats already say, and the two would eventually disagree in front of a user.
-`stalled` is a distinct state from `settled` and `debating`: a council whose
-chair failed has neither reached consensus nor merely finished, and leaving a
-spinner running over a council that is already over is the exact experience this
-redesign removes. `partial` is distinct too: the chair reported, but at least
-one non-chair participant failed, so its output must not be presented as a
-successful discussion. Status always carries a word, never colour alone.
-
-**A described option is as tall as its description.** The option buttons carry
-`h-auto` beside `min-h-11`: the shadcn `Button` default size sets a fixed `h-9`
-and `min-h-11` only raises the floor, so every depth option rendered at ~2.75rem
-with its two-line description spilling out of the border onto the option below —
-on the one screen where a person decides how much a meeting may spend. `h-auto`
-replaces `h-9` through tailwind-merge while `min-h-11` survives in its own group
-and keeps the touch target. Do not swap it for a taller fixed height: the
-descriptions are server-owned copy, and any fixed value is one wording change
-from overlapping again. Pinned by `human-input-card.dom.test.tsx` as a class
-assertion rather than a measurement, because happy-dom has no layout engine and
-an `offsetHeight` check would pass against the broken markup.
-
-The native council preflight uses `input_mode=single_choice`; every option has
-an `id`, `label`, and `value`, with optional description, and
-`recommended_option_id` names the server recommendation. Keep this aligned with
-`core/messages/human-input.ts` — an unrecognized mode or valueless option makes
-the entire card fail closed. User-facing copy calls the feature the **design
-meeting**; internal keys (`council_preflight`, `council_participants`, event
-`council_seat`) keep the council vocabulary. The preflight artifact also
-carries `council_participants` — one editable card per participant, prefilled
-with the roster writer's suggestions — parsed fail-soft per entry in
-`human-input.ts` (a malformed participant is skipped; nothing usable falls
-back to the plain roster text). `meeting-participant-editor.tsx` renders the
-collapsed cards (model select, token budget, reasoning strength,
-instructions textarea) inside `HumanInputCard`. Meeting depth is a local
-selection first, not an immediate submit: `participantsForCouncilDepth` removes
-positions the selected policy will not run while preserving the red team and
-chair, and a separate **Start meeting** action confirms the now-visible roster.
-Only those visible participants contribute edits, so changing `position-2`
-cannot silently ride on a Light reply that keeps only `position-1`. On submit,
-`buildCouncilParticipantEdits` diffs against the prefills so an untouched
-editor submits nothing, and the edits ride the option reply's optional
-`participants` key (skipped for the roster-adjust option, whose redraw
-returns fresh prefills). The backend re-validates every field, so the editor
-is honest about prefills rather than defensive. Automatic Design kickoff messages carry
-`hide_from_ui=true` plus `dbtl_design_kickoff=true`: they are explicit graph
-input containing the owner's setup decisions, but must not impersonate text the
-person typed.
-
-`core/tasks/lifecycle.ts` owns all four custom-event transitions. A council
-`task_started` creates an in-progress seat; `task_completed` and `task_failed`
-are terminal and preserve result/error, cap reason, and seat identity. The
-run-scoped meeting panel projects that durable ledger into chat; task events do
-not create a second checkpoint-derived card.
-
-`core/dbtl/design-consensus-view.ts` reads the machine package filename from the
-bound review Markdown and parses only the chair's recorded consensus. The stage
-sheet renders that decision map above the Markdown as a reading guide; it never
-recomputes consensus, and the approval remains bound to the Markdown bytes.
-
-## Design deck feedback bridge
-
-`src/core/dbtl/design-deck-feedback.ts` is the parent's half of the Design deck
-bridge: **pure**, React-free, and the security-critical boundary between an
-agent-rendered page and the application. A deck runs in an opaque-origin iframe
-and may _collect_ a decision; it may never authorize one. Everything it sends is
-an intent parsed into a closed vocabulary (`ready`, `submit_intent`,
-`open_evidence_intent`, `open_originating_conversation_intent`), and everything
-sent back is state (`initialize`, `pending`, `accepted`, `stale`, `failed`). No
-endpoint, token, or write capability crosses the boundary in either direction.
-
-Two rules are easy to erode and worth restating. **Parsing here is a UX
-boundary, not an authorization boundary** — the server repeats membership,
-surface identity, evidence revision, and deck-hash checks on the write itself,
-and if the backend ever trusts this module the model collapses to "any page that
-can talk to the parent can write". **A settled surface never rebases**:
-`reduceDeckState` refuses to return an `accepted` or `stale` surface to
-readiness, because retrying a pending answer against a newer revision is how an
-approval ends up bound to a document nobody read.
-
-`parseDeckIntent` refuses a foreign source, a different protocol version, another
-surface id, an unknown type, an unknown action kind, a selection that is not
-exactly one slug-shaped option id, and any post-handshake message not carrying
-the per-mount channel this parent issued. A non-string comment is treated as
-absent rather than coerced, and an over-long one is bounded.
-
-The deck's own half lives in the Python renderer
-(`deerflow.dbtl.council_deck._bridge_script`) and is emitted **only** for a
-server-registered surface — a legacy or unregistered deck carries no bridge at
-all rather than a disabled one, because the safest version of "this file cannot
-answer" is a file with no code that could. `tests/e2e/design-deck-bridge.spec.ts`
-drives that script in a real browser against
-`tests/e2e/fixtures/design-deck.html`, which is generated from the Python
-renderer and guarded against drift by
-`backend/tests/test_dbtl_deck_fixture_drift.py` (regenerate with
-`cd backend && PYTHONPATH=.:tests uv run python -c 'import _design_deck_fixture as f; f.FIXTURE_PATH.write_text(f.render_fixture_deck())'`).
-That browser suite earns its keep: it is what caught a deck that would happily
-re-arm itself after being superseded, which no source-level assertion noticed.
-
-`ArtifactFilePreview` owns the live controller only when it has trusted project
-and thread context. It verifies `event.source`, resolves the opaque surface id
-through the authenticated parent, hashes the exact HTML bytes with SHA-256, and
-issues a per-mount channel before sending the server's allowed-action set.
-`submit_intent` maps to fixed API handlers; endpoints and credentials never
-cross into the iframe. A failed request keeps the DOM draft and client
-submission id, while a 409 refresh that proves revision change or consumption
-latches the deck stale instead of rebasing.
-
-Chair answers start a background run outside the page's normal LangGraph
-stream. After `resume_started`, `ArtifactFilePreview` therefore keeps the deck
-pending and polls the authenticated surface read model. A successor surface
-settles the old deck and invalidates durable thread/history queries so the new
-deck appears in the originating conversation. A terminal run with no successor
-returns `failed` plus the original allowed chair action; the bridge re-enables
-the still-mounted controls without clearing the selected option, comment, or
-client submission id, so the retry remains one payload-bound answer. On a
-reload—or after a 409 caused by changing that failed answer—the authenticated
-receipt supplies the original selected option/comment in the next
-`initialize` message, and the deck restores them before re-enabling controls.
-The persisted HTML still carries no answer and remains inert outside DeerFlow.
-
-The Design gate is two-step in the same deck at standard depth: submit first,
-then refresh and show the three verdicts. With `dbtl.progressive_gate`, the
-deck also shows the agent assessment/rationale, records a bounded explicit
-difficulty override, exposes the legal server routes, collapses routine
-submit+approve to one `advance` intent, and can Park the cycle. Park refreshes
-the same still-live deck instead of settling it, so the user can return and
-continue; a later gate decision clears the parked state. A deck-backed Human
-Input request stays in
-thread state for supervisor recovery but `MessageList` suppresses the duplicate
-card and `hasOpenHumanInputRequest` leaves the ordinary composer unlocked.
-
-**A surface id does not by itself mean the deck owns the card.**
-`isDeckOwnedHumanInputRequest` is the single predicate for that suppression, and
-it keys on `clarification_type`, not on the mere presence of
-`design_feedback_surface_id`. On a Design decision the deck _is_ the input
-surface. On a `dbtl_stage_handoff` the surface id is only an audit binding —
-which approval opened this stage — and the deck holds no Start/Hold control that
-could answer it, so suppressing it rendered the card as nothing at all: the
-control sat in durable thread history and nobody could see or answer it, while
-the backend's routing fence re-presented that same invisible card on every
-later message. The check is an **allowlist** of chat-answered types, so any
-future surface-bound card stays suppressed until someone decides otherwise —
-invisible is recoverable, wrongly interactive is not. `humanInputRunContext`
-routes the handoff reply back to its cycle for the same reason every other card
-has a case there.
-With `design_deck_feedback` enabled, the project rail says **Open feedback
-deck** and the Design stage sheet points at it; Reconciliation, Build,
-Test, and Learn sheets are unchanged.
-
-Progressive-gate Phase 2 makes this parent bridge stage-aware without changing
-its security model. `cycles-api.ts` uses the canonical `/stage-feedback/`
-aliases and surfaces include `stage`, monotonic `surface_revision`, and the
-server-derived lifecycle `open | consumed | superseded`.
-`ArtifactFilePreview` renders those fields above the opaque iframe and gives a
-superseded surface a link to the registered newest deck. The server, not the
-TypeScript parser, remains the intent authority. Phase 3 rollout flags are
-available as `dbtl.stage_meetings.{build,test,learn}` and default false.
-Build/Test/Learn decks can emit `convene_review_meeting`; the parent treats it
-as a background successor-producing action, polls the authenticated surface
-read model, refreshes the originating conversation, and remounts the successor
-deck. A terminal run with no successor restores the ledger-bound action for an
-identical retry. Progress and failure copy uses the surface's stage instead of
-calling every action Design.
-
-Human Input rendering deduplicates by stable request id but displays only the
-newest physical delivery. A structured response settles that request; a
-plain-composer compatibility guess is cleared if the server re-delivers it.
-Both `dbtl_stage_handoff` and `dbtl_build_control` route back through the cycle.
-
-Conversational discovery reuses that Human Input transport with
-`clarification_type=dbtl_discovery_start`. `humanInputRunContext` routes its
-reply to the Supervisor's start branch; the browser performs no create-cycle
-mutation. After the run completes, the chat page refreshes the project cycles
-and selects only a new cycle whose originating thread and server-stored
-discovery-package hash match. The same backend response already contains the
-Design preflight, so discovery never uses the legacy browser-authored hidden
-kickoff prompt or serializes the accepted brief back to the server.
-
-The immediate setup fallback is server-owned as well. After its confirmation
-reply, the chat page refreshes and selects the newly created non-discovery
-cycle from the same originating thread; answering the following Design setup
-card receives the preflight from that server run. `use-upgrade-proposal` owns
-evaluation telemetry only, and `ProjectCycleSelectionContext` no longer carries
-armed/pending hidden kickoffs or a create-cycle mutation. Settings → DBTL
-readiness renders the server-reported discovery rollout and authority boundary.
-
-Phase 5 adds a quiet read-only discovery indicator through
-`InputBox.extraTools`. `useDiscoveryStatus` reads the authenticated thread
-projection on load and after a run/card reply; the browser does not infer state
-from message wording. Only active `gathering`, `ready`, and `offered` rows
-render, so confirmed, declined, stale, and superseded controls are inert after
-refresh. The internal evaluation drawer also shows bounded discovery
-trigger/status/turn/revision outcomes beside classifier telemetry.
-
-`StageWorkPanel` converges from the thread-scoped stage-worker lifecycle read
-and filters that ledger by the run owning the transcript anchor. A historical
-Build card must never appear below a later ordinary Lead Agent turn; if the
-latest run has no stage worker, it has no stage-work panel.
-after a run settles, even when a partial live task already exists. Async
-terminal hydration uses eager batch reconciliation rather than the
-render-deferred ToolMessage path. Live custom `task_completed` and
-`task_failed` events likewise publish terminal state eagerly; only terminal
-ToolMessages parsed during `MessageList` render use the after-render path.
-Governed cards render `displaySummary` (or a
-safe legacy structured summary), never raw contract JSON. While a run is live,
-the panel follows the newest running governed worker's stamped run id instead
-of the previous persisted transcript anchor, and retains that run through its
-last terminal worker until the transcript catches up. A collapsed terminal
-governed card keeps its bounded progress report visible; expansion is for the
-prompt and tool transcript, not the only way to discover the outcome. A failed
-capped worker uses its server-owned `stopReason` to select the explanation in
-both the live and durable card; its partial success-like summary is not rendered as the error.
-The Build rail
-projects an open collaboration as **Waiting for you**. Its parent Build stage
-row also follows a terminal workflow phase: failed and cancelled phase attempts
-read **Stopped** or **Interrupted** instead of inheriting the cycle's broad
-`in_progress` spinner.
-
-A cycle may name its immutable `originating_thread_id`. The expanded rail links
-it only when that conversation remains in the authenticated project list; the
-link clears cycle selection and never arms request scope. Missing origins stay
-visible as unavailable provenance.
-
-## A meeting stays in the turn that held it
-
-`core/tasks/meeting-timeline.ts` groups council seats **by run**, and each
-meeting renders inside that run's own message group. It replaces one
-thread-wide `DebatePanel` that folded every seat in the conversation into a
-single block, spliced it into the transcript at a computed index, and bound it
-to `latestRunId`. Three failures came out of that shape and the run fixes all
-three: a second meeting merged into the first's rounds; starting any new run
-moved the panel off the meeting it described; and a meeting the browser never
-watched live had nothing to render. The run is the identity a meeting already
-has (`subagent.start` records it), it is what the transcript is ordered by, and
-it survives a reload.
-
-The panel is drawn above its turn's answer, so a conclusion reads below the
-debate that produced it. `UnanchoredMeetings` renders at the tail the meetings
-whose run has no message group yet — the live case, where seats stream before
-the run's first message lands; once the turn appears the meeting moves into it,
-so nothing is shown twice and nothing falls off the end. A seat carrying no run
-id at all keeps its own empty-string bucket rather than being dropped: it
-renders unanchored, which is worse than being in the right place and far better
-than vanishing.
-
-**Durability is the other half, and it was the actual bug.** `fetchStageWorkers`
-used to _discard_ every persisted meeting seat, on the grounds that the debate
-panel already drew them — but that panel read only the live stream, so the
-seats sat in the database and the one path that reads them threw them away. A
-reload, a deck-started round, or any background run therefore showed no meeting
-at all. The record now carries `councilSeat` and the stage-work reconcile passes
-it into the task context; one participant is still never drawn twice because
-`stageWorkGroups` excludes any task carrying a seat. A seat `readCouncilSeat`
-cannot parse falls through to the stage lane instead of being dropped — a worker
-in the wrong lane is recoverable, a worker nobody can see is not.
-`debatePanelPosition` / `insertDebatePanel` / `shouldRenderDebatePanel` are
-gone with the splice they served. Tests:
-`tests/unit/core/tasks/meeting-timeline.test.ts`, plus the fold cases in
-`tests/unit/core/tasks/api.test.ts`.
+Route asset budgets are enforced with `pnpm perf:check`. The command measures
+`/login` from a normal production build, then builds in static-demo mode for the
+fixture-backed workspace routes. It starts the production server on temporary local
+ports, measures the unique JavaScript and CSS files referenced by representative
+routes, writes the detailed result to `.next/performance-results.json`, and compares
+totals with `performance-budgets.json`. Fix route ownership or split points when a
+budget fails; do not raise a ceiling without documenting and reviewing the measured
+regression.

@@ -437,10 +437,9 @@ const formPayload = {
   ],
 };
 
-function toolMessage(payload: unknown, id?: string): Message {
+function toolMessage(payload: unknown): Message {
   return {
     type: "tool",
-    ...(id ? { id } : {}),
     name: "ask_clarification",
     content: "fallback",
     artifact: { human_input: payload },
@@ -700,51 +699,6 @@ test("a visible plain human reply bypasses and closes an open request", () => {
   expect(answered?.value).toBe("金额 300，类别差旅");
   expect(hasOpenHumanInputRequest([toolMessage(formPayload)])).toBe(true);
   expect(hasOpenHumanInputRequest(messages)).toBe(false);
-});
-
-test("a later delivery reopens a request closed only by plain-text fallback", () => {
-  const state = deriveHumanInputThreadState([
-    toolMessage(formPayload, "delivery-old"),
-    {
-      type: "human",
-      content: "what is next?",
-    } as unknown as Message,
-    toolMessage(formPayload, "delivery-new"),
-  ]);
-
-  expect(state.answeredResponses.has("clarification:call-form")).toBe(false);
-  expect(state.latestOpenRequestId).toBe("clarification:call-form");
-  expect(state.latestRequestMessageIds.get("clarification:call-form")).toBe(
-    "delivery-new",
-  );
-});
-
-test("a structured answer stays authoritative across a later delivery", () => {
-  const response = {
-    version: 1,
-    kind: "human_input_response",
-    source: "ask_clarification",
-    request_id: "clarification:call-form",
-    response_kind: "text",
-    value: "Amount: 300",
-  };
-  const state = deriveHumanInputThreadState([
-    toolMessage(formPayload, "delivery-old"),
-    {
-      type: "human",
-      content: "answer",
-      additional_kwargs: { human_input_response: response },
-    } as unknown as Message,
-    toolMessage(formPayload, "delivery-new"),
-  ]);
-
-  expect(state.answeredResponses.get("clarification:call-form")).toEqual(
-    response,
-  );
-  expect(state.latestOpenRequestId).toBeNull();
-  expect(state.latestRequestMessageIds.get("clarification:call-form")).toBe(
-    "delivery-new",
-  );
 });
 
 test("a visible human message before the request does not close it", () => {

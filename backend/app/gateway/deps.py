@@ -415,8 +415,6 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     async with AsyncExitStack() as stack:
         config = startup_config
         app.state.checkpoint_channel_mode = freeze_checkpoint_channel_mode(config.database.checkpoint_channel_mode)
-        app.state.dbtl_database_backend = config.database.backend
-
         app.state.checkpoint_snapshot_frequency = freeze_checkpoint_snapshot_frequency(config.database.checkpoint_delta.snapshot_frequency)
 
         app.state.stream_bridge = await stack.enter_async_context(make_stream_bridge(config))
@@ -680,6 +678,7 @@ def get_run_context(request: Request) -> RunContext:
         checkpoint_snapshot_frequency=getattr(request.app.state, "checkpoint_snapshot_frequency", None),
         thread_store=get_thread_store(request),
         app_config=get_config(),
+        extensions=getattr(request.app.state, "extensions", None),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
     )
 

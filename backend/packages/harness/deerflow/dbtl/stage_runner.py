@@ -152,12 +152,6 @@ class DispatchOutcome:
     forced_finalization: bool = False
 
 
-class WorkerDispatcher(Protocol):
-    """How a stage runs its work units. Implemented over ``SubagentExecutor``."""
-
-    def __call__(self, units: Sequence[WorkUnit], *, budget: WorkerBudget) -> Sequence[DispatchOutcome]: ...
-
-
 class AsyncWorkerDispatcher(Protocol):
     """Async sibling used by graph nodes that fan out real subagents."""
 
@@ -478,29 +472,6 @@ def collect_results(plan: StageExecutionPlan, outcomes: Sequence[DispatchOutcome
             results.append(replace(failed, token_usage=dict(outcome.token_usage or {})))
 
     return StageExecutionOutcome(plan=plan, results=tuple(results), rejected=tuple(rejected))
-
-
-def run_stage(
-    spec: StageSpec,
-    candidates: Sequence,
-    dispatcher: WorkerDispatcher,
-    *,
-    attempt_id: str,
-    context: str = "",
-) -> StageExecutionOutcome:
-    """Plan, dispatch, and collect one stage's fan-out.
-
-    An unsatisfiable plan is *not* dispatched. Running the workers that could be
-    matched while a required capability went uncovered would produce partial
-    evidence that looks complete, so the outcome comes back empty with the
-    selection's own explanation attached.
-    """
-    plan = plan_stage(spec, candidates, attempt_id=attempt_id, context=context)
-    if not plan.dispatchable:
-        logger.info("dbtl stage %s not dispatchable: %s", spec.spec_key, "; ".join(plan.selection.notes) or "no work units")
-        return StageExecutionOutcome(plan=plan)
-    outcomes = dispatcher(plan.units, budget=spec.budget)
-    return collect_results(plan, outcomes)
 
 
 async def arun_stage(

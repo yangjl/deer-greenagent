@@ -220,10 +220,6 @@ def resolve_build_workflow_by_key(spec_key: str) -> BuildWorkflowSpec:
     return spec
 
 
-def registered_build_workflow_keys() -> tuple[str, ...]:
-    return tuple(_REGISTRY)
-
-
 #: Contract versions pinned to this workflow version.
 #:
 #: They belong in the digest chain because they change what a step *means*
@@ -419,15 +415,6 @@ def input_digest(
             "material": dict(material or {}),
         }
     )
-
-
-def phase_bundle_digest(phase_output_digests: Sequence[str]) -> str:
-    """The ordered digests of every successful phase, as one value.
-
-    `execute_phases` is a container: what it hands downstream is the sequence of
-    its phases' outputs, and the sequence is what a summarizer read.
-    """
-    return _digest({"phases": list(phase_output_digests)})
 
 
 @dataclass(frozen=True, slots=True)

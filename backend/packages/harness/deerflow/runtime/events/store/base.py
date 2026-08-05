@@ -72,21 +72,6 @@ class RunEventStore(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def put_batch_if_absent(self, events: list[dict]) -> tuple[list[dict], bool]:
-        """Write a whole batch unless its first event is already present.
-
-        The all-or-nothing counterpart to :meth:`put_if_absent`, for a batch
-        that must never be observable in part. Claiming with
-        ``put_if_absent`` and writing the remainder separately leaves a
-        partially written batch behind if the process dies between the two
-        commits, and a consumer that reads "any row exists" as "this batch was
-        written" can never recover the rest.
-
-        Returns ``(records, created)``; ``created`` is ``False`` when another
-        writer already claimed the batch, in which case nothing is written.
-        """
-
-    @abc.abstractmethod
     async def list_messages(
         self,
         thread_id: str,

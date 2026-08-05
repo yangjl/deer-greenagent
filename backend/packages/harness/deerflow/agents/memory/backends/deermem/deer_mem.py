@@ -498,18 +498,6 @@ class DeerMem(MemoryManager):
             return True
         return warm_tiktoken_cache()
 
-    def scope_bindings(self) -> tuple[str, Any]:
-        """Hand back DeerMem's own root and storage for scope migration.
-
-        Returning ``self._storage`` — rather than letting the caller construct
-        a second ``FileMemoryStorage`` over the same directory — keeps one set
-        of scope locks and one cache in the process.
-        """
-        from .deermem.core.paths import _default_root
-
-        root = str(self._config.storage_path) if self._config.storage_path else str(_default_root())
-        return root, self._storage
-
     def warm_retrieval(self) -> bool:
         """Rebuild the complete derived retrieval index before serving traffic."""
         rebuild = getattr(self._storage, "rebuild_index", None)

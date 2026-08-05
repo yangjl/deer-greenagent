@@ -18,7 +18,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
@@ -34,14 +34,12 @@ from app.gateway.checkpoint_lineage import (
     is_duration_only_checkpoint,
 )
 from app.gateway.context_usage import build_context_usage
-from app.gateway.deps import get_config, get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import build_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
-from deerflow.config.app_config import AppConfig
-from deerflow.constants import AGENT_ACTIVITY_EVENT_TYPE
 from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
@@ -355,40 +353,9 @@ def _is_visible_ai_message(message: Any) -> bool:
     return _message_type(message) == "ai" and not _is_hidden_or_control_message(message)
 
 
-def _subagent_tool_call_ids(rows: list[dict[str, Any]]) -> set[str]:
-    ids: set[str] = set()
-    for row in rows:
-        caller = str((row.get("metadata") or {}).get("caller", ""))
-        content = row.get("content")
-        if not caller.startswith("subagent:") or not isinstance(content, dict):
-            continue
-        tool_calls = content.get("tool_calls")
-        if not isinstance(tool_calls, list):
-            continue
-        for tool_call in tool_calls:
-            if not isinstance(tool_call, dict):
-                continue
-            tool_call_id = tool_call.get("id")
-            if isinstance(tool_call_id, str) and tool_call_id:
-                ids.add(tool_call_id)
-    return ids
-
-
-def _is_thread_history_hidden_message_row(
-    row: dict[str, Any],
-    *,
-    legacy_subagent_tool_call_ids: set[str] | None = None,
-) -> bool:
+def _is_thread_history_hidden_message_row(row: dict[str, Any]) -> bool:
     caller = str((row.get("metadata") or {}).get("caller", ""))
-    if caller.startswith("middleware:"):
-        return True
-    content = row.get("content")
-    if caller.startswith("subagent:") and (_message_type(content) == "ai" or row.get("event_type") == "llm.tool.result"):
-        return True
-    if not isinstance(content, dict) or _message_type(content) != "tool":
-        return False
-    tool_call_id = content.get("tool_call_id")
-    return isinstance(tool_call_id, str) and legacy_subagent_tool_call_ids is not None and tool_call_id in legacy_subagent_tool_call_ids
+    return caller.startswith("middleware:") or (caller.startswith("subagent:") and _message_type(row.get("content")) == "ai")
 
 
 def _checkpoint_messages(snapshot: Any) -> list[Any]:
@@ -1219,19 +1186,12 @@ async def _scan_visible_thread_messages(
             if not raw:
                 break
             _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=None, scan_after=scan_after)
-            legacy_subagent_tool_call_ids = _subagent_tool_call_ids(raw)
             reached_before_bound = False
             for row in raw:
                 if before_seq is not None and row["seq"] >= before_seq:
                     reached_before_bound = True
                     break
-                if (
-                    not include_middleware
-                    and _is_thread_history_hidden_message_row(
-                        row,
-                        legacy_subagent_tool_call_ids=legacy_subagent_tool_call_ids,
-                    )
-                ) or row.get("run_id") in hidden_run_ids:
+                if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids:
                     continue
                 visible.append(row)
                 if len(visible) == needed:
@@ -1257,15 +1217,8 @@ async def _scan_visible_thread_messages(
         if not raw:
             break
         _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=scan_before, scan_after=None)
-        legacy_subagent_tool_call_ids = _subagent_tool_call_ids(raw)
         for row in reversed(raw):
-            if (
-                not include_middleware
-                and _is_thread_history_hidden_message_row(
-                    row,
-                    legacy_subagent_tool_call_ids=legacy_subagent_tool_call_ids,
-                )
-            ) or row.get("run_id") in hidden_run_ids:
+            if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids:
                 continue
             visible_desc.append(row)
             if len(visible_desc) == needed:
@@ -1485,88 +1438,6 @@ async def list_run_events(
         else event
         for event in events
     ]
-
-
-@router.get("/{thread_id}/stage-worker-events", response_model=StageWorkerEventsResponse)
-@require_permission("runs", "read", owner_check=True)
-async def list_stage_worker_events(
-    thread_id: ThreadId,
-    request: Request,
-    limit: int = Query(default=500, ge=1, le=2000),
-    before_seq: int | None = Query(default=None, ge=1),
-) -> dict[str, Any]:
-    """Return persisted stage-worker lifecycle events across every thread run.
-
-    Stage work may belong to a hidden or older supervisor run, so a current-run
-    endpoint cannot reconstruct it after reload.  This intentionally exposes
-    only the start/end lifecycle rows needed for task convergence; detailed
-    steps remain on the existing run-and-task scoped endpoint.
-    """
-    event_store = get_run_event_store(request)
-    events = await event_store.list_thread_events(
-        thread_id,
-        event_types=["subagent.start", "subagent.end"],
-        limit=limit,
-        before_seq=before_seq,
-    )
-    return {
-        "events": [
-            {
-                **event,
-                "metadata": redact_metadata_secrets(event.get("metadata")),
-            }
-            if isinstance(event, dict) and "metadata" in event
-            else event
-            for event in events
-        ],
-        "next_before_seq": (events[0].get("seq") if events and len(events) >= limit else None),
-    }
-
-
-@router.get("/{thread_id}/activity")
-@require_permission("runs", "read", owner_check=True)
-async def list_thread_activity(
-    thread_id: ThreadId,
-    request: Request,
-    limit: int = Query(default=200, ge=1, le=1000),
-    before_seq: int | None = Query(default=None, ge=1),
-    config: AppConfig = Depends(get_config),
-) -> dict:
-    """Return one page of this conversation's runtime activity, newest page first.
-
-    Conversation-scoped rather than run-scoped on purpose: a conversation's
-    activity spans every run in it, including hidden deck-triggered runs that
-    no browser ever subscribed to. Reading only the live stream would leave
-    those invisible, and reading the current run would lose the history a
-    reader opened this surface for.
-
-    ``before_seq`` pages backwards from the live edge; the response's
-    ``next_before_seq`` is the oldest ``seq`` on this page, or ``null`` when the
-    beginning has been reached.
-    """
-    event_store = get_run_event_store(request)
-    page_limit = min(limit, int(getattr(getattr(config, "run_events", None), "activity_page_limit", 200) or 200))
-    events = await event_store.list_thread_events(
-        thread_id,
-        event_types=[AGENT_ACTIVITY_EVENT_TYPE],
-        limit=page_limit,
-        before_seq=before_seq,
-    )
-    # ``content`` is already a closed, server-owned field set — the parse
-    # boundary rebuilt it on the way in — so it is served as-is. Metadata still
-    # goes through the shared redaction every other event read uses.
-    return {
-        "events": [
-            {
-                **event,
-                "metadata": redact_metadata_secrets(event.get("metadata")),
-            }
-            if isinstance(event, dict) and "metadata" in event
-            else event
-            for event in events
-        ],
-        "next_before_seq": (events[0].get("seq") if events and len(events) >= page_limit else None),
-    }
 
 
 @router.get("/{thread_id}/runs/{run_id}/workspace-changes")

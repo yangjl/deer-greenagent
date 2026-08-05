@@ -8,27 +8,6 @@ const PROPOSAL_RESPONSE = {
   evaluation_id: "eval-1",
   route_kind: "proposal",
   route_source: "classifier",
-  proposals_visible: true,
-  proposal: {
-    kind: "proposal",
-    proposed_objective:
-      "Compare drought-response models across G2F environments",
-    missing_fields: ["target trait", "season range"],
-    band: "high",
-    confidence: 0.84,
-    project_name: "test2",
-    cycle_id: null,
-    creates_record: false,
-    requires_confirmation: true,
-    notice: "No cycle has been created yet.",
-    confirmation: {
-      project_name: "test2",
-      required_gates: ["Design", "Data reconciliation"],
-      record_effect: "Creates a durable research record in this project.",
-      notice:
-        "Starting this cycle creates a durable research record. Nothing is written until you confirm.",
-    },
-  },
 };
 
 const EXISTING_CYCLE = {
@@ -53,8 +32,6 @@ const CONTINUATION_RESPONSE = {
   evaluation_id: "eval-continuation",
   route_kind: "cycle_continuation",
   route_source: "selected_cycle",
-  proposals_visible: true,
-  proposal: null,
 };
 
 const SETUP_REQUEST_ID = "dbtl-setup-confirm:e2e";

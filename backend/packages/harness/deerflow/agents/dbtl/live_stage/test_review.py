@@ -96,10 +96,6 @@ def validated_test_assessment(
     return None
 
 
-# Temporary compatibility name for tests migrating from stage_execution.py.
-_validated_test_assessment = validated_test_assessment
-
-
 @dataclass(frozen=True, slots=True)
 class TestReviewService:
     """Read Test review state and perform its server-bound human write."""

@@ -18,7 +18,6 @@ from deerflow.dbtl.build_control import (
     plan_rows,
     resolve_answer,
     step_failure_request,
-    summarize_actions,
     worker_question_request,
 )
 from deerflow.dbtl.build_plan import BuildPhase, BuildPhasePlan, PlanFeasibility
@@ -311,20 +310,6 @@ class TestChangingThePlanIsASecondExchange:
         assert "have not run yet" in follow_up["question"]
 
 
-class TestTheControlReadsAsTextToo:
-    def test_every_option_renders_a_line_a_chat_channel_can_show(self) -> None:
-        card = step_failure_request(
-            step_key="summarize_results",
-            step_label="Summarize results",
-            error_code="summary_contract_rejected",
-            error_summary="The summarizer cited a figure the server never published.",
-            **BINDINGS,
-        ).as_card()
-
-        lines = summarize_actions(card)
-
-        assert len(lines) == 4
-        assert all(line.startswith("- **") for line in lines)
-
+class TestPlanRows:
     def test_a_plan_with_no_phases_renders_no_rows(self) -> None:
         assert plan_rows(BuildPhasePlan(feasibility=PlanFeasibility.NEEDS_INPUT, clarification_question="Which trait?")) == ()

@@ -285,6 +285,45 @@ RECONCILIATION_SPEC_V1 = StageSpec(
     memory_write_policy=MemoryWritePolicy.NONE,
 )
 
+BUILD_SPEC_V11 = StageSpec(
+    stage="build",
+    domain_profile=GENERIC_PROFILE,
+    version=11,
+    title="Build",
+    purpose=("Produce and execute an implementation from the approved design, discover the data actually used, bind those inputs to server-computed content hashes, and record everything another person needs to re-run it."),
+    cycle_classes=_ALL_CLASSES,
+    cycle_weights=_ALL_WEIGHTS,
+    required_inputs=(
+        "approved_design_brief",
+        "workspace_inputs_examined_during_build",
+    ),
+    required_artifact_types=("build_package",),
+    output_schema="build_package.v11",
+    required_capabilities=(Capability.SOFTWARE_ENGINEERING,),
+    optional_capabilities=(
+        Capability.STATISTICAL_ANALYSIS,
+        Capability.QUANTITATIVE_GENETICS,
+        Capability.FIELD_TRIAL_QC,
+    ),
+    validity_gates=(
+        "server_bound_input_lineage",
+        "versioned_derived_outputs",
+        "structured_rerun_spec",
+        "server_verified_phase_manifest",
+        "phase_declared_skills",
+        "narrow_implementation_inputs",
+    ),
+    memory_write_policy=MemoryWritePolicy.NONE,
+    budget=WorkerBudget(
+        max_workers=3,
+        max_turns=450,
+        max_tokens=500_000,
+        timeout_seconds=900,
+        token_limit_enforced=True,
+    ),
+)
+
+
 BUILD_SPEC_V12 = StageSpec(
     stage="build",
     domain_profile=GENERIC_PROFILE,
@@ -495,6 +534,7 @@ _REGISTRY: dict[str, StageSpec] = {
         DESIGN_SPEC_V1,
         DESIGN_SPEC_V2,
         RECONCILIATION_SPEC_V1,
+        BUILD_SPEC_V11,
         BUILD_SPEC_V12,
         TEST_SPEC_V1,
         TEST_SPEC_V2,
@@ -572,11 +612,6 @@ def resolve_spec_by_key(spec_key: str) -> StageSpec:
     return spec
 
 
-def registered_spec_keys() -> tuple[str, ...]:
-    """Every spec key, sorted — for readiness reporting and tests."""
-    return tuple(sorted(_REGISTRY))
-
-
 def resolve_review_stage_spec(stage: str) -> StageSpec:
     """Return the pinned post-evidence review-meeting contract."""
     normalized = (stage or "").strip().lower()
@@ -585,36 +620,6 @@ def resolve_review_stage_spec(stage: str) -> StageSpec:
     if spec is None:
         raise StageSpecNotFound(f"No review meeting spec registered for stage {stage!r}.")
     return spec
-
-
-def current_spec_keys(domain_profile: str = GENERIC_PROFILE) -> tuple[str, ...]:
-    """The spec keys a new cycle in *domain_profile* would run under."""
-    profile = (domain_profile or GENERIC_PROFILE).strip().lower()
-    return tuple(resolve_stage_spec(stage, domain_profile=profile).spec_key for stage in EXECUTABLE_STAGES if (profile, stage) in _CURRENT)
-
-
-def specs_for_cycle(cycle_class: CycleClass, weight: CycleWeight, *, domain_profile: str = GENERIC_PROFILE) -> tuple[StageSpec, ...]:
-    """The executable specs that apply to one cycle, in stage order."""
-    resolved: list[StageSpec] = []
-    for stage in EXECUTABLE_STAGES:
-        try:
-            spec = resolve_stage_spec(stage, domain_profile=domain_profile)
-        except StageSpecNotFound:
-            continue
-        if spec.applies_to(cycle_class, weight):
-            resolved.append(spec)
-    return tuple(resolved)
-
-
-def parse_cycle_weight(value: str | None) -> CycleWeight:
-    """Coerce a stored or requested weight, defaulting to ``full``."""
-    if value is None or value == "":
-        return CycleWeight.FULL
-    try:
-        return CycleWeight(value)
-    except ValueError as exc:
-        allowed = ", ".join(item.value for item in CycleWeight)
-        raise ValueError(f"Unknown cycle weight {value!r}; expected one of: {allowed}") from exc
 
 
 def describe_specs(specs: Iterable[StageSpec]) -> tuple[dict[str, object], ...]:

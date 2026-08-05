@@ -302,6 +302,17 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Changed
 
+- **frontend performance:** Keep the public root and localized docs static;
+  lazy-load closed workspace panels and editor/highlighter dependencies;
+  incrementally derive streamed message state; bound streaming Markdown work;
+  virtualize long message and chat lists; pause offscreen decorative effects;
+  and enforce representative route JS/CSS budgets.
+- **browser:** Negotiate binary Browser Live JPEG frames, retain the legacy
+  JSON/base64 protocol for older clients, coalesce presentation to the latest
+  frame per refresh, and revoke replaced object URLs.
+- **artifacts:** Stream regular text artifacts with HTTP byte-range support and
+  limit the initial Web UI preview to 1 MiB until the user explicitly loads the
+  complete file.
 - **sandbox:** The Helm chart now defaults per-sandbox Services to `ClusterIP`
   instead of `NodePort`, so the code-execution sandbox is reachable only inside
   the cluster via Service DNS (`http://sandbox-<id>-svc.<ns>.svc.cluster.local`)
@@ -358,32 +369,34 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
-- **DBTL:** Treat failed, blocked, or capped Design chairs as audit records
-  rather than meeting outcomes. Provider outages no longer generate a
-  conclusion deck or register a feedback surface for an unfinished meeting;
-  completed and intentionally paused (`needs_input`) chairs retain their decks.
-  Light pilot fallback now requires actual recoverable chair output instead of
-  manufacturing a review package from cycle metadata alone, and cannot conclude
-  a round unless both an independent position and a red-team report validated.
-- **DBTL:** Pin each participant card's selected model onto the subagent
-  executor configuration. Meeting seats no longer display/load tools for one
-  model while silently invoking the composer's inherited provider.
-- **DBTL:** Consume project-rail cycle selection after its one scoped request
-  and route ordinary read/explain follow-ups through the lead agent, preventing
-  questions about a Design result from restarting its council.
-- **DBTL:** Treat explicit Design review language as a deterministic control
-  boundary even after the one-shot cycle scope clears. Chat approval/rejection
-  text no longer invokes the lead model or restarts workers; it immediately
-  directs the reviewer to the revision-bound project review action.
-- **DBTL:** Keep Design-council card replies bound to the server-resolved cycle
-  when browser selection state is missing, and recover the hidden Design
-  kickoff instead of re-reading the original “start a DBTL cycle” message and
-  opening setup again.
-- **models:** Preserve a Codex model's configured
-  `when_thinking_disabled.reasoning_effort` instead of always forcing `none`,
-  allowing subscription-backed models such as GPT-5.3-Codex-Spark that require
-  at least `low`; `CodexChatModel.include_reasoning_summary=false` also supports
-  models that reject the optional `reasoning.summary` field.
+- **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview.
+- **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
+  substitution that only captures output. The rule now judges *position* instead
+  of matching any `$(`: `x=$(curl url)`, `echo $(curl url)`, an argument, and a
+  `for` word list all run normally, while a substitution in command position
+  (`$(curl url)`, after a `|`/`&&`/`;`, behind leading assignments or an
+  `env`/`nohup`/`time` style wrapper, or as an `eval`/`source` argument) still
+  blocks because it executes fetched content. An interpreter's code-string flag
+  (`bash -c`, `python -c`, `perl -e`, `node -p`, `php -r`, and the `<<<`
+  here-string) is treated as an execution context wherever it appears, so
+  `bash -c "$(curl url)"` blocks; `source <(curl url)` and the backtick spelling
+  of `eval`/`source` now block too, neither of which was detected before. An
+  unquoted newline separates statements like `;`, so `echo hi` followed by a
+  new line starting `$(curl url)` blocks as well, while heredoc bodies are
+  consumed as data — writing a file whose content happens to start a line with
+  `$(curl url)` is not a command.
+  Variable expansions whose name merely starts with a risky executable
+  (`$shell`, `$bashrc`, `$python_version`) and lookalike binaries
+  (`shellcheck`, `shasum`) are no longer false positives.
+  ([#4611])
+- **mcp:** Isolate Settings > Tools enable/disable updates to one MCP server, so
+  an unrelated disallowed stdio command no longer blocks every switch; allow
+  disabling a disallowed target while still rejecting its re-enable, preserve
+  the raw extensions config, honor the MCP-spec `transport` alias when enabling
+  SSE/HTTP servers, surface backend validation details in the UI, and atomically
+  replace the shared config for MCP, skill, and embedded-client updates so
+  interrupted writes cannot leave it truncated.
+  ([#4574])
 - **runtime:** Thread metadata now switches to `running` only after the run passes
   the startup barrier, so pending-cancelled runs no longer briefly project
   `running`; clients may observe the prior thread status during worker startup.
@@ -619,6 +632,17 @@ This section accumulates work toward the **2.1.0** milestone
   thread. ([#4394])
 - **tools:** Exclude injected runtime from the `list_uploaded_files` schema.
   ([#4376])
+- **mcp:** Bound MCP server bring-up — tool discovery (subprocess spawn +
+  `initialize` + `tools/list`) and persistent stdio session initialization —
+  with a new per-server `session_init_timeout` (default 60s, `null` disables),
+  so a hung stdio server can no longer block agent construction, or the whole
+  Gateway event loop, indefinitely. `tool_call_timeout` still bounds individual
+  stdio tool calls.
+- **runtime:** Tool-output budget externalization no longer trips run delivery
+  verification. The default `.tool-results` storage dir (and any custom
+  `tool_output.storage_subdir`) is excluded from workspace-change snapshots and
+  produced-artifact detection, so a run that only externalized oversized tool
+  outputs succeeds instead of failing as an error.
 
 ### Performance
 
@@ -1491,3 +1515,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4469]: https://github.com/bytedance/deer-flow/pull/4469
 [#4471]: https://github.com/bytedance/deer-flow/pull/4471
 [#4516]: https://github.com/bytedance/deer-flow/pull/4516
+[#4611]: https://github.com/bytedance/deer-flow/issues/4611

@@ -122,17 +122,6 @@ class MemoryRunEventStore(RunEventStore):
             True,
         )
 
-    async def put_batch_if_absent(self, events):
-        if not events:
-            return [], False
-        claim = events[0]
-        # No await between the lookup and the appends, so the batch is atomic
-        # for the backend's documented single-event-loop concurrency model.
-        for event in self._events_by_run.get(claim["thread_id"], {}).get(claim["run_id"], []):
-            if event["event_type"] == claim["event_type"]:
-                return [], False
-        return [self._put_one(**ev) for ev in events], True
-
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         # ``messages`` is messages-only and seq-sorted, so the seq window is a
         # contiguous slice located with bisect (O(log m)) rather than a full scan.

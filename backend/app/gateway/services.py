@@ -1311,22 +1311,7 @@ async def ensure_checkpoint_history_seeded(
     )
     if not events:
         return
-    # The empty-feed check above races other Gateway workers: two processes can
-    # both see an empty feed and both build the same seed batch. The batch's
-    # first event doubles as a durable claim — ``put_batch_if_absent``
-    # serializes that existence check with every other writer for the thread
-    # (advisory lock on PostgreSQL, in-process lock on SQLite), and seeding is
-    # deterministic, so the loser finds the winner's identical first row and
-    # stands down instead of duplicating the transcript.
-    #
-    # Claim and remainder commit together, because the guard above reads *any*
-    # message as "already seeded": a batch left half written by a crash between
-    # two commits could never be completed, silently truncating the inherited
-    # transcript for the life of the thread.
-    _, created = await event_store.put_batch_if_absent(events)
-    if not created:
-        logger.info("Checkpoint-history seed already claimed for thread %s; skipping duplicate seed", thread_id)
-        return
+    await event_store.put_batch(events)
     logger.info("Seeded %d checkpoint-history events for thread %s", len(events), thread_id)
 
 
@@ -1355,10 +1340,6 @@ async def start_run(
         validate_thread_id(thread_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    # Phase 0 fail-closed boundary: reject the experimental orchestrator before
-    # creating a run row, thread metadata, checkpoints, or project artifacts.
-    ensure_dbtl_execution_allowed(body.assistant_id, getattr(body, "command", None))
 
     body_config = getattr(body, "config", None)
     config_metadata = body_config.get("metadata") if isinstance(body_config, dict) else None
@@ -1417,6 +1398,7 @@ async def start_run(
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
+        agent_factory = resolve_agent_factory(body.assistant_id)
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
         command = getattr(body, "command", None)
         if command and command.get("resume") is not None:
@@ -1461,7 +1443,6 @@ async def start_run(
             internal_owner_user=internal_owner_user,
             request_context=getattr(body, "context", None),
         )
-        agent_factory = resolve_run_agent_factory(body.assistant_id, config)
 
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(

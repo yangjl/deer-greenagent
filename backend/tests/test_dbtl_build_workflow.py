@@ -32,7 +32,6 @@ from deerflow.dbtl.build_workflow import (
     StepAttempt,
     StepState,
     input_digest,
-    phase_bundle_digest,
     phase_step_material,
     project_workflow,
     resolve_build_workflow,
@@ -137,12 +136,6 @@ class TestInputDigests:
 
     def test_a_changed_predecessor_changes_the_digest(self):
         assert input_digest(BuildStepKey.SUMMARIZE_RESULTS, predecessors=("a",)) != input_digest(BuildStepKey.SUMMARIZE_RESULTS, predecessors=("b",))
-
-    def test_a_phase_bundle_binds_its_phases_in_order(self):
-        assert phase_bundle_digest(("p1", "p2")) != phase_bundle_digest(("p2", "p1"))
-
-    def test_an_empty_bundle_is_stable(self):
-        assert phase_bundle_digest(()) == phase_bundle_digest(())
 
     def test_a_skill_content_change_changes_only_phase_material(self):
         base = dict(

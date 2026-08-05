@@ -35,6 +35,18 @@ Nginx is the single public entry: it serves the frontend and proxies `/api/langg
 to the Gateway's LangGraph runtime, rewriting it to Gateway's native `/api/*` routes; all
 other `/api/*` go straight to the Gateway REST routers. See
 [backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail.
+It compresses HTML and configured textual assets, while deliberately leaving SSE,
+fonts, images, audio, and video uncompressed at the proxy layer.
+
+Both compose files publish that entry as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
+— **loopback by default**, matching the README's documented deployment model. A bare
+`"${PORT}:2026"` binds `0.0.0.0`, which does not.
+Nginx itself listens `default_server` on IPv4+IPv6 and the
+Gateway binds `0.0.0.0:8001` inside the container on purpose — both are container-
+internal; the published nginx port is the entire external surface, and the Gateway's
+`8001` is deliberately not published. Any new published port needs an explicit bind
+address; `backend/tests/test_compose_default_bind_host.py` pins this for every service
+in both compose files.
 
 Both compose files publish that entry as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
 — **loopback by default**, matching the README's documented deployment model. A bare
@@ -55,6 +67,7 @@ deer-flow/
 ├── extensions_config.example.json  # Template → copy to extensions_config.json (gitignored): MCP servers + skills
 ├── backend/                        # Python backend — see backend/AGENTS.md
 │   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
+│   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
 │   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
 │   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
 ├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
@@ -67,6 +80,11 @@ deer-flow/
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
+
+Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
+(operator-controlled on purpose — that list causes code to be imported, so it is deliberately
+kept out of the API-writable `extensions_config.json`). See the Extension System section in
+[backend/AGENTS.md](backend/AGENTS.md).
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
@@ -940,29 +958,6 @@ cd frontend && pnpm test      # Unit tests
 
 Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
 (`pnpm`) = per-module work.**
-
-Gateway development launchers exclude `backend/tests/` from Uvicorn's reload
-watcher. Test edits must not restart the live Gateway; runtime source and
-configuration changes remain hot-reloaded.
-
-The local DBTL manual pipeline lives in `scripts/dbtl_manual.py` and stores all
-generated state under gitignored `.deer-flow/manual-dbtl/`. Its generated
-profile forces unified SQLite plus an isolated `projects.root`, enables the
-graph, Design-deck feedback, and the progressive-gate cycle timeline, and disables
-background memory/scheduler/channel writers. A scenario is a matched SQLite backup + project tree + integrity
-manifest captured only at a quiescent human-decision boundary. Restore refuses
-while Gateway port 8001 is listening, validates both hashes, backs up the prior
-isolated live pair, and never touches the normal configured database or project
-root. `restore --hot` (`make dbtl-manual-restore-hot`) inverts only the
-running-stack rule and **requires** the stack to be up: it keeps every other
-safety behavior, refuses unless the live database is quiescent (the same
-active-run/action guard capture applies, re-checked immediately before the
-swap), then touches one watched backend source file so the Gateway's
-`uvicorn --reload` watcher recycles that process alone, and polls the Gateway
-until it answers. The frontend and nginx keep running, so the developer only
-hard-refreshes the browser. This is a developer acceleration tool, not a
-production stage bypass; it adds no Gateway route or config flag; see
-`docs/dbtl-manual-test-pipeline.md`.
 
 Host-side pnpm consumers, including the root/frontend Makefiles and local diagnostic scripts, must run through `scripts/pnpm.py`. The runner preserves direct `pnpm`/`pnpm.cmd` priority, falls back to `corepack pnpm`, and is invoked from `frontend/` so Corepack honors the package-manager version pinned by that project.
 
