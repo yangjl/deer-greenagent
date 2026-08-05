@@ -25,7 +25,9 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from deerflow.dbtl.agent_selector import Assignment, SelectionResult, capability_brief, select_agents
+from deerflow.dbtl.build_fulfillment import BUILD_FULFILLMENT_CONTRACT
 from deerflow.dbtl.build_grant import INPUT_ENV_PREFIX, PROJECT_ROOT_ENV, WORKSPACE_ENV
+from deerflow.dbtl.deliverable_audit import DELIVERABLE_AUDIT_CONTRACT
 from deerflow.dbtl.stage_spec import StageSpec, WorkerBudget
 from deerflow.dbtl.worker_result import (
     StageWorkerResult,
@@ -307,6 +309,7 @@ def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> st
         RESULT_CONTRACT,
     ]
     if spec.stage == "build" and ({"recorded_rerun_procedure", "structured_rerun_spec"} & set(spec.validity_gates)):
+        lines.extend(["", BUILD_FULFILLMENT_CONTRACT])
         lines.extend(
             [
                 "",
@@ -355,6 +358,7 @@ def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> st
                 ]
             )
     if spec.stage == "test":
+        lines.extend(["", DELIVERABLE_AUDIT_CONTRACT])
         lines.extend(
             [
                 "",

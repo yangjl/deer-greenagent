@@ -125,6 +125,7 @@ from deerflow.dbtl.build_control import (
 from deerflow.dbtl.build_deck import BUILD_DECK_SURFACE_VERSION
 from deerflow.dbtl.build_driver import DriverPhase, driver_rerun_spec, render_driver_script
 from deerflow.dbtl.build_execution import BuildExecutionBundle, BuildRerunSpec, parse_rerun_spec
+from deerflow.dbtl.build_fulfillment import BUILD_FULFILLMENT_CONTRACT, BuildFulfillment, derive_build_fulfillment
 from deerflow.dbtl.build_grant import INPUT_ENV_PREFIX, build_input_grant
 from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError, restore_build_input_bundle
 from deerflow.dbtl.build_plan import BuildPhasePlan, parse_build_plan, restore_build_plan, single_phase_plan
@@ -143,7 +144,7 @@ from deerflow.dbtl.council import (
     recommend_depth,
 )
 from deerflow.dbtl.council_deck import chair_result as _chair_result_of
-from deerflow.dbtl.council_deck import render_authored_design_deck, render_council_deck
+from deerflow.dbtl.council_deck import extract_commentable_slides, render_authored_design_deck, render_council_deck
 from deerflow.dbtl.council_proposal import (
     CouncilProposal,
     build_proposal_prompt,
@@ -158,6 +159,12 @@ from deerflow.dbtl.council_settings import (
 )
 from deerflow.dbtl.cycle_state import TERMINAL_CYCLE_STATES, StageStatus, stage_for_state
 from deerflow.dbtl.decision_request import DECISION_REQUEST_CONTRACT, DecisionRequest
+from deerflow.dbtl.deliverable_audit import DeliverableAudit, DeliverableAuditRejected, parse_deliverable_audit
+from deerflow.dbtl.deliverables import (
+    DELIVERABLE_MANIFEST_CONTRACT,
+    DeliverableManifestRejected,
+    parse_deliverable_manifest,
+)
 from deerflow.dbtl.meeting_intent import _NEW_DEBATE_PATTERN as _shared_new_debate_pattern
 from deerflow.dbtl.meeting_intent import _RESTART_TYPOS as _shared_restart_typos
 from deerflow.dbtl.meeting_intent import wants_new_debate
@@ -1925,6 +1932,68 @@ def _execute_server_build_command(
 _WORKSPACE_INPUT_BINDING = re.compile(r"^workspace_file:(.+):sha256:([0-9a-f]{64})$")
 
 
+def _design_deliverable_manifest(
+    chair_result: StageWorkerResult,
+    *,
+    cycle_class: str,
+) -> tuple[dict[str, object] | None, str]:
+    """Validate the chair's promised products before Design becomes evidence."""
+    raw = chair_result.provenance.get("deliverable_manifest")
+    if raw is None:
+        return None, "The Design chair did not return the required deliverable manifest, so the package is not reviewable."
+    try:
+        parsed = parse_deliverable_manifest(raw, cycle_class=cycle_class)
+    except DeliverableManifestRejected as exc:
+        return None, f"The Design deliverable manifest was rejected: {exc}"
+    return parsed.as_dict(), ""
+
+
+def _validated_deliverable_audit(
+    results: Sequence[StageWorkerResult],
+    *,
+    manifest: Any,
+    build_test: Mapping[str, Any],
+) -> tuple[DeliverableAudit | None, str]:
+    lineage = build_test.get("build_lineage")
+    outputs = lineage.get("output_artifacts") if isinstance(lineage, Mapping) else []
+    output_rows = [item for item in (outputs if isinstance(outputs, Sequence) else []) if isinstance(item, Mapping)]
+    published = {str(item.get("source_path") or ""): str(item.get("content_hash") or "") for item in output_rows}
+    published_by_uri = {str(item.get("uri") or ""): (str(item.get("source_path") or ""), str(item.get("content_hash") or "")) for item in output_rows if str(item.get("uri") or "")}
+    refusals: list[str] = []
+    for result in results:
+        raw = result.provenance.get("deliverable_audit")
+        if raw is None:
+            continue
+        if isinstance(raw, Mapping) and isinstance(raw.get("items"), Sequence):
+            normalized_items: list[object] = []
+            for item in raw["items"]:
+                if not isinstance(item, Mapping) or not isinstance(item.get("observed_artifacts"), Sequence):
+                    normalized_items.append(item)
+                    continue
+                normalized_artifacts: list[object] = []
+                for artifact in item["observed_artifacts"]:
+                    if not isinstance(artifact, Mapping):
+                        normalized_artifacts.append(artifact)
+                        continue
+                    uri = str(artifact.get("path") or "")
+                    claimed_hash = str(artifact.get("content_hash") or artifact.get("sha256") or "")
+                    bound = published_by_uri.get(uri)
+                    normalized_artifacts.append({**artifact, "path": bound[0], "content_hash": bound[1]} if bound is not None and claimed_hash == bound[1] else artifact)
+                normalized_items.append({**item, "observed_artifacts": normalized_artifacts})
+            raw = {**raw, "items": normalized_items}
+        try:
+            audit = parse_deliverable_audit(raw, manifest=manifest)
+        except DeliverableAuditRejected as exc:
+            refusals.append(str(exc))
+            continue
+        if any(published.get(artifact.path) != artifact.content_hash for item in audit.items for artifact in item.observed_artifacts):
+            refusals.append("The deliverable audit cited an artifact hash that is not in the server-owned Build lineage.")
+            continue
+        return audit, ""
+    detail = f" ({'; '.join(refusals[:3])})" if refusals else ""
+    return None, f"Test did not return a valid independent audit for every approved Design deliverable{detail}."
+
+
 def _input_artifacts_intact(input_artifacts: Sequence[str], *, project_root: str) -> bool:
     """Verify that replayed phase inputs still have the bytes it actually read."""
     for binding in input_artifacts:
@@ -2012,6 +2081,8 @@ def _design_chair_unit(
             CONSENSUS_CONTRACT,
             "",
             DECISION_REQUEST_CONTRACT,
+            "",
+            DELIVERABLE_MANIFEST_CONTRACT,
         ]
     )
     unit = WorkUnit(
@@ -2149,6 +2220,8 @@ def _resumed_chair_unit(
             CONSENSUS_CONTRACT,
             "",
             DECISION_REQUEST_CONTRACT,
+            "",
+            DELIVERABLE_MANIFEST_CONTRACT,
         ]
     )
     return _unit_with_settings(
@@ -2362,6 +2435,7 @@ def _write_stage_package(
     idempotency_key: str,
     council: CouncilPlan | None = None,
     authored_design: str | None = None,
+    deliverable_audit: DeliverableAudit | None = None,
 ) -> tuple[str, str, str]:
     """Write the review package and return the URI/hash of the reviewed document.
 
@@ -2408,6 +2482,20 @@ def _write_stage_package(
         # impossible.
         payload["authored_design"] = authored_design
         payload["authored_by"] = "human"
+    if outcome.plan.spec.stage == "design" and cycle.get("cycle_class"):
+        chair = next((item for item in reversed(outcome.results) if item.capability == "design_council_chair"), None)
+        if chair is not None:
+            deliverable_manifest, refusal = _design_deliverable_manifest(
+                chair,
+                cycle_class=str(cycle["cycle_class"]),
+            )
+            if deliverable_manifest is None:
+                raise ValueError(refusal)
+            payload["deliverable_manifest"] = deliverable_manifest
+    if outcome.plan.spec.stage == "test" and deliverable_audit is not None:
+        # Persist the exact audit the server validated against Build lineage,
+        # never a raw worker payload that merely happened to appear first.
+        payload["deliverable_audit"] = deliverable_audit.as_dict()
     encoded = (json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     data_hash = hashlib.sha256(encoded).hexdigest()
 
@@ -2475,15 +2563,13 @@ class _FeedbackSurfacePlan:
         a disabled one: the safest version of "this file cannot answer" is a
         file containing no code that could.
         """
-        # Design owns both chair questions and its review gate. Build's
-        # result-specific deck owns its review gate too: unlike Test, no typed
-        # chat review card currently exists for Build, and registering a
-        # ``stage_review`` surface while stripping its bridge leaves the cycle
-        # with no human control at all. Test remains card-owned; Learn keeps its
-        # specialized review surface during that migration.
+        # Design owns both chair questions and its review gate. Every later
+        # stage owns its review gate in the same HTML deck so comments stay
+        # attached to the slide they address. Chat may mirror progress, but it
+        # is not a second decision surface.
         if self.stage == "design":
             return self.mode in {"chair_feedback", "stage_review"}
-        return self.stage == "build" and self.mode == "stage_review"
+        return self.stage in {"build", "test", "learn"} and self.mode == "stage_review"
 
 
 @dataclass(frozen=True, slots=True)
@@ -2497,6 +2583,7 @@ class RenderedDeck:
 
     uri: str
     content_hash: str
+    commentable_slides: tuple[dict[str, str], ...] = ()
 
 
 def _write_build_driver(
@@ -2590,7 +2677,7 @@ def _write_council_deck(
     are already committed by the time this runs.
     """
     try:
-        document = render_council_deck(
+        deck_html = render_council_deck(
             cycle_title=str(cycle.get("title") or ""),
             stage_title=f"{stage.title()} meeting",
             round_number=round_number,
@@ -2607,12 +2694,19 @@ def _write_council_deck(
             research_question=str(cycle.get("research_question") or ""),
             objective=str(cycle.get("objective") or ""),
             success_criteria=cycle.get("success_criteria") or (),
-        ).encode("utf-8")
+        )
+        document = deck_html.encode("utf-8")
     except Exception:  # noqa: BLE001 - a presentation must not break the record
         logger.warning("Could not render the design meeting slide deck.", exc_info=True)
         return None
 
-    return _persist_deck(project_root=project_root, cycle=cycle, stage=stage, document=document)
+    return _persist_deck(
+        project_root=project_root,
+        cycle=cycle,
+        stage=stage,
+        document=document,
+        commentable_slides=extract_commentable_slides(deck_html),
+    )
 
 
 def _persist_deck(
@@ -2621,6 +2715,7 @@ def _persist_deck(
     cycle: Mapping[str, Any],
     stage: str,
     document: bytes,
+    commentable_slides: tuple[dict[str, str], ...] = (),
 ) -> RenderedDeck | None:
     """Write rendered deck bytes beside the stage's review package.
 
@@ -2646,7 +2741,11 @@ def _persist_deck(
     except Exception:  # noqa: BLE001 - same reason
         logger.warning("Could not write the design meeting slide deck.", exc_info=True)
         return None
-    return RenderedDeck(uri=f"/mnt/user-data/outputs/{relative.as_posix()}", content_hash=content_hash)
+    return RenderedDeck(
+        uri=f"/mnt/user-data/outputs/{relative.as_posix()}",
+        content_hash=content_hash,
+        commentable_slides=commentable_slides,
+    )
 
 
 def _write_authored_design_deck(
@@ -2660,7 +2759,7 @@ def _write_authored_design_deck(
 ) -> RenderedDeck | None:
     """The owner's own design, rendered into the deck they answer it in."""
     try:
-        document = render_authored_design_deck(
+        deck_html = render_authored_design_deck(
             cycle_title=str(cycle.get("title") or ""),
             authored_design=authored_design,
             package_path=package_path,
@@ -2669,11 +2768,18 @@ def _write_authored_design_deck(
             research_question=str(cycle.get("research_question") or ""),
             objective=str(cycle.get("objective") or ""),
             success_criteria=cycle.get("success_criteria") or (),
-        ).encode("utf-8")
+        )
+        document = deck_html.encode("utf-8")
     except Exception:  # noqa: BLE001 - a presentation must not break the record
         logger.warning("Could not render the authored design slide deck.", exc_info=True)
         return None
-    return _persist_deck(project_root=project_root, cycle=cycle, stage="design", document=document)
+    return _persist_deck(
+        project_root=project_root,
+        cycle=cycle,
+        stage="design",
+        document=document,
+        commentable_slides=extract_commentable_slides(deck_html),
+    )
 
 
 def _stage_attempt_row_id(cycle: Mapping[str, Any], stage: str) -> str:
@@ -2858,6 +2964,10 @@ def _publish_build_worker_artifacts(
                             break
                         uri = f"{WORKSPACE_VIRTUAL_ROOT}/outputs/{destination_relative.as_posix()}"
                         published_sources[source_relative] = uri
+                        try:
+                            grant_relative = source.relative_to(workspace_host).as_posix()
+                        except ValueError:
+                            grant_relative = ""
                         if uri not in published_uris:
                             published_uris.add(uri)
                             unit_outputs.append(
@@ -2866,6 +2976,7 @@ def _publish_build_worker_artifacts(
                                     "content_hash": content_hash,
                                     "revision": 1,
                                     "unit_id": unit.unit_id,
+                                    "source_path": grant_relative or source_relative,
                                 }
                             )
                     reference_uris.append(uri)
@@ -3084,6 +3195,16 @@ def _phase_note(assignment: PhaseAssignment, result: StageWorkerResult) -> dict[
         "outputs": list(result.artifact_refs),
         "summary": result.summary,
     }
+
+
+def _declared_deliverable_fulfillments(results: Sequence[StageWorkerResult]) -> list[Mapping[str, object]]:
+    items: list[Mapping[str, object]] = []
+    for result in results:
+        raw = result.provenance.get("deliverable_fulfillment")
+        raw_items = raw.get("items") if isinstance(raw, Mapping) else None
+        if isinstance(raw_items, Sequence) and not isinstance(raw_items, (str, bytes)):
+            items.extend(item for item in raw_items if isinstance(item, Mapping))
+    return items
 
 
 def _build_phase_context(
@@ -3511,10 +3632,7 @@ class LiveStageAdapter:
         cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
         if cycle is None or cycle.get("state") != "learn":
             return None
-        stages = {
-            str(item.get("stage") or ""): str(item.get("status") or "")
-            for item in cycle.get("stages", [])
-        }
+        stages = {str(item.get("stage") or ""): str(item.get("status") or "") for item in cycle.get("stages", [])}
         if stages.get("test") != "approved" or stages.get("learn") != "in_progress":
             return None
         view = await self._repo.build_test_view(cycle_id, project_id=project_id)
@@ -3528,6 +3646,32 @@ class LiveStageAdapter:
             "approved_stage": "test",
             "next_stage": "learn",
             "surface_id": str(assessment.get("id") or cycle_id),
+        }
+
+    async def recover_test_retry_control(
+        self,
+        *,
+        project_id: str | None,
+        cycle_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Recover Start Test after a human selected Repeat Test."""
+        if not project_id or not cycle_id:
+            return None
+        cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
+        if cycle is None or _executable_stage(cycle) != "test":
+            return None
+        view = await self._repo.build_test_view(cycle_id, project_id=project_id)
+        assessment = dict((view or {}).get("validity_assessment") or {})
+        if assessment.get("recommendation") != "repeat_test":
+            return None
+        return {
+            "version": 1,
+            "cycle_id": cycle_id,
+            "cycle_revision": int(cycle.get("db_revision") or 0),
+            "approved_stage": "test",
+            "next_stage": "test",
+            "surface_id": str(assessment.get("id") or cycle_id),
+            "repeat_stage": True,
         }
 
     async def active_cycle_status(self, *, project_id: str) -> list[dict[str, Any]]:
@@ -4232,10 +4376,7 @@ class LiveStageAdapter:
                         project_root=WORKSPACE_VIRTUAL_ROOT,
                         declared_inputs=tuple(unit.tool_contract.get("granted_inputs") or ()),
                     )
-                    if (
-                        unit_workspace
-                        and ((stage == "build" and unit.role == "phase") or (stage == "test" and unit.role == "rerun"))
-                    )
+                    if (unit_workspace and ((stage == "build" and unit.role == "phase") or (stage == "test" and unit.role == "rerun")))
                     else None
                 ),
             )
@@ -4600,7 +4741,7 @@ class LiveStageAdapter:
                 spec=spec,
                 context=phase_context,
                 completed=completed,
-                result_contract=RESULT_CONTRACT,
+                result_contract=f"{RESULT_CONTRACT}\n\n{BUILD_FULFILLMENT_CONTRACT}",
                 granted_inputs=granted_inputs,
             )
             units.append(unit)
@@ -4690,7 +4831,7 @@ class LiveStageAdapter:
                     spec=spec,
                     previous_workspace=first_workspace,
                     failure=completion_error,
-                    result_contract=RESULT_CONTRACT,
+                    result_contract=f"{RESULT_CONTRACT}\n\n{BUILD_FULFILLMENT_CONTRACT}",
                     granted_inputs=granted_inputs,
                 )
                 # A phase has one accepted result. The rejected first worker
@@ -5324,6 +5465,11 @@ class LiveStageAdapter:
         identity = (execution_key, mode, str(round_number))
         if stage == "build":
             identity = (*identity, stage, BUILD_DECK_SURFACE_VERSION)
+        elif stage in {"test", "learn"}:
+            # These stages were originally registered as inert provenance
+            # pages. Version the interactive bytes so an existing inert row
+            # can never steal the id embedded in a replacement deck.
+            identity = (*identity, stage, "interactive-v1")
         digest = hashlib.sha256("\x1f".join(identity).encode("utf-8")).hexdigest()
         return _FeedbackSurfacePlan(
             surface_id=f"dfs-{digest[:32]}",
@@ -5360,6 +5506,10 @@ class LiveStageAdapter:
         an owner with a deck that can never answer its gate. Stage evidence is
         already durable at this point and remains available for a safe retry.
         """
+        decision_request = dict(plan.decision_request) if plan.decision_request is not None else {}
+        commentable_slides = getattr(deck, "commentable_slides", ())
+        if commentable_slides:
+            decision_request["commentable_slides"] = [dict(item) for item in commentable_slides]
         kwargs = dict(
             surface_id=plan.surface_id,
             project_id=project_id,
@@ -5369,7 +5519,7 @@ class LiveStageAdapter:
             originating_thread_id=plan.originating_thread_id,
             mode=plan.mode,
             chair_worker_run_id=plan.chair_worker_run_id,
-            decision_request=dict(plan.decision_request) if plan.decision_request is not None else None,
+            decision_request=decision_request or None,
             deck_uri=deck.uri,
             deck_content_hash=deck.content_hash,
             evidence_artifact_id=str(plan.evidence["id"]) if plan.evidence is not None else None,
@@ -6219,6 +6369,25 @@ class LiveStageAdapter:
                 execution={"design_revision": build_inputs.design_revision, "design_truncated": build_inputs.design_truncated},
                 payload=build_inputs.as_dict(),
             )
+        elif stage == "test":
+            try:
+                build_inputs = await asyncio.to_thread(
+                    resolve_build_inputs,
+                    cycle,
+                    project_root=project_root,
+                    datasets=datasets,
+                    manifest=project_manifest,
+                    policy={
+                        "reconciliation_required": requires_reconciliation,
+                        "stage_spec_key": spec.spec_key,
+                    },
+                )
+            except BuildInputError as refusal:
+                # Legacy Test attempts predate the deliverables contract. They
+                # remain executable without silently inventing a manifest; a
+                # new hash-bound Design package resolves above and activates
+                # the strict audit path.
+                logger.info("Test has no resolvable Design deliverables manifest: %s", refusal.summary)
 
         stage_context_payload = {
             "request": request_text,
@@ -6352,9 +6521,9 @@ class LiveStageAdapter:
             # Its absence is meaningful: a later stage seeing no brief is
             # working before the gate, not merely without context.
             "approved_design_brief": _approved_design_brief(cycle),
-            # Build alone gets the resolved bundle: the design already read and
+            # Build and Test get the resolved bundle: the design already read and
             # hash-verified by the server, so the worker's first act is
-            # implementing it rather than searching for it.
+            # implementing or auditing it rather than searching for it.
             "build_input_bundle": build_inputs.as_dict() if build_inputs is not None else None,
             # Verbatim, not summarized. The council is being asked to answer
             # this specific sentence, and a paraphrase is the failure mode
@@ -6883,6 +7052,8 @@ class LiveStageAdapter:
 
         published_build_artifacts: list[dict[str, Any]] = []
         build_execution_record: BuildExecutionBundle | None = None
+        build_fulfillment: BuildFulfillment | None = None
+        build_fulfillment_refusal = ""
         if phase_run is not None:
             # Already published, one phase at a time, before each phase's own row
             # was settled. Running the bulk publisher again here would resolve
@@ -6899,8 +7070,27 @@ class LiveStageAdapter:
                 attempt_id=attempt_id,
             )
             unit_result_pairs = list(zip(outcome.plan.units, outcome.results, strict=True))
+        if stage == "build" and build_inputs is not None and build_inputs.deliverable_manifest is not None:
+            build_fulfillment = derive_build_fulfillment(
+                build_inputs.deliverable_manifest,
+                published=published_build_artifacts,
+                declarations=_declared_deliverable_fulfillments(outcome.results),
+            )
+            if not build_fulfillment.reviewable:
+                build_fulfillment_refusal = "Build did not attempt every approved Design deliverable, so the result is not reviewable."
+            for artifact in published_build_artifacts:
+                source_path = str(artifact.get("source_path") or "")
+                matched = next(
+                    (item.id for item in build_inputs.deliverable_manifest.deliverables if source_path in item.expected_paths),
+                    None,
+                )
+                if matched is not None:
+                    artifact["deliverable_id"] = matched
         if stage == "build" and published_build_artifacts:
-            build_execution_record = execution_bundle(outcome.trustworthy_results, published=published_build_artifacts)
+            build_execution_record = replace(
+                execution_bundle(outcome.trustworthy_results, published=published_build_artifacts),
+                deliverable_fulfillment=build_fulfillment,
+            )
             if phase_run is not None and build_execution_record.rerun_spec is None:
                 # The phased path derives its own record rather than merging the
                 # workers'. Only when they produced none, so a single-phase Build
@@ -6976,12 +7166,34 @@ class LiveStageAdapter:
                 and any(unit.role == "red_team" and result.status in debate_report_statuses for unit, result in unit_result_pairs)
             )
         )
-        design_ready = stage != "design" or (design_debate_complete and chair_result is not None and chair_result.is_trustworthy and chair_result.status is WorkerStatus.COMPLETED)
+        design_manifest = None
+        design_contract_refusal = ""
+        if stage == "design" and chair_result is not None and cycle.get("cycle_class"):
+            design_manifest, design_contract_refusal = _design_deliverable_manifest(
+                chair_result,
+                cycle_class=str(cycle["cycle_class"]),
+            )
+        design_ready = stage != "design" or (
+            design_debate_complete and chair_result is not None and chair_result.is_trustworthy and chair_result.status is WorkerStatus.COMPLETED and (not cycle.get("cycle_class") or design_manifest is not None)
+        )
+        if design_contract_refusal:
+            stage_refusal = design_contract_refusal
+        if build_fulfillment_refusal:
+            stage_refusal = build_fulfillment_refusal
+        _deliverable_audit = None
+        deliverable_audit_refusal = ""
+        if stage == "test" and build_inputs is not None and build_inputs.deliverable_manifest is not None:
+            _deliverable_audit, deliverable_audit_refusal = _validated_deliverable_audit(
+                outcome.trustworthy_results,
+                manifest=build_inputs.deliverable_manifest,
+                build_test=build_test,
+            )
+            if deliverable_audit_refusal:
+                stage_refusal = deliverable_audit_refusal
         test_assessment = _validated_test_assessment(outcome.trustworthy_results, build_test=build_test, rerun=test_rerun_record) if stage == "test" else None
         if stage == "test" and outcome.produced_usable_evidence and test_assessment is None:
             stage_refusal = (
-                "The Test workers returned evidence, but no complete server-readable validity assessment was present. "
-                "Every headline metric must use criterion `gte` or `lte`, and the check set must exactly match the pinned validity pack."
+                "The Test workers returned evidence, but no complete server-readable validity assessment was present. Every headline metric must use criterion `gte` or `lte`, and the check set must exactly match the pinned validity pack."
             )
         # **A plan that did not finish is not a Build.** Every phase that ran
         # ran truthfully, so `produced_usable_evidence` is true of a Build whose
@@ -6991,7 +7203,7 @@ class LiveStageAdapter:
         # thing a person approves and Test measures. The committed phases stay
         # committed and reusable; what they do not do is become evidence.
         build_plan_incomplete = (phase_run is not None and not phase_run.complete) or missing_structured_rerun
-        produced_usable_evidence = outcome.produced_usable_evidence and design_ready and (stage != "test" or test_assessment is not None) and not build_plan_incomplete
+        produced_usable_evidence = outcome.produced_usable_evidence and design_ready and (stage != "test" or test_assessment is not None) and not deliverable_audit_refusal and not build_plan_incomplete and not build_fulfillment_refusal
         # Not opened at all when the plan did not finish. Opening it would
         # settle as `summary_contract_rejected` — a *presentational* code, which
         # the UI renders as "the build ran; the write-up broke". The build did
@@ -7018,10 +7230,14 @@ class LiveStageAdapter:
                 outcome=outcome,
                 idempotency_key=execution_key,
                 council=council_plan,
+                deliverable_audit=_deliverable_audit,
             )
             artifact_type = spec.required_artifact_types[0]
         if build_summary_owns_evidence:
-            bundle = build_execution_record or execution_bundle(outcome.trustworthy_results, published=published_build_artifacts)
+            bundle = build_execution_record or replace(
+                execution_bundle(outcome.trustworthy_results, published=published_build_artifacts),
+                deliverable_fulfillment=build_fulfillment,
+            )
             # The whole reason the write-up is its own step: a deck that failed
             # to render is retried against *this* package rather than against a
             # second, differently-hashed one nobody reviewed.
@@ -7317,6 +7533,30 @@ class LiveStageAdapter:
                     "assessment": assessment.as_dict(),
                     "routes": [route.as_dict() for route in routes],
                 }
+            if stage == "test" and isinstance(test_assessment, Mapping):
+                evaluation = dict(test_assessment.get("evaluation") or {})
+                labels = {
+                    "advance_to_learn": "Accept outcome and advance to Learn",
+                    "repeat_test": "Repeat Test",
+                    "return_to_build": "Return to Build",
+                    "return_to_reconciliation": "Return to Data Reconciliation",
+                    "return_to_design": "Return to Design",
+                    "close_cycle": "Close this cycle",
+                }
+                test_routes = [{"slug": route, "label": labels[route], "blocked": False} for route in labels if route in {str(item) for item in evaluation.get("allowed_recommendations", [])}]
+                transition_gate = {
+                    **(
+                        transition_gate
+                        or {
+                            "stage": "test",
+                            "assessment": {
+                                "difficulty": "standard",
+                                "rationale": "The server computed the Test outcome from the pinned validity pack.",
+                            },
+                        }
+                    ),
+                    "routes": test_routes,
+                }
             surface_plan = await self._plan_feedback_surface(
                 stage=stage,
                 cycle_id=cycle_id,
@@ -7345,7 +7585,7 @@ class LiveStageAdapter:
                     surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
                     transition_gate=transition_gate,
                 )
-                deck = RenderedDeck(uri=rendered[0], content_hash=rendered[1]) if rendered is not None else None
+                deck = RenderedDeck(uri=rendered[0], content_hash=rendered[1], commentable_slides=rendered[2]) if rendered is not None else None
             else:
                 deck = await asyncio.to_thread(
                     _write_council_deck,

@@ -488,6 +488,7 @@ def test_manual_dev_pins_test_auth_and_config_in_the_child_environment(
     monkeypatch.setattr(dbtl_manual, "initialize_profile", lambda **_kwargs: profile)
     monkeypatch.setattr(dbtl_manual, "manual_runtime_lock", lambda **_kwargs: nullcontext())
     monkeypatch.setattr(dbtl_manual, "_backfill_checkpoint_history", lambda _path: 0)
+    monkeypatch.setattr(dbtl_manual, "_manual_user", lambda *_args, **_kwargs: ("manual-user", "dbtl-linear-10m@example.com"))
     monkeypatch.setattr(
         dbtl_manual.subprocess,
         "run",
@@ -499,6 +500,26 @@ def test_manual_dev_pins_test_auth_and_config_in_the_child_environment(
     assert captured["DEER_FLOW_CONFIG_PATH"] == str(profile)
     assert captured["DEER_FLOW_AUTH_DISABLED"] == "1"
     assert captured["DEER_FLOW_MANUAL_PROFILE"] == "1"
+    assert captured["DEER_FLOW_AUTH_DISABLED_USER_ID"] == "manual-user"
+    assert captured["DEER_FLOW_AUTH_DISABLED_USER_EMAIL"] == "dbtl-linear-10m@example.com"
+
+
+def test_manual_replay_user_is_resolved_from_the_isolated_checkpoint(tmp_path: Path) -> None:
+    database = tmp_path / "deerflow.db"
+    with sqlite3.connect(database) as conn:
+        conn.execute("CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL)")
+        conn.execute(
+            "INSERT INTO users (id, email) VALUES (?, ?)",
+            ("user-10m", "dbtl-linear-10m@example.com"),
+        )
+
+    assert dbtl_manual._manual_user(database, email="DBTL-LINEAR-10M@example.com") == (
+        "user-10m",
+        "dbtl-linear-10m@example.com",
+    )
+
+    with pytest.raises(dbtl_manual.ManualPipelineError, match="has no user"):
+        dbtl_manual._manual_user(database, email="missing@example.com")
 
 
 def test_manual_dev_services_are_loopback_only_and_restore_pinned_env_after_dotenv() -> None:
@@ -508,10 +529,38 @@ def test_manual_dev_services_are_loopback_only_and_restore_pinned_env_after_dote
 
     assert 'DEER_FLOW_MANUAL_PROFILE_INHERITED="${DEER_FLOW_MANUAL_PROFILE:-}"' in serve
     assert 'export DEER_FLOW_AUTH_DISABLED="1"' in serve
+    assert 'export DEER_FLOW_AUTH_DISABLED_USER_ID="$DEER_FLOW_MANUAL_USER_ID_INHERITED"' in serve
     assert "--host 127.0.0.1 --port 8001" in serve
-    assert "run dev -- --hostname 127.0.0.1" in serve
+    assert "run dev --hostname 127.0.0.1" in serve
+    assert "run dev -- --hostname" not in serve
     assert "listen 127.0.0.1:2026;" in nginx
     assert "listen [::1]:2026;" in nginx
+
+
+def test_normal_signal_shutdown_is_not_reported_as_a_failed_manual_run() -> None:
+    serve = (SCRIPT_PATH.parents[1] / "scripts" / "serve.sh").read_text(encoding="utf-8")
+
+    assert "trap 'cleanup 0' INT" in serve
+    assert "trap 'cleanup 0' TERM" in serve
+
+
+def test_manual_dev_treats_keyboard_interrupt_as_a_clean_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = tmp_path / "manual-config.yaml"
+    profile.write_text("config_version: 45\n", encoding="utf-8")
+    monkeypatch.setattr(dbtl_manual, "initialize_profile", lambda **_kwargs: profile)
+    monkeypatch.setattr(dbtl_manual, "manual_runtime_lock", lambda **_kwargs: nullcontext())
+    monkeypatch.setattr(dbtl_manual, "_backfill_checkpoint_history", lambda _path: 0)
+    monkeypatch.setattr(dbtl_manual, "_manual_user", lambda *_args, **_kwargs: ("manual-user", "dbtl-linear-10m@example.com"))
+
+    def _interrupt(*_args: object, **_kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(dbtl_manual.subprocess, "run", _interrupt)
+
+    assert dbtl_manual.main(["--manual-root", str(tmp_path), "dev"]) == 0
 
 
 @pytest.mark.parametrize("name", ["DEER_FLOW_ENV", "ENVIRONMENT"])

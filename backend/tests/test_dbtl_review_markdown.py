@@ -83,6 +83,34 @@ class TestReadability:
         assert "The target population is a simulated maize population." in out
         assert "Declare a holdout split." in out
 
+    def test_renders_the_design_deliverables_as_a_bounded_checklist(self):
+        payload = {
+            **PAYLOAD,
+            "deliverable_manifest": {
+                "version": 1,
+                "cycle_class": "computational",
+                "deliverables": [
+                    {
+                        "id": "replay-notebook",
+                        "title": "Human replay notebook",
+                        "kind": "notebook",
+                        "required": True,
+                        "expected_paths": ["outputs/replay.ipynb"],
+                        "acceptance_criteria": ["Runs from a clean kernel"],
+                        "validation": "Execute all cells in order.",
+                        "capabilities": ["python"],
+                    }
+                ],
+            },
+        }
+
+        out = render(payload)
+
+        assert "## Deliverables" in out
+        assert "Human replay notebook" in out
+        assert "`outputs/replay.ipynb`" in out
+        assert "Runs from a clean kernel" in out
+
 
 class TestHonesty:
     def test_states_that_the_package_does_not_satisfy_the_gate(self):

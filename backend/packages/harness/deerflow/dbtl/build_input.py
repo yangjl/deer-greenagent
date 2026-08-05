@@ -35,6 +35,7 @@ from types import MappingProxyType
 from typing import Any
 
 from deerflow.dbtl.build_workflow import BuildErrorCode
+from deerflow.dbtl.deliverables import DeliverableManifest, parse_deliverable_manifest
 
 #: How much of the approved Design travels inline. The document is already
 #: bound by hash and readable at its URI, so this is a convenience for the
@@ -97,6 +98,7 @@ class BuildInputBundle:
     design_revision: int
     design_text: str = ""
     design_truncated: bool = False
+    deliverable_manifest: DeliverableManifest | None = None
     inputs: tuple[BundleInput, ...] = ()
     manifest: tuple[Mapping[str, Any], ...] = ()
     policy: Mapping[str, Any] = field(default_factory=dict)
@@ -111,6 +113,8 @@ class BuildInputBundle:
             raise ValueError("A Build input bundle's design must name its artifact.")
         if not _SHA256.fullmatch(self.design.content_hash or ""):
             raise ValueError("A Build input bundle's design must carry a lowercase SHA-256 content hash.")
+        if self.deliverable_manifest is not None and not isinstance(self.deliverable_manifest, DeliverableManifest):
+            raise ValueError("A Build input bundle's deliverable_manifest must be a parsed DeliverableManifest.")
         object.__setattr__(self, "policy", MappingProxyType(dict(self.policy)))
 
     @property
@@ -127,6 +131,7 @@ class BuildInputBundle:
             "inputs": [item.as_dict() for item in self.inputs],
             "manifest": [dict(entry) for entry in self.manifest],
             "policy": dict(self.policy),
+            **({"deliverable_manifest": self.deliverable_manifest.as_dict()} if self.deliverable_manifest is not None else {}),
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
@@ -136,6 +141,7 @@ class BuildInputBundle:
             "design_revision": self.design_revision,
             "design_text": self.design_text,
             "design_truncated": self.design_truncated,
+            "deliverable_manifest": self.deliverable_manifest.as_dict() if self.deliverable_manifest is not None else None,
             "inputs": [item.as_dict() for item in self.inputs],
             "manifest": [dict(entry) for entry in self.manifest],
             "policy": dict(self.policy),
@@ -157,6 +163,7 @@ def restore_build_input_bundle(payload: object) -> BuildInputBundle | None:
     inputs_payload = payload.get("inputs")
     manifest_payload = payload.get("manifest")
     policy_payload = payload.get("policy")
+    deliverable_payload = payload.get("deliverable_manifest")
     if not isinstance(design_payload, Mapping):
         return None
     if not isinstance(inputs_payload, Sequence) or isinstance(inputs_payload, (str, bytes)):
@@ -164,6 +171,8 @@ def restore_build_input_bundle(payload: object) -> BuildInputBundle | None:
     if not isinstance(manifest_payload, Sequence) or isinstance(manifest_payload, (str, bytes)):
         return None
     if not isinstance(policy_payload, Mapping):
+        return None
+    if deliverable_payload is not None and not isinstance(deliverable_payload, Mapping):
         return None
 
     def restore_input(item: Mapping[str, Any]) -> BundleInput:
@@ -175,11 +184,20 @@ def restore_build_input_bundle(payload: object) -> BuildInputBundle | None:
         )
 
     try:
+        deliverable_manifest = (
+            parse_deliverable_manifest(
+                deliverable_payload,
+                cycle_class=str(deliverable_payload.get("cycle_class") or ""),
+            )
+            if deliverable_payload is not None
+            else None
+        )
         bundle = BuildInputBundle(
             design=restore_input(design_payload),
             design_revision=int(payload.get("design_revision") or 0),
             design_text=str(payload.get("design_text") or ""),
             design_truncated=bool(payload.get("design_truncated")),
+            deliverable_manifest=deliverable_manifest,
             inputs=tuple(restore_input(item) for item in inputs_payload if isinstance(item, Mapping)),
             manifest=tuple(dict(item) for item in manifest_payload if isinstance(item, Mapping)),
             policy=dict(policy_payload),

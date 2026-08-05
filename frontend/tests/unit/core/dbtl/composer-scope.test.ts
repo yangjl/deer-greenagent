@@ -9,6 +9,7 @@ import {
   SCOPE_START_CYCLE_LABEL,
   START_CYCLE_REQUEST_CONTEXT,
   cycleShortLabel,
+  canReplayConversation,
   findNewDiscoveryCycle,
   findNewSetupCycle,
   isContextStillValid,
@@ -659,5 +660,20 @@ describe("design authoring replies", () => {
     );
 
     expect(context.dbtl_council_depth).toBeUndefined();
+  });
+});
+
+describe("conversation replay", () => {
+  it("disables regenerate while a governed cycle is live", () => {
+    expect(canReplayConversation([cycle({ state: "test" })])).toBe(false);
+  });
+
+  it("allows regenerate when every cycle is terminal", () => {
+    expect(
+      canReplayConversation([
+        cycle({ state: "completed" }),
+        cycle({ id: "cyc-2", state: "abandoned" }),
+      ]),
+    ).toBe(true);
   });
 });

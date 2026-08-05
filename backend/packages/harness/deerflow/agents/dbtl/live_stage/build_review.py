@@ -33,6 +33,7 @@ from deerflow.dbtl.build_deck import render_build_deck
 from deerflow.dbtl.build_execution import MAX_FIGURES, BuildExecutionBundle, BuildFigure, parse_execution_bundle
 from deerflow.dbtl.build_input import BuildInputBundle
 from deerflow.dbtl.build_summary import BuildReviewPackage, parse_build_summary, render_summary_markdown
+from deerflow.dbtl.council_deck import extract_commentable_slides
 from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
 from deerflow.dbtl.stage_runner import BUILD_SUMMARY_OUTPUT, WorkUnit
 from deerflow.dbtl.worker_result import StageWorkerResult
@@ -235,8 +236,8 @@ def write_build_deck(
     package_path: str,
     surface_id: str = "",
     transition_gate: Mapping[str, object] | None = None,
-) -> tuple[str, str] | None:
-    """Render and write the Build deck; return ``(uri, content_hash)``.
+) -> tuple[str, str, tuple[dict[str, str], ...]] | None:
+    """Render and write the Build deck plus its commentable-slide registry.
 
     Figures are read from the governed output tree through the same containment
     rules the adapter uses, so a package path that somehow escaped the project
@@ -276,7 +277,11 @@ def write_build_deck(
     except (OSError, ValueError, KeyError):
         logger.warning("Could not write the Build review deck.", exc_info=True)
         return None
-    return f"{WORKSPACE_VIRTUAL_ROOT}/outputs/{relative.as_posix()}", content_hash
+    return (
+        f"{WORKSPACE_VIRTUAL_ROOT}/outputs/{relative.as_posix()}",
+        content_hash,
+        extract_commentable_slides(document.decode("utf-8")),
+    )
 
 
 def _atomic_write(destination: Path, content: bytes) -> None:

@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from deerflow.dbtl.build_execution import BuildExecutionBundle, BuildFigure, KeyOutcome
+from deerflow.dbtl.build_fulfillment import BuildFulfillment
 
 #: How many figures the deck may lead with. The rest stay in the record.
 MAX_SUMMARY_FIGURES = 8
@@ -96,6 +97,7 @@ class BuildReviewPackage:
     deviations: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     rerun_procedure: str = ""
+    deliverable_fulfillment: BuildFulfillment | None = None
 
     @property
     def digest(self) -> str:
@@ -126,6 +128,7 @@ class BuildReviewPackage:
             "deviations": list(self.deviations),
             "limitations": list(self.limitations),
             "rerun_procedure": self.rerun_procedure,
+            "deliverable_fulfillment": self.deliverable_fulfillment.as_dict() if self.deliverable_fulfillment is not None else None,
         }
 
 
@@ -258,6 +261,7 @@ def parse_build_summary(raw: str, *, bundle: BuildExecutionBundle) -> SummaryPar
         # The recorded procedure wins outright: it is what was actually run, and
         # a rewrite is a claim about reproducibility that only Test may make.
         rerun_procedure=bundle.rerun_procedure or _text(payload.get("rerun_procedure"), limit=1200),
+        deliverable_fulfillment=bundle.deliverable_fulfillment,
     )
     return SummaryParse(package=package, repaired=repaired)
 
@@ -290,6 +294,15 @@ def render_summary_markdown(package: BuildReviewPackage, *, title: str) -> str:
     else:
         lines.append("- None reported.")
     lines.append("")
+
+    if package.deliverable_fulfillment is not None:
+        lines.append("## Deliverables")
+        for item in package.deliverable_fulfillment.items:
+            paths = ", ".join(f"`{artifact.path}`" for artifact in item.artifacts)
+            suffix = f" — {paths}" if paths else ""
+            lines.append(f"- **{item.deliverable_id}**: {item.status.value}{suffix}")
+            lines.append(f"  - {item.notes}")
+        lines.append("")
 
     lines.append("## Figures worth looking at")
     if package.selected_figures:

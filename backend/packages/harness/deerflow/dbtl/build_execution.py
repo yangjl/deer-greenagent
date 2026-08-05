@@ -26,6 +26,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
+from deerflow.dbtl.build_fulfillment import BuildFulfillment
+
 #: Bounds on what one Build may declare. Generous — this is an audit record, not
 #: a slide deck — but finite, because these travel into prompts and decks.
 MAX_FIGURES = 24
@@ -133,6 +135,7 @@ class BuildExecutionBundle:
     #: than dropped: "the worker said it made a figure and there is no figure"
     #: is a thing a reviewer should be able to see.
     unverified: tuple[str, ...] = ()
+    deliverable_fulfillment: BuildFulfillment | None = None
 
     @property
     def digest(self) -> str:
@@ -151,6 +154,7 @@ class BuildExecutionBundle:
             "deviations": list(self.deviations),
             "limitations": list(self.limitations),
             "unverified": list(self.unverified),
+            "deliverable_fulfillment": self.deliverable_fulfillment.as_dict() if self.deliverable_fulfillment is not None else None,
         }
 
 

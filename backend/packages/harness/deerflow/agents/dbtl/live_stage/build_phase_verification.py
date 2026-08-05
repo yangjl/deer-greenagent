@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
-from deerflow.agents.dbtl.live_stage.build_phases import BuildPhaseManifest
+from deerflow.agents.dbtl.live_stage.build_phases import BuildPhaseManifest, is_server_executable_entry_point
 from deerflow.agents.dbtl.live_stage.workspace import verified_workspace_file, workspace_relative_path
 from deerflow.dbtl.build_grant import build_input_grant
 
@@ -135,6 +135,12 @@ def execute_and_verify_phase(
     entry = verified_workspace_file(manifest.entry_point, project_root=project_root, containment_reference=unit_workspace)
     if entry is None:
         return BuildPhaseVerification(False, "The declared Build entry point is missing or outside its phase grant.", "")
+    if not is_server_executable_entry_point(manifest.entry_point):
+        return BuildPhaseVerification(
+            False,
+            "The declared file is not an executable Build entry point supported by the server; use a script and keep notebooks as outputs.",
+            "",
+        )
     issued = set(issued_inputs)
     for declared in manifest.execution_inputs:
         if declared not in issued:

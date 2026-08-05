@@ -64,6 +64,15 @@ Build rerun declaration (required in provenance.rerun_spec):
 """.strip()
 
 GENERALIST = "general-purpose"
+SERVER_NON_EXECUTABLE_SUFFIXES = frozenset({".ipynb", ".md", ".json", ".csv", ".html", ".txt"})
+
+
+def is_server_executable_entry_point(path: str) -> bool:
+    """Whether the server knows how to invoke this phase entry point."""
+
+    # Unknown suffixes may be compiled executables and are run directly. Known
+    # document/data formats can never be an entry point.
+    return PurePosixPath(path).suffix.lower() not in SERVER_NON_EXECUTABLE_SUFFIXES
 
 
 def required_phase_manifest_version(spec: StageSpec) -> int:
@@ -166,6 +175,8 @@ def verify_phase_manifest(
         return None, "The Build phase manifest does not name exactly the outputs the server published."
     if manifest.entry_point not in published_uris:
         return None, "The Build phase entry point is not one of its governed published files."
+    if required_version >= 3 and not is_server_executable_entry_point(manifest.entry_point):
+        return None, "The Build phase entry point is not an executable script type supported by the server."
     if manifest.completion_condition != completion_condition.strip():
         return None, "The Build phase manifest changed the versioned completion condition from the recorded plan."
     if manifest.version >= 3 and not set(manifest.execution_inputs).issubset(manifest.declared_inputs):
@@ -195,6 +206,8 @@ def verify_unpublished_phase_manifest(
         return None, "The Build phase manifest does not name exactly the outputs it asked the server to publish."
     if manifest.entry_point not in result.artifact_refs:
         return None, "The Build phase entry point is not one of its declared output files."
+    if required_version >= 3 and not is_server_executable_entry_point(manifest.entry_point):
+        return None, "The Build phase entry point is not an executable script type supported by the server."
     if manifest.completion_condition != completion_condition.strip():
         return None, "The Build phase manifest changed the versioned completion condition from the recorded plan."
     if manifest.version >= 3 and not set(manifest.execution_inputs).issubset(manifest.declared_inputs):
@@ -454,6 +467,10 @@ def phase_unit(
                                     [
                                         "Also return execution_inputs containing only the server-issued inputs the entry point consumes at runtime.",
                                         "execution_inputs is a subset of declared_inputs and does not renumber DBTL_INPUT_n.",
+                                        "The entry_point must be an executable script ending in .py, .sh, .bash, .R, .js, .mjs, .cjs, .ts, .tsx, .jl, .rb, or .pl.",
+                                        "A notebook may be a declared output, but it is a human replay playbook and must never be the entry_point.",
+                                        "Create the entry-point script inside this phase workspace and include that exact path in both artifact_refs and declared_outputs.",
+                                        "Do not name an earlier phase's read-only output as this phase's entry_point. For a notebook phase, create one concise validator script as this phase's executable output.",
                                     ]
                                     if "server_executed_entry_point" in spec.validity_gates
                                     else []
@@ -531,6 +548,8 @@ def phase_correction_unit(
         "In declared_inputs list only exact workspace files actually consumed to implement or execute the correction.",
         "In execution_inputs list only server-issued inputs the corrected entry point consumes at runtime.",
         "execution_inputs is a subset of declared_inputs and does not renumber DBTL_INPUT_n.",
+        "Create the entry-point script inside this correction workspace and include that exact path in both artifact_refs and declared_outputs.",
+        "A notebook is a human replay output, never the entry_point; use a concise validator script for a notebook-only correction.",
         f"Return exactly one {PHASE_DONE_CHECK!r} check, passed only after the corrected entry point runs and the Done when condition holds.",
         "Return the complete phase manifest and shared structured result.",
         "",

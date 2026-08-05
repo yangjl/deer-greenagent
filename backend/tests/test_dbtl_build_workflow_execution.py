@@ -33,6 +33,7 @@ from deerflow.config.database_config import DatabaseConfig
 from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.build_workflow import BUILD_WORKFLOW_V1, BuildErrorCode, BuildStepKey, StepState
 from deerflow.dbtl.capabilities import Capability
+from deerflow.dbtl.council_deck import extract_commentable_slides
 from deerflow.dbtl.reconciliation_policy import reconciliation_required
 from deerflow.dbtl.stage_runner import DispatchOutcome
 from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlWorkflowRefused
@@ -785,6 +786,9 @@ class TestTheSummarizerWritesTheReviewedDocument:
         assert "send('ready')" in deck
         assert 'class="track"' in deck
         assert 'data-step="-1"' in deck
+        surface = await repo.latest_stage_feedback_surface(cycle_id="cycle-1", project_id="project-1", stage="build")
+        assert surface is not None
+        assert surface["decision_request"]["commentable_slides"] == list(extract_commentable_slides(deck))
         # The Build deck, not the meeting deck: a Build result nobody argued
         # about has no positions to render.
         assert "participants" not in deck.lower()

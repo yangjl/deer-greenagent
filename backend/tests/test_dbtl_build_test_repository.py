@@ -274,6 +274,9 @@ async def test_high_accuracy_and_leakage_routes_back_to_build(tmp_path: Path) ->
                 "value": 0.94,
                 "threshold": 0.70,
                 "criterion": "gte",
+                # A refreshed Test deck sends the server's own projected
+                # metric, including this derived field.
+                "meets_threshold": True,
             }
         ],
         checks=_checks(leakage="failed"),

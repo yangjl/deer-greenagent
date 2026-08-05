@@ -370,7 +370,8 @@ class BuildTestOpsMixin:
 
         if not rationale.strip():
             raise ValueError("A validity assessment requires a rationale.")
-        parsed_metrics = [HeadlineMetric(**item) for item in metrics]
+        metric_fields = {"name", "value", "threshold", "criterion", "plausible_max", "unit"}
+        parsed_metrics = [HeadlineMetric(**{key: value for key, value in item.items() if key in metric_fields}) for item in metrics]
         parsed_checks = [
             ValidityCheck(
                 check=item["check"],

@@ -95,6 +95,23 @@ def test_server_computes_supported_from_complete_typed_test_evidence(monkeypatch
     assert provenance["evidence_refs"] == ["lineage-1"]
 
 
+def test_server_reloads_its_derived_metric_fields(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.dbtl.live_stage.test_review.reconciliation_required",
+        lambda: False,
+    )
+    result = _assessment_result()
+    result.provenance["validity_assessment"]["metrics"][0]["meets_threshold"] = True
+
+    snapshot = _validated_test_assessment(
+        [result],
+        build_test={"build_lineage": {"id": "lineage-1"}},
+    )
+
+    assert snapshot is not None
+    assert snapshot["evaluation"]["outcome"] == "supported"
+
+
 def test_a_prose_pass_without_typed_test_evidence_is_not_reviewable():
     result = StageWorkerResult(
         status=WorkerStatus.COMPLETED,

@@ -316,6 +316,7 @@ def test_a_recorded_chair_option_starts_one_originating_thread_run(
         assert thread_id == "thread-1"
         message = body.input["messages"][0]
         assert message["additional_kwargs"]["human_input_response"]["option_id"] == "family"
+        assert 'Slide "Objectives" [objectives]: Tighten the success threshold.' in message["content"]
         return SimpleNamespace(run_id="run-resume-1")
 
     monkeypatch.setattr(dbtl_cycles, "start_run", fake_start_run)
@@ -338,6 +339,7 @@ def test_a_recorded_chair_option_starts_one_originating_thread_run(
                             "value": "Use family holdout.",
                         }
                     ],
+                    "commentable_slides": [{"id": "objectives", "title": "Objectives"}],
                 },
             )
         )
@@ -348,6 +350,8 @@ def test_a_recorded_chair_option_starts_one_originating_thread_run(
                 "version": 1,
                 "action": {"kind": "chair_option", "option_ids": ["family"]},
                 "comment": "Keep one site external.",
+                "slide_comments": {"objectives": "Tighten the success threshold."},
+                "active_slide_id": "objectives",
                 "client_submission_id": "submission-1",
                 "originating_thread_id": "thread-1",
                 "expected_db_revision": cycle["db_revision"],
@@ -359,6 +363,8 @@ def test_a_recorded_chair_option_starts_one_originating_thread_run(
     assert response.status_code == 200
     assert response.json()["status"] == "resume_started"
     assert response.json()["run_id"] == "run-resume-1"
+    assert response.json()["slide_comments"] == {"objectives": "Tighten the success threshold."}
+    assert response.json()["active_slide_id"] == "objectives"
     messages = anyio.run(
         partial(
             client.app.state.run_event_store.list_messages,
@@ -1152,6 +1158,7 @@ def test_revise_records_the_verdict_without_a_separate_submit(
                 evidence_content_hash=EVIDENCE_HASH,
                 decision_request={
                     "review_issue_ids": [],
+                    "commentable_slides": [{"id": "objectives", "title": "Objectives"}],
                     "transition_gate": {
                         "stage": "design",
                         "assessment": {
@@ -1173,7 +1180,9 @@ def test_revise_records_the_verdict_without_a_separate_submit(
             json={
                 "version": 1,
                 "action": {"kind": "request_changes", "option_ids": []},
-                "comment": "The holdout is not separated by family.",
+                "comment": "",
+                "slide_comments": {"objectives": "The holdout is not separated by family."},
+                "active_slide_id": "objectives",
                 "client_submission_id": "revise-once",
                 "originating_thread_id": "thread-1",
                 "expected_db_revision": cycle["db_revision"],
@@ -1196,6 +1205,7 @@ def test_revise_records_the_verdict_without_a_separate_submit(
         assert len([item for item in activity if item["event_type"] == "stage.reviewed"]) == 1
         assert started["thread_id"] == "thread-1"
         content = started["body"].input["messages"][0]["content"]
+        assert 'Slide "Objectives" [objectives]' in content
         assert "The holdout is not separated by family." in content
 
 

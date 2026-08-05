@@ -546,6 +546,17 @@ def test_api_auth_me_auth_disabled_returns_synthetic_user(monkeypatch):
     assert CSRF_COOKIE_NAME not in resp.cookies
 
 
+def test_auth_disabled_identity_override_is_manual_profile_only(monkeypatch):
+    from app.gateway.auth_disabled import _manual_identity
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED_USER_ID", "checkpoint-owner")
+    monkeypatch.delenv("DEER_FLOW_MANUAL_PROFILE", raising=False)
+    assert _manual_identity("DEER_FLOW_AUTH_DISABLED_USER_ID", "default") == "default"
+
+    monkeypatch.setenv("DEER_FLOW_MANUAL_PROFILE", "1")
+    assert _manual_identity("DEER_FLOW_AUTH_DISABLED_USER_ID", "default") == "checkpoint-owner"
+
+
 def test_api_auth_me_restores_missing_csrf_cookie_for_cookie_session():
     """A valid access cookie can recover when its CSRF partner was evicted."""
     _setup_config()

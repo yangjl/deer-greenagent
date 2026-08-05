@@ -522,6 +522,109 @@ class TestEvidenceBinding:
 
 
 class TestPayloadBoundActions:
+    async def test_slide_comments_are_bound_to_registered_surface_slides(self, tmp_path: Path) -> None:
+        repo = await _repo(tmp_path)
+        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert cycle is not None
+        surface = await _register(
+            repo,
+            human_input_request_id="dbtl-design__slide-comments",
+            decision_request={
+                "question": "Which split?",
+                "options": [{"id": "family", "label": "Family", "value": "Use families."}],
+                "commentable_slides": [
+                    {"id": "objectives", "title": "Objectives"},
+                    {"id": "limitations", "title": "Limitations"},
+                ],
+            },
+        )
+
+        _surface, action, replayed = await repo.reserve_stage_feedback_action(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            surface_id=surface["surface_id"],
+            originating_thread_id="thread-1",
+            action_kind="chair_option",
+            selected_card_ids=["family"],
+            human_comment="",
+            slide_comments={"objectives": "Tighten the threshold.", "limitations": "Name the small holdout."},
+            active_slide_id="limitations",
+            client_submission_id="submission-slide-comments",
+            expected_db_revision=int(cycle["db_revision"]),
+            expected_evidence=None,
+            expected_deck_hash=DECK_HASH,
+        )
+
+        assert replayed is False
+        assert action["slide_comments"] == {
+            "objectives": "Tighten the threshold.",
+            "limitations": "Name the small holdout.",
+        }
+        assert action["active_slide_id"] == "limitations"
+
+    async def test_an_unknown_slide_comment_is_refused_without_consuming_the_surface(self, tmp_path: Path) -> None:
+        repo = await _repo(tmp_path)
+        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert cycle is not None
+        surface = await _register(
+            repo,
+            human_input_request_id="dbtl-design__unknown-slide",
+            decision_request={
+                "question": "Which split?",
+                "options": [{"id": "family", "label": "Family", "value": "Use families."}],
+                "commentable_slides": [{"id": "objectives", "title": "Objectives"}],
+            },
+        )
+
+        with pytest.raises(DbtlWorkflowRefused, match="registered slide"):
+            await repo.reserve_stage_feedback_action(
+                project_id="project-1",
+                cycle_id="cycle-1",
+                surface_id=surface["surface_id"],
+                originating_thread_id="thread-1",
+                action_kind="chair_option",
+                selected_card_ids=["family"],
+                human_comment="",
+                slide_comments={"invented": "Attach this nowhere."},
+                active_slide_id="invented",
+                client_submission_id="submission-unknown-slide",
+                expected_db_revision=int(cycle["db_revision"]),
+                expected_evidence=None,
+                expected_deck_hash=DECK_HASH,
+            )
+
+        assert await repo.stage_feedback_actions(surface["surface_id"], project_id="project-1") == []
+
+    async def test_a_legacy_surface_can_submit_after_its_empty_slide_draft_is_cleared(self, tmp_path: Path) -> None:
+        repo = await _repo(tmp_path)
+        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert cycle is not None
+        surface = await _register(
+            repo,
+            human_input_request_id="dbtl-build__legacy-slide-registry",
+            decision_request={"question": "Review this Build?", "options": []},
+        )
+
+        _surface, action, replayed = await repo.reserve_stage_feedback_action(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            surface_id=surface["surface_id"],
+            originating_thread_id="thread-1",
+            action_kind="chair_text",
+            selected_card_ids=[],
+            human_comment="Keep the cleared note as a general review comment.",
+            slide_comments={"build-limitations": ""},
+            active_slide_id="build-limitations",
+            client_submission_id="submission-legacy-cleared-slide",
+            expected_db_revision=int(cycle["db_revision"]),
+            expected_evidence=None,
+            expected_deck_hash=DECK_HASH,
+        )
+
+        assert replayed is False
+        assert action["slide_comments"] == {}
+        assert action["active_slide_id"] is None
+
     async def test_a_rollback_card_answer_consumes_the_same_surface(self, tmp_path: Path) -> None:
         repo = await _repo(tmp_path)
         surface = await _register(

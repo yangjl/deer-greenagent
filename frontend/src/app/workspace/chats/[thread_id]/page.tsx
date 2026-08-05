@@ -44,6 +44,7 @@ import { Welcome } from "@/components/workspace/welcome";
 import {
   AUTO_REQUEST_CONTEXT,
   type RequestContext,
+  canReplayConversation,
   findNewDiscoveryCycle,
   findNewSetupCycle,
   humanInputRunContext,
@@ -505,6 +506,7 @@ export default function ChatPage() {
       ),
     [thread.messages],
   );
+  const canReplay = canReplayConversation(cycleList);
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
@@ -583,7 +585,8 @@ export default function ChatPage() {
                     !isMock &&
                     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
                     !isUploading &&
-                    !thread.isLoading
+                    !thread.isLoading &&
+                    canReplay
                   }
                   onRegenerateMessage={handleRegenerate}
                   canEdit={
@@ -594,7 +597,8 @@ export default function ChatPage() {
                     !thread.isLoading &&
                     !branchThread.isPending &&
                     !hasGoal &&
-                    !hasOpenHumanInputCard
+                    !hasOpenHumanInputCard &&
+                    canReplay
                   }
                   onEditAndRegenerateMessage={handleEditAndRegenerate}
                   onSubmitHumanInput={

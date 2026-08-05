@@ -33,6 +33,8 @@ cd "$REPO_ROOT"
 
 DEER_FLOW_MANUAL_PROFILE_INHERITED="${DEER_FLOW_MANUAL_PROFILE:-}"
 DEER_FLOW_MANUAL_CONFIG_INHERITED="${DEER_FLOW_CONFIG_PATH:-}"
+DEER_FLOW_MANUAL_USER_ID_INHERITED="${DEER_FLOW_AUTH_DISABLED_USER_ID:-}"
+DEER_FLOW_MANUAL_USER_EMAIL_INHERITED="${DEER_FLOW_AUTH_DISABLED_USER_EMAIL:-}"
 if [ -f "$REPO_ROOT/.env" ]; then
     set -a
     source "$REPO_ROOT/.env"
@@ -51,6 +53,8 @@ if [ "$DEER_FLOW_MANUAL_PROFILE_INHERITED" = "1" ]; then
     export DEER_FLOW_MANUAL_PROFILE="1"
     export DEER_FLOW_CONFIG_PATH="$DEER_FLOW_MANUAL_CONFIG_INHERITED"
     export DEER_FLOW_AUTH_DISABLED="1"
+    export DEER_FLOW_AUTH_DISABLED_USER_ID="$DEER_FLOW_MANUAL_USER_ID_INHERITED"
+    export DEER_FLOW_AUTH_DISABLED_USER_EMAIL="$DEER_FLOW_MANUAL_USER_EMAIL_INHERITED"
 fi
 
 _pick_python() {
@@ -320,7 +324,10 @@ export DEERFLOW_PNPM_PYTHON DEERFLOW_PNPM_RUNNER
 
 # Frontend command
 if $DEV_MODE; then
-    FRONTEND_CMD='"$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev -- --hostname 127.0.0.1'
+    # pnpm forwards arguments after the script name directly. An extra `--`
+    # reaches Next.js as a positional project directory ("--hostname"), so
+    # the frontend exits before the manual stack can become healthy.
+    FRONTEND_CMD='"$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev --hostname 127.0.0.1'
 else
     FRONTEND_CMD="env BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run preview"
 fi
@@ -438,8 +445,11 @@ cleanup() {
     exit "$status"
 }
 
-trap 'cleanup 130' INT
-trap 'cleanup 143' TERM
+# A user stopping the foreground stack is a successful lifecycle action. The
+# children still receive TERM from ``stop_all``; only the launcher's final
+# status is normalized so Make does not print a false failure after cleanup.
+trap 'cleanup 0' INT
+trap 'cleanup 0' TERM
 
 # ── Helper: start a service ──────────────────────────────────────────────────
 

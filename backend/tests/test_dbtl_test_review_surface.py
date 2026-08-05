@@ -228,19 +228,19 @@ class TestTheTestStageGetsAReviewPage:
         assert "test-slides" in result.deck_uri
 
     @pytest.mark.asyncio
-    async def test_the_test_deck_is_inert_because_chat_owns_the_decision(self, tmp_path: Path):
+    async def test_the_test_deck_carries_its_registered_feedback_bridge(self, tmp_path: Path):
         repo = _Repo()
 
         result = await _run(repo, tmp_path)
 
         relative = result.deck_uri.removeprefix("/mnt/user-data/outputs/")
         html = (tmp_path / "outputs" / relative).read_text(encoding="utf-8")
-        assert repo.surfaces, "the inert deck must still be registered for provenance"
-        assert repo.surfaces[0]["surface_id"] not in html
-        assert "deerflow:design-feedback" not in html
+        assert repo.surfaces, "the deck must be registered before it can accept human input"
+        assert repo.surfaces[0]["surface_id"] in html
+        assert "deerflow-design-deck" in html
 
 
-class TestItCarriesAnAssessmentButNoRoutes:
+class TestItCarriesTheComputedAssessmentAndRoutes:
     @pytest.mark.asyncio
     async def test_the_assessment_travels_so_the_meeting_gate_can_read_it(self, tmp_path: Path):
         repo = _Repo()
@@ -252,14 +252,20 @@ class TestItCarriesAnAssessmentButNoRoutes:
         assert gate["assessment"]["difficulty"] == "high_stakes"
 
     @pytest.mark.asyncio
-    async def test_no_route_menu_is_offered_before_the_outcome_is_computed(self, tmp_path: Path):
-        """A Test outcome is computed at review time from the validity pack. A
-        route menu rendered before that would pre-empt the computation."""
+    async def test_the_route_menu_comes_from_the_computed_outcome(self, tmp_path: Path):
         repo = _Repo()
 
         await _run(repo, tmp_path)
 
-        assert repo.surfaces[0]["decision_request"]["transition_gate"]["routes"] == []
+        routes = repo.surfaces[0]["decision_request"]["transition_gate"]["routes"]
+        assert routes
+        assert {item["slug"] for item in routes} == {
+            "repeat_test",
+            "return_to_build",
+            "return_to_reconciliation",
+            "return_to_design",
+            "close_cycle",
+        }
 
     @pytest.mark.asyncio
     async def test_the_flag_being_off_still_registers_the_page_without_a_gate(self, tmp_path: Path):
@@ -268,4 +274,6 @@ class TestItCarriesAnAssessmentButNoRoutes:
         await _run(repo, tmp_path, progressive_gate=False)
 
         assert repo.surfaces, "the review page is not the progressive gate and must not depend on it"
-        assert repo.surfaces[0]["decision_request"] is None
+        request = repo.surfaces[0]["decision_request"]
+        assert request["transition_gate"]["routes"]
+        assert request["commentable_slides"]

@@ -103,6 +103,15 @@ export interface ScopeMenuOption {
   description: string;
 }
 
+/**
+ * A prepared replay cannot faithfully restore a DBTL request's one-shot scope.
+ * Keep Regenerate/Edit unavailable while governed work is live instead of
+ * silently replaying a stage turn as ordinary lead-agent chat.
+ */
+export function canReplayConversation(cycles: readonly CycleRecord[]): boolean {
+  return !cycles.some(isLive);
+}
+
 /** Resolve the one server-created discovery cycle after a start-card reply. */
 export function findNewDiscoveryCycle(
   cycles: readonly CycleRecord[],

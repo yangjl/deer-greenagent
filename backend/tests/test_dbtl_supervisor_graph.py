@@ -680,10 +680,7 @@ class TestSetupClarificationIsACard:
                 "messages": [
                     *declined["messages"],
                     HumanMessage(
-                        content=(
-                            "I want to test whether the new hybrids beat the check for grain yield "
-                            "across three environments in 2026, validated on held-out sites"
-                        ),
+                        content=("I want to test whether the new hybrids beat the check for grain yield across three environments in 2026, validated on held-out sites"),
                         id="human-after-decline",
                     ),
                 ],
@@ -2184,6 +2181,69 @@ class TestLiveStageBranch:
         assert isinstance(card, ToolMessage)
         assert card.artifact["human_input"]["request_id"] == "dbtl-build__resume-1"
 
+    @pytest.mark.asyncio
+    async def test_unscoped_test_retry_reopens_the_server_owned_review_control(self):
+        lead_calls = []
+
+        class Adapter:
+            async def active_cycle_status(self, *, project_id):
+                return [
+                    {
+                        "cycle_id": "cyc-1",
+                        "title": "Maize simulation",
+                        "state": "test",
+                        "parked": False,
+                        "stages": {"test": "awaiting_review"},
+                    }
+                ]
+
+            async def test_review_snapshot(self, *, project_id, cycle_id):
+                return {
+                    "cycle_id": cycle_id,
+                    "evidence_hash": "e" * 64,
+                    "evidence_uri": "/mnt/user-data/outputs/test.md",
+                    "evaluation": {
+                        "outcome": "supported",
+                        "validity_pack_key": "generic-predictive:v2",
+                        "allowed_recommendations": [
+                            "advance_to_learn",
+                            "repeat_test",
+                            "return_to_reconciliation",
+                        ],
+                    },
+                    "meeting": {"requirement": "skipped"},
+                }
+
+            async def execute(self, **kwargs):
+                raise AssertionError("reopening a Test control must not dispatch workers")
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent(lead_calls),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id=None,
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {**FULL_STATE, "messages": [HumanMessage(content="Retry Test", id="retry-test")]},
+            config={"configurable": {"thread_id": "retry-test-control"}},
+        )
+
+        assert lead_calls == []
+        card = final["messages"][-1]
+        assert isinstance(card, ToolMessage)
+        request = card.artifact["human_input"]
+        assert request["clarification_type"] == "dbtl_test_outcome"
+        assert [item["id"] for item in request["options"]] == [
+            "advance_to_learn",
+            "repeat_test",
+            "return_to_reconciliation",
+        ]
+
     @pytest.mark.parametrize(
         "text",
         [
@@ -2620,6 +2680,92 @@ class TestLiveStageBranch:
         assert request["clarification_type"] == "dbtl_stage_handoff"
         assert request["cycle_revision"] == 16
         assert request["design_feedback_surface_id"] == "validity-new"
+
+    @pytest.mark.asyncio
+    async def test_recorded_test_outcome_preserves_a_current_hold(self):
+        executed: list[dict] = []
+        request_id = "dbtl-stage-handoff__cyc-1__current"
+        request = {
+            "version": 1,
+            "kind": "human_input_request",
+            "source": "ask_clarification",
+            "request_id": request_id,
+            "clarification_type": "dbtl_stage_handoff",
+            "title": "Test reviewed",
+            "question": "Start Learn?",
+            "context": "Learn is ready.",
+            "input_mode": "single_choice",
+            "options": [
+                {"id": "start_next_stage", "label": "Start Learn", "value": "start_next_stage"},
+                {"id": "hold_here", "label": "Hold here", "value": "hold_here"},
+            ],
+            "dbtl_cycle_id": "cyc-1",
+            "cycle_revision": 16,
+            "approved_stage": "test",
+            "next_stage": "learn",
+            "design_feedback_surface_id": "validity-current",
+        }
+
+        class Adapter:
+            async def recover_test_learn_handoff(self, **kwargs):
+                return {
+                    "cycle_id": kwargs["cycle_id"],
+                    "cycle_revision": 16,
+                    "approved_stage": "test",
+                    "next_stage": "learn",
+                    "surface_id": "validity-current",
+                }
+
+            async def execute(self, **kwargs):
+                executed.append(kwargs)
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    AIMessage(
+                        id=f"{request_id}:call",
+                        content="",
+                        tool_calls=[{"id": request_id, "name": "ask_clarification", "args": {"question": "Start Learn?"}, "type": "tool_call"}],
+                    ),
+                    ToolMessage(
+                        id=request_id,
+                        content="Start Learn?",
+                        name="ask_clarification",
+                        tool_call_id=request_id,
+                        artifact={"human_input": request},
+                    ),
+                    HumanMessage(
+                        id="hold-current",
+                        content="Hold here",
+                        additional_kwargs={
+                            "hide_from_ui": True,
+                            "human_input_response": {
+                                "version": 1,
+                                "kind": "human_input_response",
+                                "source": "ask_clarification",
+                                "request_id": request_id,
+                                "response_kind": "option",
+                                "option_id": "hold_here",
+                                "value": "hold_here",
+                            },
+                        },
+                    ),
+                    HumanMessage(id="later-message", content="continue the cycle"),
+                ],
+            },
+            config={"configurable": {"thread_id": "test-learn-current-hold"}},
+        )
+
+        assert executed == []
+        assert not isinstance(final["messages"][-1], ToolMessage)
+        assert "held" in final["messages"][-1].content.lower()
 
     @pytest.mark.asyncio
     async def test_the_slide_deck_is_shown_before_the_question_it_needs_answered(self):

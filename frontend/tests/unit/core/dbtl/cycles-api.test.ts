@@ -80,4 +80,76 @@ describe("DBTL cycle API", () => {
       action: { kind: "approve" },
     });
   });
+
+  it("forwards validated slide comments without changing their order", async () => {
+    mockedFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: "review_recorded", replayed: false }),
+    } as Response);
+    const surface = {
+      project_id: "project-1",
+      cycle_id: "cycle-1",
+      surface_id: "surface-1",
+      current_db_revision: 12,
+      deck_content_hash: "a".repeat(64),
+      evidence_artifact_id: null,
+      receipt: null,
+    } as DesignFeedbackSurface;
+
+    await applyDesignFeedbackAction({
+      projectId: "project-1",
+      surface,
+      viewerThreadId: "thread-1",
+      action: { kind: "request_changes", optionIds: [] },
+      comment: "Revise the noted slides.",
+      slideComments: {
+        objectives: "Make the primary outcome explicit.",
+        limitations: "Name the small-cohort limitation.",
+      },
+      activeSlideId: "limitations",
+      clientSubmissionId: "changes-1",
+    });
+
+    const body = JSON.parse(
+      mockedFetch.mock.calls[0]?.[1]?.body as string,
+    ) as Record<string, unknown>;
+    expect(
+      Object.entries(body.slide_comments as Record<string, string>),
+    ).toEqual([
+      ["objectives", "Make the primary outcome explicit."],
+      ["limitations", "Name the small-cohort limitation."],
+    ]);
+    expect(body.active_slide_id).toBe("limitations");
+  });
+
+  it("omits slide fields for a legacy deck submission", async () => {
+    mockedFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: "review_recorded", replayed: false }),
+    } as Response);
+    const surface = {
+      project_id: "project-1",
+      cycle_id: "cycle-1",
+      surface_id: "surface-1",
+      current_db_revision: 12,
+      deck_content_hash: "a".repeat(64),
+      evidence_artifact_id: null,
+      receipt: null,
+    } as DesignFeedbackSurface;
+
+    await applyDesignFeedbackAction({
+      projectId: "project-1",
+      surface,
+      viewerThreadId: "thread-1",
+      action: { kind: "approve", optionIds: [] },
+      comment: "Approved.",
+      clientSubmissionId: "approval-1",
+    });
+
+    const body = JSON.parse(
+      mockedFetch.mock.calls[0]?.[1]?.body as string,
+    ) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("slide_comments");
+    expect(body).not.toHaveProperty("active_slide_id");
+  });
 });

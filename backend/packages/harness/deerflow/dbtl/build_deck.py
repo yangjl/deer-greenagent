@@ -125,10 +125,17 @@ def _figure_slide(embedded: EmbeddedFigure) -> str:
     )
 
 
-def _list_slide(title: str, eyebrow: str, entries: list[str], *, empty: str) -> str:
+def _list_slide(
+    title: str,
+    eyebrow: str,
+    entries: list[str],
+    *,
+    empty: str,
+    note_id: str = "",
+) -> str:
     body = "".join(f"<li>{_e(entry)}</li>" for entry in entries)
     inner = f"<ul>{body}</ul>" if entries else f'<p class="empty">{_e(empty)}</p>'
-    return render_design_deck_slide(kind="detail", eyebrow=eyebrow, title=title, body=inner)
+    return render_design_deck_slide(kind="detail", eyebrow=eyebrow, title=title, body=inner, note_id=note_id, note_label=title)
 
 
 def render_build_deck(
@@ -157,6 +164,8 @@ def render_build_deck(
             eyebrow="What we got",
             title="Key outcomes",
             body=_outcomes_body(package),
+            note_id="build-outcomes",
+            note_label="Key outcomes",
         ),
     ]
 
@@ -177,12 +186,24 @@ def render_build_deck(
         rows = "".join(f"<li><strong>{_e(note.title)}</strong> — {_e(note.text)}</li>" for note in package.phase_notes)
         slides.append(render_design_deck_slide(kind="phases", eyebrow="How it got there", title="What the build did", body=f"<ul>{rows}</ul>"))
 
+    if package.deliverable_fulfillment is not None:
+        slides.append(
+            _list_slide(
+                "Deliverables",
+                "Design contract",
+                [f"{item.deliverable_id} — {item.status.value}: {item.notes}" for item in package.deliverable_fulfillment.items],
+                empty="No deliverables were declared.",
+                note_id="build-deliverables",
+            )
+        )
+
     slides.append(
         _list_slide(
             "Deviations and limitations",
             "Read this before the result",
             [f"Deviation: {item}" for item in package.deviations] + [f"Limitation: {item}" for item in package.limitations],
             empty="None reported.",
+            note_id="build-limitations",
         )
     )
     rerun = (
@@ -196,6 +217,8 @@ def render_build_deck(
             eyebrow="Reproducing it",
             title="How to re-run it",
             body=rerun + (f'<p class="stamp">Reviewed document: {_e(package_path)}</p>' if package_path else ""),
+            note_id="build-rerun",
+            note_label="How to re-run it",
         )
     )
 

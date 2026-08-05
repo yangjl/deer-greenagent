@@ -18,6 +18,7 @@ from deerflow.dbtl.council_deck import (
     BRIDGE_PROTOCOL_VERSION,
     DECK_MESSAGE_SOURCE,
     INERT_NOTICE,
+    extract_commentable_slides,
     render_council_deck,
 )
 from deerflow.dbtl.decision_request import parse_decision_request
@@ -208,6 +209,37 @@ class TestActivationReachesEveryControl:
         assert "choice.disabled = true" not in body
 
 
+class TestSlideSpecificComments:
+    def test_commentable_slides_have_stable_ids(self) -> None:
+        html = render_council_deck(
+            cycle_title="Genomic selection in maize",
+            stage_title="Design meeting",
+            round_number=2,
+            results=[{"summary": "Run a benchmark.", "consensus": _CONSENSUS}],
+            surface_id=SURFACE_ID,
+            research_question="Does it generalize?",
+            objective="Estimate holdout accuracy.",
+            success_criteria=["R2 >= 0.7"],
+        )
+
+        assert 'data-slide-id="background"' in html
+        assert 'data-slide-id="objectives"' in html
+        assert {item["id"] for item in extract_commentable_slides(html)} >= {"background", "objectives"}
+
+    def test_submit_intents_carry_the_comment_map_and_visible_slide(self) -> None:
+        html = _deck(decision=_request())
+
+        assert "function slideComments()" in html
+        assert "slideComments: slideComments()" in html
+        assert "activeSlideId: activeSlideId()" in html
+
+    def test_failed_initialization_restores_comments_to_their_slides(self) -> None:
+        html = _deck(decision=_request())
+
+        assert "data.slideComments" in html
+        assert "notesBySlide" in html
+
+
 class TestProgressiveTransitionGate:
     @staticmethod
     def _progressive_deck() -> str:
@@ -310,6 +342,37 @@ class TestProgressiveTransitionGate:
 
 
 class TestNonDesignStageGate:
+    def test_a_test_deck_shows_the_independent_deliverable_audit_as_a_commentable_slide(self) -> None:
+        html = render_council_deck(
+            cycle_title="Genomic selection in maize",
+            stage_title="Test",
+            stage="test",
+            round_number=1,
+            results=[
+                {
+                    "summary": "The rerun completed.",
+                    "provenance": {
+                        "deliverable_audit": {
+                            "version": 1,
+                            "items": [
+                                {
+                                    "deliverable_id": "replay-notebook",
+                                    "verdict": "pass",
+                                    "notes": "Executed from a clean kernel.",
+                                }
+                            ],
+                        }
+                    },
+                }
+            ],
+            surface_id=SURFACE_ID,
+            surface_mode="stage_review",
+        )
+
+        assert "Deliverable audit" in html
+        assert "replay-notebook — pass" in html
+        assert 'data-slide-id="test-deliverable-audit"' in html
+
     def test_a_test_deck_can_emit_the_convene_intent_the_server_offers(self) -> None:
         html = render_council_deck(
             cycle_title="Genomic selection in maize",

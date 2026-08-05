@@ -1074,7 +1074,11 @@ export function ArtifactFilePreview({
         note: "Approval recorded. Preparing the next-stage choice in this conversation…",
       });
       try {
-        for (let poll = 0; poll < STAGE_HANDOFF_MAX_POLLS && !cancelled; poll += 1) {
+        for (
+          let poll = 0;
+          poll < STAGE_HANDOFF_MAX_POLLS && !cancelled;
+          poll += 1
+        ) {
           await new Promise((resolve) =>
             window.setTimeout(
               resolve,
@@ -1130,6 +1134,8 @@ export function ArtifactFilePreview({
                 allowedActions: refreshed.allowed_actions,
                 selectedOptionIds: refreshed.receipt?.selected_card_ids ?? [],
                 comment: refreshed.receipt?.human_comment ?? "",
+                slideComments: refreshed.receipt?.slide_comments ?? undefined,
+                activeSlideId: refreshed.receipt?.active_slide_id ?? undefined,
                 note,
               });
               return;
@@ -1212,6 +1218,14 @@ export function ArtifactFilePreview({
               bytesMatch && isRetryableDeckReceipt(surface.receipt?.status)
                 ? (surface.receipt?.human_comment ?? "")
                 : undefined,
+            slideComments:
+              bytesMatch && isRetryableDeckReceipt(surface.receipt?.status)
+                ? (surface.receipt?.slide_comments ?? undefined)
+                : undefined,
+            activeSlideId:
+              bytesMatch && isRetryableDeckReceipt(surface.receipt?.status)
+                ? (surface.receipt?.active_slide_id ?? undefined)
+                : undefined,
             note: bytesMatch
               ? surface.note
               : "This preview does not match the registered deck bytes.",
@@ -1288,6 +1302,8 @@ export function ArtifactFilePreview({
           viewerThreadId: threadId,
           action: intent.action,
           comment: intent.comment,
+          slideComments: intent.slideComments,
+          activeSlideId: intent.activeSlideId,
           clientSubmissionId: submissionId,
         });
         if (cancelled) return;
@@ -1345,6 +1361,8 @@ export function ArtifactFilePreview({
             allowedActions: refreshed.allowed_actions,
             selectedOptionIds: refreshed.receipt?.selected_card_ids ?? [],
             comment: refreshed.receipt?.human_comment ?? "",
+            slideComments: refreshed.receipt?.slide_comments ?? undefined,
+            activeSlideId: refreshed.receipt?.active_slide_id ?? undefined,
             note,
           });
         } else if (

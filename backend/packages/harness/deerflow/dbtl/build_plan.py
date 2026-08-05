@@ -463,6 +463,9 @@ Return one JSON object and nothing else:
 Rules:
 - "single_phase" is a real answer. A short script is not four phases pretending to be a
   project. Use it whenever the work does not usefully decompose, and give it one phase.
+- Prefer one phase when a small experiment has five or fewer deliverables in one runtime.
+  Creating its replay notebook and validator belongs in that same implementation phase;
+  do not create a second phase that merely revalidates work Test will independently audit.
 - At most {MAX_BUILD_PHASES} phases. If the work needs more, say so as an open question
   rather than emitting a project plan.
 - `capability` must be one of the registered values. An unregistered one is refused and the
@@ -471,6 +474,9 @@ Rules:
   Declare only skills this phase needs; an unknown or changed skill is refused at dispatch.
 - Set `pause_after` only when a person genuinely should see that phase's result before the
   next phase consumes it.
+- Every phase must produce one small executable runner or validator script as one of its
+  outputs. A documentation or notebook phase still needs a concise validator script; the
+  notebook is a human replay playbook, not an executable entry point.
 - Use "needs_input" when the design leaves something you cannot resolve, or the work as
   specified cannot be built at all.
 - Do not ask the owner to author an entire technical specification from scratch. When a

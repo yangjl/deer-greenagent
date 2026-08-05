@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,7 @@ from deerflow.agents.dbtl.live_stage.adapter import (
     _build_input_artifacts,
     _compact_design_history,
     _declared_skill_bindings,
+    _design_deliverable_manifest,
     _executable_stage,
     _project_file_snapshot,
     _report_subagent_token_usage,
@@ -25,6 +27,7 @@ from deerflow.agents.dbtl.live_stage.adapter import (
     _summarize_token_usage,
     _token_limit_for_worker,
     _tools_for_stage_budget,
+    _validated_deliverable_audit,
     _wants_new_debate,
 )
 from deerflow.agents.dbtl.live_stage.test_rerun import RERUN_EXIT_STATUS_NAME, RERUN_STDERR_NAME, RERUN_STDOUT_NAME
@@ -34,6 +37,7 @@ from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_runner import DispatchOutcome, WorkUnit
 from deerflow.dbtl.stage_spec import WorkerBudget, resolve_stage_spec
 from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK
+from deerflow.dbtl.worker_result import StageWorkerResult, WorkerStatus
 from deerflow.subagents.config import SubagentConfig
 
 
@@ -251,6 +255,22 @@ def _structured_result() -> str:
             "recommended_next_actions": ["Review the design."],
             "provenance": {
                 "inputs_examined": ["cycle metadata"],
+                "deliverable_manifest": {
+                    "version": 1,
+                    "cycle_class": "computational",
+                    "deliverables": [
+                        {
+                            "id": "replay-notebook",
+                            "title": "Human replay notebook",
+                            "kind": "notebook",
+                            "required": True,
+                            "expected_paths": ["outputs/replay.ipynb"],
+                            "acceptance_criteria": ["Runs from a clean kernel"],
+                            "validation": "Execute all cells in order.",
+                            "capabilities": ["python"],
+                        }
+                    ],
+                },
                 "rerun_spec": {
                     "version": 1,
                     "entry_point": "/mnt/user-data/run.py",
@@ -264,6 +284,120 @@ def _structured_result() -> str:
             },
         }
     )
+
+
+def test_design_deliverables_are_server_validated_before_the_package_is_reviewable() -> None:
+    valid = StageWorkerResult(
+        status=WorkerStatus.COMPLETED,
+        summary="Design complete.",
+        capability="design_council_chair",
+        agent_name="general-purpose",
+        provenance=json.loads(_structured_result())["provenance"],
+    )
+    missing = StageWorkerResult(
+        status=WorkerStatus.COMPLETED,
+        summary="Design complete.",
+        capability="design_council_chair",
+        agent_name="general-purpose",
+        provenance={},
+    )
+
+    manifest, refusal = _design_deliverable_manifest(valid, cycle_class="computational")
+    assert refusal == ""
+    assert manifest is not None
+    assert manifest["deliverables"][0]["id"] == "replay-notebook"
+
+    absent, refusal = _design_deliverable_manifest(missing, cycle_class="computational")
+    assert absent is None
+    assert "deliverable manifest" in refusal.lower()
+
+
+def test_test_deliverable_audit_must_match_server_owned_build_hashes() -> None:
+    from deerflow.dbtl.deliverables import parse_deliverable_manifest
+
+    manifest = parse_deliverable_manifest(
+        json.loads(_structured_result())["provenance"]["deliverable_manifest"],
+        cycle_class="computational",
+    )
+    audit = {
+        "version": 1,
+        "items": [
+            {
+                "deliverable_id": "replay-notebook",
+                "observed_artifacts": [{"path": "outputs/replay.ipynb", "content_hash": "f" * 64}],
+                "criteria": [{"criterion": "Runs from a clean kernel", "verdict": "pass", "detail": "Executed independently."}],
+                "verdict": "pass",
+                "notes": "Independent rerun passed.",
+            }
+        ],
+    }
+    result = StageWorkerResult(
+        status=WorkerStatus.COMPLETED,
+        summary="Audited deliverables.",
+        capability="test_validation",
+        agent_name="tester",
+        provenance={"deliverable_audit": audit},
+    )
+    build_test = {"build_lineage": {"output_artifacts": [{"source_path": "outputs/replay.ipynb", "content_hash": "f" * 64}]}}
+
+    accepted, refusal = _validated_deliverable_audit((result,), manifest=manifest, build_test=build_test)
+    assert accepted is not None
+    assert refusal == ""
+
+    audit["items"][0]["observed_artifacts"][0]["content_hash"] = "e" * 64
+    forged = replace(result, provenance={"deliverable_audit": audit})
+    accepted, refusal = _validated_deliverable_audit((forged,), manifest=manifest, build_test=build_test)
+    assert accepted is None
+    assert "server-owned Build lineage" in refusal
+
+
+@pytest.mark.asyncio
+async def test_computational_design_without_deliverables_records_no_reviewable_package(tmp_path: Path) -> None:
+    cycle = _cycle()
+    cycle["cycle_class"] = "computational"
+    payload = json.loads(_structured_result())
+    del payload["provenance"]["deliverable_manifest"]
+    repo = FakeRepo(cycle)
+    dispatcher = FakeDispatcher(text=json.dumps(payload))
+
+    result = await _design_adapter(repo, dispatcher).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert result.produced_usable_evidence is False
+    assert result.artifact_uri is None
+    assert "deliverable manifest" in result.note.lower()
+    assert repo.recorded[-1]["artifact_uri"] is None
+    prompts = [unit.prompt for units, _budget in dispatcher.calls for unit in units]
+    assert any("provenance.deliverable_manifest" in prompt for prompt in prompts)
+    assert any("exactly one notebook deliverable" in prompt for prompt in prompts)
+
+
+@pytest.mark.asyncio
+async def test_validated_design_deliverables_are_written_into_the_machine_package(tmp_path: Path) -> None:
+    cycle = _cycle()
+    cycle["cycle_class"] = "computational"
+    repo = FakeRepo(cycle)
+
+    result = await _design_adapter(repo, FakeDispatcher(text=_structured_result())).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert result.artifact_uri is not None
+    review = tmp_path / result.artifact_uri.removeprefix("/mnt/user-data/")
+    match = re.search(r"Structured package: `([^`]+)`", review.read_text(encoding="utf-8"))
+    assert match is not None
+    package = json.loads((review.parent / match.group(1)).read_text(encoding="utf-8"))
+    assert package["deliverable_manifest"]["cycle_class"] == "computational"
+    assert package["deliverable_manifest"]["deliverables"][0]["id"] == "replay-notebook"
 
 
 def _runtime_config(project_root: Path) -> dict:
@@ -1258,6 +1392,7 @@ async def test_ready_for_build_runs_build_and_records_reproducibility_lineage(
     assert repo.lineage[0]["rerun_spec"]["command"] == "python run.py --seed 7"
     assert repo.lineage[0]["expected_db_revision"] == 4
     assert repo.lineage[0]["output_artifacts"][0]["content_hash"]
+    assert repo.lineage[0]["output_artifacts"][0]["source_path"] == "pipeline.py"
     assert "/outputs/dbtl/" in repo.lineage[0]["output_artifacts"][0]["uri"]
     assert ".dbtl-stage-work" not in repo.lineage[0]["output_artifacts"][0]["uri"]
     assert repo.lineage[0]["code_revision"] == "workspace:unversioned"

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 
@@ -157,12 +158,23 @@ def _slide(
 ) -> str:
     eyebrow_html = f'<p class="eyebrow">{html.escape(eyebrow)}</p>' if eyebrow else ""
     note_html = _note_box(note_id, note_label or title) if note_id else ""
-    return f'<section class="slide slide--{kind}">{eyebrow_html}<h2>{html.escape(title)}</h2>{body}{note_html}</section>'
+    slide_id = f' data-slide-id="{html.escape(note_id)}"' if note_id else ""
+    return f'<section class="slide slide--{kind}"{slide_id}>{eyebrow_html}<h2>{html.escape(title)}</h2>{body}{note_html}</section>'
 
 
 def render_design_deck_slide(*, kind: str, title: str, body: str, eyebrow: str = "", note_id: str = "", note_label: str = "") -> str:
     """Render one slide with the canonical Design-deck structure."""
     return _slide(kind=kind, title=title, body=body, eyebrow=eyebrow, note_id=note_id, note_label=note_label)
+
+
+def extract_commentable_slides(deck_html: str) -> tuple[dict[str, str], ...]:
+    """Read stable slide ids/titles from HTML emitted by this renderer."""
+    matches = re.findall(
+        r'<section class="slide [^"]*" data-slide-id="([^"]+)">.*?<h2>(.*?)</h2>',
+        deck_html,
+        flags=re.DOTALL,
+    )
+    return tuple({"id": html.unescape(slide_id), "title": html.unescape(title)} for slide_id, title in matches[:20])
 
 
 def _pages(items: Sequence[object], per_page: int) -> list[list[object]]:
@@ -468,6 +480,16 @@ def _stage_review_controls(
         '<button type="button" data-deck-action="convene_review_meeting" disabled>Convene review meeting</button>',
         '<button type="button" data-deck-action="submit_for_review" disabled>Submit for review</button>',
     ]
+    if normalized == "test":
+        route_buttons = []
+        for route in gate.get("routes", []):
+            if not isinstance(route, Mapping):
+                continue
+            route_id = _text(route.get("slug") or "", limit=64)
+            label = _text(route.get("label") or route_id.replace("_", " ").title(), limit=120)
+            if route_id:
+                route_buttons.append(f'<button type="button" data-deck-action="choose_route" data-route-id="{html.escape(route_id)}" disabled>{html.escape(label)}</button>')
+        buttons.extend(route_buttons)
     if normalized in {"build", "learn"}:
         buttons.extend(
             [
@@ -588,7 +610,12 @@ _BRIDGE_TEMPLATE = """
   // is in them is folded into the comment of the decision actually taken, so a
   // note can never be stored as a verdict nobody gave.
   var notes = Array.prototype.slice.call(document.querySelectorAll('[data-deck-note]'));
-  var NOTE_LIMIT = 1000;
+  var notesBySlide = {};
+  notes.forEach(function (note) {
+    var slide = note.closest('[data-slide-id]');
+    if (slide) { notesBySlide[slide.getAttribute('data-slide-id')] = note; }
+  });
+  var NOTE_LIMIT = 2000;
   var GATE_KINDS = ['advance', 'approve', 'request_changes', 'park'];
 
   function say(text) { if (status) { status.textContent = text; } }
@@ -609,6 +636,24 @@ _BRIDGE_TEMPLATE = """
 
   function clearNotes() {
     notes.forEach(function (note) { note.value = ''; });
+  }
+
+  function slideComments() {
+    var result = {};
+    var total = 0;
+    Object.keys(notesBySlide).slice(0, 20).forEach(function (slideId) {
+      var value = (notesBySlide[slideId].value || '').trim().slice(0, 2000);
+      if (!value || total >= 10000) { return; }
+      value = value.slice(0, 10000 - total);
+      total += value.length;
+      result[slideId] = value;
+    });
+    return result;
+  }
+
+  function activeSlideId() {
+    var slide = document.querySelector('.slide.is-active[data-slide-id]');
+    return slide ? slide.getAttribute('data-slide-id') : null;
   }
 
   function send(type, extra) {
@@ -671,7 +716,9 @@ _BRIDGE_TEMPLATE = """
       // the person had typed rather than asking them to retype it.
       send('submit_intent', {
         action: { kind: 'chair_option', optionIds: [option] },
-        comment: withNotes(comment ? comment.value : '')
+        comment: withNotes(comment ? comment.value : ''),
+        slideComments: slideComments(),
+        activeSlideId: activeSlideId()
       });
     });
   }
@@ -704,7 +751,9 @@ _BRIDGE_TEMPLATE = """
       say('Recording your decision...');
       send('submit_intent', {
         action: { kind: kind, optionIds: [], difficultyOverride: '' },
-        comment: text
+        comment: text,
+        slideComments: slideComments(),
+        activeSlideId: activeSlideId()
       });
     });
   }
@@ -714,6 +763,9 @@ _BRIDGE_TEMPLATE = """
       var kind = button.dataset.deckAction;
       if (submitting || !channel || allowed.indexOf(kind) === -1) { return; }
       var optionIds = [];
+      if (kind === 'choose_route' && button.dataset.routeId) {
+        optionIds = [button.dataset.routeId];
+      }
       if (kind === 'request_changes') {
         optionIds = Array.prototype.slice.call(document.querySelectorAll('[data-deck-issue]:checked')).map(function (item) { return item.value; });
       }
@@ -733,7 +785,9 @@ _BRIDGE_TEMPLATE = """
           optionIds: optionIds,
           difficultyOverride: ''
         },
-        comment: text
+        comment: text,
+        slideComments: slideComments(),
+        activeSlideId: activeSlideId()
       });
     });
   });
@@ -765,7 +819,13 @@ _BRIDGE_TEMPLATE = """
         // so the boxes are cleared rather than merged a second time. The
         // reviewer's words are not lost -- they are in the comment now, which
         // is the field the record actually keeps.
-        if (data.comment) { clearNotes(); }
+        if (data.comment && (!data.slideComments || typeof data.slideComments !== 'object')) { clearNotes(); }
+      }
+      if (data.slideComments && typeof data.slideComments === 'object') {
+        Object.keys(notesBySlide).forEach(function (slideId) {
+          var restored = data.slideComments[slideId];
+          notesBySlide[slideId].value = typeof restored === 'string' ? restored.slice(0, 2000) : '';
+        });
       }
       submitting = false;
       var live = !!channel && allowed.length > 0;
@@ -982,6 +1042,21 @@ def render_council_deck(
                 empty="",
                 note_label="Conclusions",
                 note_prefix="conclusions",
+            )
+        )
+    provenance = chair.get("provenance")
+    deliverable_audit = provenance.get("deliverable_audit") if isinstance(provenance, Mapping) else None
+    audit_items = deliverable_audit.get("items") if isinstance(deliverable_audit, Mapping) else None
+    if stage == "test" and isinstance(audit_items, Sequence) and not isinstance(audit_items, (str, bytes)):
+        entries = [f"{str(item.get('deliverable_id') or 'deliverable')} — {str(item.get('verdict') or 'not_testable')}: {str(item.get('notes') or '')}" for item in audit_items if isinstance(item, Mapping)]
+        slides.append(
+            _slide(
+                kind="audit",
+                eyebrow="Independent Test",
+                title="Deliverable audit",
+                body=_list_body(entries, empty="No deliverable audit was recorded."),
+                note_id="test-deliverable-audit",
+                note_label="Deliverable audit",
             )
         )
     limitations = _bullets(list(chair.get("limitations") or []), limit=MAX_SECTION_ITEMS)

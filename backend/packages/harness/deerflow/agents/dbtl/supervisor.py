@@ -605,11 +605,16 @@ def _stage_handoff_message(
     )
     approved_label = approved_stage.replace("_", " ").title()
     next_label = next_stage.replace("_", " ").title()
-    question = f"{approved_label} is approved. What should happen next?"
+    repeating = bool(marker.get("repeat_stage"))
+    question = f"Run {next_label} again now?" if repeating else f"{approved_label} is approved. What should happen next?"
     # The cycle is named, not implied. A project can run several cycles at once
     # and this card can be re-presented long after the approval that raised it,
     # so "this cycle" leaves a reader to guess which one they are starting.
-    context = f"{next_label} is open for cycle {cycle_id}, but it will not start until you choose. Holding here leaves the approved record unchanged."
+    context = (
+        f"{next_label} was reset for cycle {cycle_id}. The prior evidence remains recorded, and no worker starts until you choose."
+        if repeating
+        else f"{next_label} is open for cycle {cycle_id}, but it will not start until you choose. Holding here leaves the approved record unchanged."
+    )
     options = [
         {
             "id": "start_next_stage",
@@ -630,7 +635,7 @@ def _stage_handoff_message(
         "source": "ask_clarification",
         "request_id": request_id,
         "clarification_type": "dbtl_stage_handoff",
-        "title": f"{approved_label} approved",
+        "title": f"Repeat {next_label}" if repeating else f"{approved_label} approved",
         "question": question,
         "context": context,
         "input_mode": "single_choice",
@@ -1026,6 +1031,7 @@ def _test_card_messages(
             "advance_to_learn": "Accept outcome and advance to Learn",
             "repeat_test": "Repeat Test",
             "return_to_build": "Return to Build",
+            "return_to_reconciliation": "Return to Data Reconciliation",
             "return_to_design": "Return to Design",
             "close_cycle": "Close this cycle",
         }
@@ -2021,6 +2027,13 @@ def build_supervisor_graph(
         if handoff.handled:
             return handoff.update or {}
         handoff_answer = handoff.handoff_answer
+        # The visible fallback text for a Start card repeats the stage name
+        # ("Run Test again now?"), which also matches the free-text stage
+        # intent detector. Once the server-owned card has been answered, that
+        # detector must stand down or it reopens another card instead of
+        # dispatching the choice the person just made.
+        if handoff_answer is not None:
+            unscoped_stage_intent = None
 
         # Before the Test cards and before anything else that could dispatch: a
         # Build control the server raised is answered by this request, or it is
@@ -2060,21 +2073,23 @@ def build_supervisor_graph(
                 marker = recover_handoff(project_id=context.project_id, cycle_id=decision.cycle_id)
                 if isawaitable(marker):
                     marker = await marker
-                latest_request = _pending_stage_handoff_control(
-                    state,
-                    selected_cycle_id=str(marker.get("cycle_id") or "") if isinstance(marker, Mapping) else None,
-                )
+                latest_handoff = _latest_stage_handoff_state(state)
+                latest_request, latest_answer = latest_handoff if latest_handoff is not None else ({}, None)
                 marker_revision = marker.get("cycle_revision") if isinstance(marker, Mapping) else None
                 latest_revision = latest_request.get("cycle_revision") if isinstance(latest_request, Mapping) else None
-                if isinstance(marker, Mapping) and not (
-                    isinstance(latest_request, Mapping)
+                same_handoff = bool(
+                    isinstance(marker, Mapping)
+                    and isinstance(latest_request, Mapping)
                     and str(latest_request.get("dbtl_cycle_id") or "") == str(marker.get("cycle_id") or "")
                     and isinstance(marker_revision, int)
                     and not isinstance(marker_revision, bool)
                     and latest_revision == marker_revision
                     and str(latest_request.get("approved_stage") or "") == "test"
                     and str(latest_request.get("next_stage") or "") == "learn"
-                ):
+                )
+                if same_handoff and latest_answer == "hold_here":
+                    return {"messages": [receipt_message("Learn remains held. No governed stage work was started; use the current server-owned control when you are ready to reopen it.")]}
+                if isinstance(marker, Mapping) and not same_handoff:
                     return {
                         "messages": list(
                             _stage_handoff_message(
@@ -2158,6 +2173,55 @@ def build_supervisor_graph(
                             _build_control_message(
                                 decision,
                                 recovered,
+                                request_nonce=request_nonce,
+                            )
+                        )
+                    }
+        # A failed Test-card write can leave the durable stage awaiting review
+        # while the historical card is already marked answered. An explicit
+        # retry must recover a fresh server-owned decision card; merely telling
+        # the person to use the old control points them at a disabled button.
+        if unscoped_stage_intent is not None and unscoped_stage_intent[1] == "test":
+            snapshot_reader = getattr(stage_adapter, "test_review_snapshot", None)
+            if callable(snapshot_reader) and decision.cycle_id:
+                snapshot = snapshot_reader(
+                    project_id=str(context.project_id or ""),
+                    cycle_id=str(decision.cycle_id),
+                )
+                if isawaitable(snapshot):
+                    snapshot = await snapshot
+                if isinstance(snapshot, dict):
+                    requirement = str(dict(snapshot.get("meeting") or {}).get("requirement") or "skipped")
+                    return {
+                        "messages": list(
+                            _test_card_messages(
+                                decision,
+                                snapshot,
+                                request_nonce=request_nonce,
+                                outcome=requirement in {"skipped", "complete"},
+                            )
+                        )
+                    }
+            recover_retry = getattr(stage_adapter, "recover_test_retry_control", None)
+            if callable(recover_retry) and decision.cycle_id:
+                marker = recover_retry(
+                    project_id=str(context.project_id or ""),
+                    cycle_id=str(decision.cycle_id),
+                )
+                if isawaitable(marker):
+                    marker = await marker
+                if isinstance(marker, Mapping):
+                    recovered_marker = dict(marker)
+                    # Each recovered control is a new question. Reusing the
+                    # original request id leaves several cards with one id in
+                    # history, so a later click can resolve against the wrong
+                    # occurrence and merely re-render the control.
+                    recovered_marker["surface_id"] = f"{str(recovered_marker.get('surface_id') or 'test-retry')}:{request_nonce or 'recovered'}"
+                    return {
+                        "messages": list(
+                            _stage_handoff_message(
+                                decision,
+                                recovered_marker,
                                 request_nonce=request_nonce,
                             )
                         )

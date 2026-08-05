@@ -88,6 +88,8 @@ export interface DesignFeedbackSurface {
     status: string;
     selected_card_ids?: string[];
     human_comment?: string | null;
+    slide_comments?: Record<string, string> | null;
+    active_slide_id?: string | null;
     receipt?: {
       message?: string;
       run_id?: string;
@@ -213,6 +215,8 @@ export async function applyDesignFeedbackAction(input: {
     difficultyOverride?: TransitionDifficulty | null;
   };
   comment: string;
+  slideComments?: Record<string, string>;
+  activeSlideId?: string;
   clientSubmissionId: string;
 }) {
   const retryingRecordedHandoff =
@@ -243,6 +247,10 @@ export async function applyDesignFeedbackAction(input: {
         difficulty_override: input.action.difficultyOverride ?? null,
       },
       comment: input.comment,
+      ...(input.slideComments && Object.keys(input.slideComments).length > 0
+        ? { slide_comments: input.slideComments }
+        : {}),
+      ...(input.activeSlideId ? { active_slide_id: input.activeSlideId } : {}),
       client_submission_id: input.clientSubmissionId,
       originating_thread_id: input.viewerThreadId,
       expected_db_revision: retryingRecordedHandoff

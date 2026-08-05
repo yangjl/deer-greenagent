@@ -1192,3 +1192,21 @@ class TestBuildContract:
 
         assert "Evidence kind says where the evidence lives" in prompt
         assert "Use workspace_file for manifests, logs, source code, tests" in prompt
+
+    def test_build_and_test_are_told_to_account_for_every_design_deliverable(self) -> None:
+        from deerflow.dbtl.agent_selector import Assignment
+        from deerflow.dbtl.stage_runner import build_prompt
+
+        assignment = Assignment(
+            capability=Capability.SOFTWARE_ENGINEERING,
+            agent_name="general-purpose",
+            via_generalist=True,
+        )
+
+        build = build_prompt(resolve_stage_spec("build"), assignment, context="ctx")
+        test = build_prompt(resolve_stage_spec("test"), assignment, context="ctx")
+
+        assert "provenance.deliverable_fulfillment" in build
+        assert "one item for every id" in build
+        assert "provenance.deliverable_audit" in test
+        assert "Independently inspect every expected path" in test

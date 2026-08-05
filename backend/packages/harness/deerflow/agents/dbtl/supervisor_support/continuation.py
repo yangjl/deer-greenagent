@@ -185,11 +185,22 @@ async def handle_test_cards(
                         "cycle_revision": int(cycle.get("db_revision") or 0),
                         "approved_stage": "test",
                         "next_stage": "learn",
-                        "surface_id": str(
-                            snapshot.get("evidence_hash")
-                            or snapshot.get("stage_attempt_id")
-                            or request_id
-                        ),
+                        "surface_id": str(snapshot.get("evidence_hash") or snapshot.get("stage_attempt_id") or request_id),
+                    },
+                    request_nonce=request_nonce,
+                )
+            )
+        elif next_state == "test" and recommendation == "repeat_test":
+            messages.extend(
+                build_stage_handoff(
+                    decision,
+                    {
+                        "cycle_id": str(cycle.get("id") or decision.cycle_id or ""),
+                        "cycle_revision": int(cycle.get("db_revision") or 0),
+                        "approved_stage": "test",
+                        "next_stage": "test",
+                        "surface_id": str(snapshot.get("evidence_hash") or snapshot.get("stage_attempt_id") or request_id),
+                        "repeat_stage": True,
                     },
                     request_nonce=request_nonce,
                 )

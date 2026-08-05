@@ -26,6 +26,9 @@ export const DECK_PROTOCOL_VERSION = 1;
 
 const MAX_COMMENT_CHARS = 4_000;
 const MAX_OPTION_ID_CHARS = 64;
+const MAX_SLIDE_COMMENTS = 20;
+const MAX_SLIDE_COMMENT_CHARS = 2_000;
+const MAX_SLIDE_COMMENTS_TOTAL_CHARS = 10_000;
 
 /** Option ids are slugs; anything else did not come from a rendered deck. */
 const OPTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
@@ -57,9 +60,18 @@ export interface DeckSubmitAction {
   difficultyOverride?: "routine" | "standard" | "high_stakes" | null;
 }
 
+export type DeckSlideComments = Record<string, string>;
+
 export type DeckIntent =
   | { type: "ready"; surfaceId: string }
-  | { type: "submit_intent"; surfaceId: string; action: DeckSubmitAction; comment: string }
+  | {
+      type: "submit_intent";
+      surfaceId: string;
+      action: DeckSubmitAction;
+      comment: string;
+      slideComments?: DeckSlideComments;
+      activeSlideId?: string;
+    }
   | { type: "open_evidence_intent"; surfaceId: string }
   | { type: "open_originating_conversation_intent"; surfaceId: string };
 
@@ -70,7 +82,12 @@ const INTENT_TYPES = new Set([
   "open_originating_conversation_intent",
 ]);
 
-export type DeckStateMessageType = "initialize" | "pending" | "accepted" | "stale" | "failed";
+export type DeckStateMessageType =
+  | "initialize"
+  | "pending"
+  | "accepted"
+  | "stale"
+  | "failed";
 
 export interface DeckStateMessage {
   source: typeof DECK_MESSAGE_SOURCE;
@@ -81,6 +98,8 @@ export interface DeckStateMessage {
   allowedActions?: DeckActionKind[];
   selectedOptionIds?: string[];
   comment?: string;
+  slideComments?: DeckSlideComments;
+  activeSlideId?: string;
   note?: string;
 }
 
@@ -108,14 +127,19 @@ export function isDeckIntent(value: unknown): boolean {
 function parseAction(value: unknown): DeckSubmitAction | null {
   if (!isRecord(value)) return null;
   const kind = value.kind;
-  if (typeof kind !== "string" || !DECK_ACTION_KINDS.includes(kind as DeckActionKind)) {
+  if (
+    typeof kind !== "string" ||
+    !DECK_ACTION_KINDS.includes(kind as DeckActionKind)
+  ) {
     return null;
   }
   const rawIds = value.optionIds;
   if (!Array.isArray(rawIds)) return null;
   const optionIds = rawIds.filter(
     (id): id is string =>
-      typeof id === "string" && id.length <= MAX_OPTION_ID_CHARS && OPTION_ID_PATTERN.test(id),
+      typeof id === "string" &&
+      id.length <= MAX_OPTION_ID_CHARS &&
+      OPTION_ID_PATTERN.test(id),
   );
   if (optionIds.length !== rawIds.length) return null;
   if (kind === "chair_option" && optionIds.length !== 1) return null;
@@ -140,17 +164,65 @@ function parseAction(value: unknown): DeckSubmitAction | null {
   return { kind: kind as DeckActionKind, optionIds, difficultyOverride };
 }
 
+function parseSlideComments(
+  value: unknown,
+): { valid: true; comments?: DeckSlideComments } | { valid: false } {
+  if (value === undefined || value === null) return { valid: true };
+  if (!isRecord(value)) return { valid: false };
+  const entries = Object.entries(value);
+  if (entries.length > MAX_SLIDE_COMMENTS) return { valid: false };
+
+  let totalChars = 0;
+  const comments: DeckSlideComments = {};
+  for (const [slideId, comment] of entries) {
+    if (
+      slideId.length > MAX_OPTION_ID_CHARS ||
+      !OPTION_ID_PATTERN.test(slideId) ||
+      typeof comment !== "string" ||
+      comment.length > MAX_SLIDE_COMMENT_CHARS
+    ) {
+      return { valid: false };
+    }
+    if (comment.trim().length === 0) continue;
+    totalChars += comment.length;
+    if (totalChars > MAX_SLIDE_COMMENTS_TOTAL_CHARS) return { valid: false };
+    comments[slideId] = comment;
+  }
+  return Object.keys(comments).length > 0
+    ? { valid: true, comments }
+    : { valid: true };
+}
+
+function parseActiveSlideId(value: unknown): string | null | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (
+    typeof value !== "string" ||
+    value.length > MAX_OPTION_ID_CHARS ||
+    !OPTION_ID_PATTERN.test(value)
+  ) {
+    return null;
+  }
+  return value;
+}
+
 /**
  * Read one message from the deck, or refuse it.
  *
  * Returns `null` rather than throwing: a malformed frame is an ordinary event
  * on a window anyone can post to, not an exceptional condition.
  */
-export function parseDeckIntent(value: unknown, context: DeckIntentContext): DeckIntent | null {
+export function parseDeckIntent(
+  value: unknown,
+  context: DeckIntentContext,
+): DeckIntent | null {
   if (!isRecord(value)) return null;
   if (value.source !== DECK_MESSAGE_SOURCE) return null;
   if (value.protocol !== DECK_PROTOCOL_VERSION) return null;
-  if (typeof value.surfaceId !== "string" || value.surfaceId !== context.surfaceId) return null;
+  if (
+    typeof value.surfaceId !== "string" ||
+    value.surfaceId !== context.surfaceId
+  )
+    return null;
 
   const type = value.type;
   if (typeof type !== "string" || !INTENT_TYPES.has(type)) return null;
@@ -160,26 +232,50 @@ export function parseDeckIntent(value: unknown, context: DeckIntentContext): Dec
   }
 
   // Everything past the handshake must carry the channel this parent issued.
-  if (context.channel === null || value.channel !== context.channel) return null;
+  if (context.channel === null || value.channel !== context.channel)
+    return null;
 
   if (type === "submit_intent") {
     const action = parseAction(value.action);
     if (action === null) return null;
-    const comment = typeof value.comment === "string" ? value.comment.slice(0, MAX_COMMENT_CHARS) : "";
+    const comment =
+      typeof value.comment === "string"
+        ? value.comment.slice(0, MAX_COMMENT_CHARS)
+        : "";
+    const parsedSlideComments = parseSlideComments(value.slideComments);
+    if (!parsedSlideComments.valid) return null;
+    const activeSlideId = parseActiveSlideId(value.activeSlideId);
+    if (activeSlideId === null) return null;
     if (
       action.kind === "request_changes" &&
       action.optionIds.length === 0 &&
-      comment.trim().length === 0
+      comment.trim().length === 0 &&
+      !parsedSlideComments.comments
     ) {
       return null;
     }
-    return { type: "submit_intent", surfaceId: context.surfaceId, action, comment };
+    return {
+      type: "submit_intent",
+      surfaceId: context.surfaceId,
+      action,
+      comment,
+      ...(parsedSlideComments.comments
+        ? { slideComments: parsedSlideComments.comments }
+        : {}),
+      ...(activeSlideId ? { activeSlideId } : {}),
+    };
   }
 
   return { type, surfaceId: context.surfaceId } as DeckIntent;
 }
 
-export type DeckStatus = "idle" | "ready" | "submitting" | "accepted" | "stale" | "failed";
+export type DeckStatus =
+  | "idle"
+  | "ready"
+  | "submitting"
+  | "accepted"
+  | "stale"
+  | "failed";
 
 export interface DeckSurfaceState {
   surfaceId: string;
@@ -192,7 +288,12 @@ export interface DeckSurfaceState {
 }
 
 export type DeckStateEvent =
-  | { kind: "server_state"; channel: string; allowedActions: DeckActionKind[]; note?: string }
+  | {
+      kind: "server_state";
+      channel: string;
+      allowedActions: DeckActionKind[];
+      note?: string;
+    }
   | { kind: "submitting"; submissionId: string }
   | { kind: "accepted"; note?: string }
   | { kind: "stale"; newestSurfaceId?: string | null; note?: string }
@@ -211,9 +312,15 @@ export function initialDeckState(surfaceId: string): DeckSurfaceState {
 }
 
 /** Terminal states. Nothing re-opens them; a newer surface is a different one. */
-const SETTLED: ReadonlySet<DeckStatus> = new Set<DeckStatus>(["accepted", "stale"]);
+const SETTLED: ReadonlySet<DeckStatus> = new Set<DeckStatus>([
+  "accepted",
+  "stale",
+]);
 
-export function reduceDeckState(state: DeckSurfaceState, event: DeckStateEvent): DeckSurfaceState {
+export function reduceDeckState(
+  state: DeckSurfaceState,
+  event: DeckStateEvent,
+): DeckSurfaceState {
   if (SETTLED.has(state.status) && event.kind === "server_state") {
     // Refusing to rebase is the point: a settled surface describes a document
     // the person already decided about, or one that has been replaced.
@@ -234,9 +341,18 @@ export function reduceDeckState(state: DeckSurfaceState, event: DeckStateEvent):
       };
     }
     case "submitting":
-      return { ...state, status: "submitting", submissionId: event.submissionId };
+      return {
+        ...state,
+        status: "submitting",
+        submissionId: event.submissionId,
+      };
     case "accepted":
-      return { ...state, status: "accepted", allowedActions: [], note: event.note ?? "" };
+      return {
+        ...state,
+        status: "accepted",
+        allowedActions: [],
+        note: event.note ?? "",
+      };
     case "stale":
       return {
         ...state,
@@ -262,6 +378,8 @@ export function toDeckMessage(
     allowedActions?: DeckActionKind[];
     selectedOptionIds?: string[];
     comment?: string;
+    slideComments?: DeckSlideComments;
+    activeSlideId?: string;
     note?: string;
   },
 ): DeckStateMessage {

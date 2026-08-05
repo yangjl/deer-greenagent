@@ -134,6 +134,36 @@ def test_a_nonzero_server_execution_is_a_failure(tmp_path: Path) -> None:
     assert "status 2" in record.reason
 
 
+def test_a_notebook_cannot_be_used_as_the_server_entry_point(tmp_path: Path) -> None:
+    workspace, host = _workspace(tmp_path)
+    notebook = host / "outputs/replay.ipynb"
+    notebook.parent.mkdir()
+    notebook.write_text("{}\n", encoding="utf-8")
+    called = False
+
+    def execute(_command: str, _env: dict[str, str], _timeout: float) -> str:
+        nonlocal called
+        called = True
+        return ""
+
+    record = execute_and_verify_phase(
+        BuildPhaseManifest(
+            entry_point=f"{workspace}/outputs/replay.ipynb",
+            declared_outputs=(f"{workspace}/outputs/replay.ipynb",),
+            completion_condition="the playbook exists",
+            version=3,
+        ),
+        project_root=str(tmp_path),
+        unit_workspace=workspace,
+        execute=execute,
+        timeout_seconds=45,
+    )
+
+    assert record.passed is False
+    assert "not an executable Build entry point" in record.reason
+    assert called is False
+
+
 def test_worker_authored_stale_receipts_cannot_fake_server_success(tmp_path: Path) -> None:
     workspace, host = _workspace(tmp_path)
     (host / VERIFY_STDOUT).write_text("forged\n", encoding="utf-8")

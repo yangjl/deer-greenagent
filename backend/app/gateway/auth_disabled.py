@@ -9,8 +9,20 @@ from types import SimpleNamespace
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 
 AUTH_DISABLED_ENV_VAR = "DEER_FLOW_AUTH_DISABLED"
-AUTH_DISABLED_USER_ID = DEFAULT_USER_ID
-AUTH_DISABLED_USER_EMAIL = "default@test.local"
+MANUAL_PROFILE_ENV_VAR = "DEER_FLOW_MANUAL_PROFILE"
+AUTH_DISABLED_USER_ID_ENV_VAR = "DEER_FLOW_AUTH_DISABLED_USER_ID"
+AUTH_DISABLED_USER_EMAIL_ENV_VAR = "DEER_FLOW_AUTH_DISABLED_USER_EMAIL"
+
+
+def _manual_identity(name: str, default: str) -> str:
+    """Accept an identity override only inside the isolated manual profile."""
+    if os.environ.get(MANUAL_PROFILE_ENV_VAR) != "1":
+        return default
+    return os.environ.get(name, "").strip() or default
+
+
+AUTH_DISABLED_USER_ID = _manual_identity(AUTH_DISABLED_USER_ID_ENV_VAR, DEFAULT_USER_ID)
+AUTH_DISABLED_USER_EMAIL = _manual_identity(AUTH_DISABLED_USER_EMAIL_ENV_VAR, "default@test.local")
 
 AUTH_SOURCE_SESSION = "session"
 AUTH_SOURCE_INTERNAL = "internal"

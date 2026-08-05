@@ -84,6 +84,44 @@ def _is_sha256(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
 
 
+def _normalized_slide_feedback(
+    slide_comments: dict[str, str] | None,
+    active_slide_id: str | None,
+    *,
+    decision_request: dict[str, Any] | None,
+) -> tuple[dict[str, str], str | None]:
+    registered = (decision_request or {}).get("commentable_slides")
+    allowed = {str(item.get("id")) for item in (registered if isinstance(registered, list) else []) if isinstance(item, dict) and isinstance(item.get("id"), str)}
+    raw = slide_comments or {}
+    if not isinstance(raw, dict) or len(raw) > 20:
+        raise ValueError("Slide comments must be a map with at most 20 entries.")
+    comments: dict[str, str] = {}
+    total = 0
+    for raw_id, raw_comment in raw.items():
+        slide_id = str(raw_id).strip()
+        if not isinstance(raw_comment, str):
+            raise ValueError("A slide comment must be text.")
+        comment = raw_comment.strip()
+        if not comment:
+            continue
+        if slide_id not in allowed:
+            raise ValueError(f"Slide comment target {slide_id!r} is not a registered slide on this exact surface.")
+        if len(comment) > 2_000:
+            raise ValueError("A slide comment cannot exceed 2000 characters.")
+        total += len(comment)
+        if total > 10_000:
+            raise ValueError("Slide comments cannot exceed 10000 characters in total.")
+        comments[slide_id] = comment
+    active = active_slide_id.strip() if isinstance(active_slide_id, str) else None
+    if active == "":
+        active = None
+    if not allowed and not comments:
+        active = None
+    if active is not None and active not in allowed:
+        raise ValueError("The active slide must be registered on this exact surface.")
+    return comments, active
+
+
 def _locked_cycle_for_feedback_surface(cycle_id: str, project_id: str):
     """Serialize revision allocation and supersession for one cycle."""
     return (
@@ -147,6 +185,8 @@ class DesignFeedbackOpsMixin:
             "action_kind": row.action_kind,
             "selected_card_ids": list(row.selected_card_ids or []),
             "human_comment": row.human_comment,
+            "slide_comments": dict(row.slide_comments or {}),
+            "active_slide_id": row.active_slide_id,
             "expected_db_revision": row.expected_db_revision,
             "expected_evidence": row.expected_evidence,
             "expected_deck_hash": row.expected_deck_hash,
@@ -478,6 +518,8 @@ class DesignFeedbackOpsMixin:
         expected_evidence: dict[str, Any] | None,
         expected_deck_hash: str,
         difficulty_override: str | None = None,
+        slide_comments: dict[str, str] | None = None,
+        active_slide_id: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], bool]:
         """Validate and reserve one single-use stage-deck intent.
 
@@ -510,7 +552,6 @@ class DesignFeedbackOpsMixin:
             "expected_deck_hash": expected_deck_hash,
             "difficulty_override": difficulty_override,
         }
-        payload_hash = hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
         action_group = _ACTION_GROUP[action_kind]
 
         async with self._sf() as session:  # type: ignore[attr-defined]
@@ -533,6 +574,19 @@ class DesignFeedbackOpsMixin:
                 raise DesignFeedbackConflict("This deck can only answer in the conversation where the meeting started.")
             if surface.deck_content_hash != expected_deck_hash:
                 raise DesignFeedbackConflict("The deck bytes no longer match the registered feedback surface.")
+            try:
+                comments, active_slide = _normalized_slide_feedback(
+                    slide_comments,
+                    active_slide_id,
+                    decision_request=surface.decision_request,
+                )
+            except ValueError as exc:
+                raise DbtlWorkflowRefused(str(exc)) from exc
+            has_written_feedback = bool(comment or comments)
+
+            normalized["slide_comments"] = comments
+            normalized["active_slide_id"] = active_slide
+            payload_hash = hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
 
             existing = await session.scalar(
                 select(DbtlDesignFeedbackActionRow).where(
@@ -608,7 +662,7 @@ class DesignFeedbackOpsMixin:
                 # how many actions it takes to record one. High stakes is the
                 # one place it still costs the reviewer something: their own
                 # words, on every approving or ending verdict.
-                if action_kind in {"advance", "approve", "request_changes", "reject"} and effective_difficulty == "high_stakes" and not comment:
+                if action_kind in {"advance", "approve", "request_changes", "reject"} and effective_difficulty == "high_stakes" and not has_written_feedback:
                     raise DesignFeedbackConflict("A high-stakes Design verdict requires the reviewer's written rationale.")
                 evidence = expected_evidence or {}
                 exact = {
@@ -630,7 +684,7 @@ class DesignFeedbackOpsMixin:
                     issue_ids = {str(value) for value in request_payload.get("review_issue_ids", []) if isinstance(value, str)}
                     if card_ids and not set(card_ids) <= issue_ids:
                         raise DesignFeedbackConflict("Request changes must select issues shown in this deck.")
-                    if not card_ids and not comment:
+                    if not card_ids and not has_written_feedback:
                         raise DesignFeedbackConflict("Request changes requires a selected issue or a comment.")
                 if action_kind in {"advance", "park"} and card_ids:
                     raise DesignFeedbackConflict("A progressive route action cannot select issue cards.")
@@ -653,6 +707,8 @@ class DesignFeedbackOpsMixin:
                             "action_kind": existing.action_kind,
                             "selected_card_ids": list(existing.selected_card_ids or []),
                             "human_comment": existing.human_comment or "",
+                            "slide_comments": dict(existing.slide_comments or {}),
+                            "active_slide_id": existing.active_slide_id,
                             "expected_db_revision": existing.expected_db_revision,
                             "payload_hash": existing.payload_hash,
                             "run_id": existing.run_id,
@@ -664,6 +720,8 @@ class DesignFeedbackOpsMixin:
                     existing.payload_hash = payload_hash
                     existing.selected_card_ids = card_ids
                     existing.human_comment = comment or None
+                    existing.slide_comments = comments
+                    existing.active_slide_id = active_slide
                     existing.expected_db_revision = expected_db_revision
                     existing.expected_evidence = expected_evidence
                     existing.status = "pending"
@@ -691,6 +749,8 @@ class DesignFeedbackOpsMixin:
                 payload_hash=payload_hash,
                 selected_card_ids=card_ids,
                 human_comment=comment or None,
+                slide_comments=comments,
+                active_slide_id=active_slide,
                 expected_db_revision=expected_db_revision,
                 expected_evidence=expected_evidence,
                 expected_deck_hash=expected_deck_hash,

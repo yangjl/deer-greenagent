@@ -22,7 +22,9 @@ import pytest
 from deerflow.agents.dbtl.live_stage.build_review import execution_bundle
 from deerflow.dbtl.build_deck import MAX_FIGURE_BYTES, embed_figures, render_build_deck
 from deerflow.dbtl.build_execution import BuildExecutionBundle, BuildFigure, KeyOutcome, parse_execution_bundle
+from deerflow.dbtl.build_fulfillment import derive_build_fulfillment
 from deerflow.dbtl.build_summary import MAX_SUMMARY_FIGURES, BuildReviewPackage, SelectedFigure, parse_build_summary, render_summary_markdown
+from deerflow.dbtl.deliverables import parse_deliverable_manifest
 
 PUBLISHED = {
     "figs/roc.png": "/mnt/user-data/outputs/dbtl/c1/build/artifacts/a1/abc-roc.png",
@@ -43,6 +45,31 @@ def _bundle(**overrides) -> BuildExecutionBundle:
         "rerun_procedure": "uv run python fit.py --seed 7",
     }
     return BuildExecutionBundle(**{**base, **overrides})
+
+
+def _fulfillment():
+    manifest = parse_deliverable_manifest(
+        {
+            "deliverables": [
+                {
+                    "id": "replay-notebook",
+                    "title": "Human replay notebook",
+                    "kind": "notebook",
+                    "required": True,
+                    "expected_paths": ["outputs/replay.ipynb"],
+                    "acceptance_criteria": ["Runs cleanly"],
+                    "validation": "Execute all cells.",
+                    "capabilities": ["python"],
+                }
+            ]
+        },
+        cycle_class="computational",
+    )
+    return derive_build_fulfillment(
+        manifest,
+        published=[{"source_path": "outputs/replay.ipynb", "content_hash": "f" * 64}],
+        declarations=[],
+    )
 
 
 class TestDeclarationsAreVerifiedNotTrusted:
@@ -333,6 +360,18 @@ class TestTheSummarizerAddsToEvidenceAndNeverReplacesIt:
 
 
 class TestTheReviewedDocumentLeadsWithTheResult:
+    def test_every_design_deliverable_is_visible_in_the_reviewed_document(self) -> None:
+        package = parse_build_summary(
+            json.dumps({"headline": "Fitted."}),
+            bundle=_bundle(deliverable_fulfillment=_fulfillment()),
+        ).package
+
+        markdown = render_summary_markdown(package, title="Build review")
+
+        assert "Deliverables" in markdown
+        assert "replay-notebook" in markdown
+        assert "delivered" in markdown
+
     def test_deviations_are_printed_before_the_rerun_notes(self) -> None:
         markdown = render_summary_markdown(
             BuildReviewPackage(headline="Fitted.", deviations=("Dropped site 4.",), rerun_procedure="python fit.py"),
@@ -409,6 +448,20 @@ class TestTheDeckHasNoSentenceOfItsOwn:
         html = self._render(BuildReviewPackage(headline="Fitted.", deviations=("Dropped site 4.",), rerun_procedure="python fit.py"))
 
         assert html.index("Key outcomes") < html.index("Deviations and limitations") < html.index("How to re-run it")
+
+    def test_deliverable_accounting_has_its_own_slide(self) -> None:
+        package = parse_build_summary(
+            json.dumps({"headline": "Fitted."}),
+            bundle=_bundle(deliverable_fulfillment=_fulfillment()),
+        ).package
+
+        html = self._render(package)
+
+        assert "Deliverables" in html
+        assert "replay-notebook — delivered" in html
+        assert 'data-slide-id="build-deliverables"' in html
+        assert 'data-slide-id="build-outcomes"' in html
+        assert 'data-slide-id="build-limitations"' in html
 
     def test_it_is_self_contained(self) -> None:
         html = self._render(

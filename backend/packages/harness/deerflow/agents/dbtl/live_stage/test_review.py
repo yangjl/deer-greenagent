@@ -50,7 +50,12 @@ def validated_test_assessment(
         if not isinstance(raw_checks, Sequence) or isinstance(raw_checks, (str, bytes)):
             continue
         try:
-            metrics = [HeadlineMetric(**dict(item)) for item in raw_metrics if isinstance(item, Mapping)]
+            # Stored assessments are the server's own ``as_dict`` projection,
+            # which includes derived booleans such as ``meets_threshold``.
+            # Reconstruct only constructor fields so a card remains answerable
+            # after refresh instead of rejecting the server's own projection.
+            metric_fields = {"name", "value", "threshold", "criterion", "plausible_max", "unit"}
+            metrics = [HeadlineMetric(**{key: value for key, value in dict(item).items() if key in metric_fields}) for item in raw_metrics if isinstance(item, Mapping)]
             checks = [ValidityCheck(**dict(item)) for item in raw_checks if isinstance(item, Mapping)]
             if rerun is not None:
                 checks = [item for item in checks if item.check is not ValidityCheckName.REPRODUCIBILITY]

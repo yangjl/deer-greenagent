@@ -39,6 +39,7 @@ from app.gateway.memory_scope_service import resolve_scope_bindings
 from app.gateway.project_scope import ensure_project_root
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import start_run
+from deerflow.agents.dbtl.live_stage.test_review import TestReviewService
 from deerflow.agents.memory.scopes import bind_scope, publication_scope
 from deerflow.config.app_config import AppConfig
 from deerflow.dbtl import (
@@ -149,6 +150,16 @@ def _surface_meeting_gate(
 
 def _route_available(gate: dict[str, Any], slug: str) -> bool:
     return any(str(route.get("slug") or "") == slug and not bool(route.get("blocked")) for route in gate.get("routes", []) if isinstance(route, dict))
+
+
+def _slide_feedback_text(surface: dict[str, Any], comments: dict[str, str]) -> str:
+    """Render validated slide notes without losing their server-owned labels."""
+    request_payload = surface.get("decision_request")
+    registered = request_payload.get("commentable_slides") if isinstance(request_payload, dict) else []
+    if not isinstance(registered, list):
+        registered = []
+    titles = {str(item.get("id") or ""): str(item.get("title") or item.get("id") or "Slide") for item in registered if isinstance(item, dict)}
+    return "\n".join(f'Slide "{titles.get(slide_id, slide_id)}" [{slide_id}]: {comment}' for slide_id, comment in comments.items())
 
 
 def _exploratory_actions(surface_stage: str) -> list[str]:
@@ -459,11 +470,33 @@ class DesignFeedbackActionRequest(BaseModel):
     version: Literal[1]
     action: DesignFeedbackAction
     comment: str = Field(default="", max_length=4_000)
+    slide_comments: dict[str, str] = Field(default_factory=dict, max_length=20)
+    active_slide_id: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
     client_submission_id: str = Field(min_length=1, max_length=128)
     originating_thread_id: str = Field(min_length=1, max_length=64)
     expected_db_revision: int = Field(ge=1)
     expected_evidence: DesignFeedbackEvidence | None = None
     expected_deck_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("slide_comments")
+    @classmethod
+    def slide_comments_are_bounded(cls, values: dict[str, str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        total = 0
+        for raw_id, raw_comment in values.items():
+            slide_id = raw_id.strip()
+            if not slide_id or len(slide_id) > 64 or not slide_id.replace("-", "").replace("_", "").isalnum():
+                raise ValueError("slide comment ids must be bounded slugs")
+            comment = raw_comment.strip()
+            if not comment:
+                continue
+            if len(comment) > 2_000:
+                raise ValueError("each slide comment is limited to 2000 characters")
+            total += len(comment)
+            if total > 10_000:
+                raise ValueError("slide comments are limited to 10000 characters in total")
+            normalized[slide_id] = comment
+        return normalized
 
 
 class ArtifactCreateRequest(BaseModel):
@@ -893,7 +926,7 @@ async def _design_feedback_read_model(
                     else:
                         allowed_actions = ["submit_for_review"]
                 elif stage_status == "awaiting_review":
-                    allowed_actions = ["approve", "request_changes", "reject"]
+                    allowed_actions = ["choose_route"] if surface_stage == "test" else ["approve", "request_changes", "reject"]
                     if gate is not None and surface_stage == "design" and "stage_park" not in groups:
                         allowed_actions.append("park")
                     allowed_actions.extend(_exploratory_actions(surface_stage))
@@ -1316,6 +1349,8 @@ async def apply_design_feedback_action(
             expected_evidence=expected_evidence,
             expected_deck_hash=body.expected_deck_hash,
             difficulty_override=body.action.difficulty_override,
+            slide_comments=body.slide_comments,
+            active_slide_id=body.active_slide_id,
         )
     except Exception as exc:  # noqa: BLE001
         _feedback_event(
@@ -1332,6 +1367,10 @@ async def apply_design_feedback_action(
 
     action_id = str(action["client_submission_id"])
     surface_stage = str(surface.get("stage") or "design")
+    recorded_slide_comments = {str(key): str(value) for key, value in dict(action.get("slide_comments") or {}).items()}
+    active_slide_id = str(action.get("active_slide_id") or "") or None
+    slide_feedback = _slide_feedback_text(surface, recorded_slide_comments)
+    written_feedback = "\n\n".join(value for value in (body.comment.strip(), slide_feedback) if value)
 
     async def round_has_follow_up() -> bool:
         latest = await repo.latest_stage_feedback_surface(
@@ -1453,8 +1492,8 @@ async def apply_design_feedback_action(
                     "value": answer,
                 }
             visible_answer = answer
-            if body.action.kind == "chair_option" and body.comment.strip():
-                visible_answer = f"{answer}\n\nComment: {body.comment.strip()}"
+            if body.action.kind == "chair_option" and written_feedback:
+                visible_answer = f"{answer}\n\nReviewer feedback:\n{written_feedback}"
             record = await start_run(
                 RunCreateRequest(
                     input={
@@ -1493,7 +1532,7 @@ async def apply_design_feedback_action(
                 surface_id=surface_id,
                 design_round=int(surface.get("design_round") or 1),
                 choice_label=choice_label,
-                comment=body.comment.strip(),
+                comment=written_feedback,
             )
             failed_attempts = receipt.get("failed_attempts")
             receipt = {
@@ -1543,7 +1582,7 @@ async def apply_design_feedback_action(
                                 # identity is what lets this run's own presented
                                 # artifacts and cards reach durable chat history.
                                 "id": f"dbtl-review-meeting__{uuid4().hex}",
-                                "content": (f"Convene the {surface_stage.title()} review meeting for the recorded evidence." + (f"\n\n{body.comment.strip()}" if body.comment.strip() else "")),
+                                "content": (f"Convene the {surface_stage.title()} review meeting for the recorded evidence." + (f"\n\n{written_feedback}" if written_feedback else "")),
                                 "additional_kwargs": {
                                     "hide_from_ui": True,
                                     "dbtl_design_kickoff": True,
@@ -1654,7 +1693,7 @@ async def apply_design_feedback_action(
             else None
         )
         if body.action.kind == "advance":
-            if effective_difficulty == "high_stakes" and not body.comment.strip():
+            if effective_difficulty == "high_stakes" and not written_feedback:
                 raise DesignFeedbackConflict("A high-stakes approval requires the reviewer's written rationale.")
             if not _route_available(transition_gate or {}, "advance"):
                 raise DesignFeedbackConflict("Continue to Build is currently blocked.")
@@ -1663,7 +1702,7 @@ async def apply_design_feedback_action(
                 project_id=project_id,
                 stage="design",
                 decision="approve",
-                rationale=body.comment.strip() or "Approved through the one-action progressive gate.",
+                rationale=written_feedback or "Approved through the one-action progressive gate.",
                 expected_db_revision=body.expected_db_revision,
                 reviewer_user_id=user_id,
                 reviewer_project_role=str(project["current_user_role"]),
@@ -1676,8 +1715,10 @@ async def apply_design_feedback_action(
                     "selected_action": "advance",
                     "selected_card_ids": [],
                     "human_comment": body.comment.strip() or None,
-                    "rationale_projection": body.comment.strip() or "Approved through the one-action progressive gate.",
-                    "rationale_source": "human" if body.comment.strip() else "server_projection",
+                    "slide_comments": recorded_slide_comments,
+                    "active_slide_id": active_slide_id,
+                    "rationale_projection": written_feedback or "Approved through the one-action progressive gate.",
+                    "rationale_source": "human" if written_feedback else "server_projection",
                 },
                 progressive_transition=progressive_transition,
                 auto_submit=True,
@@ -1773,14 +1814,60 @@ async def apply_design_feedback_action(
                     "human_override": human_override,
                 }
         if body.action.kind in {
-            "choose_route",
             "recommend_promotion",
             "close_without_candidate",
         }:
             raise DesignFeedbackConflict(f"The {body.action.kind.replace('_', ' ')} intent requires its stage-specific review record.")
-        if effective_difficulty == "high_stakes" and not body.comment.strip():
+        if body.action.kind == "choose_route":
+            if surface_stage != "test" or len(body.action.option_ids) != 1:
+                raise DesignFeedbackConflict("A Test route decision must name exactly one server-offered route.")
+            service = TestReviewService(
+                repo=repo,
+                app_config=config,
+                runtime_reader=lambda _config: {
+                    "user_id": user_id,
+                    "project_role": str(project["current_user_role"]),
+                },
+            )
+            snapshot = await service.snapshot(project_id=project_id, cycle_id=cycle_id)
+            if snapshot is None:
+                raise DesignFeedbackConflict("Test no longer has complete reviewable evidence.")
+            recommendation = body.action.option_ids[0]
+            allowed = {str(item) for item in dict(snapshot.get("evaluation") or {}).get("allowed_recommendations", [])}
+            if recommendation not in allowed:
+                raise DesignFeedbackConflict("That route is not compatible with the server-computed Test outcome.")
+            recorded = await service.record_outcome(
+                project_id=project_id,
+                cycle_id=cycle_id,
+                snapshot=snapshot,
+                recommendation=recommendation,
+                config={},
+                idempotency_key=workflow_key,
+            )
+            cycle = dict(recorded.get("cycle") or {})
+            receipt = {
+                "kind": "choose_route",
+                "route": recommendation,
+                "db_revision": cycle.get("db_revision"),
+                "message": f"Test outcome recorded. Route: {recommendation.replace('_', ' ')}.",
+            }
+            if recommendation == "advance_to_learn" and cycle.get("state") == "learn":
+                updated, _handoff = await finish_approval_handoff(
+                    cycle,
+                    approved_stage="test",
+                    receipt=receipt,
+                )
+                return {**updated, "cycle": cycle, "replayed": replayed}
+            updated = await repo.update_stage_feedback_action(
+                action_id,
+                project_id=project_id,
+                status="review_recorded",
+                receipt=receipt,
+            )
+            return {**updated, "cycle": cycle, "replayed": replayed}
+        if effective_difficulty == "high_stakes" and not written_feedback:
             raise DesignFeedbackConflict(f"A high-stakes {surface_stage.title()} verdict requires the reviewer's written rationale.")
-        if body.action.kind == "reject" and not body.comment.strip():
+        if body.action.kind == "reject" and not written_feedback:
             raise DesignFeedbackConflict(f"{body.action.kind.replace('_', ' ').title()} requires a comment.")
         if body.action.kind == "learn_exploratory":
             default_rationale = "Approved from the registered Build feedback deck and closed without retention qualification."
@@ -1788,7 +1875,7 @@ async def apply_design_feedback_action(
             default_rationale = f"Approved from the registered {surface_stage.title()} feedback deck."
         else:
             default_rationale = f"Selected contested {surface_stage.title()} issues require refinement."
-        rationale = body.comment.strip() or default_rationale
+        rationale = written_feedback or default_rationale
         rationale_projection = rationale
         if body.action.kind == "request_changes":
             target = f"the recorded issues {', '.join(body.action.option_ids)}" if body.action.option_ids else f"the {surface_stage.title()} evidence described in the reviewer's comment"
@@ -1801,8 +1888,10 @@ async def apply_design_feedback_action(
             "selected_action": body.action.kind,
             "selected_card_ids": body.action.option_ids,
             "human_comment": body.comment.strip() or None,
+            "slide_comments": recorded_slide_comments,
+            "active_slide_id": active_slide_id,
             "rationale_projection": rationale_projection,
-            "rationale_source": "server_projection",
+            "rationale_source": "human" if written_feedback else "server_projection",
         }
         auto_submit = False
         if body.action.kind in {"approve", "learn_exploratory", "request_changes"} and transition_gate is not None:

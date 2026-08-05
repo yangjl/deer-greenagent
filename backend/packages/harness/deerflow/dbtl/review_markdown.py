@@ -223,6 +223,40 @@ def render_review_markdown(
             authored,
         ]
 
+    deliverable_manifest = payload.get("deliverable_manifest")
+    if isinstance(deliverable_manifest, Mapping):
+        deliverables = [item for item in _as_list(deliverable_manifest.get("deliverables")) if isinstance(item, Mapping)]
+        if deliverables:
+            lines += ["", "## Deliverables", ""]
+            for item in deliverables:
+                title = str(item.get("title") or item.get("id") or "Deliverable").strip()
+                kind = str(item.get("kind") or "other").strip()
+                required = "required" if item.get("required") is True else "optional"
+                lines += [f"### {title}", f"`{str(item.get('id') or '').strip()}` · {kind} · {required}"]
+                paths = [str(value).strip() for value in _as_list(item.get("expected_paths")) if str(value).strip()]
+                if paths:
+                    lines.append("- Expected: " + ", ".join(f"`{path}`" for path in paths))
+                criteria = [str(value).strip() for value in _as_list(item.get("acceptance_criteria")) if str(value).strip()]
+                if criteria:
+                    lines.append("- Acceptance: " + "; ".join(criteria))
+                validation = str(item.get("validation") or "").strip()
+                if validation:
+                    lines.append(f"- Test: {validation}")
+                lines.append("")
+
+    deliverable_audit = payload.get("deliverable_audit")
+    if isinstance(deliverable_audit, Mapping):
+        audit_items = [item for item in _as_list(deliverable_audit.get("items")) if isinstance(item, Mapping)]
+        if audit_items:
+            lines += ["", "## Deliverable audit", ""]
+            for item in audit_items:
+                item_id = str(item.get("deliverable_id") or "Deliverable").strip()
+                verdict = str(item.get("verdict") or "not_testable").strip()
+                lines.append(f"- **{item_id}**: {verdict}")
+                notes = str(item.get("notes") or "").strip()
+                if notes:
+                    lines.append(f"  - {notes}")
+
     results = [r for r in _as_list(payload.get("results")) if isinstance(r, Mapping)]
     rejected = [str(item).strip() for item in _as_list(payload.get("rejected")) if str(item).strip()]
     usage = payload.get("token_usage")

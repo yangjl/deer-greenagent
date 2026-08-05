@@ -39,26 +39,112 @@ function submitIntent(overrides: Record<string, unknown> = {}) {
 
 describe("parseDeckIntent", () => {
   it("accepts a well-formed ready announcement", () => {
-    const parsed = parseDeckIntent(readyIntent(), { surfaceId: SURFACE_ID, channel: null });
+    const parsed = parseDeckIntent(readyIntent(), {
+      surfaceId: SURFACE_ID,
+      channel: null,
+    });
 
     expect(parsed).not.toBeNull();
     expect(parsed?.type).toBe("ready");
   });
 
   it("accepts a submit intent carrying one option and a comment", () => {
-    const parsed = parseDeckIntent(submitIntent(), { surfaceId: SURFACE_ID, channel: CHANNEL });
+    const parsed = parseDeckIntent(submitIntent(), {
+      surfaceId: SURFACE_ID,
+      channel: CHANNEL,
+    });
 
     expect(parsed?.type).toBe("submit_intent");
-    if (parsed?.type !== "submit_intent") throw new Error("expected submit_intent");
+    if (parsed?.type !== "submit_intent")
+      throw new Error("expected submit_intent");
     expect(parsed.action.optionIds).toEqual(["family_holdout"]);
-    expect(parsed.comment).toBe("Keep one site external if sample size allows.");
+    expect(parsed.comment).toBe(
+      "Keep one site external if sample size allows.",
+    );
+  });
+
+  it("keeps bounded slide comments in deck order", () => {
+    const parsed = parseDeckIntent(
+      submitIntent({
+        slideComments: {
+          objectives: "Make the primary outcome explicit.",
+          limitations: "Name the small-cohort limitation.",
+          empty_note: "   ",
+        },
+        activeSlideId: "limitations",
+      }),
+      { surfaceId: SURFACE_ID, channel: CHANNEL },
+    );
+
+    if (parsed?.type !== "submit_intent")
+      throw new Error("expected submit_intent");
+    expect(Object.entries(parsed.slideComments ?? {})).toEqual([
+      ["objectives", "Make the primary outcome explicit."],
+      ["limitations", "Name the small-cohort limitation."],
+    ]);
+    expect(parsed.activeSlideId).toBe("limitations");
+  });
+
+  it("keeps legacy submit intents free of invented slide fields", () => {
+    const parsed = parseDeckIntent(submitIntent(), {
+      surfaceId: SURFACE_ID,
+      channel: CHANNEL,
+    });
+
+    if (parsed?.type !== "submit_intent")
+      throw new Error("expected submit_intent");
+    expect(parsed.slideComments).toBeUndefined();
+    expect(parsed.activeSlideId).toBeUndefined();
+  });
+
+  it.each([
+    [
+      "more than twenty comments",
+      Object.fromEntries(
+        Array.from({ length: 21 }, (_, index) => [`slide-${index}`, "note"]),
+      ),
+    ],
+    ["a non-slug slide id", { "slide one": "note" }],
+    ["a non-string comment", { objectives: { text: "note" } }],
+    [
+      "a comment over two thousand characters",
+      { objectives: "x".repeat(2_001) },
+    ],
+    [
+      "comments over ten thousand characters in total",
+      Object.fromEntries(
+        Array.from({ length: 6 }, (_, index) => [
+          `slide-${index}`,
+          "x".repeat(2_000),
+        ]),
+      ),
+    ],
+  ])("refuses slide comments with %s", (_label, slideComments) => {
+    expect(
+      parseDeckIntent(submitIntent({ slideComments }), {
+        surfaceId: SURFACE_ID,
+        channel: CHANNEL,
+      }),
+    ).toBeNull();
+  });
+
+  it("refuses a non-slug active slide id", () => {
+    expect(
+      parseDeckIntent(submitIntent({ activeSlideId: "slide one" }), {
+        surfaceId: SURFACE_ID,
+        channel: CHANNEL,
+      }),
+    ).toBeNull();
   });
 
   // Each of these is a way a hostile or confused page could try to be mistaken
   // for the deck. None of them may parse.
   it.each([
     ["a foreign source", readyIntent({ source: "some-other-widget" })],
-    ["a different protocol", readyIntent({ protocol: DECK_PROTOCOL_VERSION + 1 })],
+    [
+      "a different protocol",
+      readyIntent({ protocol: DECK_PROTOCOL_VERSION + 1 }),
+    ],
     ["another surface", readyIntent({ surfaceId: "dfs-someone-elses" })],
     ["an unknown type", readyIntent({ type: "approve_everything" })],
     ["a missing type", readyIntent({ type: undefined })],
@@ -66,15 +152,24 @@ describe("parseDeckIntent", () => {
     ["null", null],
     ["an array", []],
   ])("refuses %s", (_label, payload) => {
-    expect(parseDeckIntent(payload, { surfaceId: SURFACE_ID, channel: null })).toBeNull();
+    expect(
+      parseDeckIntent(payload, { surfaceId: SURFACE_ID, channel: null }),
+    ).toBeNull();
   });
 
   it("refuses a submit intent that does not carry the issued channel", () => {
-    expect(parseDeckIntent(submitIntent({ channel: "chan-guessed" }), { surfaceId: SURFACE_ID, channel: CHANNEL })).toBeNull();
+    expect(
+      parseDeckIntent(submitIntent({ channel: "chan-guessed" }), {
+        surfaceId: SURFACE_ID,
+        channel: CHANNEL,
+      }),
+    ).toBeNull();
   });
 
   it("refuses a submit intent before any channel has been issued", () => {
-    expect(parseDeckIntent(submitIntent(), { surfaceId: SURFACE_ID, channel: null })).toBeNull();
+    expect(
+      parseDeckIntent(submitIntent(), { surfaceId: SURFACE_ID, channel: null }),
+    ).toBeNull();
   });
 
   it("refuses an unknown action kind", () => {
@@ -82,7 +177,9 @@ describe("parseDeckIntent", () => {
       action: { kind: "delete_everything", optionIds: [] },
     });
 
-    expect(parseDeckIntent(payload, { surfaceId: SURFACE_ID, channel: CHANNEL })).toBeNull();
+    expect(
+      parseDeckIntent(payload, { surfaceId: SURFACE_ID, channel: CHANNEL }),
+    ).toBeNull();
   });
 
   it("accepts formal review actions with their bounded shapes", () => {
@@ -148,6 +245,20 @@ describe("parseDeckIntent", () => {
     ).not.toBeNull();
   });
 
+  it("accepts a change request expressed only as slide comments", () => {
+    const changes = submitIntent({
+      action: { kind: "request_changes", optionIds: [] },
+      comment: "",
+      slideComments: {
+        objectives: "State the primary outcome before approval.",
+      },
+    });
+
+    expect(
+      parseDeckIntent(changes, { surfaceId: SURFACE_ID, channel: CHANNEL }),
+    ).not.toBeNull();
+  });
+
   it("refuses a change request with neither an issue nor a comment", () => {
     const changes = submitIntent({
       action: { kind: "request_changes", optionIds: [] },
@@ -160,9 +271,13 @@ describe("parseDeckIntent", () => {
   });
 
   it("refuses a chair option that selects nothing", () => {
-    const payload = submitIntent({ action: { kind: "chair_option", optionIds: [] } });
+    const payload = submitIntent({
+      action: { kind: "chair_option", optionIds: [] },
+    });
 
-    expect(parseDeckIntent(payload, { surfaceId: SURFACE_ID, channel: CHANNEL })).toBeNull();
+    expect(
+      parseDeckIntent(payload, { surfaceId: SURFACE_ID, channel: CHANNEL }),
+    ).toBeNull();
   });
 
   it("refuses a chair option that selects more than one thing", () => {
@@ -170,33 +285,48 @@ describe("parseDeckIntent", () => {
       action: { kind: "chair_option", optionIds: ["a", "b"] },
     });
 
-    expect(parseDeckIntent(payload, { surfaceId: SURFACE_ID, channel: CHANNEL })).toBeNull();
+    expect(
+      parseDeckIntent(payload, { surfaceId: SURFACE_ID, channel: CHANNEL }),
+    ).toBeNull();
   });
 
   it("refuses option ids that are not plain slugs", () => {
     const payload = submitIntent({
-      action: { kind: "chair_option", optionIds: ["<script>alert(1)</script>"] },
+      action: {
+        kind: "chair_option",
+        optionIds: ["<script>alert(1)</script>"],
+      },
     });
 
-    expect(parseDeckIntent(payload, { surfaceId: SURFACE_ID, channel: CHANNEL })).toBeNull();
+    expect(
+      parseDeckIntent(payload, { surfaceId: SURFACE_ID, channel: CHANNEL }),
+    ).toBeNull();
   });
 
   it("bounds an over-long comment rather than accepting it whole", () => {
     const payload = submitIntent({ comment: "x".repeat(10_000) });
 
-    const parsed = parseDeckIntent(payload, { surfaceId: SURFACE_ID, channel: CHANNEL });
-
-    if (parsed?.type !== "submit_intent") throw new Error("expected submit_intent");
-    expect(parsed.comment.length).toBeLessThan(10_000);
-  });
-
-  it("treats a non-string comment as absent rather than coercing it", () => {
-    const parsed = parseDeckIntent(submitIntent({ comment: { toString: "nope" } }), {
+    const parsed = parseDeckIntent(payload, {
       surfaceId: SURFACE_ID,
       channel: CHANNEL,
     });
 
-    if (parsed?.type !== "submit_intent") throw new Error("expected submit_intent");
+    if (parsed?.type !== "submit_intent")
+      throw new Error("expected submit_intent");
+    expect(parsed.comment.length).toBeLessThan(10_000);
+  });
+
+  it("treats a non-string comment as absent rather than coercing it", () => {
+    const parsed = parseDeckIntent(
+      submitIntent({ comment: { toString: "nope" } }),
+      {
+        surfaceId: SURFACE_ID,
+        channel: CHANNEL,
+      },
+    );
+
+    if (parsed?.type !== "submit_intent")
+      throw new Error("expected submit_intent");
     expect(parsed.comment).toBe("");
   });
 });
@@ -204,7 +334,9 @@ describe("parseDeckIntent", () => {
 describe("isDeckIntent", () => {
   it("recognizes the envelope without validating the body", () => {
     expect(isDeckIntent(readyIntent())).toBe(true);
-    expect(isDeckIntent({ source: "scroll-restoration", type: "save" })).toBe(false);
+    expect(isDeckIntent({ source: "scroll-restoration", type: "save" })).toBe(
+      false,
+    );
   });
 });
 
@@ -246,7 +378,10 @@ describe("reduceDeckState", () => {
       allowedActions: ["chair_option"],
     });
 
-    const pending = reduceDeckState(ready, { kind: "submitting", submissionId: "sub-1" });
+    const pending = reduceDeckState(ready, {
+      kind: "submitting",
+      submissionId: "sub-1",
+    });
 
     expect(pending.status).toBe("submitting");
     expect(pending.submissionId).toBe("sub-1");
@@ -254,11 +389,18 @@ describe("reduceDeckState", () => {
 
   it("reuses the same submission id after a failure so a retry is not a second answer", () => {
     const pending = reduceDeckState(
-      reduceDeckState(base, { kind: "server_state", channel: CHANNEL, allowedActions: ["chair_option"] }),
+      reduceDeckState(base, {
+        kind: "server_state",
+        channel: CHANNEL,
+        allowedActions: ["chair_option"],
+      }),
       { kind: "submitting", submissionId: "sub-1" },
     );
 
-    const failed = reduceDeckState(pending, { kind: "failed", note: "Network error." });
+    const failed = reduceDeckState(pending, {
+      kind: "failed",
+      note: "Network error.",
+    });
 
     expect(failed.status).toBe("failed");
     expect(failed.submissionId).toBe("sub-1");
@@ -266,11 +408,18 @@ describe("reduceDeckState", () => {
 
   it("freezes after acceptance", () => {
     const pending = reduceDeckState(
-      reduceDeckState(base, { kind: "server_state", channel: CHANNEL, allowedActions: ["chair_option"] }),
+      reduceDeckState(base, {
+        kind: "server_state",
+        channel: CHANNEL,
+        allowedActions: ["chair_option"],
+      }),
       { kind: "submitting", submissionId: "sub-1" },
     );
 
-    const accepted = reduceDeckState(pending, { kind: "accepted", note: "Recorded." });
+    const accepted = reduceDeckState(pending, {
+      kind: "accepted",
+      note: "Recorded.",
+    });
 
     expect(accepted.status).toBe("accepted");
     expect(accepted.allowedActions).toEqual([]);
@@ -283,7 +432,10 @@ describe("reduceDeckState", () => {
       allowedActions: ["chair_option"],
     });
 
-    const stale = reduceDeckState(ready, { kind: "stale", newestSurfaceId: "dfs-newer" });
+    const stale = reduceDeckState(ready, {
+      kind: "stale",
+      newestSurfaceId: "dfs-newer",
+    });
 
     expect(stale.status).toBe("stale");
     expect(stale.allowedActions).toEqual([]);
@@ -294,7 +446,11 @@ describe("reduceDeckState", () => {
     // A rejected-for-staleness response must never be retried against the new
     // revision: the person decided about a specific document.
     const stale = reduceDeckState(
-      reduceDeckState(base, { kind: "server_state", channel: CHANNEL, allowedActions: ["chair_option"] }),
+      reduceDeckState(base, {
+        kind: "server_state",
+        channel: CHANNEL,
+        allowedActions: ["chair_option"],
+      }),
       { kind: "stale", newestSurfaceId: "dfs-newer" },
     );
 
@@ -316,6 +472,8 @@ describe("toDeckMessage", () => {
       allowedActions: ["chair_option"],
       selectedOptionIds: ["nam_ril_panel"],
       comment: "Restore this answer.",
+      slideComments: { objectives: "Restore this slide note." },
+      activeSlideId: "objectives",
       note: "Choose an option.",
     });
 
@@ -326,10 +484,17 @@ describe("toDeckMessage", () => {
     expect(message.type).toBe("initialize");
     expect(message.selectedOptionIds).toEqual(["nam_ril_panel"]);
     expect(message.comment).toBe("Restore this answer.");
+    expect(message.slideComments).toEqual({
+      objectives: "Restore this slide note.",
+    });
+    expect(message.activeSlideId).toBe("objectives");
   });
 
   it("carries no endpoint, token, or credential", () => {
-    const message = toDeckMessage(SURFACE_ID, CHANNEL, { type: "accepted", note: "Recorded." });
+    const message = toDeckMessage(SURFACE_ID, CHANNEL, {
+      type: "accepted",
+      note: "Recorded.",
+    });
     const serialized = JSON.stringify(message);
 
     expect(serialized).not.toContain("/api/");

@@ -93,7 +93,25 @@ async def _dispatcher(units, *, budget):
       "limitations": [],
       "quality_checks": [{"name": "threshold stated", "passed": true, "detail": ""}],
       "recommended_next_actions": ["Submit for human review."],
-      "provenance": {"inputs_examined": ["cycle metadata"]}
+      "provenance": {
+        "inputs_examined": ["cycle metadata"],
+        "deliverable_manifest": {
+          "version": 1,
+          "cycle_class": "computational",
+          "deliverables": [
+            {
+              "id": "replay-notebook",
+              "title": "Replay notebook",
+              "kind": "notebook",
+              "required": true,
+              "acceptance_criteria": ["Runs from a clean kernel."],
+              "expected_paths": ["outputs/replay.ipynb"],
+              "validation": "Execute every cell from a clean kernel.",
+              "capabilities": ["notebook_execution"]
+            }
+          ]
+        }
+      }
     }"""
     return [DispatchOutcome(unit_id=unit.unit_id, text=text) for unit in units]
 
@@ -172,6 +190,7 @@ async def test_selected_cycle_runs_workers_and_persists_review_evidence(
     }
     assert workers[0]["status"] == "completed"
     assert cycle is not None
+    assert cycle["artifacts"], final["messages"][-1].content
     assert cycle["artifacts"][0]["artifact_type"] == "design_brief"
     # The reply carries what the council concluded, then where to review it — a
     # reply that is only a file path makes the reader open a file to learn
