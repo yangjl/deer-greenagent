@@ -763,9 +763,7 @@ artifact` is server-owned in full and is now stripped from external run input:
   but cannot invent them as gates. In optional mode the backend replaces any
   client/worker `reconciled_inputs` verdict with the server-owned Build-lineage
   pass, and still refuses assessment when no lineage exists.
-  `generic:build:v3` gives executable Build work twelve bounded model calls
-  (143 LangGraph super-steps) rather than the four-call effective default that
-  could only read the Design and one input before finalizing.
+  Current Build uses an enforced 120K-token, 450-superstep worker ceiling.
 - **The server issues a Build phase its paths; the phase does not compose its
   own.** Two workers on one cycle — a registered specialist and the generalist —
   independently wrote the same nonexistent host path into generated code and

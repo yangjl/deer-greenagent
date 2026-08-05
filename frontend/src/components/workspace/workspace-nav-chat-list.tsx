@@ -6,6 +6,7 @@ import {
   ChevronRight,
   FolderClosed,
   FolderOpen,
+  MessageSquarePlus,
   MessagesSquare,
   MoreHorizontal,
   Plus,
@@ -277,8 +278,8 @@ export function WorkspaceNavChatList({
             <DialogTitle>Remove {projectToRemove?.name}?</DialogTitle>
             <DialogDescription>
               The project will leave the sidebar and its conversations will move
-              to Unfiled chats. Its local folder and DBTL audit records will not
-              be deleted.
+              to Chats. Its local folder and DBTL audit records will not be
+              deleted.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -302,14 +303,36 @@ export function WorkspaceNavChatList({
       <SidebarGroup>
         <SidebarMenu>
           <SidebarMenuItem>
-            {/* Legacy projectless conversations keep their existing route. */}
+            {/* Starting a conversation outside any project. Only the exact
+                route counts as active, so browsing an existing chat does not
+                light this entry up. */}
             <SidebarMenuButton
-              isActive={pathname.startsWith("/workspace/chats")}
+              isActive={pathname === "/workspace/chats/new"}
+              asChild
+            >
+              <Link
+                className="text-muted-foreground"
+                href="/workspace/chats/new"
+              >
+                <MessageSquarePlus />
+                <span>{t.sidebar.newChat}</span>
+              </Link>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            {/* Legacy projectless conversations keep their existing route.
+                `/workspace/chats/new` is excluded so the two entries never
+                claim the active treatment at the same time. */}
+            <SidebarMenuButton
+              isActive={
+                pathname.startsWith("/workspace/chats") &&
+                pathname !== "/workspace/chats/new"
+              }
               asChild
             >
               <Link className="text-muted-foreground" href="/workspace/chats">
                 <MessagesSquare />
-                <span>Unfiled chats</span>
+                <span>{t.sidebar.chats}</span>
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>

@@ -1289,23 +1289,6 @@ dbtl:
   # failure. Every option states what it costs, nothing is preselected, and the
   # answer is recorded with who gave it.
   build_workflow_steps: false
-  # Contract for new phased Build attempts. hardened_v12 issues a phase its
-  # paths instead of asking it to compose them: the server supplies the
-  # workspace and each declared input through the environment, and an entry
-  # point that names a location outside its grant is refused before it runs.
-  # Two workers on one cycle each hardcoded a host path that did not exist and
-  # spent most of their budget failing to run it, so the earlier contract's
-  # instruction to use absolute paths is gone. Each phase is bounded at 120K
-  # tokens; a reported failed implementation check gets one fresh 40K
-  # correction that sees the rejection and staged files, not the old transcript.
-  # Remote sandbox images must provide `bwrap`; Build fails preflight instead
-  # of running an entry point that can read unissued project files.
-  # hardened_v11 keeps v10's
-  # declared skill and implementation-input bindings with a 500,000-token
-  # ceiling; hardened_v10 and legacy_v9 remain bounded rollback paths. Attempts
-  # that already pinned a contract never change underneath an operator when
-  # this setting changes.
-  build_worker_contract: hardened_v12
   # Which agent implements a Build phase whose capability has no registered
   # specialist. null keeps the registered generalist. This is an efficiency
   # dial, never a correctness one: the path grant, the entry-point refusal, and

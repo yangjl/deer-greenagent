@@ -118,7 +118,7 @@ async def _repo(tmp_path: Path) -> DbtlCycleRepository:
             cycle_id="cycle-1",
             stage_attempt_id=by_stage["build"].id,
             lineage_revision=1,
-            stage_spec_key="generic:build:v1",
+            stage_spec_key="generic:build:v12",
             dataset_fingerprint="a" * 64,
             code_revision="git:test",
             config_revision="config:test",

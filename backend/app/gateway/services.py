@@ -693,11 +693,9 @@ def resolve_run_owner_user_id(request: Request) -> str | None:
     return str(user_id) if user_id is not None else None
 
 
-# Reserved assistant_ids that resolve to a DBTL LangGraph target instead of the
-# lead agent. Kept as one set so the resolve path and the pre-run safety gate
-# cannot disagree about which ids are gated — a gated id missing from the gate
-# would create a run record before failing.
-_DBTL_GRAPH_ASSISTANT_IDS: frozenset[str] = frozenset({"dbtl_orchestrator", "project_supervisor"})
+# Reserved assistant IDs that resolve to the project supervisor rather than the
+# lead agent. The same set drives resolution and the pre-run safety gate.
+_DBTL_GRAPH_ASSISTANT_IDS: frozenset[str] = frozenset({"project_supervisor"})
 
 
 def resolve_agent_factory(assistant_id: str | None):
@@ -709,13 +707,8 @@ def resolve_agent_factory(assistant_id: str | None):
     same factory; the routing happens inside ``make_lead_agent`` when it reads
     ``cfg["agent_name"]``.
 
-    Exceptions: two reserved assistant_ids resolve to greenagent-gated DBTL
-    graphs instead of the lead agent, and both are fail-closed until an operator
-    sets ``dbtl.mode=graph_enabled``.
-
-    - ``dbtl_orchestrator`` — the stage-machine orchestrator (Phase 1).
-    - ``project_supervisor`` — the thin routing supervisor (Phase 5), which
-      delegates ordinary work to this same lead agent.
+    ``project_supervisor`` is the sole reserved DBTL graph and is fail-closed
+    until an operator sets ``dbtl.mode=graph_enabled``.
 
     These are opt-in run targets; every other assistant_id keeps the untouched
     lead-agent path, so ordinary chat is unaffected by their existence.
@@ -723,13 +716,9 @@ def resolve_agent_factory(assistant_id: str | None):
     if assistant_id in _DBTL_GRAPH_ASSISTANT_IDS:
         if not get_app_config().dbtl.graph_execution_enabled:
             raise DbtlExecutionDisabledError("DBTL LangGraph execution is disabled. Review Settings → DBTL readiness; an operator must explicitly set dbtl.mode=graph_enabled before this assistant can run.")
-        if assistant_id == "project_supervisor":
-            from deerflow.agents.dbtl import make_project_supervisor
+        from deerflow.agents.dbtl import make_project_supervisor
 
-            return make_project_supervisor
-        from deerflow.agents.dbtl import make_dbtl_orchestrator
-
-        return make_dbtl_orchestrator
+        return make_project_supervisor
 
     from deerflow.agents.lead_agent.agent import make_lead_agent
 

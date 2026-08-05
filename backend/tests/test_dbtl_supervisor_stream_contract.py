@@ -21,9 +21,14 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.runtime import Runtime
 
+from deerflow.agents.dbtl.live_stage.types import LiveStageResult
 from deerflow.agents.dbtl.supervisor import build_supervisor_graph
 from deerflow.dbtl.branches import SupervisorContext
-from deerflow.dbtl.stage_stub import ManualStageAdapter
+
+
+class NoopStageAdapter:
+    async def execute(self, *, cycle_id: str | None, **_kwargs) -> LiveStageResult:
+        return LiveStageResult(stage="design", cycle_id=cycle_id, note="Stage execution is unavailable.")
 
 
 class StreamState(TypedDict):
@@ -53,7 +58,7 @@ def supervisor(context: SupervisorContext | None = None):
     return build_supervisor_graph(
         lead_agent=streaming_lead_agent(),
         context=context or SupervisorContext(project_id="proj-1", project_name="G2F"),
-        stage_adapter=ManualStageAdapter(),
+        stage_adapter=NoopStageAdapter(),
         state_schema=MessagesState,
     ).compile()
 
@@ -165,7 +170,7 @@ class TestRootValuesGranularity:
         graph = build_supervisor_graph(
             lead_agent=child.compile(checkpointer=False),
             context=SupervisorContext(project_id="proj-1", project_name="G2F"),
-            stage_adapter=ManualStageAdapter(),
+            stage_adapter=NoopStageAdapter(),
             state_schema=MessagesState,
         ).compile()
 
@@ -208,7 +213,7 @@ class TestTerminalBranchesStreamAtRoot:
         final = frames[-1][1]["messages"][-1]
         # The branch reply no longer names the cycle id; what matters to this
         # contract is that the terminal frame carries the branch's own text.
-        assert "Stage execution is not enabled yet" in final.content
+        assert "Stage execution is unavailable" in final.content
 
 
 class TestSupervisorActivityUsesTheRealNodeConfigShape:

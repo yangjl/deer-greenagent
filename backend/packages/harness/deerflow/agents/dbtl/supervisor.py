@@ -136,7 +136,7 @@ from deerflow.agents.dbtl.supervisor_support.human_input_protocol import (
 from deerflow.agents.dbtl.supervisor_support.human_input_protocol import (
     MAX_CARD_REQUEST_ID_CHARS as _MAX_CARD_REQUEST_ID_CHARS,
 )
-from deerflow.agents.dbtl.supervisor_support.ports import StageExecutionPort, compatible_stage_port
+from deerflow.agents.dbtl.supervisor_support.ports import StageExecutionPort
 from deerflow.dbtl.branches import (
     BranchDecision,
     SupervisorBranch,
@@ -1343,7 +1343,6 @@ def build_supervisor_graph(
     card on a depth the owner did not ask for. ``None`` uses the configured
     model and every failure keeps the deterministic default.
     """
-    stage_adapter = compatible_stage_port(stage_adapter)
     writer = question_writer or _make_llm_question_writer(context, principal_request_context)
     summarizer = round_summarizer or _make_llm_round_summarizer(principal_request_context)
     depth_reader = depth_interpreter or make_llm_depth_interpreter(principal_request_context)

@@ -429,14 +429,12 @@ def _adapter(
     workflow: bool,
     dispatcher,
     candidates=CANDIDATES,
-    build_worker_contract: str = "hardened_v11",
 ) -> LiveStageAdapter:
     return LiveStageAdapter(
         repo=repo,
         app_config=SimpleNamespace(
             dbtl=SimpleNamespace(
                 build_workflow_steps=workflow,
-                build_worker_contract=build_worker_contract,
             )
         ),
         candidate_provider=lambda: candidates,
@@ -472,7 +470,6 @@ async def _run_build(
     dispatcher=None,
     candidates=CANDIDATES,
     run_id: str = "run-1",
-    build_worker_contract: str = "hardened_v11",
 ):
     """One Build request.
 
@@ -487,7 +484,6 @@ async def _run_build(
         workflow=workflow,
         dispatcher=dispatcher,
         candidates=candidates,
-        build_worker_contract=build_worker_contract,
     ).execute(
         project_id="project-1",
         cycle_id="cycle-1",
@@ -526,57 +522,9 @@ class TestTheWriterAndTheReadModelAgree:
         dispatcher = _ObservingDispatcher()
         await _run_build(repo, root, dispatcher=dispatcher)
 
-        assert events[0] == ("pin", "generic:build:v11")
+        assert events[0] == ("pin", "generic:build:v12")
         assert events[1][0] == "dispatch"
-        assert observed_token_caps[0] == 500_000
-
-    async def test_v10_remains_an_explicit_budget_rollback_for_new_attempts(self, project) -> None:
-        repo, root = project
-        await _ready_for_build(repo)
-
-        result, _ = await _run_build(
-            repo,
-            root,
-            build_worker_contract="hardened_v10",
-        )
-
-        assert result.produced_usable_evidence, result.note
-        lineage = (await repo.build_test_view("cycle-1", project_id="project-1"))["build_lineage"]
-        assert lineage["stage_spec_key"] == "generic:build:v10"
-
-    async def test_legacy_build_contract_is_an_explicit_new_attempt_rollback(self, project) -> None:
-        repo, root = project
-        await _ready_for_build(repo)
-
-        result, _ = await _run_build(
-            repo,
-            root,
-            build_worker_contract="legacy_v9",
-        )
-
-        assert result.produced_usable_evidence, result.note
-        lineage = (await repo.build_test_view("cycle-1", project_id="project-1"))["build_lineage"]
-        assert lineage["stage_spec_key"] == "generic:build:v9"
-
-    async def test_pinned_build_contract_wins_after_operator_changes_rollout_mode(self, project) -> None:
-        repo, root = project
-        await _ready_for_build(repo)
-        attempt_id = await _build_stage_attempt_id(repo)
-        await repo.pin_stage_spec(
-            project_id="project-1",
-            stage_attempt_id=attempt_id,
-            stage_spec_key="generic:build:v9",
-        )
-
-        result, _ = await _run_build(
-            repo,
-            root,
-            build_worker_contract="hardened_v11",
-        )
-
-        assert result.produced_usable_evidence, result.note
-        lineage = (await repo.build_test_view("cycle-1", project_id="project-1"))["build_lineage"]
-        assert lineage["stage_spec_key"] == "generic:build:v9"
+        assert observed_token_caps[0] == 120_000
 
     async def test_a_successful_build_records_a_complete_chain(self, project) -> None:
         """The property a fake repository cannot show.
@@ -603,7 +551,7 @@ class TestTheWriterAndTheReadModelAgree:
         # other direction and the one that broke when the two sides disagreed.
         assert all(not entry["invalidated_attempts"] for entry in view["steps"])
         lineage = (await repo.build_test_view("cycle-1", project_id="project-1"))["build_lineage"]
-        assert lineage["stage_spec_key"] == "generic:build:v11"
+        assert lineage["stage_spec_key"] == "generic:build:v12"
         assert lineage["rerun_status"] == "verified"
         assert lineage["rerun_spec"]["command"] == "uv run python fit.py --seed 7"
 
@@ -1931,7 +1879,6 @@ class TestAPartialPhaseCannotAdvanceThePlan:
             repo,
             root,
             dispatcher=dispatcher,
-            build_worker_contract="hardened_v12",
         )
 
         assert result.produced_usable_evidence, result.note
@@ -1962,7 +1909,7 @@ class TestAPartialPhaseCannotAdvanceThePlan:
         result, _ = await _run_build(repo, root, dispatcher=dispatcher)
 
         assert not result.produced_usable_evidence
-        assert len(dispatcher.phase_units) == 1
+        assert len(dispatcher.phase_units) == 2
         view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
         assert [entry["phase_key"] for entry in view["phases"]] == ["simulate"]
         assert view["phases"][0]["status"] == StepState.FAILED.value
@@ -1981,7 +1928,7 @@ class TestAPartialPhaseCannotAdvanceThePlan:
         result, _ = await _run_build(repo, root, dispatcher=dispatcher)
 
         assert not result.produced_usable_evidence
-        assert len(dispatcher.phase_units) == 1
+        assert len(dispatcher.phase_units) == 2
         view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
         assert view["phases"][0]["status"] == StepState.FAILED.value
         assert "Automated implementation tests" in result.note

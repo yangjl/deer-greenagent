@@ -58,9 +58,6 @@ class _Repo:
         self.registered.append(kwargs)
         return {"surface_id": kwargs["surface_id"], **kwargs}
 
-    async def register_design_feedback_surface(self, **kwargs):  # pragma: no cover - legacy path
-        return await self.register_stage_feedback_surface(stage="design", **kwargs)
-
 
 def _adapter(repo: _Repo) -> LiveStageAdapter:
     return LiveStageAdapter(

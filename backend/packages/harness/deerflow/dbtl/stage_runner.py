@@ -1,11 +1,10 @@
 """Planning and collecting one stage's worker fan-out (Phase 6).
 
-This module replaces what :mod:`deerflow.dbtl.stage_stub` stood in for, and it
-keeps that module's central guarantee intact: **a stage run produces evidence, it
-never satisfies a gate.** :class:`StageExecutionOutcome` has no approval field,
-``satisfies_gate`` is a constant ``False`` property exactly as the stub's was,
-and nothing here imports the review path. Approval remains a typed human-review
-record bound to the evidence revision the reviewer saw.
+**A stage run produces evidence; it never satisfies a gate.**
+:class:`StageExecutionOutcome` has no approval field, ``satisfies_gate`` is a
+constant ``False`` property, and nothing here imports the review path. Approval
+remains a typed human-review record bound to the evidence revision the reviewer
+saw.
 
 Dispatch is injected rather than imported. ``SubagentExecutor`` owns
 cancellation, tracing, task events, and the child runtime; the production

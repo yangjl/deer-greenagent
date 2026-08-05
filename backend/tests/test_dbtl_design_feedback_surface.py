@@ -103,7 +103,8 @@ async def _register(
     thread_id: str = "thread-1",
     **overrides: object,
 ) -> dict:
-    return await repo.register_design_feedback_surface(
+    return await repo.register_stage_feedback_surface(
+        stage="design",
         project_id=project_id,
         cycle_id=cycle_id,
         stage_attempt_id=await _attempt_id(repo, cycle_id=cycle_id, project_id=project_id),
@@ -157,7 +158,7 @@ class TestLookupIsScoped:
         repo = await _repo(tmp_path)
         surface = await _register(repo)
 
-        found = await repo.get_design_feedback_surface(surface["surface_id"], project_id="project-1")
+        found = await repo.get_stage_feedback_surface(surface["surface_id"], project_id="project-1")
 
         assert found is not None
         assert found["surface_id"] == surface["surface_id"]
@@ -167,21 +168,21 @@ class TestLookupIsScoped:
         repo = await _repo(tmp_path, projects=("project-1", "project-2"))
         surface = await _register(repo)
 
-        found = await repo.get_design_feedback_surface(surface["surface_id"], project_id="project-2")
+        found = await repo.get_stage_feedback_surface(surface["surface_id"], project_id="project-2")
 
         assert found is None
 
     async def test_an_unknown_surface_id_is_simply_absent(self, tmp_path: Path) -> None:
         repo = await _repo(tmp_path)
 
-        assert await repo.get_design_feedback_surface("forged-surface-id", project_id="project-1") is None
+        assert await repo.get_stage_feedback_surface("forged-surface-id", project_id="project-1") is None
 
     async def test_the_latest_surface_for_an_attempt_is_addressable(self, tmp_path: Path) -> None:
         repo = await _repo(tmp_path)
         await _register(repo)
         second = await _register(repo, deck_content_hash=OTHER_DECK_HASH, design_round=2)
 
-        latest = await repo.latest_design_feedback_surface(project_id="project-1", cycle_id="cycle-1")
+        latest = await repo.latest_stage_feedback_surface(project_id="project-1", cycle_id="cycle-1", stage="design")
 
         assert latest is not None
         assert latest["surface_id"] == second["surface_id"]
@@ -194,7 +195,7 @@ class TestRegenerationSupersedesRatherThanMutates:
 
         second = await _register(repo, deck_content_hash=OTHER_DECK_HASH, design_round=2)
 
-        stale = await repo.get_design_feedback_surface(first["surface_id"], project_id="project-1")
+        stale = await repo.get_stage_feedback_surface(first["surface_id"], project_id="project-1")
         assert stale is not None
         assert stale["superseded_by_surface_id"] == second["surface_id"]
         assert stale["is_current"] is False
@@ -206,7 +207,7 @@ class TestRegenerationSupersedesRatherThanMutates:
         first = await _register(repo)
         await _register(repo, deck_content_hash=OTHER_DECK_HASH, design_round=2)
 
-        stale = await repo.get_design_feedback_surface(first["surface_id"], project_id="project-1")
+        stale = await repo.get_stage_feedback_surface(first["surface_id"], project_id="project-1")
 
         assert stale is not None
         assert stale["deck_content_hash"] == DECK_HASH
@@ -259,9 +260,10 @@ class TestRegenerationSupersedesRatherThanMutates:
 
         await _register(repo, mode="read_only", deck_content_hash=OTHER_DECK_HASH, design_round=2)
 
-        newest_review = await repo.latest_design_feedback_surface(
+        newest_review = await repo.latest_stage_feedback_surface(
             project_id="project-1",
             cycle_id="cycle-1",
+            stage="design",
             stage_attempt_id=reviewable["stage_attempt_id"],
             mode="stage_review",
         )
@@ -269,7 +271,7 @@ class TestRegenerationSupersedesRatherThanMutates:
         assert newest_review["surface_id"] == reviewable["surface_id"]
 
         # The record itself is untouched: it still says a later deck came after.
-        stale = await repo.get_design_feedback_surface(reviewable["surface_id"], project_id="project-1")
+        stale = await repo.get_stage_feedback_surface(reviewable["surface_id"], project_id="project-1")
         assert stale is not None
         assert stale["is_current"] is False
 
@@ -301,9 +303,10 @@ class TestRegenerationSupersedesRatherThanMutates:
 
         second = await _register(repo, mode="stage_review", deck_content_hash=OTHER_DECK_HASH, design_round=2, **evidence)
 
-        newest_review = await repo.latest_design_feedback_surface(
+        newest_review = await repo.latest_stage_feedback_surface(
             project_id="project-1",
             cycle_id="cycle-1",
+            stage="design",
             stage_attempt_id=first["stage_attempt_id"],
             mode="stage_review",
         )
@@ -356,7 +359,8 @@ class TestRefusals:
         attempt = await _attempt_id(repo, cycle_id="cycle-2", project_id="project-2")
 
         with pytest.raises(DbtlWorkflowRefused, match="cycle"):
-            await repo.register_design_feedback_surface(
+            await repo.register_stage_feedback_surface(
+                stage="design",
                 project_id="project-1",
                 cycle_id="cycle-2",
                 stage_attempt_id=attempt,
@@ -373,7 +377,8 @@ class TestRefusals:
         foreign_attempt = await _attempt_id(repo, cycle_id="cycle-2", project_id="project-2")
 
         with pytest.raises(DbtlWorkflowRefused, match="attempt"):
-            await repo.register_design_feedback_surface(
+            await repo.register_stage_feedback_surface(
+                stage="design",
                 project_id="project-1",
                 cycle_id="cycle-1",
                 stage_attempt_id=foreign_attempt,
@@ -497,7 +502,7 @@ class TestEvidenceBinding:
         assert newest is not None
 
         with pytest.raises(DesignFeedbackConflict, match="evidence changed"):
-            await repo.reserve_design_feedback_action(
+            await repo.reserve_stage_feedback_action(
                 project_id="project-1",
                 cycle_id="cycle-1",
                 surface_id=surface["surface_id"],
@@ -540,7 +545,7 @@ class TestPayloadBoundActions:
             answer="Use family holdout.",
         )
 
-        actions = await repo.design_feedback_actions(surface["surface_id"], project_id="project-1")
+        actions = await repo.stage_feedback_actions(surface["surface_id"], project_id="project-1")
         assert len(actions) == 1
         assert actions[0]["action_group"] == "chair_response"
         assert actions[0]["status"] == "resume_started"
@@ -571,15 +576,15 @@ class TestPayloadBoundActions:
             "expected_deck_hash": DECK_HASH,
         }
 
-        _surface, first, replayed = await repo.reserve_design_feedback_action(**kwargs)
-        _surface, replay, was_replayed = await repo.reserve_design_feedback_action(**kwargs)
+        _surface, first, replayed = await repo.reserve_stage_feedback_action(**kwargs)
+        _surface, replay, was_replayed = await repo.reserve_stage_feedback_action(**kwargs)
 
         assert replayed is False
         assert was_replayed is True
         assert replay["client_submission_id"] == first["client_submission_id"]
 
         with pytest.raises(DesignFeedbackConflict, match="different payload"):
-            await repo.reserve_design_feedback_action(
+            await repo.reserve_stage_feedback_action(
                 **{
                     **kwargs,
                     "human_comment": "A different answer.",
@@ -615,9 +620,9 @@ class TestPayloadBoundActions:
             "expected_evidence": None,
             "expected_deck_hash": DECK_HASH,
         }
-        _surface, first, replayed = await repo.reserve_design_feedback_action(**first_kwargs)
+        _surface, first, replayed = await repo.reserve_stage_feedback_action(**first_kwargs)
         assert replayed is False
-        await repo.update_design_feedback_action(
+        await repo.update_stage_feedback_action(
             first["client_submission_id"],
             project_id="project-1",
             status="failed",
@@ -629,7 +634,7 @@ class TestPayloadBoundActions:
             failure_code="resume_no_feedback_surface",
         )
 
-        _surface, retried, reused = await repo.reserve_design_feedback_action(
+        _surface, retried, reused = await repo.reserve_stage_feedback_action(
             **{
                 **first_kwargs,
                 "selected_card_ids": ["site"],
@@ -664,7 +669,7 @@ class TestPayloadBoundActions:
         )
 
         with pytest.raises(DesignFeedbackConflict, match="not offered"):
-            await repo.reserve_design_feedback_action(
+            await repo.reserve_stage_feedback_action(
                 project_id="project-1",
                 cycle_id="cycle-1",
                 surface_id=surface["surface_id"],
@@ -692,7 +697,7 @@ class TestPayloadBoundActions:
         )
 
         with pytest.raises(DesignFeedbackConflict, match="requires a comment"):
-            await repo.reserve_design_feedback_action(
+            await repo.reserve_stage_feedback_action(
                 project_id="project-1",
                 cycle_id="cycle-1",
                 surface_id=surface["surface_id"],
@@ -724,7 +729,7 @@ class TestCallerSuppliedIdentifiers:
         second = await _register(repo, surface_id="dfs-deterministic-1", deck_content_hash=OTHER_DECK_HASH)
 
         assert second["surface_id"] != first["surface_id"]
-        stale = await repo.get_design_feedback_surface(first["surface_id"], project_id="project-1")
+        stale = await repo.get_stage_feedback_surface(first["surface_id"], project_id="project-1")
         assert stale is not None
         assert stale["superseded_by_surface_id"] == second["surface_id"]
 

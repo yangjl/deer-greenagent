@@ -134,7 +134,8 @@ async def _register(
     **overrides,
 ) -> dict:
     attempt = next(item["id"] for item in cycle["stages"] if item["stage"] == "design")
-    return await repo.register_design_feedback_surface(
+    return await repo.register_stage_feedback_surface(
+        stage="design",
         project_id=cycle["project_id"],
         cycle_id=cycle["id"],
         stage_attempt_id=attempt,

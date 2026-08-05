@@ -8,7 +8,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from deerflow.agents.dbtl.state import HAPPY_PATH, TERMINAL_STATE
 from deerflow.config.dbtl_config import DbtlConfig, DbtlMode
 
 DBTL_TEST_OUTCOMES = ("supported", "not_supported", "inconclusive", "invalidated")
@@ -21,7 +20,24 @@ ReadinessClassification = Literal[
     "safe_to_supersede",
 ]
 
-_KNOWN_STATES = frozenset({*HAPPY_PATH.keys(), *HAPPY_PATH.values(), TERMINAL_STATE})
+_KNOWN_STATES = frozenset(
+    {
+        "requested",
+        "designing",
+        "awaiting-design-review",
+        "approved-for-build",
+        "build-planning",
+        "building",
+        "awaiting-builder-handoff",
+        "test-planning",
+        "testing",
+        "pass",
+        "awaiting-evidence-review",
+        "learning",
+        "awaiting-knowledge-review",
+        "completed",
+    }
+)
 _COUNTS_TEMPLATE = {
     "compatible": 0,
     "repairable": 0,

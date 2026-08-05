@@ -306,25 +306,9 @@ def _runtime_view(config: RunnableConfig) -> dict[str, Any]:
     return merged
 
 
-def _initial_stage_spec(stage: str, dbtl_config: Any) -> StageSpec:
-    """Resolve the contract for a new attempt through the DBTL rollout boundary.
-
-    Durable attempts bypass this helper and resolve their recorded key. The
-    operator switch therefore changes only work that has not yet pinned a
-    contract; rollback cannot rewrite the rules under an active Build.
-    """
-    if stage != "build":
-        return resolve_stage_spec(stage)
-    contract = str(getattr(dbtl_config, "build_worker_contract", "hardened_v12") or "").strip()
-    if contract == "legacy_v9":
-        return resolve_stage_spec(stage, version=9)
-    if contract == "hardened_v10":
-        return resolve_stage_spec(stage, version=10)
-    if contract == "hardened_v11":
-        return resolve_stage_spec(stage, version=11)
-    if contract == "hardened_v12":
-        return resolve_stage_spec(stage, version=12)
-    raise StageSpecNotFound(f"Unknown DBTL Build worker contract {contract!r}.")
+def _initial_stage_spec(stage: str) -> StageSpec:
+    """Resolve the current contract for a new attempt."""
+    return resolve_stage_spec(stage)
 
 
 def _bounded_text(value: Any, *, max_chars: int) -> str:
@@ -5341,12 +5325,6 @@ class LiveStageAdapter:
         an owner with a deck that can never answer its gate. Stage evidence is
         already durable at this point and remains available for a safe retry.
         """
-        # Resolved without touching the legacy attribute: ``getattr`` with a
-        # default evaluates that default eagerly, so a repository exposing
-        # only the stage-generic method raised AttributeError before the lookup
-        # it would have succeeded at.
-        stage_register = getattr(self._repo, "register_stage_feedback_surface", None)
-        register = stage_register if stage_register is not None else self._repo.register_design_feedback_surface
         kwargs = dict(
             surface_id=plan.surface_id,
             project_id=project_id,
@@ -5362,10 +5340,9 @@ class LiveStageAdapter:
             evidence_artifact_id=str(plan.evidence["id"]) if plan.evidence is not None else None,
             evidence_artifact_revision=int(plan.evidence["revision"]) if plan.evidence is not None else None,
             evidence_content_hash=plan.evidence_content_hash or None,
+            stage=plan.stage,
         )
-        if stage_register is not None:
-            kwargs["stage"] = plan.stage
-        await register(**kwargs)
+        await self._repo.register_stage_feedback_surface(**kwargs)
 
     async def bind_feedback_request(
         self,
@@ -5444,31 +5421,27 @@ class LiveStageAdapter:
             )
 
         # Carry the assessment from the pre-meeting surface onto the successor
-        # deck.  The meeting is an attachment to that assessment, not a fresh
-        # transition that gets to reassess itself.  Repository doubles used by
-        # older integrations may not expose the generalized surface read yet;
-        # missing it safely leaves the legacy gate in place.
+        # deck. The meeting is an attachment to that assessment, not a fresh
+        # transition that gets to reassess itself.
         transition_gate = None
-        latest_surface = getattr(self._repo, "latest_stage_feedback_surface", None)
-        if callable(latest_surface):
-            try:
-                prior_surface = await latest_surface(
-                    project_id=project_id,
-                    cycle_id=cycle_id,
-                    stage=normalized,
-                    stage_attempt_id=attempt_id,
-                    mode="stage_review",
-                )
-                request_payload = prior_surface.get("decision_request") if isinstance(prior_surface, Mapping) else None
-                candidate_gate = request_payload.get("transition_gate") if isinstance(request_payload, Mapping) else None
-                if isinstance(candidate_gate, Mapping):
-                    transition_gate = dict(candidate_gate)
-            except Exception:  # noqa: BLE001 - losing a label must not lose the meeting
-                logger.warning(
-                    "Could not recover the %s transition assessment for its review meeting.",
-                    normalized,
-                    exc_info=True,
-                )
+        try:
+            prior_surface = await self._repo.latest_stage_feedback_surface(
+                project_id=project_id,
+                cycle_id=cycle_id,
+                stage=normalized,
+                stage_attempt_id=attempt_id,
+                mode="stage_review",
+            )
+            request_payload = prior_surface.get("decision_request") if isinstance(prior_surface, Mapping) else None
+            candidate_gate = request_payload.get("transition_gate") if isinstance(request_payload, Mapping) else None
+            if isinstance(candidate_gate, Mapping):
+                transition_gate = dict(candidate_gate)
+        except Exception:  # noqa: BLE001 - losing a label must not lose the meeting
+            logger.warning(
+                "Could not recover the %s transition assessment for its review meeting.",
+                normalized,
+                exc_info=True,
+            )
         try:
             spec = resolve_review_stage_spec(normalized)
         except StageSpecNotFound:
@@ -5871,7 +5844,7 @@ class LiveStageAdapter:
         dbtl_config = getattr(self._app_config, "dbtl", None)
         recorded_spec_key = str((attempt or {}).get("stage_spec_key") or "").strip()
         try:
-            spec = resolve_spec_by_key(recorded_spec_key) if recorded_spec_key else _initial_stage_spec(stage, dbtl_config)
+            spec = resolve_spec_by_key(recorded_spec_key) if recorded_spec_key else _initial_stage_spec(stage)
         except StageSpecNotFound as exc:
             return LiveStageResult(
                 stage=stage,

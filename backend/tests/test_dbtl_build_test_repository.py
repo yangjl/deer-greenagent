@@ -227,25 +227,6 @@ async def test_build_lineage_binds_inputs_environment_and_outputs(tmp_path: Path
     assert view["build_lineage"]["rerun_spec"] == lineage["rerun_spec"]
 
 
-async def test_historical_build_lineage_is_readable_but_rerun_unverified(tmp_path: Path) -> None:
-    repo = await _repo(tmp_path)
-    await _ready_for_build(repo)
-    cycle = await repo.get_cycle("cycle-1", project_id="project-1")
-    assert cycle is not None
-    build_attempt = next(item for item in cycle["stages"] if item["stage"] == "build")
-    await repo.pin_stage_spec(
-        project_id="project-1",
-        stage_attempt_id=build_attempt["id"],
-        stage_spec_key="generic:build:v7",
-    )
-
-    lineage = await _record_lineage(repo, typed=False)
-
-    assert lineage["rerun_spec"] == {}
-    assert lineage["rerun_status"] == "rerun_unverified"
-    assert lineage["stage_spec_key"] == "generic:build:v7"
-
-
 async def test_invalid_typed_rerun_record_is_refused_before_persistence(tmp_path: Path) -> None:
     repo = await _repo(tmp_path)
     await _ready_for_build(repo)

@@ -126,7 +126,7 @@ class FakeRepo:
     async def get_stage_execution_replay(self, cycle_id: str, *, project_id: str, idempotency_key: str):
         return self.replay
 
-    async def register_design_feedback_surface(self, **kwargs):
+    async def register_stage_feedback_surface(self, **kwargs):
         if self.surface_error is not None:
             raise self.surface_error
         self.surfaces.append(kwargs)
@@ -1307,37 +1307,6 @@ async def test_a_build_that_no_worker_failed_still_says_why_it_refused(tmp_path:
     assert "Test would have no command to re-execute" in result.note
     # The header must not appear with nothing under it.
     assert "Why each worker did not count:" not in result.note
-
-
-@pytest.mark.asyncio
-async def test_a_retry_uses_the_build_contract_recorded_on_its_stage_attempt(tmp_path: Path) -> None:
-    cycle = _cycle(state="ready_for_build")
-    build_attempt = next(item for item in cycle["stages"] if item["stage"] == "build")
-    build_attempt["stage_spec_key"] = "generic:build:v4"
-    repo = FakeRepo(cycle)
-    dispatcher = FakeDispatcher(text=_structured_result())
-    adapter = LiveStageAdapter(
-        repo=repo,
-        app_config=SimpleNamespace(),
-        candidate_provider=lambda: (
-            AgentCandidate(
-                name="builder",
-                capabilities=frozenset({Capability.SOFTWARE_ENGINEERING}),
-            ),
-        ),
-        dispatcher=dispatcher,
-    )
-
-    await adapter.execute(
-        project_id="project-1",
-        cycle_id="cycle-1",
-        request_text="Retry the Build.",
-        state={},
-        config=_runtime_config(tmp_path),
-    )
-
-    assert dispatcher.calls[0][1].max_tokens == 400_000
-    assert repo.recorded[0]["stage_spec_key"] == "generic:build:v4"
 
 
 def test_concurrent_stage_units_receive_distinct_workspace_paths() -> None:

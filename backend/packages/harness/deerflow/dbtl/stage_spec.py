@@ -285,43 +285,12 @@ RECONCILIATION_SPEC_V1 = StageSpec(
     memory_write_policy=MemoryWritePolicy.NONE,
 )
 
-BUILD_SPEC_V1 = StageSpec(
+BUILD_SPEC_V12 = StageSpec(
     stage="build",
     domain_profile=GENERIC_PROFILE,
-    version=1,
+    version=12,
     title="Build",
-    purpose="Produce a rerunnable implementation from the approved design and reconciled, immutable inputs.",
-    cycle_classes=_ALL_CLASSES,
-    cycle_weights=_ALL_WEIGHTS,
-    required_inputs=(
-        "approved_design_brief",
-        "approved_reconciliation_report",
-        "bound_dataset_fingerprint",
-    ),
-    required_artifact_types=("build_package",),
-    output_schema="build_package.v1",
-    required_capabilities=(Capability.SOFTWARE_ENGINEERING,),
-    optional_capabilities=(
-        Capability.STATISTICAL_ANALYSIS,
-        Capability.QUANTITATIVE_GENETICS,
-        Capability.FIELD_TRIAL_QC,
-    ),
-    validity_gates=(
-        "reconciled_input_lineage",
-        "immutable_raw_inputs",
-        "versioned_derived_outputs",
-        "reproducible_execution",
-    ),
-    memory_write_policy=MemoryWritePolicy.NONE,
-)
-
-
-BUILD_SPEC_V2 = StageSpec(
-    stage="build",
-    domain_profile=GENERIC_PROFILE,
-    version=2,
-    title="Build",
-    purpose=("Produce a rerunnable implementation from the approved design, discover the data actually used, and bind those inputs to server-computed content hashes."),
+    purpose=("Produce and execute an implementation from the approved design, discover the data actually used, bind those inputs to server-computed content hashes, and record everything another person needs to re-run it."),
     cycle_classes=_ALL_CLASSES,
     cycle_weights=_ALL_WEIGHTS,
     required_inputs=(
@@ -329,7 +298,7 @@ BUILD_SPEC_V2 = StageSpec(
         "workspace_inputs_examined_during_build",
     ),
     required_artifact_types=("build_package",),
-    output_schema="build_package.v2",
+    output_schema="build_package.v12",
     required_capabilities=(Capability.SOFTWARE_ENGINEERING,),
     optional_capabilities=(
         Capability.STATISTICAL_ANALYSIS,
@@ -339,151 +308,14 @@ BUILD_SPEC_V2 = StageSpec(
     validity_gates=(
         "server_bound_input_lineage",
         "versioned_derived_outputs",
-        "reproducible_execution",
+        "structured_rerun_spec",
+        "server_verified_phase_manifest",
+        "phase_declared_skills",
+        "narrow_implementation_inputs",
+        "granted_paths_only",
+        "server_executed_entry_point",
     ),
     memory_write_policy=MemoryWritePolicy.NONE,
-)
-
-
-BUILD_SPEC_V3 = StageSpec(
-    stage="build",
-    domain_profile=GENERIC_PROFILE,
-    version=3,
-    title="Build",
-    purpose=("Produce and execute a rerunnable implementation from the approved design, discover the data actually used, and bind those inputs to server-computed content hashes."),
-    cycle_classes=_ALL_CLASSES,
-    cycle_weights=_ALL_WEIGHTS,
-    required_inputs=BUILD_SPEC_V2.required_inputs,
-    required_artifact_types=("build_package",),
-    output_schema="build_package.v3",
-    required_capabilities=(Capability.SOFTWARE_ENGINEERING,),
-    optional_capabilities=BUILD_SPEC_V2.optional_capabilities,
-    validity_gates=BUILD_SPEC_V2.validity_gates,
-    memory_write_policy=MemoryWritePolicy.NONE,
-    # The v1/v2 default of 40 LangGraph super-steps buys only four model
-    # calls after middleware overhead: enough to read a design and one CSV,
-    # but not enough to write and execute the implementation. Twelve calls
-    # leaves room for targeted inspection, execution, diagnostics, and the
-    # structured final result while remaining bounded.
-    budget=WorkerBudget(
-        max_workers=3,
-        max_turns=143,
-        max_tokens=400_000,
-        timeout_seconds=900,
-    ),
-)
-
-
-BUILD_SPEC_V4 = StageSpec(
-    stage="build",
-    domain_profile=GENERIC_PROFILE,
-    version=4,
-    title="Build",
-    purpose=("Produce and execute an implementation from the approved design, discover the data actually used, bind those inputs to server-computed content hashes, and record everything another person needs to re-run it."),
-    cycle_classes=_ALL_CLASSES,
-    cycle_weights=_ALL_WEIGHTS,
-    required_inputs=BUILD_SPEC_V3.required_inputs,
-    required_artifact_types=("build_package",),
-    output_schema="build_package.v4",
-    required_capabilities=(Capability.SOFTWARE_ENGINEERING,),
-    optional_capabilities=BUILD_SPEC_V3.optional_capabilities,
-    # `reproducible_execution` asked Build to *prove* a repeat run. A worker
-    # that wrote a complete implementation but could not run it twice marked
-    # its own result failed, so the whole attempt produced no reviewable
-    # evidence — a strictly worse outcome than a recorded implementation with a
-    # stated caveat. Build now records the rerun procedure; whether the work is
-    # reproducible is judged at Test, where `reproducibility` is a required
-    # check of the pinned validity pack, and settled by the human reviewer.
-    validity_gates=(
-        "server_bound_input_lineage",
-        "versioned_derived_outputs",
-        "recorded_rerun_procedure",
-    ),
-    memory_write_policy=MemoryWritePolicy.NONE,
-    budget=BUILD_SPEC_V3.budget,
-)
-
-
-BUILD_SPEC_V5 = StageSpec(
-    stage="build",
-    domain_profile=GENERIC_PROFILE,
-    version=5,
-    title=BUILD_SPEC_V4.title,
-    purpose=BUILD_SPEC_V4.purpose,
-    cycle_classes=BUILD_SPEC_V4.cycle_classes,
-    cycle_weights=BUILD_SPEC_V4.cycle_weights,
-    required_inputs=BUILD_SPEC_V4.required_inputs,
-    required_artifact_types=BUILD_SPEC_V4.required_artifact_types,
-    output_schema="build_package.v5",
-    required_capabilities=BUILD_SPEC_V4.required_capabilities,
-    optional_capabilities=BUILD_SPEC_V4.optional_capabilities,
-    validity_gates=BUILD_SPEC_V4.validity_gates,
-    memory_write_policy=BUILD_SPEC_V4.memory_write_policy,
-    # Build phases now receive one compact, hash-bound context and a
-    # server-created workspace scaffold. Six model calls are enough to inspect,
-    # author, execute, repair once, and land the structured result; the smaller
-    # token ceiling prevents a simple implementation from repeatedly paying for
-    # a growing tool transcript.
-    budget=WorkerBudget(
-        max_workers=3,
-        max_turns=77,
-        max_tokens=120_000,
-        timeout_seconds=600,
-    ),
-)
-
-
-BUILD_SPEC_V6 = StageSpec(
-    stage="build",
-    domain_profile=GENERIC_PROFILE,
-    version=6,
-    title=BUILD_SPEC_V5.title,
-    purpose=BUILD_SPEC_V5.purpose,
-    cycle_classes=BUILD_SPEC_V5.cycle_classes,
-    cycle_weights=BUILD_SPEC_V5.cycle_weights,
-    required_inputs=BUILD_SPEC_V5.required_inputs,
-    required_artifact_types=BUILD_SPEC_V5.required_artifact_types,
-    output_schema="build_package.v6",
-    required_capabilities=BUILD_SPEC_V5.required_capabilities,
-    optional_capabilities=BUILD_SPEC_V5.optional_capabilities,
-    validity_gates=BUILD_SPEC_V5.validity_gates,
-    memory_write_policy=BUILD_SPEC_V5.memory_write_policy,
-    # V5's six-call finalization deadline caused workers to stop after creating
-    # only a configuration and lock file, then let that partial phase count as
-    # complete. V6 removes the Build-stage token kill switch, repetitive-tool
-    # hard stop, and stage-level turn clamp. A deliberately unreachable
-    # practical recursion ceiling and this timeout remain operational
-    # safeguards; usage is still metered.
-    budget=WorkerBudget(
-        max_workers=3,
-        max_turns=10_000,
-        max_tokens=1_000_000,
-        timeout_seconds=900,
-        token_limit_enforced=False,
-    ),
-)
-
-
-BUILD_SPEC_V7 = StageSpec(
-    stage="build",
-    domain_profile=GENERIC_PROFILE,
-    version=7,
-    title=BUILD_SPEC_V6.title,
-    purpose=BUILD_SPEC_V6.purpose,
-    cycle_classes=BUILD_SPEC_V6.cycle_classes,
-    cycle_weights=BUILD_SPEC_V6.cycle_weights,
-    required_inputs=BUILD_SPEC_V6.required_inputs,
-    required_artifact_types=BUILD_SPEC_V6.required_artifact_types,
-    output_schema="build_package.v7",
-    required_capabilities=BUILD_SPEC_V6.required_capabilities,
-    optional_capabilities=BUILD_SPEC_V6.optional_capabilities,
-    validity_gates=BUILD_SPEC_V6.validity_gates,
-    memory_write_policy=BUILD_SPEC_V6.memory_write_policy,
-    # V6 removed every worker guard to avoid a premature six-call finalizer.
-    # A real manual run then consumed 301k tokens in one phase and still did
-    # not execute. V7 restores a roomy, enforced ceiling: about 37 model calls
-    # at the executor's graph-step ratio, 120k tokens, and the existing
-    # ten-minute wall clock. Durable phase replay remains the recovery path.
     budget=WorkerBudget(
         max_workers=3,
         max_turns=450,
@@ -491,122 +323,6 @@ BUILD_SPEC_V7 = StageSpec(
         timeout_seconds=900,
         token_limit_enforced=True,
     ),
-)
-
-
-BUILD_SPEC_V8 = StageSpec(
-    stage="build",
-    domain_profile=GENERIC_PROFILE,
-    version=8,
-    title=BUILD_SPEC_V7.title,
-    purpose=BUILD_SPEC_V7.purpose,
-    cycle_classes=BUILD_SPEC_V7.cycle_classes,
-    cycle_weights=BUILD_SPEC_V7.cycle_weights,
-    required_inputs=BUILD_SPEC_V7.required_inputs,
-    required_artifact_types=BUILD_SPEC_V7.required_artifact_types,
-    output_schema="build_package.v8",
-    required_capabilities=BUILD_SPEC_V7.required_capabilities,
-    optional_capabilities=BUILD_SPEC_V7.optional_capabilities,
-    validity_gates=(
-        "server_bound_input_lineage",
-        "versioned_derived_outputs",
-        "structured_rerun_spec",
-    ),
-    memory_write_policy=BUILD_SPEC_V7.memory_write_policy,
-    budget=BUILD_SPEC_V7.budget,
-)
-
-
-BUILD_SPEC_V9 = StageSpec(
-    stage="build",
-    domain_profile=GENERIC_PROFILE,
-    version=9,
-    title=BUILD_SPEC_V8.title,
-    purpose=BUILD_SPEC_V8.purpose,
-    cycle_classes=BUILD_SPEC_V8.cycle_classes,
-    cycle_weights=BUILD_SPEC_V8.cycle_weights,
-    required_inputs=BUILD_SPEC_V8.required_inputs,
-    required_artifact_types=BUILD_SPEC_V8.required_artifact_types,
-    output_schema="build_package.v9",
-    required_capabilities=BUILD_SPEC_V8.required_capabilities,
-    optional_capabilities=BUILD_SPEC_V8.optional_capabilities,
-    validity_gates=(*BUILD_SPEC_V8.validity_gates, "server_verified_phase_manifest"),
-    memory_write_policy=BUILD_SPEC_V8.memory_write_policy,
-    budget=BUILD_SPEC_V8.budget,
-)
-
-BUILD_SPEC_V10 = StageSpec(
-    stage="build",
-    domain_profile=GENERIC_PROFILE,
-    version=10,
-    title=BUILD_SPEC_V9.title,
-    purpose=BUILD_SPEC_V9.purpose,
-    cycle_classes=BUILD_SPEC_V9.cycle_classes,
-    cycle_weights=BUILD_SPEC_V9.cycle_weights,
-    required_inputs=BUILD_SPEC_V9.required_inputs,
-    required_artifact_types=BUILD_SPEC_V9.required_artifact_types,
-    output_schema="build_package.v10",
-    required_capabilities=BUILD_SPEC_V9.required_capabilities,
-    optional_capabilities=BUILD_SPEC_V9.optional_capabilities,
-    validity_gates=(*BUILD_SPEC_V9.validity_gates, "phase_declared_skills", "narrow_implementation_inputs"),
-    memory_write_policy=BUILD_SPEC_V9.memory_write_policy,
-    budget=BUILD_SPEC_V9.budget,
-)
-
-
-BUILD_SPEC_V11 = StageSpec(
-    stage="build",
-    domain_profile=GENERIC_PROFILE,
-    version=11,
-    title=BUILD_SPEC_V10.title,
-    purpose=BUILD_SPEC_V10.purpose,
-    cycle_classes=BUILD_SPEC_V10.cycle_classes,
-    cycle_weights=BUILD_SPEC_V10.cycle_weights,
-    required_inputs=BUILD_SPEC_V10.required_inputs,
-    required_artifact_types=BUILD_SPEC_V10.required_artifact_types,
-    output_schema="build_package.v11",
-    required_capabilities=BUILD_SPEC_V10.required_capabilities,
-    optional_capabilities=BUILD_SPEC_V10.optional_capabilities,
-    validity_gates=BUILD_SPEC_V10.validity_gates,
-    memory_write_policy=BUILD_SPEC_V10.memory_write_policy,
-    # V11 changes only the enforced per-worker token ceiling. Keep v10
-    # immutable so an attempt already pinned at 120k remains auditable under
-    # the exact budget it started with.
-    budget=WorkerBudget(
-        max_workers=BUILD_SPEC_V10.budget.max_workers,
-        max_turns=BUILD_SPEC_V10.budget.max_turns,
-        max_tokens=500_000,
-        timeout_seconds=BUILD_SPEC_V10.budget.timeout_seconds,
-        token_limit_enforced=True,
-    ),
-)
-
-
-BUILD_SPEC_V12 = StageSpec(
-    stage="build",
-    domain_profile=GENERIC_PROFILE,
-    version=12,
-    title=BUILD_SPEC_V11.title,
-    purpose=BUILD_SPEC_V11.purpose,
-    cycle_classes=BUILD_SPEC_V11.cycle_classes,
-    cycle_weights=BUILD_SPEC_V11.cycle_weights,
-    required_inputs=BUILD_SPEC_V11.required_inputs,
-    required_artifact_types=BUILD_SPEC_V11.required_artifact_types,
-    output_schema="build_package.v12",
-    required_capabilities=BUILD_SPEC_V11.required_capabilities,
-    optional_capabilities=BUILD_SPEC_V11.optional_capabilities,
-    # `granted_paths_only` refuses an entry point that names a location the
-    # grant does not cover; `server_executed_entry_point` then runs the file the
-    # manifest declared and records exit status, logs, and output hashes. The
-    # first is a cheap early refusal with a specific message, the second is what
-    # actually decides whether the paths were real -- a worker's own account of
-    # having run its code is not evidence that it ran.
-    validity_gates=(*BUILD_SPEC_V11.validity_gates, "granted_paths_only", "server_executed_entry_point"),
-    memory_write_policy=BUILD_SPEC_V11.memory_write_policy,
-    # The path grant removes the failure that motivated v11's 500K experiment.
-    # Return to the bounded v10 envelope: one bad phase may fail, but it may not
-    # consume another quarter-million tokens while rediscovering its mount.
-    budget=BUILD_SPEC_V10.budget,
 )
 
 
@@ -779,17 +495,6 @@ _REGISTRY: dict[str, StageSpec] = {
         DESIGN_SPEC_V1,
         DESIGN_SPEC_V2,
         RECONCILIATION_SPEC_V1,
-        BUILD_SPEC_V1,
-        BUILD_SPEC_V2,
-        BUILD_SPEC_V3,
-        BUILD_SPEC_V4,
-        BUILD_SPEC_V5,
-        BUILD_SPEC_V6,
-        BUILD_SPEC_V7,
-        BUILD_SPEC_V8,
-        BUILD_SPEC_V9,
-        BUILD_SPEC_V10,
-        BUILD_SPEC_V11,
         BUILD_SPEC_V12,
         TEST_SPEC_V1,
         TEST_SPEC_V2,

@@ -35,15 +35,3 @@ def test_dbtl_config_can_be_read_from_app_config_shape() -> None:
     app_config = SimpleNamespace(dbtl=DbtlConfig(mode="graph_enabled"))
 
     assert app_config.dbtl.graph_execution_enabled is True
-
-
-def test_dbtl_build_worker_contract_defaults_to_hardened_and_accepts_rollback() -> None:
-    assert DbtlConfig().build_worker_contract == "hardened_v12"
-    assert DbtlConfig(build_worker_contract="hardened_v11").build_worker_contract == "hardened_v11"
-    assert DbtlConfig(build_worker_contract="hardened_v10").build_worker_contract == "hardened_v10"
-    assert DbtlConfig(build_worker_contract="legacy_v9").build_worker_contract == "legacy_v9"
-
-
-def test_dbtl_build_worker_contract_rejects_unknown_values() -> None:
-    with pytest.raises(ValidationError):
-        DbtlConfig(build_worker_contract="latest")

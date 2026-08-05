@@ -172,19 +172,17 @@ class TestReviewService:
             evidence_content_hash=str(evidence.get("content_hash") or ""),
         )
         difficulty = "standard"
-        latest_surface = getattr(self.repo, "latest_stage_feedback_surface", None)
-        if callable(latest_surface):
-            surface = await latest_surface(
-                project_id=project_id,
-                cycle_id=cycle_id,
-                stage="test",
-                stage_attempt_id=str(test.get("id") or ""),
-                mode="stage_review",
-            )
-            gate_payload = dict((surface or {}).get("decision_request") or {}).get("transition_gate")
-            assessed = dict(gate_payload or {}).get("assessment")
-            if isinstance(assessed, Mapping):
-                difficulty = str(assessed.get("difficulty") or difficulty)
+        surface = await self.repo.latest_stage_feedback_surface(
+            project_id=project_id,
+            cycle_id=cycle_id,
+            stage="test",
+            stage_attempt_id=str(test.get("id") or ""),
+            mode="stage_review",
+        )
+        gate_payload = dict((surface or {}).get("decision_request") or {}).get("transition_gate")
+        assessed = dict(gate_payload or {}).get("assessment")
+        if isinstance(assessed, Mapping):
+            difficulty = str(assessed.get("difficulty") or difficulty)
         meetings = getattr(getattr(self.app_config, "dbtl", None), "stage_meetings", None)
         gate = surface_meeting_gate(
             stage="test",

@@ -20,6 +20,8 @@ rs.mock("@/core/i18n/hooks", () => ({
       sidebar: {
         agents: "Agents",
         agentsDisabledTooltip: "Agents are disabled",
+        chats: "Chats",
+        newChat: "New chat",
         scheduledTasks: "Scheduled tasks",
       },
       settings: {
@@ -93,5 +95,48 @@ describe("WorkspaceNavChatList", () => {
     expect(
       screen.getByRole("button", { name: "Project actions for test2" }),
     ).toBeTruthy();
+  });
+
+  it("offers New chat and Chats entries underneath the projects group", () => {
+    render(
+      <SidebarProvider defaultOpen>
+        <WorkspaceNavChatList selectedFile={null} onFileOpen={rs.fn()} />
+      </SidebarProvider>,
+    );
+
+    expect(
+      screen.getByRole("link", { name: "New chat" }).getAttribute("href"),
+    ).toBe("/workspace/chats/new");
+    expect(
+      screen.getByRole("link", { name: "Chats" }).getAttribute("href"),
+    ).toBe("/workspace/chats");
+
+    // Both entries belong to the group that follows the project folders, so a
+    // project row must precede them in document order.
+    const links = screen.getAllByRole("link");
+    const indexOf = (name: string) =>
+      links.findIndex((link) => link.textContent?.trim() === name);
+    expect(indexOf("test2")).toBeGreaterThanOrEqual(0);
+    expect(indexOf("New chat")).toBeGreaterThan(indexOf("test2"));
+    expect(indexOf("Chats")).toBeGreaterThan(indexOf("New chat"));
+  });
+
+  it("marks New chat active only on the new-conversation route", () => {
+    render(
+      <SidebarProvider defaultOpen>
+        <WorkspaceNavChatList selectedFile={null} onFileOpen={rs.fn()} />
+      </SidebarProvider>,
+    );
+
+    // usePathname is mocked to a project route, so neither chat entry is the
+    // current page and neither may claim the active treatment.
+    expect(
+      screen
+        .getByRole("link", { name: "New chat" })
+        .getAttribute("data-active"),
+    ).toBe("false");
+    expect(
+      screen.getByRole("link", { name: "Chats" }).getAttribute("data-active"),
+    ).toBe("false");
   });
 });

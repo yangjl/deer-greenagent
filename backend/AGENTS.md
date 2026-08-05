@@ -1974,7 +1974,7 @@ deterministic, exposes only relative paths, and never opens a file for writing.
 The four operator review classifications are `compatible`, `repairable`,
 `invalid_or_ambiguous`, and `safe_to_supersede` (the last requires an explicit
 `superseded_by` marker). This inventory is not authoritative DBTL state.
-`start_run` rejects the reserved `dbtl_orchestrator` before creating a run,
+`start_run` rejects the reserved `project_supervisor` before creating a run,
 thread, checkpoint, or artifact unless `dbtl.mode=graph_enabled`; `manual`
 does not enable LangGraph execution. Preserve this fail-closed ordering.
 
@@ -1988,11 +1988,8 @@ knowledge claims/promotions/links, plus validation and cutover evidence.
 single-use idempotency. The Gateway captures reviewer identity and project
 role from the authenticated membership; client actor fields, internal
 principals, stale revisions, replays, and cross-project access fail closed.
-Serialized LangGraph resume payloads are not review records: the Gateway
-rejects `dbtl_orchestrator` resume commands before run creation, and the
-experimental graph refuses every client-shaped human decision until a later
-phase connects a server-side durable-review resolver. Never copy reviewer
-identity or authorization from a resume payload into graph authority.
+Serialized LangGraph resume payloads are not review records. Never copy
+reviewer identity or authorization from a resume payload into graph authority.
 `GET /api/dbtl/governance/readiness` and the validation/cutover endpoints are
 administrator-only. A cutover can be approved only from a successful
 PostgreSQL validation; SQLite remains useful for local inspection but can
@@ -2198,10 +2195,10 @@ project scope, `resolve_run_agent_factory` accepts the runtime-only
 `dbtl_supervisor_enabled=true` opt-in for that run. This preserves the normal
 state/checkpoint graph and makes rollback to audit/manual mode degrade to the
 lead agent instead of stranding threads pinned to a disabled assistant.
-`project_supervisor` remains a reserved direct/headless target beside
-`dbtl_orchestrator` in `services.py::_DBTL_GRAPH_ASSISTANT_IDS` (one set, so the
-resolve path and pre-run safety gate cannot disagree), and both direct targets
-stay fail-closed until `dbtl.mode=graph_enabled`.
+`project_supervisor` remains a reserved direct/headless target in
+`services.py::_DBTL_GRAPH_ASSISTANT_IDS` (one set, so the resolve path and
+pre-run safety gate cannot disagree), and stays fail-closed until
+`dbtl.mode=graph_enabled`.
 
 `deerflow.agents.dbtl.supervisor` routes one request to one of four **terminal**
 branches and ends; it never loops between them, so a request cannot silently
@@ -2358,14 +2355,11 @@ the turn. This is a known framework cost confined to graph-enabled project
 runs; projectless, custom-agent, scheduled, and rollback-mode runs remain on
 the root lead-agent graph.
 
-Phase 5 introduced `deerflow.dbtl.stage_stub.ManualStageAdapter` as a
-structurally non-writing seam. Phase 6 keeps it only for explicit compatibility
-tests; production continuation requests receive
+Production continuation requests receive
 `deerflow.agents.dbtl.stage_execution.LiveStageAdapter` from
-`make_project_supervisor`. Both adapters preserve the critical Phase 5
-invariant: `satisfies_gate` is a constant-false property, and gate satisfaction
-stays a typed human-review record in Phase 1's governance tables rather than a
-graph output.
+`make_project_supervisor`. Stage execution preserves the critical invariant:
+`satisfies_gate` is a constant-false property, and gate satisfaction stays a
+typed human-review record in the governance tables rather than a graph output.
 
 The selected project and cycle arrive as **explicit runtime context**.
 `supervisor_context_from_config` reads `project_id` from the merged runtime view
@@ -2702,64 +2696,15 @@ membership rather than request data.
 
 `LiveStageAdapter` maps `ready_for_build` to Build, runs Build/Test through the
 same bounded fan-out, and creates Build lineage after the content-addressed
-Build package is committed. `generic:build:v3` makes the approved Design plus
-the files examined during Build its inputs; the server snapshot excludes newly
-generated outputs and refuses a source changed during the run. V3 raises the
-bounded allowance from the four model calls effectively available under the
-old 40-super-step default to twelve calls (143 super-steps), so a worker can
-inspect, write, execute, diagnose, and still return its structured result in
-the same request.
-
-**Build records how to re-run its work; Test and the human decide whether it
-is reproducible.** V4 introduced the current scientific contract and remains
-resolvable; `generic:build:v7` is the current execution contract. V1–V3
-carried a `reproducible_execution` validity gate, which asked Build to *prove*
-a repeat run — so a worker that wrote a complete, correct implementation but
-could not run it twice marked its own result `failed`, and the whole attempt
-produced no reviewable evidence at all. A recorded implementation carrying a
-stated caveat is strictly more useful to a reviewer than nothing. V4 replaces
-that gate with `recorded_rerun_procedure`, and `build_prompt` gains a
-Build-stage block telling the worker to record the exact command, seed, input
-paths, and environment; that demonstrating a second identical run is welcome
-but **not** required; and that it must not fail its own result over an
-unrepeated or unexecuted run — reporting it in `limitations` instead. The
-question is not dropped, only moved to where it is decided: `reproducibility`
-remains a required check of the pinned `generic-predictive:v2` pack, where a
-failure still yields `irreproducible_execution` and dominates strong headline
-metrics, and the Build review meeting still asks whether another person could
-reproduce the work from the record alone. V1–V3 keep their gate unchanged and
-stay resolvable, because an approval names the contract it ran under and
-relaxing a rule must add a version rather than rewrite the one somebody
-approved. V5 keeps V4's inputs and validity gates while replacing the former
-twelve-call/400K-token worker allowance with six calls/120K tokens and a
-ten-minute timeout. Each phase receives one compact, hash-bound Build packet
-instead of generic stage history, and the server creates `src/`, `tests/`,
-`config/`, `artifacts/`, and `logs/` before dispatch. The phase prompt directs
-workers to file tools for authoring and reserves Bash for short execution and
-verification commands. A retry still resolves the spec recorded on the stage
-attempt, so a V4 attempt never changes budget or output schema halfway through.
-V6 removes V5's Build-stage token kill switch, repetitive-tool frequency hard
-stop, and six-call finalization
-deadline after a live run finalized a partial configuration as a successful
-phase. Provider usage remains metered, a deliberately high emergency recursion
-ceiling and 15-minute timeout remain safeguards, and each phase must return a
-passing `phase_done_condition` quality check before its terminal event or
-durable workflow row can say complete. That marker cannot contradict another
-failed implementation check; only repeat-run/reproducibility checks are
-non-gating here because Test owns that verdict. A failed or missing assertion stops at
-that phase, so recovery replays earlier committed phases and retries the first
-unfinished phase rather than validating missing outputs downstream. Declared
-prior-phase directories are expanded over the union of unchanged pre-run files
-and server-published file hashes;
-they are no longer rejected merely because the pre-run snapshot could not have
-contained same-run output.
-V7 keeps the V6 evidence contract but restores an enforced 120K-token,
-450-superstep, 15-minute worker ceiling. The production dispatcher applies the
-same operational ceiling to already-pinned uncapped V6 attempts, so the attempt
-that exposed the regression cannot consume another 300K-token phase merely
-because version pinning correctly preserves its recorded contract.
-Tests:
-`tests/test_dbtl_stage_contracts.py::TestBuildRecordsRerunInformationRatherThanProvingIt`.
+Build package is committed. Build uses the single current
+`generic:build:v12` contract: the approved Design and server-bound workspace
+inputs are its inputs, each worker has an enforced 120K-token, 450-superstep,
+15-minute ceiling, and one failed implementation check may receive one fresh
+40K-token correction. Each phase must return a passing
+`phase_done_condition`; a failed or missing assertion stops the plan and leaves
+earlier committed phases available for replay. Build records a structured
+rerun procedure, while Test and the human decide whether the result is
+reproducible.
 
 Build's structured-result parser is deliberately looser only about the label on
 a concrete implementation file. Models often return semantic kinds such as
@@ -3820,13 +3765,12 @@ same switch:
   so deadline accounting cannot refund the call, and refuses to jump after a
   token/loop/safety stop or forced finalization. Its one-time graph nodes are
   reserved as deadline headroom. A forced-finalized Build phase is a typed
-  failure in both the live task event and `collect_results`; older stage
-  contracts retain their historical limitation behavior. Tests:
+  failure in both the live task event and `collect_results`. Tests:
   `test_build_phase_correction_middleware.py`,
   `test_finalization_deadline_middleware.py`, and
   `test_dbtl_council_seat_events.py`.
 
-  Build v10 introduced `BuildPhase.skills` as the complete
+  Current Build treats `BuildPhase.skills` as the complete
   per-phase allowlist: the planner may name at most eight enabled skill names,
   the adapter resolves the same per-user registry `SubagentExecutor` uses,
   hashes each winning `SKILL.md`, binds `skill:<name>:sha256:<digest>` into the
@@ -3836,22 +3780,16 @@ same switch:
   work cannot commit against a revision it did not finish under. Do not add a
   parallel skill loader or eagerly union passive skill policies.
 
-  V10 also requires phase-manifest v2. `declared_inputs` contains only exact
-  workspace files consumed to implement that phase. `_build_input_artifacts`
-  binds and re-hashes those files (plus durable datasets) and deliberately
-  ignores `inputs_examined` and evidence-reference fallbacks for v10, so files
-  read only for discovery/orientation do not invalidate execution. V9 keeps
-  manifest v1 and the historical broad provenance fallback. Tests:
+  `_build_input_artifacts` binds and re-hashes exact workspace files consumed
+  by the phase (plus durable datasets), so files read only for
+  discovery/orientation do not invalidate execution. Tests:
   `test_dbtl_build_plan.py`, `test_dbtl_build_workflow.py`,
   `test_dbtl_build_workflow_execution.py`, and
   `test_dbtl_live_stage_execution.py`.
 
-  Current Build is `generic:build:v12`. V11 stays immutable and resolvable as
-  the matched-checkpoint experiment that raised v10's per-worker ceiling from
-  120,000 to 500,000; v12 restores the 120,000 ceiling after the live run showed
-  that more budget amplified an environment-contract error rather than fixing
-  it. A failed implementation check receives one fresh 40,000-token correction
-  worker carrying only the refusal and previous staged workspace. It does not
+  Current Build is `generic:build:v12`, with a 120,000-token worker ceiling. A
+  failed implementation check receives one fresh 40,000-token correction
+  worker carrying only the refusal and previous staged workspace; it does not
   inherit the first worker's growing ReAct transcript.
 
   V12 requires phase-manifest v3. `declared_inputs` binds the narrow set of
@@ -3925,17 +3863,6 @@ same switch:
   without double-counting a multi-tool turn. Tests:
   `test_subagent_step_events.py`, `core/tasks/steps.test.ts`, and
   `core/tasks/tool-transcript.test.ts`.
-
-  `dbtl.build_worker_contract` is the rollout boundary for new, unpinned
-  phased Build attempts. `hardened_v12` is the default; `hardened_v11`,
-  `hardened_v10`, and `legacy_v9` are bounded rollbacks while
-  matched-checkpoint evaluation continues. A recorded
-  `stage_spec_key` always wins over the setting, and repository pinning still
-  arbitrates concurrent starters, so changing the configuration cannot rewrite
-  an active attempt's contract. Keep v9's parser and broad provenance fallback
-  until telemetry supports retiring them; do not add a second execution or
-  persistence path for rollback. Tests: `test_dbtl_config.py` and
-  `test_dbtl_build_workflow_execution.py`.
 
   Current Test execution is pinned to `generic:test:v4`. The focused
   `live_stage.test_rerun` module is the sole new owner for the rerun protocol;

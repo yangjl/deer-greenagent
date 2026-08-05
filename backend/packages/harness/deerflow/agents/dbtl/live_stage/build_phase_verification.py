@@ -9,7 +9,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from deerflow.agents.dbtl.live_stage.build_phases import BuildPhaseManifest
-from deerflow.agents.dbtl.live_stage.workspace import sha256_file, verified_workspace_files, workspace_relative_path
+from deerflow.agents.dbtl.live_stage.workspace import verified_workspace_file, workspace_relative_path
 from deerflow.dbtl.build_grant import build_input_grant
 
 VERIFY_STDOUT = "logs/server-verification.stdout.log"
@@ -94,29 +94,6 @@ def verification_shell_command(
     return shell, env
 
 
-def _verified_file(reference: str, *, project_root: str, unit_workspace: str, max_bytes: int | None = None) -> tuple[str, int, str] | None:
-    try:
-        files = verified_workspace_files(
-            reference,
-            project_root=project_root,
-            containment_reference=unit_workspace,
-            max_files=1,
-        )
-        if len(files) != 1 or not files[0][1].is_file():
-            return None
-        relative, path = files[0]
-        before = path.stat()
-        if max_bytes is not None and before.st_size > max_bytes:
-            return None
-        content_hash = sha256_file(path)
-        after = path.stat()
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-            return None
-        return relative, after.st_size, content_hash
-    except (FileNotFoundError, OSError, ValueError):
-        return None
-
-
 def _clear_verification_receipts(*, project_root: str, unit_workspace: str) -> str:
     """Remove worker-visible receipt names before the server starts.
 
@@ -151,7 +128,7 @@ def execute_and_verify_phase(
     issued_inputs: tuple[str, ...] = (),
 ) -> BuildPhaseVerification:
     """Execute the declared entry point and derive the receipt from files."""
-    entry = _verified_file(manifest.entry_point, project_root=project_root, unit_workspace=unit_workspace)
+    entry = verified_workspace_file(manifest.entry_point, project_root=project_root, containment_reference=unit_workspace)
     if entry is None:
         return BuildPhaseVerification(False, "The declared Build entry point is missing or outside its phase grant.", "")
     issued = set(issued_inputs)
@@ -173,7 +150,7 @@ def execute_and_verify_phase(
         return BuildPhaseVerification(False, f"The server could not execute the Build entry point: {exc}", entry_command(manifest.entry_point))
 
     status_ref = f"{unit_workspace.rstrip('/')}/{VERIFY_STATUS}"
-    status_file = _verified_file(status_ref, project_root=project_root, unit_workspace=unit_workspace, max_bytes=32)
+    status_file = verified_workspace_file(status_ref, project_root=project_root, containment_reference=unit_workspace, max_bytes=32)
     if status_file is None:
         return BuildPhaseVerification(False, "The server execution produced no readable exit-status receipt.", entry_command(manifest.entry_point))
     resolved_status = workspace_relative_path(status_ref, project_root=project_root)
@@ -184,10 +161,10 @@ def execute_and_verify_phase(
 
     logs: list[dict[str, Any]] = []
     for stream, filename in (("stdout", VERIFY_STDOUT), ("stderr", VERIFY_STDERR)):
-        verified = _verified_file(
+        verified = verified_workspace_file(
             f"{unit_workspace.rstrip('/')}/{filename}",
             project_root=project_root,
-            unit_workspace=unit_workspace,
+            containment_reference=unit_workspace,
             max_bytes=MAX_VERIFY_LOG_BYTES,
         )
         if verified is None:
@@ -206,7 +183,7 @@ def execute_and_verify_phase(
 
     outputs: list[dict[str, Any]] = []
     for declared in manifest.declared_outputs:
-        verified = _verified_file(declared, project_root=project_root, unit_workspace=unit_workspace)
+        verified = verified_workspace_file(declared, project_root=project_root, containment_reference=unit_workspace)
         if verified is None:
             return BuildPhaseVerification(
                 False,

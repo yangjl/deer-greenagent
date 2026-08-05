@@ -294,6 +294,38 @@ def verified_workspace_files(
     return tuple(files)
 
 
+def verified_workspace_file(
+    reference: object,
+    *,
+    project_root: str,
+    containment_reference: str,
+    max_bytes: int | None = None,
+) -> tuple[str, int, str] | None:
+    """Return one stable contained file and its size/hash, or ``None``."""
+    if not isinstance(reference, str) or not reference.strip():
+        return None
+    try:
+        files = verified_workspace_files(
+            reference,
+            project_root=project_root,
+            containment_reference=containment_reference,
+            max_files=1,
+        )
+        if len(files) != 1 or not files[0][1].is_file():
+            return None
+        relative, path = files[0]
+        before = path.stat()
+        if max_bytes is not None and before.st_size > max_bytes:
+            return None
+        content_hash = sha256_file(path)
+        after = path.stat()
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        return None
+    return relative, after.st_size, content_hash
+
+
 def read_workspace_text(
     reference: str,
     *,

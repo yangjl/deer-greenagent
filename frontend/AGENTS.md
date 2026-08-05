@@ -404,17 +404,14 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
   choosing Create invokes the existing authenticated cycle endpoint.
   `cycle_continuation` instead runs `LiveStageAdapter` directly and never raises
   a proposal card alongside that work.
-- **Creating a cycle and starting its Design council are two steps, and both
-  paths must do both.** The debate is a `continue_cycle`-scoped request, so it
-  cannot be sent before a cycle id exists. `StartCycleDialog.onCreated` does
-  `selectCycle` + `requestDesignKickoff`; the conversational path does the same
-  after the chat page handles the native setup confirmation, which is why
+- **Creating a cycle and starting its Design council are two steps.** The debate
+  is a `continue_cycle`-scoped request, so it cannot be sent before a cycle id
+  exists. The chat page starts it after handling the native setup confirmation,
+  which is why
   `useDbtlUpgradeProposal.createFromNativeSetup` **returns the created
   `CycleRecord`** instead of discarding it (`null` on failure, so a failed
   confirmation cannot start a debate about a record that does not exist).
-  Wiring a new creation route
-  without the kickoff leaves a cycle that never gets designed — that regression
-  shipped once already.
+  A creation route without the kickoff leaves a cycle that never gets designed.
 - **On the conversational path the kickoff is armed, not sent.** Approving the
   native confirmation calls `armDesignKickoff`; the supervisor answers that
   same approval with its design questions, and `releaseDesignKickoff(answer)`
@@ -425,14 +422,7 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
   had already happened. The answers ride along as `PendingDesignKickoff.
 designNotes` and are handed to the council as the owner's decisions rather
   than as suggestions to revisit; re-deriving them from the transcript would
-  make the council's grounding depend on summarization. `StartCycleDialog`
-  still calls `requestDesignKickoff` directly: that form collects the same
-  facts up front, so there is nothing left to ask.
-- `POST .../dbtl/proposals/draft-setup` and its merge helpers remain available
-  to the degraded form path, but graph-enabled project chat does not invoke
-  them. The supervisor derives bounded setup data from the conversation and
-  asks for missing facts through the native card instead of mounting a second
-  form above the composer.
+  make the council's grounding depend on summarization.
 - **Do not point `setup_draft_model_name` at a Claude subscription model.** The
   Claude Code OAuth path impersonates the CLI (`claude_provider`'s billing
   header), and the OAuth inference endpoint returns `stop_reason=refusal` with
@@ -442,13 +432,8 @@ designNotes` and are handed to the council as the owner's decisions rather
   constraint for any other internal backend prompt.
 - A textless send does **not** consume the armed one-shot scope. The DBTL routes
   read the request's text, so a textless send cannot start or continue anything,
-  and disarming on it stranded users who armed the composer and then sent
-  nothing. `start-cycle-dialog.tsx`
-  is retained only as the degraded path for installs where the supervisor graph
-  is off (`audit_only` / `manual`): chat structurally cannot run setup there, so
-  removing the form would leave no way to open a record at all. The project
-  rail picks between them on `graph_execution_enabled` — do not make the form
-  the primary path again on a graph-enabled install.
+  and disarming on it strands users who armed the composer and then sent
+  nothing.
 - `src/components/workspace/dbtl/cycle-selection-context.tsx` carries an
   **explicitly clicked** cycle from the project rail to project chat. The sole
   automatic selection is a cycle returned by the user's own Start Cycle
@@ -520,13 +505,8 @@ designNotes` and are handed to the council as the owner's decisions rather
   remain visible as superseded or retracted audit records. The client renders
   server-owned status and never infers that stage approval promoted or
   published knowledge.
-- `src/core/dbtl/phase7-demo.ts` owns the no-write Phase 7 human-demo fixtures,
-  and `project-rail/phase7-demo-dialog.tsx` renders them. The project rail no
-  longer exposes that preview. The three cases deliberately separate a
-  strong-but-invalid result, missing evidence, and a supported result. The
-  dialog says that it is a preview and never invokes a mutation hook.
-- A successful `StartCycleDialog` calls its `onCreated` handoff. Project chat
-  sends one visible, cycle-scoped Design-council prompt. Design questions use
+- A successful conversational cycle setup sends one visible, cycle-scoped
+  Design-council prompt. Design questions use
   the existing `ask_clarification` card (`clarification_type=design_decision`)
   and retain that cycle scope instead of falling back to ordinary chat.
   Completed packages use the existing `present_files` group,
@@ -773,9 +753,8 @@ the run's ordinary assistant conclusion or `present_files` output. A successful
 round anchors the panel immediately above its files so the Design slide deck is
 always below the meeting; a failed round anchors it above the assistant's
 refusal so the failed participant remains visible instead of collapsing into a
-generic sentence. `MessageList` does not restore the old checkpoint-derived
-`DesignMeetingProgressCard`: the durable participant ledger is the single
-meeting footprint, and agent activity remains the deeper audit surface.
+generic sentence. The durable participant ledger is the single meeting
+footprint, and agent activity remains the deeper audit surface.
 
 The task ledger is **conversation-scoped**, even though project layouts persist
 while navigating between conversations. `ChatProviders` keys
@@ -977,21 +956,6 @@ reload—or after a 409 caused by changing that failed answer—the authenticate
 receipt supplies the original selected option/comment in the next
 `initialize` message, and the deck restores them before re-enabling controls.
 The persisted HTML still carries no answer and remains inert outside DeerFlow.
-
-That background path must still speak through the main chat. The Gateway writes
-one visible `llm.ai.response` carrying a bounded
-`additional_kwargs.dbtl_meeting_progress` snapshot after it admits the chair
-run. `message-list-item.tsx` renders it as
-`DesignMeetingProgressCard`, reconstructing the already-reported independent
-and red-team lanes from durable stage-worker rows and showing the chair as
-synthesizing. The card polls the existing stage-workers read endpoint until the
-new chair row completes or fails, so a reload does not depend on the live
-`task_*` stream. Each durable lane opens the shared
-`MeetingParticipantInspector`; the worker endpoint supplies the complete
-structured closing report, while unavailable intermediate step events remain
-uninvented. Keep this separate from `DebatePanel`: that panel is the rich
-live-run view with inspectable step events, while this card is the durable
-fallback for a run started by the authenticated deck parent.
 
 The Design gate is two-step in the same deck at standard depth: submit first,
 then refresh and show the three verdicts. With `dbtl.progressive_gate`, the

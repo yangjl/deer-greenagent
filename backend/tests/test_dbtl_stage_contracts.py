@@ -28,9 +28,7 @@ from deerflow.dbtl.stage_runner import (
     run_stage,
 )
 from deerflow.dbtl.stage_spec import (
-    BUILD_SPEC_V1,
-    BUILD_SPEC_V2,
-    BUILD_SPEC_V3,
+    BUILD_SPEC_V12,
     DESIGN_SPEC_V1,
     DESIGN_SPEC_V2,
     EXECUTABLE_STAGES,
@@ -142,26 +140,18 @@ class TestStageSpecRegistry:
         assert "raw_data_immutable" in RECONCILIATION_SPEC_V1.validity_gates
         assert "dataset_hashes_bound" in RECONCILIATION_SPEC_V1.validity_gates
 
-    def test_build_requires_reconciled_lineage_and_reproducibility(self) -> None:
-        assert BUILD_SPEC_V1.required_inputs == (
-            "approved_design_brief",
-            "approved_reconciliation_report",
-            "bound_dataset_fingerprint",
-        )
-        assert "reproducible_execution" in BUILD_SPEC_V1.validity_gates
-
     def test_current_build_discovers_and_server_binds_its_inputs(self) -> None:
-        assert BUILD_SPEC_V2.required_inputs == (
+        assert BUILD_SPEC_V12.required_inputs == (
             "approved_design_brief",
             "workspace_inputs_examined_during_build",
         )
-        assert "server_bound_input_lineage" in BUILD_SPEC_V2.validity_gates
-        assert BUILD_SPEC_V2.output_schema == "build_package.v2"
+        assert "server_bound_input_lineage" in BUILD_SPEC_V12.validity_gates
+        assert BUILD_SPEC_V12.output_schema == "build_package.v12"
 
     def test_current_build_has_enough_bounded_turns_to_execute(self) -> None:
-        assert BUILD_SPEC_V3.required_inputs == BUILD_SPEC_V2.required_inputs
-        assert BUILD_SPEC_V3.budget.max_turns == 143
-        assert BUILD_SPEC_V3.output_schema == "build_package.v3"
+        assert BUILD_SPEC_V12.budget.max_turns == 450
+        assert BUILD_SPEC_V12.budget.max_tokens == 120_000
+        assert BUILD_SPEC_V12.budget.token_limit_enforced is True
 
     def test_learn_can_only_create_candidates(self) -> None:
         assert LEARN_SPEC_V1.output_schema == "learn_summary.v1"
@@ -1190,7 +1180,7 @@ class TestStageFanOut:
             collect_results(typed, [])
 
 
-class TestBuildRecordsRerunInformationRatherThanProvingIt:
+class TestBuildContract:
     """Reproducibility is Test's question and a human's verdict, not Build's gate.
 
     A Build worker that could not demonstrate a second identical run marked its
@@ -1200,46 +1190,19 @@ class TestBuildRecordsRerunInformationRatherThanProvingIt:
     Test validity pack, where ``reproducibility`` remains a required check.
     """
 
-    def test_build_no_longer_gates_on_proven_reproducibility(self) -> None:
-        from deerflow.dbtl.stage_spec import BUILD_SPEC_V4
-
-        assert "reproducible_execution" not in BUILD_SPEC_V4.validity_gates
-        assert "recorded_rerun_procedure" in BUILD_SPEC_V4.validity_gates
-        assert "server_bound_input_lineage" in BUILD_SPEC_V4.validity_gates
-
-    def test_build_v12_is_current_and_restores_the_bounded_ceiling(self) -> None:
-        from deerflow.dbtl.stage_spec import BUILD_SPEC_V9, BUILD_SPEC_V10, BUILD_SPEC_V11, BUILD_SPEC_V12
-
+    def test_build_v12_is_current_and_bounded(self) -> None:
         assert resolve_stage_spec("build").spec_key == "generic:build:v12"
-        assert BUILD_SPEC_V10.required_inputs == BUILD_SPEC_V9.required_inputs
-        assert BUILD_SPEC_V10.validity_gates == (
+        assert BUILD_SPEC_V12.validity_gates == (
             "server_bound_input_lineage",
             "versioned_derived_outputs",
             "structured_rerun_spec",
             "server_verified_phase_manifest",
             "phase_declared_skills",
             "narrow_implementation_inputs",
+            "granted_paths_only",
+            "server_executed_entry_point",
         )
-        assert BUILD_SPEC_V10.budget == BUILD_SPEC_V9.budget
-        assert BUILD_SPEC_V11.validity_gates == BUILD_SPEC_V10.validity_gates
-        assert BUILD_SPEC_V11.budget.max_tokens == 500_000
-        assert BUILD_SPEC_V11.budget.max_turns == BUILD_SPEC_V10.budget.max_turns
-        assert BUILD_SPEC_V11.budget.timeout_seconds == BUILD_SPEC_V10.budget.timeout_seconds
-        assert BUILD_SPEC_V11.budget.token_limit_enforced is True
-        assert BUILD_SPEC_V12.budget == BUILD_SPEC_V10.budget
         assert BUILD_SPEC_V12.budget.max_tokens == 120_000
-        assert "server_executed_entry_point" in BUILD_SPEC_V12.validity_gates
-
-    def test_the_older_build_contracts_are_unchanged(self) -> None:
-        from deerflow.dbtl.stage_spec import BUILD_SPEC_V2, BUILD_SPEC_V3, BUILD_SPEC_V4, BUILD_SPEC_V7
-
-        # An approved attempt records the spec it ran under, so relaxing the
-        # rule must add a version rather than rewrite the ones people approved.
-        assert "reproducible_execution" in BUILD_SPEC_V2.validity_gates
-        assert "reproducible_execution" in BUILD_SPEC_V3.validity_gates
-        assert BUILD_SPEC_V4.budget == BUILD_SPEC_V3.budget
-        assert "recorded_rerun_procedure" in BUILD_SPEC_V7.validity_gates
-        assert "structured_rerun_spec" not in BUILD_SPEC_V7.validity_gates
 
     def test_test_still_requires_the_reproducibility_check(self) -> None:
         from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK, ValidityCheckName

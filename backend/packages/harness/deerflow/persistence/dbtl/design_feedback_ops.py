@@ -351,10 +351,6 @@ class DesignFeedbackOpsMixin:
                 )
             return payload
 
-    async def register_design_feedback_surface(self, **kwargs: Any) -> dict[str, Any]:
-        """Compatibility wrapper for pre-Phase 2 callers and captured decks."""
-        return await self.register_stage_feedback_surface(stage="design", **kwargs)
-
     async def bind_design_feedback_request(
         self,
         surface_id: str,
@@ -716,10 +712,6 @@ class DesignFeedbackOpsMixin:
                 return self._surface_payload(surface), self._action_payload(winner), True
             return self._surface_payload(surface), self._action_payload(row), False
 
-    async def reserve_design_feedback_action(self, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any], bool]:
-        """Compatibility wrapper for callers using the former Design name."""
-        return await self.reserve_stage_feedback_action(**kwargs)
-
     async def update_stage_feedback_action(
         self,
         action_id: str,
@@ -792,10 +784,6 @@ class DesignFeedbackOpsMixin:
                 raise DesignFeedbackConflict("Design feedback action not found.")
             return self._action_payload(row), changed
 
-    async def update_design_feedback_action(self, action_id: str, **kwargs: Any) -> dict[str, Any]:
-        """Compatibility wrapper for callers using the former Design name."""
-        return await self.update_stage_feedback_action(action_id, **kwargs)
-
     async def stage_feedback_actions(self, surface_id: str, *, project_id: str) -> list[dict[str, Any]]:
         async with self._sf() as session:  # type: ignore[attr-defined]
             rows = (
@@ -809,10 +797,6 @@ class DesignFeedbackOpsMixin:
                 )
             ).scalars()
             return [self._action_payload(row) for row in rows]
-
-    async def design_feedback_actions(self, surface_id: str, *, project_id: str) -> list[dict[str, Any]]:
-        """Compatibility wrapper for callers using the former Design name."""
-        return await self.stage_feedback_actions(surface_id, project_id=project_id)
 
     @staticmethod
     async def _live_surfaces(
@@ -832,10 +816,6 @@ class DesignFeedbackOpsMixin:
         )
         return list(result.scalars())
 
-    async def get_design_feedback_surface(self, surface_id: str, *, project_id: str) -> dict[str, Any] | None:
-        """Compatibility wrapper for the generalized stage surface lookup."""
-        return await self.get_stage_feedback_surface(surface_id, project_id=project_id)
-
     async def get_stage_feedback_surface(self, surface_id: str, *, project_id: str) -> dict[str, Any] | None:
         """Resolve one surface within its own project. Never leaks across."""
         async with self._sf() as session:  # type: ignore[attr-defined]
@@ -846,23 +826,6 @@ class DesignFeedbackOpsMixin:
                 )
             )
             return self._surface_payload(row) if row is not None else None
-
-    async def latest_design_feedback_surface(
-        self,
-        *,
-        project_id: str,
-        cycle_id: str,
-        stage_attempt_id: str | None = None,
-        mode: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Compatibility wrapper for the generalized latest-surface lookup."""
-        return await self.latest_stage_feedback_surface(
-            project_id=project_id,
-            cycle_id=cycle_id,
-            stage="design",
-            stage_attempt_id=stage_attempt_id,
-            mode=mode,
-        )
 
     async def latest_stage_feedback_surface(
         self,

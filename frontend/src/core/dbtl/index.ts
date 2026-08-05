@@ -22,4 +22,3 @@ export * from "./setup-draft-merge";
 export * from "./validity-api";
 export * from "./validity-hooks";
 export * from "./validity-view";
-export * from "./phase7-demo";

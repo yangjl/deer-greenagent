@@ -16,6 +16,7 @@ from langchain_core.tools import BaseTool
 from deerflow.agents.dbtl.live_stage.workspace import (
     STAGE_UNIT_WORKSPACE_PLACEHOLDER,
     sha256_file,
+    verified_workspace_file,
     verified_workspace_files,
     workspace_relative_path,
 )
@@ -292,37 +293,6 @@ def build_test_rerun_tool(unit: WorkUnit, *, unit_workspace: str) -> BaseTool:
     return execute_build_rerun
 
 
-def _verified_file(
-    reference: Any,
-    *,
-    project_root: str,
-    unit_workspace: str,
-    max_bytes: int,
-) -> tuple[str, int, str] | None:
-    if not isinstance(reference, str) or not reference.strip():
-        return None
-    resolved = workspace_relative_path(reference, project_root=project_root)
-    if resolved is None or not resolved[1].is_file():
-        return None
-    try:
-        files = verified_workspace_files(
-            reference,
-            project_root=project_root,
-            containment_reference=unit_workspace,
-            max_files=1,
-        )
-        if len(files) != 1 or files[0][0] != resolved[0]:
-            return None
-        before = resolved[1].stat()
-        content_hash = sha256_file(resolved[1])
-        after = resolved[1].stat()
-    except (FileNotFoundError, OSError, ValueError):
-        return None
-    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or after.st_size > max_bytes:
-        return None
-    return resolved[0], after.st_size, content_hash
-
-
 def validate_test_rerun(
     result: StageWorkerResult,
     prepared: PreparedTestRerun,
@@ -334,10 +304,10 @@ def validate_test_rerun(
 
     logs: list[dict[str, Any]] = []
     for stream, filename in (("stdout", RERUN_STDOUT_NAME), ("stderr", RERUN_STDERR_NAME)):
-        verified = _verified_file(
+        verified = verified_workspace_file(
             f"{unit_workspace.rstrip('/')}/{filename}",
             project_root=project_root,
-            unit_workspace=unit_workspace,
+            containment_reference=unit_workspace,
             max_bytes=MAX_RERUN_LOG_BYTES,
         )
         if verified is None:
@@ -355,10 +325,10 @@ def validate_test_rerun(
             }
         )
 
-    status_file = _verified_file(
+    status_file = verified_workspace_file(
         f"{unit_workspace.rstrip('/')}/{RERUN_EXIT_STATUS_NAME}",
         project_root=project_root,
-        unit_workspace=unit_workspace,
+        containment_reference=unit_workspace,
         max_bytes=32,
     )
     if status_file is None:
@@ -423,10 +393,10 @@ def validate_test_rerun(
         matches = [relative for relative, path in output_candidates if path.name == basename]
         if len(matches) != 1:
             return failed_after_execution(f"The successful rerun produced {len(matches)} fresh files named {basename!r}; exactly one is required for {expected!r}.")
-        verified = _verified_file(
+        verified = verified_workspace_file(
             f"/mnt/user-data/{matches[0]}",
             project_root=project_root,
-            unit_workspace=unit_workspace,
+            containment_reference=unit_workspace,
             max_bytes=MAX_RERUN_OUTPUT_BYTES,
         )
         if verified is None:

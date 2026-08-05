@@ -13,7 +13,6 @@ by itself.
 
 from __future__ import annotations
 
-import inspect
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -22,6 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from deerflow.agents.dbtl.live_stage.types import LiveStageResult
 from deerflow.agents.dbtl.supervisor import _make_llm_question_writer, build_supervisor_graph
 from deerflow.agents.dbtl.supervisor_support.card_history import latest_cycle_request_text as _latest_cycle_request_text
 from deerflow.agents.thread_state import get_thread_state_schema
@@ -29,10 +29,19 @@ from deerflow.dbtl.branches import SupervisorBranch, SupervisorContext
 from deerflow.dbtl.council import request_context
 from deerflow.dbtl.routing import ExplicitChoice
 from deerflow.dbtl.setup_questions import SetupQuestion
-from deerflow.dbtl.stage_stub import ManualStageAdapter, StageStubResult
 
 MODE = "full"
 SCHEMA = get_thread_state_schema(MODE)
+
+
+class NoopStageAdapter:
+    async def execute(self, *, cycle_id: str | None, **_kwargs) -> LiveStageResult:
+        return LiveStageResult(
+            stage="design",
+            cycle_id=cycle_id,
+            note="Stage execution is unavailable, so nothing has been recorded.",
+        )
+
 
 # One state carrying something in every channel a run depends on. If a branch
 # drops any of these, the corresponding product feature breaks: sandbox ->
@@ -127,7 +136,7 @@ def compile_supervisor(
     graph = build_supervisor_graph(
         lead_agent=fake_lead_agent(marker if marker is not None else []),
         context=context,
-        stage_adapter=ManualStageAdapter(),
+        stage_adapter=NoopStageAdapter(),
         state_schema=SCHEMA,
         question_writer=question_writer,
     )
@@ -695,7 +704,7 @@ class TestSetupClarificationIsACard:
         graph = build_supervisor_graph(
             lead_agent=fake_lead_agent([]),
             context=setup_context,
-            stage_adapter=ManualStageAdapter(),
+            stage_adapter=NoopStageAdapter(),
             state_schema=SCHEMA,
             question_writer=_make_llm_question_writer(setup_context),
         ).compile(checkpointer=InMemorySaver())
@@ -785,44 +794,6 @@ class TestOrdinaryIsIndistinguishable:
         # Exactly the human turn plus the agent's answer — no routing note, no
         # banner, no supervisor commentary.
         assert [m.id for m in final["messages"]] == ["human-1", "ai-1"]
-
-
-class TestStageStubCannotDoScience:
-    """ "Keep stage execution behind a controlled manual/stub adapter."""
-
-    def test_stub_never_claims_a_scientific_result_or_a_gate(self):
-        result = ManualStageAdapter().execute(stage="design", cycle_id="cyc-1")
-        assert isinstance(result, StageStubResult)
-        assert result.writes_scientific_result is False
-        assert result.satisfies_gate is False
-
-    def test_those_properties_are_constants_not_fields(self):
-        fields = StageStubResult.__dataclass_fields__
-        assert "writes_scientific_result" not in fields
-        assert "satisfies_gate" not in fields
-
-    def test_stub_module_reaches_no_persistence_and_no_greenagent_gate(self):
-        from deerflow.dbtl import stage_stub
-
-        source = inspect.getsource(stage_stub)
-        assert "persistence" not in source
-        assert "Repository" not in source
-        assert "greenagent_cli" not in source
-        assert "check_transition" not in source
-
-    @pytest.mark.asyncio
-    async def test_continuation_branch_says_it_recorded_nothing(self):
-        graph = compile_supervisor(SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"))
-
-        final = await graph.ainvoke(
-            {**FULL_STATE, "messages": [HumanMessage(content="run the design stage", id="human-1")]},
-            config={"configurable": {"thread_id": "stub-note"}},
-        )
-
-        answer = final["messages"][-1].content
-        assert "recorded" in answer.lower()
-        # The user must not be able to read this as work having been done.
-        assert "nothing has been recorded" in answer.lower()
 
 
 class TestPostApprovalStageHandoff:

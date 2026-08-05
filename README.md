@@ -87,22 +87,18 @@ Design–Build–Test–Learn (DBTL) governance.
   fresh correction over its staged files, after native guardrails have settled; a
   cap, timeout, safety stop, loop stop, or forced deadline remains an explicit
   failed phase and cannot be retried around by that correction.
-  Build v10 also makes each phase's declared skills its complete skill
-  allowlist. DeerFlow resolves those names through the enabled per-user registry,
-  binds each exact `SKILL.md` hash into phase material, and rechecks the hashes
-  before commit. Its v2 phase manifest separately names only workspace inputs
-  actually consumed for implementation; orientation-only reads do not
-  invalidate the phase or enter Build lineage. Build v11 retains those gates
-  and raises only the enforced per-worker token ceiling from 120,000 to
-  500,000. Current Build v12 returns to 120,000, issues exact workspace/input
-  paths through the environment, requires manifest-v3 runtime inputs, scans
-  declared source outputs for invented paths, and has the server execute the
-  entry point before publication. Local execution hides unissued project files
+  Current Build makes each phase's declared skills its complete allowlist.
+  DeerFlow resolves those names through the enabled per-user registry, binds
+  each exact `SKILL.md` hash into phase material, and rechecks the hashes before
+  commit. Its manifest names only workspace inputs actually consumed for
+  implementation, so orientation-only reads do not invalidate the phase or
+  enter Build lineage. It uses a 120,000-token ceiling, issues exact
+  workspace/input paths through the environment, requires manifest-v3 runtime
+  inputs, scans declared source outputs for invented paths, and has the server
+  execute the entry point before publication. Local execution hides unissued project files
   with `sandbox-exec`; remote sandbox images must provide `bwrap` or Build fails
-  the read-boundary preflight. New phased Build attempts use
-  `dbtl.build_worker_contract: hardened_v12`; operators can select
-  `hardened_v11`, `hardened_v10`, or `legacy_v9` as rollback paths. Attempts
-  already pinned to a spec keep that spec when the setting changes.
+  the read-boundary preflight. New phased Build attempts use the single current
+  `generic:build:v12` contract.
   Current Test attempts execute that command once in a fresh isolated
   grant through a server-bound native Bash wrapper. The model cannot choose the
   command or add tools; DeerFlow reads fixed stdout, stderr, and exit-status
