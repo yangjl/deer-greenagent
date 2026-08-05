@@ -229,6 +229,14 @@ def initialize_profile(
         config["dbtl"] = dbtl
     dbtl["mode"] = "graph_enabled"
     dbtl["design_deck_feedback"] = True
+    # The current pre-cycle path under test is the durable conversational one.
+    # Classifier entry and automatic cards stay off so a manual scenario begins
+    # only when the tester explicitly asks to start a cycle.
+    dbtl["conversational_discovery"] = True
+    dbtl["discovery_project_history"] = True
+    dbtl["discovery_global_memory"] = False
+    dbtl["discovery_classifier_entry"] = False
+    dbtl["discovery_auto_offer"] = False
     # The manual pipeline exists to exercise in-development DBTL surfaces, so
     # the progressive-gate read model (path strip) is on in the isolated
     # profile while the developer's normal config keeps the default.

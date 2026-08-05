@@ -246,4 +246,16 @@ def test_governance_validation_requires_operator_and_blocks_sqlite_cutover(tmp_p
     assert validation.json()["technical_ready"] is False
     assert validation.json()["total_checks"] == 10
     assert validation.json()["checks"][-1]["status"] == "waiting"
+    assert validation.json()["conversational_discovery"] == {
+        "rollout_stage": "server_owned_setup_fallback",
+        "enabled": False,
+        "classifier_entry": False,
+        "automatic_offers": False,
+        "project_history": False,
+        "global_memory": False,
+        "cycle_creation_authority": "server",
+        "setup_fallback": "server_owned_confirmation_card",
+        "browser_creation_authority": False,
+    }
+    assert "browser never creates" in validation.json()["rollback_posture"]
     assert cutover.status_code == 409

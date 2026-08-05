@@ -509,6 +509,47 @@ async def test_a_live_design_run_persists_workers_and_a_reviewable_package(
 
 
 @pytest.mark.asyncio
+async def test_discovery_package_is_shared_with_every_design_participant(
+    tmp_path: Path,
+) -> None:
+    package_hash = "d" * 64
+    cycle = _cycle()
+    cycle["discovery_package_hash"] = package_hash
+    cycle["discovery_package"] = {
+        "objective": "Compare drought-tolerant hybrids",
+        "open_questions": ["Which sites are the holdout?"],
+        "provenance": {
+            "objective": {"source": "user_turn", "accepted": True},
+        },
+    }
+    dispatcher = FakeDispatcher(text=_structured_result())
+    adapter = LiveStageAdapter(
+        repo=FakeRepo(cycle),
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="designer",
+                capabilities=frozenset({Capability.EXPERIMENTAL_DESIGN}),
+            ),
+        ),
+        dispatcher=dispatcher,
+    )
+
+    await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    prompts = [unit.prompt for units, _budget in dispatcher.calls for unit in units]
+    assert len(prompts) == 3
+    assert all(package_hash in prompt for prompt in prompts)
+    assert all("Which sites are the holdout?" in prompt for prompt in prompts)
+
+
+@pytest.mark.asyncio
 async def test_the_red_team_convenes_even_when_several_specialists_are_declared(
     tmp_path: Path,
 ) -> None:

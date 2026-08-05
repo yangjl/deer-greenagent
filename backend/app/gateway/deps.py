@@ -446,7 +446,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         app.state.thread_store = make_thread_store(sf, app.state.store)
         if sf is not None:
-            from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlGovernanceRepository
+            from deerflow.persistence.dbtl import (
+                DbtlCycleRepository,
+                DbtlDiscoveryRepository,
+                DbtlGovernanceRepository,
+            )
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
             )
@@ -456,6 +460,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
             app.state.dbtl_governance_repo = DbtlGovernanceRepository(sf)
             app.state.dbtl_cycle_repo = DbtlCycleRepository(sf)
+            app.state.dbtl_discovery_repo = DbtlDiscoveryRepository(sf)
             app.state.classifier_evaluation_repo = ClassifierEvaluationRepository(sf)
             app.state.scheduled_task_repo = ScheduledTaskRepository(sf)
             app.state.scheduled_task_run_repo = ScheduledTaskRunRepository(sf)
@@ -463,6 +468,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         else:
             app.state.dbtl_governance_repo = None
             app.state.dbtl_cycle_repo = None
+            app.state.dbtl_discovery_repo = None
             app.state.classifier_evaluation_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
@@ -631,6 +637,13 @@ def get_dbtl_cycle_repo(request: Request):
     val = getattr(request.app.state, "dbtl_cycle_repo", None)
     if val is None:
         raise HTTPException(status_code=503, detail="DBTL cycle repository not available")
+    return val
+
+
+def get_dbtl_discovery_repo(request: Request):
+    val = getattr(request.app.state, "dbtl_discovery_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="DBTL discovery repository not available")
     return val
 
 

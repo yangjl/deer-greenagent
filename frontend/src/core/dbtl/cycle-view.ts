@@ -137,6 +137,8 @@ export interface CycleRecord {
   project_id: string;
   parent_cycle_id: string | null;
   originating_thread_id?: string | null;
+  discovery_id?: string | null;
+  discovery_package_hash?: string | null;
   title: string;
   cycle_class: CycleClass;
   cycle_weight: CycleWeight;

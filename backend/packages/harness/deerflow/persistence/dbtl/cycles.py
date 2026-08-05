@@ -77,6 +77,9 @@ _DETAIL_KEYS = (
     "parked",
     "parked_stage",
     "parked_evidence",
+    "discovery_id",
+    "discovery_package_hash",
+    "discovery_package",
 )
 
 
@@ -166,6 +169,9 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
             "parked": bool(detail.get("parked", False)),
             "parked_stage": detail.get("parked_stage"),
             "parked_evidence": detail.get("parked_evidence"),
+            "discovery_id": detail.get("discovery_id"),
+            "discovery_package_hash": detail.get("discovery_package_hash"),
+            "discovery_package": detail.get("discovery_package"),
             "created_by": cycle.created_by,
             "created_at": _iso(cycle.created_at),
             "updated_at": _iso(cycle.updated_at),

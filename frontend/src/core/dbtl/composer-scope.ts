@@ -103,6 +103,38 @@ export interface ScopeMenuOption {
   description: string;
 }
 
+/** Resolve the one server-created discovery cycle after a start-card reply. */
+export function findNewDiscoveryCycle(
+  cycles: readonly CycleRecord[],
+  cycleIdsBeforeSend: ReadonlySet<string>,
+  threadId: string,
+): CycleRecord | null {
+  return (
+    cycles.find(
+      (cycle) =>
+        !cycleIdsBeforeSend.has(cycle.id) &&
+        cycle.originating_thread_id === threadId &&
+        Boolean(cycle.discovery_package_hash),
+    ) ?? null
+  );
+}
+
+/** Resolve the one server-created legacy-setup cycle after its card reply. */
+export function findNewSetupCycle(
+  cycles: readonly CycleRecord[],
+  cycleIdsBeforeSend: ReadonlySet<string>,
+  threadId: string,
+): CycleRecord | null {
+  return (
+    cycles.find(
+      (cycle) =>
+        !cycleIdsBeforeSend.has(cycle.id) &&
+        cycle.originating_thread_id === threadId &&
+        !cycle.discovery_package_hash,
+    ) ?? null
+  );
+}
+
 /**
  * "Cycle 03 · Data reconciliation".
  *
@@ -315,7 +347,8 @@ export function humanInputRunContext(
     // returns to the setup branch that asked for the missing fields.
     if (
       request.clarification_type === "cycle_setup" ||
-      request.clarification_type === "cycle_setup_confirmation"
+      request.clarification_type === "cycle_setup_confirmation" ||
+      request.clarification_type === "dbtl_discovery_start"
     ) {
       return runContextPayload(START_CYCLE_REQUEST_CONTEXT);
     }

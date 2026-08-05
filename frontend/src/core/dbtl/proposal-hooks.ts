@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   draftCycleSetup,
   evaluateRequest,
+  fetchDiscoveryStatus,
   fetchEvaluations,
   recordProposalOutcome,
 } from "./proposals-api";
@@ -23,6 +24,21 @@ export function useEvaluateRequest(projectId: string | null | undefined) {
     mutationFn: (
       input: Omit<Parameters<typeof evaluateRequest>[0], "projectId">,
     ) => evaluateRequest({ projectId: projectId!, ...input }),
+  });
+}
+
+export function useDiscoveryStatus(
+  projectId: string | null | undefined,
+  threadId: string | null | undefined,
+  options: { enabled?: boolean } = {},
+) {
+  return useQuery({
+    queryKey: [ROOT, "discovery", projectId, threadId],
+    queryFn: () =>
+      fetchDiscoveryStatus({ projectId: projectId!, threadId: threadId! }),
+    enabled: Boolean(projectId && threadId) && (options.enabled ?? true),
+    staleTime: 0,
+    retry: false,
   });
 }
 

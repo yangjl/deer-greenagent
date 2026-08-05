@@ -9,6 +9,8 @@ import {
   SCOPE_START_CYCLE_LABEL,
   START_CYCLE_REQUEST_CONTEXT,
   cycleShortLabel,
+  findNewDiscoveryCycle,
+  findNewSetupCycle,
   isContextStillValid,
   nextContextAfterSend,
   normalizeContext,
@@ -20,6 +22,7 @@ import {
   scopeMenuOptions,
 } from "@/core/dbtl/composer-scope";
 import type { CycleRecord, CycleState } from "@/core/dbtl/cycle-view";
+import type { HumanInputRequest } from "@/core/messages/human-input";
 
 function cycle(overrides: Partial<CycleRecord> = {}): CycleRecord {
   return {
@@ -45,6 +48,19 @@ function cycle(overrides: Partial<CycleRecord> = {}): CycleRecord {
 describe("scope label", () => {
   it("names ordinary work in words, not by absence", () => {
     expect(scopeLabel(ORDINARY_REQUEST_CONTEXT, [])).toBe(SCOPE_ORDINARY_LABEL);
+  });
+
+  it("routes a discovery start-card answer back to the explicit discovery branch", () => {
+    expect(
+      humanInputRunContext(
+        {
+          source: "ask_clarification",
+          clarification_type: "dbtl_discovery_start",
+        } as HumanInputRequest,
+        null,
+        "start_cycle",
+      ),
+    ).toMatchObject({ dbtl_explicit_choice: "start_cycle" });
   });
 
   it("shows the cycle number and its current stage", () => {
@@ -93,6 +109,80 @@ describe("cycle numbering", () => {
 
   it("does not pad past two digits", () => {
     expect(cycleShortLabel(cycle(), 11)).toBe("Cycle 12 · Design");
+  });
+});
+
+describe("discovery cycle handoff", () => {
+  it("selects only the newly created hash-bound cycle from this thread", () => {
+    const result = findNewDiscoveryCycle(
+      [
+        cycle({
+          id: "old",
+          originating_thread_id: "thread-1",
+          discovery_package_hash: "a".repeat(64),
+        }),
+        cycle({
+          id: "other-thread",
+          originating_thread_id: "thread-2",
+          discovery_package_hash: "b".repeat(64),
+        }),
+        cycle({
+          id: "created",
+          originating_thread_id: "thread-1",
+          discovery_package_hash: "c".repeat(64),
+        }),
+      ],
+      new Set(["old"]),
+      "thread-1",
+    );
+    expect(result?.id).toBe("created");
+  });
+
+  it("does not infer a discovery handoff from an unbound cycle", () => {
+    expect(
+      findNewDiscoveryCycle(
+        [cycle({ id: "created", originating_thread_id: "thread-1" })],
+        new Set(),
+        "thread-1",
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("server-owned setup handoff", () => {
+  it("selects only the newly created non-discovery cycle from this thread", () => {
+    const result = findNewSetupCycle(
+      [
+        cycle({ id: "old", originating_thread_id: "thread-1" }),
+        cycle({ id: "other-thread", originating_thread_id: "thread-2" }),
+        cycle({
+          id: "discovery",
+          originating_thread_id: "thread-1",
+          discovery_package_hash: "a".repeat(64),
+        }),
+        cycle({ id: "created", originating_thread_id: "thread-1" }),
+      ],
+      new Set(["old"]),
+      "thread-1",
+    );
+
+    expect(result?.id).toBe("created");
+  });
+
+  it("does not mistake a discovery cycle for the setup fallback", () => {
+    expect(
+      findNewSetupCycle(
+        [
+          cycle({
+            id: "discovery",
+            originating_thread_id: "thread-1",
+            discovery_package_hash: "b".repeat(64),
+          }),
+        ],
+        new Set(),
+        "thread-1",
+      ),
+    ).toBeNull();
   });
 });
 

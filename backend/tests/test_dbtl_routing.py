@@ -212,6 +212,42 @@ def test_the_classifier_only_runs_when_nothing_deterministic_applied() -> None:
     assert decision.classifier.rule_hits
 
 
+def test_classifier_proposal_enters_discovery_only_when_its_rollout_flag_is_enabled() -> None:
+    decision = route_request(
+        _request(
+            discovery_enabled=True,
+            discovery_classifier_entry=True,
+        )
+    )
+
+    assert decision.kind is RouteKind.DISCOVERY
+    assert decision.source is RouteSource.CLASSIFIER
+    assert decision.classifier is not None
+
+
+def test_ordinary_opt_out_suppresses_classifier_reentry_but_not_an_explicit_start() -> None:
+    suppressed = route_request(
+        _request(
+            discovery_enabled=True,
+            discovery_classifier_entry=True,
+            discovery_suppressed=True,
+        )
+    )
+    explicit = route_request(
+        _request(
+            text="start a new cycle to validate the trial",
+            discovery_enabled=True,
+            discovery_classifier_entry=True,
+            discovery_suppressed=True,
+        )
+    )
+
+    assert suppressed.kind is RouteKind.ORDINARY
+    assert suppressed.source is RouteSource.CLASSIFIER
+    assert explicit.kind is RouteKind.DISCOVERY
+    assert explicit.source is RouteSource.EXPLICIT_REQUEST
+
+
 def test_ordinary_text_in_a_project_stays_ordinary() -> None:
     decision = route_request(_request(text=ORDINARY_TEXT))
     assert decision.kind is RouteKind.ORDINARY

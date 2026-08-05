@@ -52,6 +52,7 @@ class SupervisorBranch(StrEnum):
     CLARIFICATION = "clarification"
     CYCLE_SETUP = "cycle_setup"
     CYCLE_CONTINUATION = "cycle_continuation"
+    DISCOVERY = "discovery"
 
 
 SUPERVISOR_BRANCHES: tuple[SupervisorBranch, ...] = tuple(SupervisorBranch)
@@ -78,6 +79,12 @@ class SupervisorContext:
     #: it obviously means, without making the composer's one-request scope
     #: sticky. See :mod:`deerflow.dbtl.routing` rung 2b.
     thread_cycle_id: str | None = None
+    discovery_enabled: bool = False
+    active_discovery_id: str | None = None
+    discovery_classifier_entry: bool = False
+    discovery_suppressed: bool = False
+    discovery_auto_offer: bool = False
+    policy_version: str = "greenagent-dbtl-v2-draft"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +124,10 @@ def resolve_branch(text: str, context: SupervisorContext) -> BranchDecision:
             project_cycle_count=context.project_cycle_count,
             has_unfinished_cycles=context.has_unfinished_cycles,
             thread_cycle_id=context.thread_cycle_id,
+            discovery_enabled=context.discovery_enabled,
+            active_discovery_id=context.active_discovery_id,
+            discovery_classifier_entry=context.discovery_classifier_entry,
+            discovery_suppressed=context.discovery_suppressed,
         )
     )
 
@@ -129,6 +140,9 @@ def resolve_branch(text: str, context: SupervisorContext) -> BranchDecision:
             route=route,
             cycle_id=route.cycle_id,
         )
+
+    if route.kind is RouteKind.DISCOVERY:
+        return BranchDecision(branch=SupervisorBranch.DISCOVERY, route=route)
 
     # CYCLE_SETUP and PROPOSAL both mean "this could become a cycle", and both
     # are gated on the same human confirmation. Reuse the classifier's own

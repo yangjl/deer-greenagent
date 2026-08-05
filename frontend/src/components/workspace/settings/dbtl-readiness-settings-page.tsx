@@ -18,6 +18,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DbtlEvaluationDrawer } from "@/components/workspace/dbtl";
 import {
+  type DbtlGovernanceReport,
   buildReadinessExport,
   groupReadinessItems,
   isValidationStale,
@@ -45,6 +46,18 @@ function downloadReport(contents: string, filename: string) {
   anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function discoveryRolloutSummary(
+  discovery: DbtlGovernanceReport["conversational_discovery"],
+) {
+  if (!discovery.enabled) {
+    return "Discovery is disabled. The rollback path is the server-owned immediate setup card.";
+  }
+  if (discovery.automatic_offers) {
+    return "Ready discoveries may be offered automatically; explicit starts use the same durable path.";
+  }
+  return "Explicit cycle starts use durable discovery; automatic offers remain disabled.";
 }
 
 export function DbtlReadinessSettingsPage() {
@@ -208,6 +221,47 @@ export function DbtlReadinessSettingsPage() {
                   ? "Technically ready"
                   : "Cutover blocked"}
               </Badge>
+            </div>
+
+            <div className="rounded-lg border px-4 py-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium">
+                    Conversational discovery rollout
+                  </p>
+                  <p className="text-muted-foreground mt-0.5 max-w-2xl text-xs">
+                    {discoveryRolloutSummary(
+                      governance.data.conversational_discovery,
+                    )}
+                  </p>
+                </div>
+                <Badge variant="outline">
+                  {governance.data.conversational_discovery.rollout_stage
+                    .replaceAll("_", " ")
+                    .replace(/^./, (value) => value.toUpperCase())}
+                </Badge>
+              </div>
+              <div className="text-muted-foreground mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                <span>Cycle creation: server</span>
+                <span>
+                  Classifier entry:{" "}
+                  {governance.data.conversational_discovery.classifier_entry
+                    ? "on"
+                    : "off"}
+                </span>
+                <span>
+                  Project history:{" "}
+                  {governance.data.conversational_discovery.project_history
+                    ? "on"
+                    : "off"}
+                </span>
+                <span>
+                  Global memory:{" "}
+                  {governance.data.conversational_discovery.global_memory
+                    ? "on"
+                    : "off"}
+                </span>
+              </div>
             </div>
 
             <div className="divide-y rounded-lg border">

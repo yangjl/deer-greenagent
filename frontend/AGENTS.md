@@ -1006,6 +1006,31 @@ newest physical delivery. A structured response settles that request; a
 plain-composer compatibility guess is cleared if the server re-delivers it.
 Both `dbtl_stage_handoff` and `dbtl_build_control` route back through the cycle.
 
+Conversational discovery reuses that Human Input transport with
+`clarification_type=dbtl_discovery_start`. `humanInputRunContext` routes its
+reply to the Supervisor's start branch; the browser performs no create-cycle
+mutation. After the run completes, the chat page refreshes the project cycles
+and selects only a new cycle whose originating thread and server-stored
+discovery-package hash match. The same backend response already contains the
+Design preflight, so discovery never uses the legacy browser-authored hidden
+kickoff prompt or serializes the accepted brief back to the server.
+
+The immediate setup fallback is server-owned as well. After its confirmation
+reply, the chat page refreshes and selects the newly created non-discovery
+cycle from the same originating thread; answering the following Design setup
+card receives the preflight from that server run. `use-upgrade-proposal` owns
+evaluation telemetry only, and `ProjectCycleSelectionContext` no longer carries
+armed/pending hidden kickoffs or a create-cycle mutation. Settings → DBTL
+readiness renders the server-reported discovery rollout and authority boundary.
+
+Phase 5 adds a quiet read-only discovery indicator through
+`InputBox.extraTools`. `useDiscoveryStatus` reads the authenticated thread
+projection on load and after a run/card reply; the browser does not infer state
+from message wording. Only active `gathering`, `ready`, and `offered` rows
+render, so confirmed, declined, stale, and superseded controls are inert after
+refresh. The internal evaluation drawer also shows bounded discovery
+trigger/status/turn/revision outcomes beside classifier telemetry.
+
 `StageWorkPanel` converges from the thread-scoped stage-worker lifecycle read
 and filters that ledger by the run owning the transcript anchor. A historical
 Build card must never appear below a later ordinary Lead Agent turn; if the

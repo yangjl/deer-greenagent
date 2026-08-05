@@ -18,7 +18,11 @@ from langgraph.types import Overwrite
 from deerflow.agents.thread_state import merge_artifacts, merge_message_writes
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.context_keys import (
+    CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+    RUN_EVENT_STORE_CONFIG_KEY,
+    THREAD_STORE_CONFIG_KEY,
+)
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
@@ -1725,6 +1729,18 @@ def test_build_runtime_context_ignores_caller_pre_existing_message_ids():
     ctx = _build_runtime_context("thread-1", "run-1", caller_context)
 
     assert CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY not in ctx
+
+
+def test_build_runtime_context_ignores_caller_runtime_store_dependencies():
+    caller_context = {
+        RUN_EVENT_STORE_CONFIG_KEY: "spoofed-events",
+        THREAD_STORE_CONFIG_KEY: "spoofed-threads",
+    }
+
+    ctx = _build_runtime_context("thread-1", "run-1", caller_context)
+
+    assert RUN_EVENT_STORE_CONFIG_KEY not in ctx
+    assert THREAD_STORE_CONFIG_KEY not in ctx
 
 
 def test_build_runtime_context_ignores_non_dict_caller_context():

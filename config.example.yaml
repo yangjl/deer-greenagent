@@ -1225,6 +1225,14 @@ dbtl:
   # Record what the DBTL classifier believes about each project request.
   # Observation only: an evaluation never creates or advances a cycle.
   classifier_shadow_enabled: true
+  # Explicit new-cycle requests may first enter a durable, read-only discovery
+  # conversation. No cycle is created until the later revision-bound start
+  # action. Requires mode=graph_enabled; default false during rollout.
+  conversational_discovery: false
+  discovery_project_history: false
+  discovery_global_memory: false
+  discovery_classifier_entry: false
+  discovery_auto_offer: false
   # Model used to pre-fill the cycle setup form from the user's own request, so
   # starting a cycle is a review-and-confirm step rather than data entry.
   # Drafted values the request does not support come back marked as assumptions

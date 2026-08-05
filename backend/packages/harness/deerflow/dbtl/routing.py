@@ -40,6 +40,7 @@ class RouteKind(StrEnum):
     CYCLE_SETUP = "cycle_setup"
     CYCLE_CONTINUATION = "cycle_continuation"
     PROPOSAL = "proposal"
+    DISCOVERY = "discovery"
 
 
 class RouteSource(StrEnum):
@@ -55,6 +56,7 @@ class RouteSource(StrEnum):
     THREAD_CYCLE = "thread_cycle"
     NO_PROJECT = "no_project"
     CLASSIFIER = "classifier"
+    ACTIVE_DISCOVERY = "active_discovery"
 
 
 class ExplicitChoice(StrEnum):
@@ -81,6 +83,10 @@ class RoutingRequest:
     #: decides which research record a request may touch, so it is derived
     #: from the durable record rather than accepted from the caller.
     thread_cycle_id: str | None = None
+    discovery_enabled: bool = False
+    active_discovery_id: str | None = None
+    discovery_classifier_entry: bool = False
+    discovery_suppressed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,11 +113,31 @@ _EXPLICIT_START_PATTERN = re.compile(
     r"\b(?:start|open|begin|create|" + _START_VERB_TYPOS + r")\s+(?:a\s+|the\s+|new\s+)*(?:dbtl\s+cycle|dbtl\s+workflow|research\s+cycle|learning\s+cycle|cycle|dbtl)\b",
     re.IGNORECASE,
 )
+_START_REQUEST_PREFIX = re.compile(
+    r"^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+|i(?:'d|\s+would)\s+like\s+to\s+|i\s+want\s+to\s+)?$",
+    re.IGNORECASE,
+)
+_START_OBJECTIVE_CONNECTOR = re.compile(r"^[\s,:;—-]*(?:(?:to|for|about)\s+)?", re.IGNORECASE)
 
 
 def is_explicit_start_request(text: str) -> bool:
     """Whether the user asked, in words, to start a cycle."""
     return bool(_EXPLICIT_START_PATTERN.search(text or ""))
+
+
+def explicit_start_objective_text(text: str) -> str:
+    """Remove only a leading cycle-start directive, preserving its brief.
+
+    A bare "start a cycle" has no objective. A detailed request such as
+    "start a cycle to compare hybrids" does, and discovery must not turn that
+    into a duplicate question. Non-leading mentions are returned unchanged.
+    """
+
+    value = text or ""
+    match = _EXPLICIT_START_PATTERN.search(value)
+    if match is None or _START_REQUEST_PREFIX.fullmatch(value[: match.start()]) is None:
+        return value
+    return _START_OBJECTIVE_CONNECTOR.sub("", value[match.end() :], count=1)
 
 
 def route_request(request: RoutingRequest) -> RoutingDecision:
@@ -121,7 +147,10 @@ def route_request(request: RoutingRequest) -> RoutingDecision:
     if request.explicit_choice is ExplicitChoice.ORDINARY:
         return RoutingDecision(kind=RouteKind.ORDINARY, source=RouteSource.EXPLICIT_CHOICE)
     if request.explicit_choice is ExplicitChoice.START_CYCLE:
-        return RoutingDecision(kind=RouteKind.CYCLE_SETUP, source=RouteSource.EXPLICIT_CHOICE)
+        return RoutingDecision(
+            kind=RouteKind.DISCOVERY if request.discovery_enabled else RouteKind.CYCLE_SETUP,
+            source=RouteSource.EXPLICIT_CHOICE,
+        )
     if request.explicit_choice is ExplicitChoice.CONTINUE_CYCLE:
         if request.selected_cycle_id:
             return RoutingDecision(
@@ -134,7 +163,10 @@ def route_request(request: RoutingRequest) -> RoutingDecision:
 
     # 2. A typed request to start, still deterministic.
     if is_explicit_start_request(request.text):
-        return RoutingDecision(kind=RouteKind.CYCLE_SETUP, source=RouteSource.EXPLICIT_REQUEST)
+        return RoutingDecision(
+            kind=RouteKind.DISCOVERY if request.discovery_enabled else RouteKind.CYCLE_SETUP,
+            source=RouteSource.EXPLICIT_REQUEST,
+        )
 
     # 2b. The conversation that opened a cycle can be asked, in words, to run
     # its stage work. The composer's scope is next-request-only by design, so
@@ -183,6 +215,9 @@ def route_request(request: RoutingRequest) -> RoutingDecision:
             cycle_id=request.selected_cycle_id,
         )
 
+    if request.discovery_enabled and request.project_id and request.active_discovery_id:
+        return RoutingDecision(kind=RouteKind.DISCOVERY, source=RouteSource.ACTIVE_DISCOVERY)
+
     # 4. No project, nothing to propose against.
     if not request.project_id:
         return RoutingDecision(kind=RouteKind.ORDINARY, source=RouteSource.NO_PROJECT)
@@ -196,5 +231,11 @@ def route_request(request: RoutingRequest) -> RoutingDecision:
             has_unfinished_cycles=request.has_unfinished_cycles,
         ),
     )
-    kind = RouteKind.PROPOSAL if result.decision is ClassifierDecision.PROPOSE_CYCLE else RouteKind.ORDINARY
+    if result.decision is ClassifierDecision.PROPOSE_CYCLE:
+        if request.discovery_enabled and request.discovery_classifier_entry:
+            kind = RouteKind.ORDINARY if request.discovery_suppressed else RouteKind.DISCOVERY
+        else:
+            kind = RouteKind.PROPOSAL
+    else:
+        kind = RouteKind.ORDINARY
     return RoutingDecision(kind=kind, source=RouteSource.CLASSIFIER, classifier=result)

@@ -200,6 +200,41 @@ class KnowledgeOpsMixin:
                 "events": [self._knowledge_event_payload(row) for row in events],
             }
 
+    async def active_publications_for_project(
+        self,
+        target_project_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return only currently active claims explicitly published here."""
+
+        bounded_limit = max(1, min(limit, 500))
+        async with self._sf() as session:
+            rows = list(
+                (
+                    await session.execute(
+                        select(KnowledgePublicationRow, KnowledgeClaimRow)
+                        .join(KnowledgeClaimRow, KnowledgeClaimRow.id == KnowledgePublicationRow.claim_id)
+                        .where(
+                            KnowledgePublicationRow.target_project_id == target_project_id,
+                            KnowledgePublicationRow.status == "active",
+                            KnowledgeClaimRow.status == "active",
+                        )
+                        .order_by(KnowledgePublicationRow.created_at.desc())
+                        .limit(bounded_limit)
+                    )
+                ).all()
+            )
+            return [
+                {
+                    **self._publication_payload(publication),
+                    "statement": claim.statement,
+                    "grade": claim.confidence,
+                    "claim_created_at": _iso(claim.created_at),
+                }
+                for publication, claim in rows
+            ]
+
     async def record_learn_synthesis(
         self,
         *,

@@ -3,18 +3,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
-  type CycleRecord,
   type DbtlExplicitChoice,
   type EvaluationResponse,
   type ProposalAction,
   outcomeForAction,
-  useCreateCycle,
   useEvaluateRequest,
-  useProjectCycles,
   useRecordProposalOutcome,
-  isLive,
 } from "@/core/dbtl";
-import type { DbtlCycleSetup } from "@/core/messages/human-input";
 import { uuid } from "@/core/utils/uuid";
 
 /**
@@ -34,15 +29,6 @@ export function useDbtlUpgradeProposal(projectId: string | null | undefined) {
   // chat page a new `onSubmit` each render and defeat memoized children.
   const { mutateAsync: runEvaluate } = useEvaluateRequest(projectId);
   const { mutate: runOutcome } = useRecordProposalOutcome(projectId);
-  const { mutateAsync: runCreateCycle } = useCreateCycle(projectId);
-  const cycles = useProjectCycles(projectId);
-  const parentCycle =
-    cycles.data?.cycles.find(
-      (cycle) =>
-        cycle.parent_cycle_id === null &&
-        cycle.cycle_class === "season/program" &&
-        isLive(cycle),
-    ) ?? null;
 
   useEffect(() => {
     // A late response from the previous project must never render a proposal
@@ -102,54 +88,8 @@ export function useDbtlUpgradeProposal(projectId: string | null | undefined) {
     [evaluation, runOutcome],
   );
 
-  /**
-   * Create the durable cycle only after the native card's explicit choice.
-   *
-   * The setup data is emitted by the server in the same `ask_clarification`
-   * artifact that DeerFlow renders. Its request id is the idempotency boundary,
-   * so retrying one answer cannot create two cycles.
-   */
-  const createFromNativeSetup = useCallback(
-    async (
-      setup: DbtlCycleSetup,
-      requestId: string,
-      originatingThreadId: string,
-    ): Promise<CycleRecord | null> => {
-      if (!projectId) return null;
-      const currentEvaluationId = evaluation?.evaluation_id ?? null;
-      try {
-        const cycle = await runCreateCycle({
-          title: setup.title,
-          cycleClass: "computational",
-          cycleWeight: "full",
-          researchQuestion: setup.objective,
-          objective: setup.objective,
-          successCriteria: setup.success_criteria,
-          parentCycleId: parentCycle?.id ?? null,
-          originatingThreadId,
-          idempotencyKey: `cycle-${requestId}`,
-        });
-        if (currentEvaluationId) {
-          runOutcome(
-            {
-              evaluationId: currentEvaluationId,
-              outcome: "start_setup",
-            },
-            { onError: () => undefined },
-          );
-        }
-        setEvaluation(null);
-        return cycle ?? null;
-      } catch {
-        return null;
-      }
-    },
-    [runCreateCycle, runOutcome, evaluation, projectId, parentCycle?.id],
-  );
-
   return {
     evaluate,
     recordOutcome,
-    createFromNativeSetup,
   };
 }

@@ -7,6 +7,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/core/auth/AuthProvider";
 import {
+  type DiscoveryOutcomeRow,
+  type DiscoveryStats,
   type EvaluationRow,
   type EvaluationStats,
   summarizeEvaluations,
@@ -75,7 +77,12 @@ export function DbtlEvaluationDrawer({
     );
   }
 
-  const { evaluations, stats } = query.data;
+  const {
+    evaluations,
+    stats,
+    discoveries,
+    discovery_stats: discoveryStats,
+  } = query.data;
 
   return (
     <section className={cn("space-y-4", className)}>
@@ -86,6 +93,19 @@ export function DbtlEvaluationDrawer({
       </header>
 
       <RateSummary stats={stats} />
+
+      <DiscoverySummary stats={discoveryStats} />
+
+      {discoveries.length > 0 && (
+        <div className="space-y-2">
+          <h4 className="text-sm font-medium">Discovery outcomes</h4>
+          <ul className="divide-border border-border divide-y rounded-lg border">
+            {discoveries.map((row) => (
+              <DiscoveryItem key={row.id} row={row} />
+            ))}
+          </ul>
+        </div>
+      )}
 
       {evaluations.length === 0 ? (
         <p className="text-muted-foreground text-sm">
@@ -105,6 +125,42 @@ export function DbtlEvaluationDrawer({
         </ul>
       )}
     </section>
+  );
+}
+
+function DiscoverySummary({ stats }: { stats: DiscoveryStats }) {
+  return (
+    <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <Metric label="Discoveries" value={String(stats.total)} />
+      <Metric
+        label="Classifier entries"
+        value={String(stats.classifier_entries)}
+      />
+      <Metric label="Cycles started" value={String(stats.confirmed)} />
+      <Metric
+        label="Kept ordinary"
+        value={String(stats.declined)}
+        detail={`${stats.active} currently active`}
+      />
+    </dl>
+  );
+}
+
+function DiscoveryItem({ row }: { row: DiscoveryOutcomeRow }) {
+  const turns = Math.max(0, Number(row.turn_count));
+  return (
+    <li className="flex flex-wrap items-center gap-2 px-3 py-2.5 text-xs">
+      <Badge variant="outline">{row.status.replace("_", " ")}</Badge>
+      <span className="text-muted-foreground">via {row.trigger}</span>
+      <span className="text-muted-foreground">
+        · {turns} {turns === 1 ? "turn" : "turns"} · revision {row.revision}
+      </span>
+      {row.cycle_id && (
+        <span className="text-muted-foreground ml-auto font-mono">
+          {row.cycle_id}
+        </span>
+      )}
+    </li>
   );
 }
 

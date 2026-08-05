@@ -6293,6 +6293,18 @@ class LiveStageAdapter:
                 else None
             ),
             "prior_design_council_runs": _compact_design_history(prior_design_runs),
+            # Accepted pre-cycle context is server-bound to the cycle and is
+            # shared before seat-specific instructions. Every Design
+            # participant sees the same package and hash; the frontend never
+            # reconstructs this from setup answers.
+            "discovery_package": (
+                {
+                    "hash": cycle.get("discovery_package_hash"),
+                    "content": cycle.get("discovery_package"),
+                }
+                if stage == "design" and cycle.get("discovery_package_hash") and isinstance(cycle.get("discovery_package"), Mapping)
+                else None
+            ),
             # Only present once a person has approved a Design package.
             # Its absence is meaningful: a later stage seeing no brief is
             # working before the gate, not merely without context.

@@ -10,6 +10,7 @@ from deerflow.persistence.dbtl.design_feedback_ops import (
     DesignFeedbackConflict,
     DesignFeedbackOpsMixin,
 )
+from deerflow.persistence.dbtl.discovery import DbtlDiscoveryConflict, DbtlDiscoveryRepository
 from deerflow.persistence.dbtl.model import (
     DbtlArtifactRow,
     DbtlBuildLineageRow,
@@ -18,6 +19,7 @@ from deerflow.persistence.dbtl.model import (
     DbtlDatasetRow,
     DbtlDesignFeedbackActionRow,
     DbtlDesignFeedbackSurfaceRow,
+    DbtlDiscoveryRow,
     DbtlEventRow,
     DbtlGateEvaluationRow,
     DbtlReviewRow,
@@ -58,6 +60,9 @@ __all__ = [
     "DbtlCycleRepository",
     "DbtlCycleRow",
     "DbtlDatasetRow",
+    "DbtlDiscoveryConflict",
+    "DbtlDiscoveryRepository",
+    "DbtlDiscoveryRow",
     "DbtlDesignFeedbackActionRow",
     "DbtlDesignFeedbackSurfaceRow",
     "DbtlEventRow",

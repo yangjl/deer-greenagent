@@ -1,4 +1,5 @@
 export { DbtlEvaluationDrawer } from "./evaluation-drawer";
+export { DiscoveryComposerIndicator } from "./discovery-composer-indicator";
 export {
   ProjectCycleSelectionProvider,
   useProjectCycleSelection,

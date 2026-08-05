@@ -31,14 +31,17 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from deerflow.agents.memory.scope import memory_scope_label
+from deerflow.agents.middlewares.dbtl_discovery_policy_middleware import DBTL_DISCOVERY_CONTEXT_KEY
 from deerflow.agents.middlewares.dynamic_context_middleware import (
     dynamic_memory_scope,
     is_dynamic_memory_reminder,
 )
+from deerflow.dbtl.discovery_context import render_project_discovery_evidence
 from deerflow.runtime.context_keys import is_project_scoped_context
 
 logger = logging.getLogger(__name__)
 _CURRENT_PROJECT_DATA_KEY = "current_project_data"
+_DISCOVERY_EVIDENCE_DATA_KEY = "dbtl_discovery_evidence_data"
 
 
 def build_project_reminder(project_root: str | None) -> str | None:
@@ -185,6 +188,27 @@ def build_dbtl_status_reminder(value: object) -> str | None:
     )
 
 
+def build_dbtl_discovery_reminder(value: object) -> str | None:
+    """Framework-owned authority boundary for a pre-cycle conversation."""
+
+    if not isinstance(value, dict) or value.get("active") is not True:
+        return None
+    discovery_id = escape(str(value.get("discovery_id") or ""), quote=False)
+    revision = value.get("revision")
+    return "\n".join(
+        (
+            "<dbtl_discovery>",
+            "You are helping the project owner prepare a possible DBTL cycle through conversation.",
+            "No cycle exists yet. Ask at most one high-value question unless the owner requests a checklist.",
+            "You may inspect project evidence and explain recommendations. You may not create or advance a cycle, "
+            "run or delegate governed work, mutate files or memory, call side-effecting connectors, or describe this conversation as a stage result.",
+            f"Discovery id: {discovery_id}; revision: {revision}.",
+            "The server, not you, decides readiness and renders any start control.",
+            "</dbtl_discovery>",
+        )
+    )
+
+
 def _insert_before_latest_visible_user(messages: list, message: HumanMessage) -> list:
     for index in range(len(messages) - 1, -1, -1):
         candidate = messages[index]
@@ -254,6 +278,10 @@ class ProjectContextMiddleware(AgentMiddleware[AgentState]):
         context = getattr(getattr(request, "runtime", None), "context", None) or {}
         project_scoped = is_project_scoped_context(context)
         project_data = build_current_project_data(context.get("project_root"))
+        discovery_context = context.get(DBTL_DISCOVERY_CONTEXT_KEY)
+        discovery_evidence = render_project_discovery_evidence(
+            discovery_context.get("evidence") if isinstance(discovery_context, dict) else None
+        )
         blocks = [
             block
             for block in (
@@ -261,6 +289,7 @@ class ProjectContextMiddleware(AgentMiddleware[AgentState]):
                 build_mounts_reminder(self._mounts_provider(), context.get("project_root")),
                 build_parked_design_reminder(context.get("dbtl_parked_design_brief")),
                 build_dbtl_status_reminder(context.get("dbtl_status_snapshot")),
+                build_dbtl_discovery_reminder(context.get(DBTL_DISCOVERY_CONTEXT_KEY)),
             )
             if block is not None
         ]
@@ -284,6 +313,17 @@ class ProjectContextMiddleware(AgentMiddleware[AgentState]):
                     additional_kwargs={
                         "hide_from_ui": True,
                         _CURRENT_PROJECT_DATA_KEY: True,
+                    },
+                ),
+            )
+        if discovery_evidence:
+            messages = _insert_before_latest_visible_user(
+                messages,
+                HumanMessage(
+                    content=discovery_evidence,
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        _DISCOVERY_EVIDENCE_DATA_KEY: True,
                     },
                 ),
             )

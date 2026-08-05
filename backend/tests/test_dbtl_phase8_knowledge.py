@@ -263,6 +263,8 @@ async def test_candidate_promotion_publication_and_retraction_are_distinct(
         "project-3",
     }
     assert all(item["status"] == "active" for item in published["publications"])
+    active_for_target = await repo.active_publications_for_project("project-2")
+    assert [item["claim_id"] for item in active_for_target] == [claim["id"]]
     with pytest.raises(KnowledgeLifecycleRefused, match="idempotency key"):
         await repo.publish_claim(
             claim_id=claim["id"],
@@ -286,6 +288,7 @@ async def test_candidate_promotion_publication_and_retraction_are_distinct(
     )
     assert retracted["claim"]["status"] == "retracted"
     assert all(item["status"] == "retracted" for item in retracted["publications"])
+    assert await repo.active_publications_for_project("project-2") == []
     assert len(retracted["events"]) >= 4
 
 

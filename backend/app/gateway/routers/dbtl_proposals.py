@@ -27,11 +27,17 @@ import json
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.gateway.authz import is_model_use_authorized, require_permission
-from app.gateway.deps import get_classifier_evaluation_repo, get_config, get_workspace_repo, require_admin_user
+from app.gateway.deps import (
+    get_classifier_evaluation_repo,
+    get_config,
+    get_dbtl_discovery_repo,
+    get_workspace_repo,
+    require_admin_user,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.dbtl.proposal import (
     CONFIRMATION_REQUIRED_NOTICE,
@@ -231,6 +237,29 @@ async def evaluate_request(
                 exc_info=True,
             )
 
+    active_discovery_id: str | None = None
+    discovery_suppressed = False
+    discovery_repo = getattr(request.app.state, "dbtl_discovery_repo", None)
+    if discovery_repo is not None and dbtl_config.conversational_discovery_enabled and body.thread_id:
+        try:
+            latest = await discovery_repo.get_latest(
+                project_id=project_id,
+                thread_id=body.thread_id,
+                user_id=user_id,
+            )
+            if latest and latest.get("status") in {"gathering", "ready", "offered"}:
+                active_discovery_id = str(latest["id"])
+            elif latest and latest.get("status") == "declined":
+                discovery_suppressed = True
+        except Exception:
+            # Evaluation remains observation. The runtime owns the final route
+            # and will fail closed if its durable discovery state is unreadable.
+            logger.warning(
+                "Failed to resolve discovery routing state for proposal evaluation in project %s",
+                project_id,
+                exc_info=True,
+            )
+
     decision = route_request(
         RoutingRequest(
             text=body.text,
@@ -240,6 +269,10 @@ async def evaluate_request(
             is_new_conversation=body.is_new_conversation,
             project_cycle_count=project_cycle_count,
             has_unfinished_cycles=has_unfinished_cycles,
+            discovery_enabled=dbtl_config.conversational_discovery_enabled,
+            discovery_classifier_entry=dbtl_config.discovery_classifier_entry,
+            active_discovery_id=active_discovery_id,
+            discovery_suppressed=discovery_suppressed,
         )
     )
     proposal = build_proposal(decision, project_name=str(project.get("name") or ""))
@@ -376,10 +409,50 @@ async def list_evaluations(
     """The internal evaluation drawer: shadow decisions and their outcomes."""
     await _require_project(project_id, request)
     await require_admin_user(request, detail="DBTL classifier evaluations are available to administrators only.")
+    discovery_repo = getattr(request.app.state, "dbtl_discovery_repo", None)
+    discoveries = await discovery_repo.list_project_outcomes(project_id, limit=limit) if discovery_repo is not None else []
+    discovery_stats = await discovery_repo.project_outcome_stats(project_id) if discovery_repo is not None else {"total": 0, "classifier_entries": 0, "confirmed": 0, "declined": 0, "active": 0}
     return {
         "project_id": project_id,
         "evaluations": await repo.list_evaluations(project_id, limit=limit),
         "stats": await repo.evaluation_stats(project_id),
+        "discoveries": discoveries,
+        "discovery_stats": discovery_stats,
+    }
+
+
+@router.get("/projects/{project_id}/dbtl/discovery/status")
+@require_permission("threads", "read")
+async def discovery_status(
+    project_id: str,
+    request: Request,
+    thread_id: str = Query(min_length=1, max_length=128),
+    config: AppConfig = Depends(get_config),
+    repo=Depends(get_dbtl_discovery_repo),
+):
+    """Server-derived composer state for one authorized project thread."""
+
+    _project, user_id = await _require_project(project_id, request)
+    dbtl_config = _dbtl_config(request, config)
+    if not dbtl_config.conversational_discovery_enabled:
+        return {"enabled": False, "discovery": None}
+    active = await repo.get_active(
+        project_id=project_id,
+        thread_id=thread_id,
+        user_id=user_id,
+    )
+    if active is None:
+        return {"enabled": True, "discovery": None}
+    return {
+        "enabled": True,
+        "discovery": {
+            "id": active["id"],
+            "status": active["status"],
+            "trigger": active["trigger"],
+            "revision": active["revision"],
+            "turn_count": int((active.get("draft") or {}).get("turn_count") or 0),
+            "updated_at": active["updated_at"],
+        },
     }
 
 

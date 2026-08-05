@@ -800,6 +800,9 @@ projects:
 dbtl:
   mode: graph_enabled # disabled | audit_only | manual | graph_enabled
   classifier_shadow_enabled: true
+  conversational_discovery: false # explicit pre-cycle conversation; requires graph_enabled
+  discovery_classifier_entry: false # classifier suggestions may enter discovery
+  discovery_auto_offer: false # ready classifier discoveries may show a start card
   proposals_visible: true
   design_deck_feedback: true # false restores legacy Design controls during rollback
 ```
@@ -812,6 +815,50 @@ DBTL modes:
 - `graph_enabled` — enables the opt-in project supervisor. Design,
   Reconciliation, Build, Test, and Learn use bounded, versioned stage contracts;
   every scientific gate still requires a human decision.
+
+With `conversational_discovery: true`, an explicit new-cycle request enters a
+durable, read-only project conversation before setup. The Lead Agent may inspect
+evidence and ask focused questions, but cannot write files, delegate work, call
+side-effecting connectors, or create a cycle. Expanded history/memory retrieval
+and automatic proposal cards remain independently disabled by their discovery
+switches during rollout. A ready proposal is shown as a revision/hash-bound
+Human Input Card. Confirming it creates exactly one cycle in the backend,
+queues replayable receipt/Design-kickoff effects, and starts the normal Design
+preflight from the immutable discovery package; the browser never recreates
+the accepted brief or owns cycle creation.
+
+Turning `conversational_discovery` back off keeps the release-window fallback,
+but that path is server-owned too: the confirmation reply creates the cycle,
+the Design-question reply opens the normal preflight, and the browser only
+refreshes/selects the resulting record. Settings → DBTL readiness reports the
+active rollout switches and authority boundary. Use
+[`docs/conversational-dbtl-discovery-manual.md`](docs/conversational-dbtl-discovery-manual.md)
+for the rollback, stale-card, replay, context-isolation, and classifier rollout
+scenarios.
+
+`discovery_project_history: true` adds a separately gated, bounded context
+pack: project-file metadata plus recent excerpts from the authenticated user's
+other conversations in the same project. Retrieved text is injected as hidden
+user-authority data (never system instructions), XML-escaped, source-referenced,
+and capped by file/thread/character budgets. Explicit `key: value`
+disagreements are shown as conflicts for the owner to resolve.
+
+`discovery_global_memory: true` enables a fresh, query-aware composition of
+the user's private project memory, explicitly shared project memory, opt-in
+user-global memory, and active governed publications targeting the project.
+Each source has its own result cap; the combined character/item budget is
+enforced before injection. Memory is labeled as potentially stale and never as
+an accepted owner decision. Retracted/superseded publications are filtered by
+the SQL authority on every discovery turn.
+
+`discovery_classifier_entry: true` lets an eligible classifier suggestion enter
+the same read-only discovery conversation. It never creates a cycle. Choosing
+ordinary work suppresses later classifier re-entry in that conversation, while
+an explicit “start a cycle” request still wins. `discovery_auto_offer`
+separately controls whether a classifier-entered brief automatically shows its
+start card when ready; with it off, the owner can ask to review the proposal.
+The composer shows a quiet server-derived discovery status, and the admin
+evaluation drawer includes discovery outcomes.
 
 # Paths inside the sandbox container
 /mnt/skills/public

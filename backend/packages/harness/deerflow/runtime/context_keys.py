@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from typing import Final
 
 CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: Final[str] = "__deerflow_pre_run_message_ids"
+RUN_EVENT_STORE_CONFIG_KEY: Final[str] = "__deerflow_run_event_store"
+THREAD_STORE_CONFIG_KEY: Final[str] = "__deerflow_thread_store"
 
 
 def is_project_scoped_context(context: object) -> bool:

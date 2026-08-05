@@ -61,6 +61,20 @@ export interface DbtlGovernanceReport {
     counts: Record<DbtlReadinessClassification, number>;
     items: DbtlInventoryItem[];
   };
+  conversational_discovery: {
+    rollout_stage:
+      | "server_owned_setup_fallback"
+      | "explicit_discovery"
+      | "automatic_offers";
+    enabled: boolean;
+    classifier_entry: boolean;
+    automatic_offers: boolean;
+    project_history: boolean;
+    global_memory: boolean;
+    cycle_creation_authority: "server";
+    setup_fallback: "server_owned_confirmation_card";
+    browser_creation_authority: false;
+  };
   rollback_posture: string;
   last_validation: {
     id: string;
