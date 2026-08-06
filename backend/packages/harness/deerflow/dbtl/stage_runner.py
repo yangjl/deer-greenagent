@@ -372,6 +372,15 @@ def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> st
                 "- Do not put a route or overall outcome in this object. The server computes both from the pinned validity pack.",
                 "",
                 'provenance.validity_assessment shape: {"metrics": [], "checks": [], "limitations": [], "rationale": ""}',
+                "",
+                "Build bookkeeping observations may appear in the Build package's limitations and as a failed",
+                "'build_manifest_bookkeeping' quality check. They record a manifest/output declaration desync the",
+                "server already reconciled to the files it actually published — the science bytes are intact, so this",
+                "is not a Build failure. For each observation, decide whether it could affect the result's validity.",
+                "If it cannot, carry it forward as a non-gating limitation and do NOT fail any check or the stage",
+                "over it. If it could, add the relevant check with a diagnostic detail and a recommended_next_action",
+                "naming the exact Build correction to request; even then, do not fail a required validity check on the",
+                "bookkeeping alone. Whether to accept despite an open observation is the human reviewer's decision.",
             ]
         )
     return "\n".join(lines)

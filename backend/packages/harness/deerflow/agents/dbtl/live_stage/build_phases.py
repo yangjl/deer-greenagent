@@ -33,7 +33,7 @@ from deerflow.dbtl.build_plan import PLANNER_CONTRACT, BuildPhase, BuildPhasePla
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_runner import BUILD_PLAN_OUTPUT, WorkUnit
 from deerflow.dbtl.stage_spec import StageSpec
-from deerflow.dbtl.worker_result import StageWorkerResult, WorkerStatus
+from deerflow.dbtl.worker_result import QualityCheck, StageWorkerResult, WorkerStatus
 
 #: The seat that draws the plan. Read-only by role, like the summarizer: it
 #: writes nothing, runs nothing, and dispatches nobody.
@@ -224,6 +224,57 @@ def verify_unpublished_phase_manifest(
     return manifest, ""
 
 
+BUILD_BOOKKEEPING_CHECK = "build_manifest_bookkeeping"
+
+
+def reconcile_published_manifest(
+    result: StageWorkerResult,
+    *,
+    published: Sequence[Mapping[str, Any]],
+    required_version: int,
+) -> BuildPhaseManifest | None:
+    """Bind a phase manifest to the files the server actually published.
+
+    Used when the worker's manifest disagreed with reality *after* the entry
+    point already ran and published — a bookkeeping desync, not a failure. The
+    returned manifest's declared_outputs are the published files, so the
+    post-publish security scan still targets a known, published entry point.
+    Returns None when there is nothing to bind to (no parseable manifest, wrong
+    version, or an entry point not among the published files); those are not
+    bookkeeping and stay hard.
+    """
+    manifest = parse_phase_manifest(result.provenance.get("phase_manifest"))
+    if manifest is None or manifest.version != required_version:
+        return None
+    published_uris = tuple(
+        dict.fromkeys(str(item.get("uri") or "") for item in published if str(item.get("uri") or ""))
+    )
+    if not published_uris or manifest.entry_point not in published_uris:
+        return None
+    if required_version >= 3 and not is_server_executable_entry_point(manifest.entry_point):
+        return None
+    return replace(manifest, declared_outputs=published_uris)
+
+
+def record_build_observation(result: StageWorkerResult, note: str) -> StageWorkerResult:
+    """Record a bookkeeping discrepancy on a phase result without failing it.
+
+    The note rides out on ``limitations`` — which already flow to the Build
+    summary, the review deck, and Test — and as a failed quality check, so Test
+    can judge whether it touches the science and the human sees it at the gate.
+    """
+    note = note.strip()
+    if not note:
+        return result
+    limitation = f"Build bookkeeping observation (published bytes unaffected): {note}"
+    check = QualityCheck(name=BUILD_BOOKKEEPING_CHECK, passed=False, detail=note)
+    return replace(
+        result,
+        limitations=tuple(dict.fromkeys((*result.limitations, limitation))),
+        quality_checks=(*result.quality_checks, check),
+    )
+
+
 MAX_SCANNED_ENTRY_POINT_BYTES = 2 * 1024 * 1024
 _SCANNED_SOURCE_SUFFIXES = frozenset({".py", ".r", ".sh", ".bash", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jl", ".rb", ".pl"})
 
@@ -269,6 +320,10 @@ def is_non_gating_build_check(name: str) -> bool:
         "reproduc" in normalized
         or "repeat run" in normalized
         or "rerun" in normalized
+        # A manifest/output declaration desync the server already reconciled to the
+        # published files is bookkeeping, not a Build gate: the science bytes ran and
+        # published. Test and the human reviewer own whether the discrepancy matters.
+        or "bookkeeping" in normalized
         # An optional notebook or report the sandbox cannot *execute* because a runtime
         # tool (e.g. jupyter/nbconvert) is unavailable is a recorded limitation, not a
         # Build gate: the phase is judged on its executable entry point and required data

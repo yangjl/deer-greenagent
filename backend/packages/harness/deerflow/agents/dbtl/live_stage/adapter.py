@@ -43,6 +43,8 @@ from deerflow.agents.dbtl.live_stage.build_phases import (
     phase_unit,
     plan_notes,
     planner_unit,
+    reconcile_published_manifest,
+    record_build_observation,
     required_phase_manifest_version,
     verify_granted_paths,
     verify_phase_manifest,
@@ -4994,22 +4996,40 @@ class LiveStageAdapter:
                     required_version=required_phase_manifest_version(spec),
                 )
                 if manifest_error:
-                    stopped = manifest_error
-                    rejected.append(manifest_error)
-                    results.append(
-                        replace(
-                            failed_result(
-                                capability=result.capability,
-                                agent_name=result.agent_name,
-                                reason=manifest_error,
-                            ),
-                            token_usage=result.token_usage,
-                        )
+                    # The entry point already ran clean and its bytes are
+                    # published by this point, so a manifest that does not name
+                    # exactly those bytes is a bookkeeping desync, not a failed
+                    # build. Bind the manifest to what was actually published so
+                    # the security scan below still targets a known entry point,
+                    # record the discrepancy as an observation for Test and the
+                    # human to weigh, and keep going. Only a manifest that cannot
+                    # be bound at all (unparseable, or an entry point missing from
+                    # the published set) stays hard.
+                    reconciled = reconcile_published_manifest(
+                        result,
+                        published=phase_published,
+                        required_version=required_phase_manifest_version(spec),
                     )
-                    failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
-                    await _emit_build_verification_failure(unit, stopped)
-                    await recorder.fail(handle, failure_code, stopped)
-                    break
+                    if reconciled is None:
+                        stopped = manifest_error
+                        rejected.append(manifest_error)
+                        results.append(
+                            replace(
+                                failed_result(
+                                    capability=result.capability,
+                                    agent_name=result.agent_name,
+                                    reason=manifest_error,
+                                ),
+                                token_usage=result.token_usage,
+                            )
+                        )
+                        failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
+                        await _emit_build_verification_failure(unit, stopped)
+                        await recorder.fail(handle, failure_code, stopped)
+                        break
+                    phase_manifest = reconciled
+                    result = record_build_observation(result, manifest_error)
+                    phase_outcome = replace(phase_outcome, results=(result,))
 
             if phase_manifest is not None and "granted_paths_only" in spec.validity_gates:
                 grant_error = await asyncio.to_thread(
