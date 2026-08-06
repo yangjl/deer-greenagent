@@ -1968,6 +1968,16 @@ def _validated_deliverable_audit(
     output_rows = [item for item in (outputs if isinstance(outputs, Sequence) else []) if isinstance(item, Mapping)]
     published = {str(item.get("source_path") or ""): str(item.get("content_hash") or "") for item in output_rows}
     published_by_uri = {str(item.get("uri") or ""): (str(item.get("source_path") or ""), str(item.get("content_hash") or "")) for item in output_rows if str(item.get("uri") or "")}
+    _hash_to_paths: dict[str, set[str]] = {}
+    for item in output_rows:
+        _h = str(item.get("content_hash") or "").lower()
+        _sp = str(item.get("source_path") or "")
+        if _h and _sp:
+            _hash_to_paths.setdefault(_h, set()).add(_sp)
+    # Only bind by hash when it names exactly one published file. Two deliverables
+    # with identical bytes share a hash, so hash alone cannot disambiguate them —
+    # those fall through to path matching rather than risk a wrong binding.
+    published_by_hash = {_h: next(iter(_sps)) for _h, _sps in _hash_to_paths.items() if len(_sps) == 1}
     refusals: list[str] = []
     for result in results:
         raw = result.provenance.get("deliverable_audit")
@@ -1985,9 +1995,21 @@ def _validated_deliverable_audit(
                         normalized_artifacts.append(artifact)
                         continue
                     uri = str(artifact.get("path") or "")
-                    claimed_hash = str(artifact.get("content_hash") or artifact.get("sha256") or "")
+                    claimed_hash = str(artifact.get("content_hash") or artifact.get("sha256") or "").lower()
                     bound = published_by_uri.get(uri)
-                    normalized_artifacts.append({**artifact, "path": bound[0], "content_hash": bound[1]} if bound is not None and claimed_hash == bound[1] else artifact)
+                    if bound is not None and claimed_hash == bound[1].lower():
+                        normalized_artifacts.append({**artifact, "path": bound[0], "content_hash": bound[1]})
+                    elif claimed_hash and claimed_hash in published_by_hash:
+                        # A worker that cites a deliverable by a guessed path (e.g.
+                        # the full content hash, or the governed filename it did
+                        # not read exactly) but reports the correct sha256 is still
+                        # auditing a real published artifact. Bind it by content
+                        # hash — the byte identity — to the governed source path
+                        # rather than rejecting the whole audit over the path
+                        # string. The subsequent hash check still guards integrity.
+                        normalized_artifacts.append({**artifact, "path": published_by_hash[claimed_hash], "content_hash": claimed_hash})
+                    else:
+                        normalized_artifacts.append(artifact)
                 normalized_items.append({**item, "observed_artifacts": normalized_artifacts})
             raw = {**raw, "items": normalized_items}
         try:

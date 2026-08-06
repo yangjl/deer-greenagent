@@ -200,3 +200,51 @@ def test_observed_artifacts_require_expected_paths_and_sha256() -> None:
             {"version": 1, "items": [bad, _audit_item("summary-table")]},
             manifest=_manifest(),
         )
+
+
+def test_server_binds_audit_artifacts_by_content_hash_when_path_is_wrong() -> None:
+    # Reproduces the pilot Test blocker: a worker cites a deliverable by a guessed
+    # path (e.g. the content hash itself, or a governed filename it did not read
+    # exactly) but reports the correct sha256. It must still bind to the governed
+    # artifact by content hash rather than be rejected over the path string.
+    items = [_audit_item("analysis-report"), _audit_item("summary-table")]
+    hashes = {"analysis-report": "a" * 64, "summary-table": "d" * 64}
+    outputs = []
+    for item in items:
+        h = hashes[item["deliverable_id"]]
+        source_path = item["observed_artifacts"][0]["path"]
+        governed_uri = f"/mnt/user-data/outputs/dbtl/build/hash-{source_path.rsplit('/', 1)[-1]}"
+        outputs.append({"source_path": source_path, "uri": governed_uri, "content_hash": h})
+        # cite by a path matching NEITHER source_path NOR governed uri, correct hash
+        item["observed_artifacts"] = [{"path": h, "content_hash": h}]
+
+    audit, refusal = _validated_deliverable_audit(
+        [SimpleNamespace(provenance={"deliverable_audit": {"version": 1, "items": items}})],
+        manifest=_manifest(),
+        build_test={"build_lineage": {"output_artifacts": outputs}},
+    )
+
+    assert refusal == ""
+    assert audit is not None
+    assert audit.items[0].observed_artifacts[0].path == "outputs/report.md"
+
+
+def test_server_rejects_audit_artifact_whose_hash_is_not_published() -> None:
+    # Bind-by-hash must not accept a fabricated hash: an artifact whose hash is
+    # not in the Build lineage stays unbound and the audit is rejected.
+    items = [_audit_item("analysis-report"), _audit_item("summary-table")]
+    hashes = {"analysis-report": "a" * 64, "summary-table": "d" * 64}
+    outputs = []
+    for item in items:
+        source_path = item["observed_artifacts"][0]["path"]
+        outputs.append({"source_path": source_path, "uri": f"u-{source_path}", "content_hash": hashes[item["deliverable_id"]]})
+        item["observed_artifacts"] = [{"path": "c" * 64, "content_hash": "c" * 64}]
+
+    audit, refusal = _validated_deliverable_audit(
+        [SimpleNamespace(provenance={"deliverable_audit": {"version": 1, "items": items}})],
+        manifest=_manifest(),
+        build_test={"build_lineage": {"output_artifacts": outputs}},
+    )
+
+    assert audit is None
+    assert refusal
