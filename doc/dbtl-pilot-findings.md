@@ -72,14 +72,14 @@ Code (minimal diffs, on the running checkout; all touched suites pass — 66 bui
 - `dbtl/stage_spec.py` — `BUILD_SPEC_V12.budget.max_tokens` 120_000 → 500_000, with rationale comment.
 - `persistence/dbtl/build_test_ops.py` — `record_build_lineage` accepts a **generative build** (zero external inputs) *only* when a reproducible rerun record is present; an empirical build with neither inputs nor a rerun record is still refused. Test updated to assert the new rule.
 
-Environment (project `backend/.venv`, reversible):
-- `jupyter`, `nbconvert`, `ipykernel`, and the scientific stack `numpy/scipy/matplotlib/pandas/statsmodels/scikit-learn/seaborn`.
+Dependency declaration (durable — the packages are now part of the workflow, not a loose venv install):
+- Added a `dbtl-build` optional-dependency extra (numpy, scipy, pandas, matplotlib, statsmodels, scikit-learn, seaborn, jupyter, nbconvert, ipykernel) on the harness, exposed at the backend root, and **auto-enabled by `detect_uv_extras` whenever `dbtl.mode` runs Builds** (manual or graph_enabled). `serve.sh`'s `uv sync --all-packages` now installs it and never prunes it. Verified: the stack still imports after the exact sync `serve.sh` runs; `uv.lock` refreshed and `uv lock --check` clean; detector unit tests added.
 
 **Live outcome after the fixes.** The Build **phase** ran clean and produced a correct, reproducible result (slope 1.5409, 95% CI [1.4018, 1.6800], R² 0.8945) and a review package. Reaching **Test/Learn live** was then blocked by an operational artifact, not a product defect: loading the two later code fixes required a gateway restart, which orphaned the in-flight Build run (its conversational control cards were bound to the killed run). With all fixes now resident, a **fresh** cycle run in one continuous pass would carry Build → Test → Learn; the current cycle's Build is parked, its evidence intact.
 
 ## 5. Recommendations (durable, beyond this session's stopgaps)
 
-1. **Provision the Build sandbox properly.** Ship the common scientific stack in the sandbox image *and* run the server verification with an interpreter that has it — better, run the `.py` entry point via the workspace venv if one exists (fix `entry_command`/`verification_shell_command`) so verification matches how the worker actually ran it. This removes causes #2 and #3 for good.
+1. **Provision the Build sandbox properly.** *Package half now done* (the `dbtl-build` extra above). Remaining, and cleaner still: run the server verification via the workspace venv when one exists (fix `entry_command`/`verification_shell_command`) so verification matches how the worker actually ran the code, instead of depending on the gateway interpreter. That removes cause #2 at the root and lets the extra be trimmed later.
 2. **Right-size Build worker budgets** (done here for v12) and reconcile the V11→V12 regression; consider budget scaling with declared phase complexity.
 3. **Fix the classifier dead-end** — keep-as-chat should answer the question.
 4. **Give every human gate an app-level control** — don't require reaching into the deck iframe.
