@@ -143,6 +143,24 @@ def test_detect_from_config_sqlite_returns_no_extras(tmp_path):
     assert detect.detect_from_config(cfg) == []
 
 
+def test_detect_from_config_dbtl_build_via_graph_enabled(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("dbtl:\n  mode: graph_enabled\n  proposals_visible: true\n")
+    assert detect.detect_from_config(cfg) == ["dbtl-build"]
+
+
+def test_detect_from_config_dbtl_build_via_manual(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("dbtl:\n  mode: manual\n")
+    assert detect.detect_from_config(cfg) == ["dbtl-build"]
+
+
+def test_detect_from_config_dbtl_audit_only_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("dbtl:\n  mode: audit_only\n")
+    assert detect.detect_from_config(cfg) == []
+
+
 def test_detect_from_config_redis_via_stream_bridge(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("stream_bridge:\n  type: redis\n  redis_url: redis://localhost:6379/0\n")

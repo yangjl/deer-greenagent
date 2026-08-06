@@ -32,6 +32,9 @@ buzz = ["coincurve>=20.0.0"]
 monocle = ["deerflow-harness[monocle]"]
 browser = ["deerflow-harness[browser]"]
 memory-zh = ["deerflow-harness[memory-zh]"]
+# Scientific stack for the DBTL Build sandbox (auto-enabled by detect_uv_extras
+# when dbtl.mode runs builds). Delegates to the harness extra of the same name.
+dbtl-build = ["deerflow-harness[dbtl-build]"]
 
 [dependency-groups]
 dev = [

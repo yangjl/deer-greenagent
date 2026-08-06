@@ -14,6 +14,7 @@ Order of resolution:
    - tools[].name == browser_navigate    -> browser
    - sandbox.ownership.type == redis     -> redis
    - channels.buzz.enabled == true       -> buzz
+   - dbtl.mode in {manual, graph_enabled} -> dbtl-build
 3. Runtime environment toggles that enable optional backends:
    - DEER_FLOW_STREAM_BRIDGE_REDIS_URL   -> redis
    - DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL -> redis
@@ -272,6 +273,10 @@ def detect_from_config(path: Path) -> list[str]:
         extras.add("buzz")
     if tools_include_name(lines, "browser_navigate"):
         extras.add("browser")
+    if (section_value(lines, "dbtl", "mode") or "").lower() in {"manual", "graph_enabled"}:
+        # A DBTL mode that runs Builds needs the scientific stack in the
+        # interpreter that re-executes each phase entry point for verification.
+        extras.add("dbtl-build")
     return sorted(extras)
 
 
