@@ -106,3 +106,31 @@ The residual failures (bucket 4) are not bugs in the platform — they are a **g
 5. **A verify-and-repair micro-loop for the phase** (nice-to-have). A cheap deterministic pre-check of the worker's output (paths absolute? one JSON object? versions via metadata?) that bounces obvious violations back once before spending a full server verification. Cuts wasted ~5-min attempts.
 
 My recommendation: **1 + 3** — register the specialist to fix the residual worker-variance, and add the resume path so iterating never strands a cycle again. 2 continues opportunistically; 5 is a good cheap add if you want to squeeze the per-attempt rate further.
+
+---
+
+## 7. Registered specialists (done this session)
+
+Two specialists are now **live** in `config.yaml` under `subagents.custom_agents` (config.yaml is git-ignored local config — this is where live registration takes effect). Both are recognised by the selector: `build-engineer` covers `software_and_workflow_engineering` (the *required* Build capability, so it is selected for the main build phase instead of the general-purpose stand-in), and `statistician` covers `statistical_analysis` (optional in Build; also usable in Design/Test).
+
+| | `build-engineer` | `statistician` |
+|---|---|---|
+| DBTL capability | `software_and_workflow_engineering` (required in Build) | `statistical_analysis` (optional in Build; Design/Test) |
+| System prompt | The build contract, agent-owned: workspace-relative paths, one provisioned interpreter (no venv), `importlib.metadata` versions (never `pkg.__version__`), notebook-as-output, exactly one JSON result, v3 manifest + rerun spec, one `phase_done_condition`, honest reporting | Statistical rigor: state model/estimator, interval by a named method, diagnostics, separate performance from validity (a simulation can't establish real-world/causal validity), explicit limitations; plus the same reproducibility discipline when implementing in a Build phase |
+| Skills attached | `data-analysis`, `chart-visualization`, `code-documentation` | `data-analysis`, `chart-visualization` |
+| Model | `inherit` (gpt-5.6-sol) | `inherit` |
+| max_turns / timeout | 300 / 1800s | 200 / 1800s |
+| Tools | inherit all sandbox tools (read/write/str_replace/bash/ls) | inherit all |
+
+**What "skills" means here:** two layers. (1) **DBTL capabilities** — the load-bearing field that makes the selector pick the agent for a phase. (2) **Skills** — discoverable/activatable packages (from `skills/public/…`) the agent may load at runtime: `data-analysis` (DuckDB SQL exploration/summary/export), `chart-visualization` (chart image generation), `code-documentation` (READMEs/API docs/inline docs). The *system prompt* is the primary reliability lever; skills are secondary helpers.
+
+### How to improve the specialists over time
+1. **Iterate the prompt from real failures.** Fold every new observed mistake into the system prompt (as we did for `jupyter.__version__`, extra-JSON, self-built venv). Highest leverage, cheapest.
+2. **Add curated few-shot examples.** Embed a complete correct `run.py` + phase_manifest + result JSON (in the prompt or as a dedicated skill). Exemplars cut structured-output variance more than prose rules.
+3. **Curate skills.** Build a purpose-made `dbtl-reproducible-build` skill (the exact scaffolding), and prune skills that don't help. Use the `skill-creator` skill.
+4. **Tune the dials per seat.** `model`, reasoning effort, `max_turns`, `timeout_seconds`, token budget — independently, without changing global chat behaviour.
+5. **Split capabilities into finer phases.** Let the planner emit a software-engineering phase *and* a statistics phase, each drawing its specialist, so each does what it is best at.
+6. **Promote Learn outputs back into prompts.** When a cycle's Learn stage surfaces a durable lesson, encode it in the specialist prompt/skill.
+7. **Measure + A/B.** Track per-attempt phase success by agent; compare specialist vs generalist; iterate on the failures.
+8. **Grow the roster.** Add `experimental_design`, `quantitative_genetics`, `validity_assessment`, `scientific_reporting` specialists so more of the pipeline runs on specialists rather than the stand-in.
+9. **Version the template.** The live agents are in git-ignored `config.yaml`; add a documented copy to `config.example.yaml` if you want new setups to ship with them.
