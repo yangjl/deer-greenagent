@@ -316,3 +316,46 @@ def test_remote_verification_fails_preflight_without_a_read_boundary(monkeypatch
             project_id="project-1",
             project_root="/host/project",
         )
+
+
+def test_build_verifier_keeps_jupyter_state_inside_the_phase_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = "/mnt/user-data/outputs/.dbtl-stage-work/a/build/p"
+    original_env = {WORKSPACE_ENV: workspace}
+    captured: dict[str, object] = {}
+
+    class Sandbox:
+        def execute_command(self, command, env=None, timeout=None):
+            captured.update(command=command, env=env, timeout=timeout)
+            return "ok"
+
+    class Provider:
+        def get(self, sandbox_id):
+            assert sandbox_id == "local:test"
+            return Sandbox()
+
+    monkeypatch.setattr(adapter_module.sys, "platform", "darwin")
+    monkeypatch.setattr(adapter_module, "get_sandbox_provider", lambda: Provider())
+    monkeypatch.setattr(adapter_module, "sandbox_exec_command", lambda command, **_kwargs: command)
+
+    result = adapter_module._execute_server_build_command(
+        "python -m jupyter --version",
+        original_env,
+        30,
+        sandbox_state={"sandbox_id": "local:test"},
+        writable_workspace=workspace,
+        thread_id="thread-1",
+        user_id="user-1",
+        project_id="project-1",
+        project_root="/host/project",
+    )
+
+    assert result == "ok"
+    assert original_env == {WORKSPACE_ENV: workspace}
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["JUPYTER_CONFIG_DIR"] == f"{workspace}/.jupyter/config"
+    assert env["JUPYTER_DATA_DIR"] == f"{workspace}/.jupyter/data"
+    assert env["JUPYTER_RUNTIME_DIR"] == f"{workspace}/.jupyter/runtime"
+    assert env["IPYTHONDIR"] == f"{workspace}/.ipython"

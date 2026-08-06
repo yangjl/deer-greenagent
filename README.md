@@ -92,10 +92,13 @@ Design–Build–Test–Learn (DBTL) governance.
   each exact `SKILL.md` hash into phase material, and rechecks the hashes before
   commit. Its manifest names only workspace inputs actually consumed for
   implementation, so orientation-only reads do not invalidate the phase or
-  enter Build lineage. It uses a 120,000-token ceiling, issues exact
+  enter Build lineage. It uses a 500,000-token ceiling, issues exact
   workspace/input paths through the environment, requires manifest-v3 runtime
   inputs, scans declared source outputs for invented paths, and has the server
-  execute the entry point before publication. Local execution hides unissued project files
+  execute the entry point before publication. Server verification also points
+  Jupyter and IPython configuration, data, and runtime state into the phase's
+  writable workspace, so an installed notebook tool never needs host-home
+  access. Local execution hides unissued project files
   with `sandbox-exec`; remote sandbox images must provide `bwrap` or Build fails
   the read-boundary preflight. New phased Build attempts use the single current
   `generic:build:v12` contract.

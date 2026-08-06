@@ -472,6 +472,9 @@ def phase_unit(
                 "  numpy, scipy, pandas, matplotlib, statsmodels, scikit-learn, seaborn and jupyter.",
                 "  Import what you need directly; do NOT pip install at runtime and do NOT depend on",
                 "  a virtualenv you built — the verifier will not use it.",
+                "- The server gives Jupyter and IPython writable state directories inside this phase",
+                "  workspace. For notebook structure only, prefer `python -m json.tool file.ipynb`;",
+                "  use `python -m jupyter nbconvert --execute ...` only when executed-cell evidence is required.",
             ]
             if "granted_paths_only" in spec.validity_gates
             else []

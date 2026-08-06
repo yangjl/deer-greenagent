@@ -3892,7 +3892,7 @@ same switch:
   `test_dbtl_build_workflow_execution.py`, and
   `test_dbtl_live_stage_execution.py`.
 
-  Current Build is `generic:build:v12`, with a 120,000-token worker ceiling. A
+  Current Build is `generic:build:v12`, with a 500,000-token worker ceiling. A
   failed implementation check receives one fresh 40,000-token correction
   worker carrying only the refusal and previous staged workspace; it does not
   inherit the first worker's growing ReAct transcript.
@@ -3903,6 +3903,13 @@ same switch:
   runtime. The latter must come from the server-issued grant, but it does not
   renumber `DBTL_INPUT_n`: server execution receives the original issued order
   so a script using only `DBTL_INPUT_2` still receives that exact variable.
+  `_execute_server_build_command` owns notebook runtime state as part of that
+  same grant: it overrides `JUPYTER_CONFIG_DIR`, `JUPYTER_DATA_DIR`,
+  `JUPYTER_RUNTIME_DIR`, and `IPYTHONDIR` with paths beneath the phase workspace
+  before local or remote sandbox execution. Do not widen `HOME` or grant the
+  host configuration directory; structure-only notebook checks should use the
+  standard library's `json.tool`, while `nbconvert --execute` is reserved for
+  evidence that actually requires executed cells.
 
   **A path a phase composes for itself is a guess about a filesystem it cannot
   see.** `generic:build:v12` issues the paths instead of asking for them, after

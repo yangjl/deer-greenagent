@@ -525,7 +525,7 @@ class TestTheWriterAndTheReadModelAgree:
 
         assert events[0] == ("pin", "generic:build:v12")
         assert events[1][0] == "dispatch"
-        assert observed_token_caps[0] == 120_000
+        assert observed_token_caps[0] == 500_000
 
     async def test_a_successful_build_records_a_complete_chain(self, project) -> None:
         """The property a fake repository cannot show.

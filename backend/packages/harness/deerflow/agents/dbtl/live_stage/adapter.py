@@ -1888,6 +1888,13 @@ def _execute_server_build_command(
     project_root: str,
 ) -> str:
     """Execute a verifier command in the run's sandbox, never on bare host Bash."""
+    execution_env = {
+        **env,
+        "JUPYTER_CONFIG_DIR": f"{writable_workspace}/.jupyter/config",
+        "JUPYTER_DATA_DIR": f"{writable_workspace}/.jupyter/data",
+        "JUPYTER_RUNTIME_DIR": f"{writable_workspace}/.jupyter/runtime",
+        "IPYTHONDIR": f"{writable_workspace}/.ipython",
+    }
     unwrapped, _ = unwrap_sandbox(sandbox_state)
     sandbox_id = unwrapped.get("sandbox_id") if isinstance(unwrapped, dict) else None
     provider = get_sandbox_provider()
@@ -1923,7 +1930,7 @@ def _execute_server_build_command(
                 writable_path=writable_workspace,
                 readable_paths=readable_inputs,
             )
-        return sandbox.execute_command(isolated, env=env, timeout=timeout_seconds)
+        return sandbox.execute_command(isolated, env=execution_env, timeout=timeout_seconds)
     finally:
         if acquired:
             provider.release(sandbox_id)

@@ -315,9 +315,11 @@ class _Store:
 class _Lead:
     def __init__(self) -> None:
         self.contexts = []
+        self.runtime_contexts = []
 
-    async def ainvoke(self, _state, config):
+    async def ainvoke(self, _state, config, *, context=None):
         self.contexts.append(config["context"])
+        self.runtime_contexts.append(context)
         return {"messages": [AIMessage(content="Which population should this use?", id="answer-1")]}
 
 
@@ -403,6 +405,7 @@ async def test_explicit_discovery_invokes_lead_once_with_server_owned_read_only_
     assert discovery["active"] is True
     assert discovery["no_cycle_exists"] is True
     assert discovery["discovery_id"] == "discovery-1"
+    assert lead.runtime_contexts == [lead.contexts[0]]
     assert store.begin_values["policy_version"] == "server-policy-v3"
     assert "Which population" in str(final["messages"][-1].content)
 

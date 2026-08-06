@@ -1771,7 +1771,7 @@ def build_supervisor_graph(
         run_id = run_id_from_config(config)
         parent_id = supervisor_activity_id(run_id) if isinstance(run_id, str) and run_id else None
         with activity_parent_context(parent_id):
-            lead_result = await lead_agent.ainvoke(state, config=discovery_config)
+            lead_result = await lead_agent.ainvoke(state, config=discovery_config, context=active_context)
 
         draft = DiscoveryDraft(
             discovery_id=str(active["id"]),
