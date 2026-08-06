@@ -229,6 +229,60 @@ def test_server_binds_audit_artifacts_by_content_hash_when_path_is_wrong() -> No
     assert audit.items[0].observed_artifacts[0].path == "outputs/report.md"
 
 
+def test_server_accepts_an_unambiguous_build_output_prefix_as_a_path_deviation() -> None:
+    manifest = parse_deliverable_manifest(
+        {
+            "deliverables": [
+                {
+                    "id": "model",
+                    "title": "Model",
+                    "kind": "software",
+                    "required": True,
+                    "expected_paths": ["model.json"],
+                    "acceptance_criteria": ["Contains fitted coefficients"],
+                    "validation": "Read the JSON.",
+                    "capabilities": ["data-analysis"],
+                }
+            ]
+        },
+        cycle_class="other",
+    )
+    governed_uri = "/mnt/user-data/outputs/dbtl/build/hash-model.json"
+    item = {
+        "deliverable_id": "model",
+        "verdict": "pass",
+        "observed_artifacts": [{"path": governed_uri, "content_hash": SHA}],
+        "criteria": [
+            {
+                "criterion": "Contains fitted coefficients",
+                "verdict": "pass",
+                "detail": "Independently inspected.",
+            }
+        ],
+        "notes": "The bytes are correct; Build added only an outputs/ prefix.",
+    }
+
+    audit, refusal = _validated_deliverable_audit(
+        [SimpleNamespace(provenance={"deliverable_audit": {"version": 1, "items": [item]}})],
+        manifest=manifest,
+        build_test={
+            "build_lineage": {
+                "output_artifacts": [
+                    {
+                        "source_path": "outputs/model.json",
+                        "uri": governed_uri,
+                        "content_hash": SHA,
+                    }
+                ]
+            }
+        },
+    )
+
+    assert refusal == ""
+    assert audit is not None
+    assert audit.items[0].observed_artifacts[0].path == "model.json"
+
+
 def test_server_rejects_audit_artifact_whose_hash_is_not_published() -> None:
     # Bind-by-hash must not accept a fabricated hash: an artifact whose hash is
     # not in the Build lineage stays unbound and the audit is rejected.

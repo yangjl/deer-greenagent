@@ -25,7 +25,7 @@ from typing import Any
 #: Where the reviewer's decision actually happens. Editing a Markdown file is
 #: not a governed review: reviewer identity and the revision binding are
 #: server-owned, and a gate cannot bind to a file edit.
-DECISION_NOTICE = "Record your decision in the project's Design stage review panel, not by editing this file. Approving there binds your identity and this package's revision to the durable record."
+DECISION_NOTICE = "Record your decision on the Human gate slide in this package's HTML review deck, not by editing this file. The deck binds your identity and this package's revision to the durable record."
 
 _CHAIR_MARKER = "chair"
 
@@ -384,6 +384,6 @@ def render_stage_digest(payload: Mapping[str, Any], *, document_path: str) -> st
 
     lines += [
         "",
-        f"Full review package: `{document_path}` — open the stage in the project rail to read it and record a decision. This run cannot satisfy the gate.",
+        f"Full review package: `{document_path}` — open the companion HTML review deck and use its Human gate slide to record a decision. This run cannot satisfy the gate.",
     ]
     return "\n".join(lines).strip() + "\n"

@@ -353,6 +353,22 @@ class TestAFailedStepOffersARealChoice:
         assert result.control_request["step_key"] == BuildStepKey.EXECUTE_PHASES.value
         assert result.control_request["rationale"]
 
+    async def test_an_explicit_retry_can_replace_an_open_control_missing_from_chat(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        failed = await _run(repo, root, dispatcher=_RefusingSecondPhase(plan=TWO_PHASE_PLAN))
+
+        recovered = await _adapter(repo, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN)).recover_paused_build_control(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            requested_action="retry",
+            config=_runtime(root, run_id="recovery-run"),
+        )
+
+        assert recovered is not None
+        assert recovered["request_id"] != failed.control_request["request_id"]
+        assert recovered["error_code"] == "paused_build_reopened"
+
     async def test_a_capability_nothing_covers_is_named_rather_than_swapped(self, project) -> None:
         """No registered generalist, so the statistics phase has no stand-in."""
         repo, root = project

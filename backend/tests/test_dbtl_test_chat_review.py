@@ -217,7 +217,10 @@ async def test_review_snapshot_uses_the_newest_test_retry(monkeypatch):
             return {"build_lineage": {"id": "lineage-1"}}
 
         async def latest_stage_feedback_surface(self, **kwargs):
-            return None
+            return {
+                "id": "dfs-test-review",
+                "decision_request": None,
+            }
 
     service = TestReviewService(
         repo=Repo(),
@@ -229,6 +232,7 @@ async def test_review_snapshot_uses_the_newest_test_retry(monkeypatch):
 
     assert snapshot is not None
     assert snapshot["evaluation"]["outcome"] == "supported"
+    assert snapshot["feedback_surface_id"] == "dfs-test-review"
     reproducibility = next(item for item in snapshot["checks"] if item["check"] == "reproducibility")
     assert reproducibility["detail"] == "latest pass"
 
@@ -398,6 +402,23 @@ def test_outcome_card_offers_only_server_allowed_routes():
         "advance_to_learn",
         "repeat_test",
     ]
+
+
+def test_outcome_card_binds_the_deck_that_owns_its_route_control():
+    snapshot = {
+        "evaluation": {
+            "outcome": "supported",
+            "validity_pack_key": "generic-predictive:v2",
+            "allowed_recommendations": ["advance_to_learn"],
+        },
+        "evidence_hash": "b" * 64,
+        "feedback_surface_id": "dfs-test-review",
+        "meeting": {"requirement": "complete"},
+    }
+
+    _call, card = _test_card_messages(_decision(), snapshot, request_nonce="run-3", outcome=True)
+
+    assert card.artifact["human_input"]["design_feedback_surface_id"] == "dfs-test-review"
 
 
 def test_rollout_cursor_projects_build_approved_test_active_as_test():

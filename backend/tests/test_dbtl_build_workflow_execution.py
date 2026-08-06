@@ -898,6 +898,8 @@ class TestABuildStopsBeingOneOpaqueWorker:
         assert '"approved_design_brief"' not in prompt
         assert "Use write_file or str_replace" in prompt
         assert "do not embed complete files in" in prompt
+        assert "Do not add an `outputs/` prefix" in prompt
+        assert "build_input_bundle.deliverable_manifest" in prompt
 
     async def test_server_prepares_the_standard_build_workspace_layout(self, tmp_path: Path) -> None:
         adapter_module._prepare_unit_workspace(tmp_path, stage="build")
@@ -1781,6 +1783,34 @@ class TestTheServerOwnsThePhaseManifestVerdict:
         lineage = (await repo.build_test_view("cycle-1", project_id="project-1"))["build_lineage"]
         assert lineage["output_artifacts"]
         assert all(item["uri"].startswith("/mnt/user-data/outputs/dbtl/") for item in lineage["output_artifacts"])
+
+    async def test_path_only_manifest_desync_is_recorded_without_rerunning_the_phase(self, project) -> None:
+        class _PathOnlyManifestDispatcher(_WritingDispatcher):
+            async def __call__(self, units, *, budget):
+                outcomes = await super().__call__(units, budget=budget)
+                revised = []
+                for unit, outcome in zip(units, outcomes, strict=True):
+                    if unit.role != "phase" or not outcome.text:
+                        revised.append(outcome)
+                        continue
+                    payload = json.loads(outcome.text)
+                    payload["provenance"]["phase_manifest"]["declared_outputs"] = [f"/mnt/user-data/legacy/{Path(path).name}" for path in payload["artifact_refs"]]
+                    revised.append(DispatchOutcome(unit_id=outcome.unit_id, text=json.dumps(payload)))
+                return revised
+
+        repo, root = project
+        await _ready_for_build(repo)
+
+        result, dispatcher = await _run_build(
+            repo,
+            root,
+            dispatcher=_PathOnlyManifestDispatcher(plan=SINGLE_PHASE_PLAN),
+        )
+
+        assert result.produced_usable_evidence, result.note
+        assert len(dispatcher.phase_units) == 1
+        worker_runs = await repo.list_worker_runs("cycle-1", project_id="project-1", stage="build")
+        assert any("bookkeeping observation" in limitation.lower() for limitation in worker_runs[-1]["result"]["limitations"])
 
     @pytest.mark.parametrize(
         ("mutation", "expected"),

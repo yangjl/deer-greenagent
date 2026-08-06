@@ -7,6 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.agents.dbtl.live_stage.adapter import (
+    LiveStageAdapter,
+    _has_reusable_test_evidence,
+    _reusable_test_worker_results,
+)
 from deerflow.agents.dbtl.live_stage.test_rerun import (
     RERUN_EXIT_STATUS_NAME,
     RERUN_STDERR_NAME,
@@ -26,11 +31,144 @@ from deerflow.agents.dbtl.live_stage.test_rerun import (
 from deerflow.agents.dbtl.live_stage.test_rerun import (
     build_test_rerun_unit as make_test_rerun_unit,
 )
+from deerflow.dbtl.stage_runner import WorkUnit
 from deerflow.dbtl.worker_result import StageWorkerResult, WorkerStatus
 
 UNIT_WORKSPACE = "/mnt/user-data/outputs/.dbtl-stage-work/test-attempt/test/rerun-unit"
 EXPECTED_OUTPUT = "/mnt/user-data/outputs/dbtl/build/model.bin"
 COMMAND = "python /mnt/user-data/fit.py --seed 7"
+
+
+def test_path_only_recovery_reuses_recorded_test_workers() -> None:
+    rerun_unit = WorkUnit(
+        unit_id="new-attempt-build-rerun",
+        capability="reproducibility_rerun",
+        agent_name="tester",
+        prompt="Rerun.",
+    )
+    validity_unit = WorkUnit(
+        unit_id="new-attempt-1-validity_assessment",
+        capability="validity_assessment",
+        agent_name="tester",
+        prompt="Assess.",
+    )
+    rerun_record = RerunRecord(status=RerunStatus.PASSED, command="python fit.py", reason="Hashes match.")
+    recorded = [
+        {
+            "stage_attempt_id": "stage-test-1",
+            "unit_id": "recorded-attempt-build-rerun",
+            "capability": rerun_unit.capability,
+            "agent_name": rerun_unit.agent_name,
+            "result": StageWorkerResult(
+                status=WorkerStatus.COMPLETED,
+                summary="Server-owned rerun passed.",
+                capability=rerun_unit.capability,
+                agent_name=rerun_unit.agent_name,
+                provenance={"rerun_execution": rerun_record.as_dict()},
+            ).as_dict(),
+        },
+        {
+            "stage_attempt_id": "stage-test-1",
+            "unit_id": "recorded-attempt-1-validity_assessment",
+            "capability": validity_unit.capability,
+            "agent_name": validity_unit.agent_name,
+            "result": StageWorkerResult(
+                status=WorkerStatus.COMPLETED,
+                summary="Scientific checks passed.",
+                capability=validity_unit.capability,
+                agent_name=validity_unit.agent_name,
+            ).as_dict(),
+        },
+    ]
+
+    reused = _reusable_test_worker_results(
+        recorded,
+        stage_attempt_id="stage-test-1",
+        units=(rerun_unit, validity_unit),
+    )
+
+    assert reused is not None
+    reused_units, results, recovered_rerun = reused
+    assert [item.unit_id for item in reused_units] == [
+        "recorded-attempt-build-rerun",
+        "recorded-attempt-1-validity_assessment",
+    ]
+    assert [item.summary for item in results] == ["Server-owned rerun passed.", "Scientific checks passed."]
+    assert recovered_rerun == rerun_record
+
+
+def test_recovery_control_requires_complete_current_attempt_test_evidence() -> None:
+    rerun = StageWorkerResult(
+        status=WorkerStatus.COMPLETED,
+        summary="Rerun passed.",
+        capability="reproducibility_rerun",
+        agent_name="server",
+        provenance={"rerun_execution": RerunRecord(status=RerunStatus.PASSED, command="python fit.py", reason="Hashes match.").as_dict()},
+    ).as_dict()
+    validity = StageWorkerResult(
+        status=WorkerStatus.COMPLETED,
+        summary="Checks passed.",
+        capability="validity_assessment",
+        agent_name="tester",
+        provenance={"validity_assessment": {"metrics": [], "checks": []}},
+    ).as_dict()
+    rows = [
+        {"stage_attempt_id": "current", "unit_id": "current-build-rerun", "result": rerun},
+        {"stage_attempt_id": "current", "unit_id": "current-validity", "result": validity},
+    ]
+
+    assert _has_reusable_test_evidence(rows, stage_attempt_id="current") is True
+    assert _has_reusable_test_evidence(rows[:1], stage_attempt_id="current") is False
+    assert _has_reusable_test_evidence(rows, stage_attempt_id="different") is False
+    mismatched = [
+        rows[0],
+        {**rows[1], "unit_id": "different-run-validity"},
+    ]
+    assert _has_reusable_test_evidence(mismatched, stage_attempt_id="current") is False
+
+
+@pytest.mark.asyncio
+async def test_path_recovery_uses_a_distinct_surface_even_when_an_assessment_exists() -> None:
+    rerun = StageWorkerResult(
+        status=WorkerStatus.COMPLETED,
+        summary="Rerun passed.",
+        capability="reproducibility_rerun",
+        agent_name="server",
+        provenance={"rerun_execution": RerunRecord(status=RerunStatus.PASSED, command="python fit.py", reason="Hashes match.").as_dict()},
+    ).as_dict()
+    validity = StageWorkerResult(
+        status=WorkerStatus.COMPLETED,
+        summary="Checks passed.",
+        capability="validity_assessment",
+        agent_name="tester",
+        provenance={"validity_assessment": {"metrics": [], "checks": []}},
+    ).as_dict()
+
+    class Repo:
+        async def get_cycle(self, cycle_id, *, project_id):
+            return {
+                "id": cycle_id,
+                "state": "test",
+                "db_revision": 10,
+                "stages": [{"id": "test-attempt", "stage": "test", "status": "in_progress"}],
+            }
+
+        async def build_test_view(self, cycle_id, *, project_id):
+            return {"validity_assessment": {"id": "assessment-1", "recommendation": "advance_to_learn"}}
+
+        async def list_worker_runs(self, cycle_id, *, project_id, stage):
+            return [
+                {"stage_attempt_id": "test-attempt", "unit_id": "run-1-build-rerun", "result": rerun},
+                {"stage_attempt_id": "test-attempt", "unit_id": "run-1-validity", "result": validity},
+            ]
+
+    marker = await LiveStageAdapter(repo=Repo(), app_config=None).recover_test_retry_control(
+        project_id="project-1",
+        cycle_id="cycle-1",
+    )
+
+    assert marker is not None
+    assert marker["surface_id"] == "test-evidence:test-attempt"
 
 
 def _sha(value: bytes) -> str:

@@ -790,6 +790,7 @@ class ReconciliationOpsMixin:
         return [
             {
                 "id": row.id,
+                "stage_attempt_id": row.stage_attempt_id,
                 "unit_id": row.unit_id,
                 "stage_spec_key": row.stage_spec_key,
                 "capability": row.capability,

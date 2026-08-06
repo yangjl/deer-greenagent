@@ -1071,6 +1071,7 @@ def _test_card_messages(
         "input_mode": "single_choice",
         "options": options,
         "dbtl_cycle_id": decision.cycle_id,
+        **({"design_feedback_surface_id": str(snapshot["feedback_surface_id"])} if snapshot.get("feedback_surface_id") else {}),
         "test_review_snapshot": snapshot,
     }
     return build_human_input_messages(
@@ -2048,6 +2049,12 @@ def build_supervisor_graph(
         if build_control_result.handled:
             return build_control_result.update or {}
         build_control_answer = build_control_result.control_answer
+        # A Build-control reply is hidden UI transport, so the latest visible
+        # request may still be the earlier "retry Build" message that opened
+        # this card. It must not be re-read as free text after the card itself
+        # has resolved; the bound answer is the authority for this request.
+        if build_control_answer is not None:
+            unscoped_stage_intent = None
 
         test_cards = await handle_test_cards(
             state=state,
@@ -2331,6 +2338,8 @@ def build_supervisor_graph(
         if handoff_answer is not None and handoff_answer[0] == "start_next_stage":
             execute_kwargs["expected_stage"] = str(handoff_answer[1].get("next_stage") or "")
             execute_kwargs["expected_cycle_revision"] = int(handoff_answer[1].get("cycle_revision") or 0)
+            if str(handoff_answer[1].get("design_feedback_surface_id") or "").startswith("test-evidence:"):
+                execute_kwargs["reuse_recorded_test_evidence"] = True
         if review_meeting_stage:
             # Convening is its own kind of request: the adapter reads the named
             # stage's recorded evidence rather than deriving a stage from cycle
@@ -2541,6 +2550,9 @@ def build_supervisor_graph(
                     if isawaitable(snapshot):
                         snapshot = await snapshot
                 if isinstance(snapshot, dict):
+                    feedback_surface_id = getattr(result, "feedback_surface_id", None)
+                    if feedback_surface_id and not snapshot.get("feedback_surface_id"):
+                        snapshot = {**snapshot, "feedback_surface_id": str(feedback_surface_id)}
                     requirement = str(dict(snapshot.get("meeting") or {}).get("requirement") or "skipped")
                     presented.extend(
                         _test_card_messages(

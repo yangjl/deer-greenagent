@@ -175,11 +175,34 @@ def derive_build_fulfillment(
         if source_path and _SHA256.fullmatch(content_hash):
             published_by_source[source_path] = ArtifactEvidence(path=source_path, content_hash=content_hash)
 
+    expected_basename_counts: dict[str, int] = {}
+    for spec in manifest.deliverables:
+        for path in spec.expected_paths:
+            basename = path.rsplit("/", 1)[-1]
+            expected_basename_counts[basename] = expected_basename_counts.get(basename, 0) + 1
+    published_by_basename: dict[str, list[tuple[str, ArtifactEvidence]]] = {}
+    for source_path, evidence in published_by_source.items():
+        published_by_basename.setdefault(source_path.rsplit("/", 1)[-1], []).append((source_path, evidence))
+
     declared_by_id = {str(item.get("deliverable_id") or ""): item for item in declarations if isinstance(item.get("deliverable_id"), str)}
     normalized: list[dict[str, object]] = []
     for spec in manifest.deliverables:
-        artifacts = [published_by_source[path].as_dict() for path in spec.expected_paths if path in published_by_source]
-        missing = [path for path in spec.expected_paths if path not in published_by_source]
+        artifacts: list[dict[str, str]] = []
+        missing: list[str] = []
+        reconciled: list[str] = []
+        for path in spec.expected_paths:
+            evidence = published_by_source.get(path)
+            if evidence is not None:
+                artifacts.append(evidence.as_dict())
+                continue
+            basename = path.rsplit("/", 1)[-1]
+            candidates = published_by_basename.get(basename, [])
+            if expected_basename_counts.get(basename) == 1 and len(candidates) == 1:
+                source_path, evidence = candidates[0]
+                artifacts.append(ArtifactEvidence(path=path, content_hash=evidence.content_hash).as_dict())
+                reconciled.append(f"{source_path} to {path}")
+                continue
+            missing.append(path)
         if not missing:
             normalized.append(
                 {
@@ -187,7 +210,7 @@ def derive_build_fulfillment(
                     "status": FulfillmentStatus.DELIVERED.value,
                     "artifacts": artifacts,
                     "attempt_evidence": [],
-                    "notes": "All expected paths were published and hash-bound by the server.",
+                    "notes": (f"All expected paths were published and hash-bound by the server; reconciled {', '.join(reconciled)}." if reconciled else "All expected paths were published and hash-bound by the server."),
                 }
             )
             continue

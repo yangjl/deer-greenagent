@@ -195,3 +195,34 @@ def test_server_marks_an_unaccounted_missing_item_not_attempted() -> None:
 
     assert all(item.status is FulfillmentStatus.NOT_ATTEMPTED for item in fulfillment.items)
     assert fulfillment.reviewable is False
+
+
+def test_server_reconciles_an_unambiguous_output_directory_prefix() -> None:
+    manifest = parse_deliverable_manifest(
+        {
+            "deliverables": [
+                {
+                    "id": "model",
+                    "title": "Model",
+                    "kind": "software",
+                    "required": True,
+                    "expected_paths": ["model.json"],
+                    "acceptance_criteria": ["Contains the fitted coefficients."],
+                    "validation": "Test parses and checks the coefficients.",
+                    "capabilities": ["python"],
+                }
+            ],
+        },
+        cycle_class="other",
+    )
+
+    fulfillment = derive_build_fulfillment(
+        manifest,
+        published=[{"source_path": "outputs/model.json", "content_hash": SHA}],
+        declarations=[],
+    )
+
+    assert fulfillment.reviewable is True
+    assert fulfillment.all_delivered is True
+    assert fulfillment.items[0].artifacts[0].path == "model.json"
+    assert "outputs/model.json" in fulfillment.items[0].notes

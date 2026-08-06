@@ -640,7 +640,8 @@ artifact` is server-owned in full and is now stripped from external run input:
   is the spec's, not the one those workers had. An agent that declares no
   `subagents.custom_agents.<name>.dbtl_capabilities` covers nothing, so a
   deployment with none declared runs every council role as `general-purpose` —
-  `config.example.yaml` ships a worked `experimental-design` specialist.
+  `config.example.yaml` registers `build-engineer` and `statistician` and also
+  shows an optional worked `experimental-design` specialist.
   The roster itself is **proposed for the question, then validated**.
   `deerflow.dbtl.council_proposal` parses a one-shot `nostream` reply into seats
   that carry a _focus_ and a _brief_ — what each seat argues from — which is

@@ -73,6 +73,7 @@ from deerflow.agents.dbtl.live_stage.test_rerun import (
     TestRerunRecord,
     build_test_rerun_tool,
     build_test_rerun_unit,
+    parse_test_rerun_record,
     prepare_test_rerun,
     rerun_result,
     validate_test_rerun,
@@ -1966,12 +1967,30 @@ def _validated_deliverable_audit(
     lineage = build_test.get("build_lineage")
     outputs = lineage.get("output_artifacts") if isinstance(lineage, Mapping) else []
     output_rows = [item for item in (outputs if isinstance(outputs, Sequence) else []) if isinstance(item, Mapping)]
-    published = {str(item.get("source_path") or ""): str(item.get("content_hash") or "") for item in output_rows}
-    published_by_uri = {str(item.get("uri") or ""): (str(item.get("source_path") or ""), str(item.get("content_hash") or "")) for item in output_rows if str(item.get("uri") or "")}
+    expected_by_basename: dict[str, list[str]] = {}
+    for deliverable in manifest.deliverables:
+        for expected_path in deliverable.expected_paths:
+            expected_by_basename.setdefault(expected_path.rsplit("/", 1)[-1], []).append(expected_path)
+    published_basename_counts: dict[str, int] = {}
+    for item in output_rows:
+        source_path = str(item.get("source_path") or "")
+        basename = source_path.rsplit("/", 1)[-1]
+        published_basename_counts[basename] = published_basename_counts.get(basename, 0) + 1
+
+    def canonical_path(item: Mapping[str, object]) -> str:
+        source_path = str(item.get("source_path") or "")
+        basename = source_path.rsplit("/", 1)[-1]
+        candidates = expected_by_basename.get(basename, [])
+        if len(candidates) == 1 and published_basename_counts.get(basename) == 1:
+            return candidates[0]
+        return source_path
+
+    published = {canonical_path(item): str(item.get("content_hash") or "") for item in output_rows}
+    published_by_uri = {str(item.get("uri") or ""): (canonical_path(item), str(item.get("content_hash") or "")) for item in output_rows if str(item.get("uri") or "")}
     _hash_to_paths: dict[str, set[str]] = {}
     for item in output_rows:
         _h = str(item.get("content_hash") or "").lower()
-        _sp = str(item.get("source_path") or "")
+        _sp = canonical_path(item)
         if _h and _sp:
             _hash_to_paths.setdefault(_h, set()).add(_sp)
     # Only bind by hash when it names exactly one published file. Two deliverables
@@ -2023,6 +2042,93 @@ def _validated_deliverable_audit(
         return audit, ""
     detail = f" ({'; '.join(refusals[:3])})" if refusals else ""
     return None, f"Test did not return a valid independent audit for every approved Design deliverable{detail}."
+
+
+def _reusable_test_worker_results(
+    stored: Sequence[Mapping[str, object]],
+    *,
+    stage_attempt_id: str,
+    units: Sequence[WorkUnit],
+) -> tuple[tuple[WorkUnit, ...], tuple[StageWorkerResult, ...], TestRerunRecord] | None:
+    """Recover a complete current-attempt Test result without spending workers again."""
+
+    current = [item for item in stored if str(item.get("stage_attempt_id") or "") == stage_attempt_id]
+    rerun_row = next(
+        (item for item in reversed(current) if str(item.get("unit_id") or "").endswith("-build-rerun")),
+        None,
+    )
+    if rerun_row is None:
+        return None
+    prefix = str(rerun_row.get("unit_id") or "").removesuffix("-build-rerun")
+    reused_units: list[WorkUnit] = []
+    parsed: list[StageWorkerResult] = []
+    rerun: TestRerunRecord | None = None
+    for unit in units:
+        item = (
+            rerun_row
+            if unit.unit_id.endswith("-build-rerun")
+            else next(
+                (row for row in reversed(current) if str(row.get("unit_id") or "").startswith(f"{prefix}-") and str(row.get("capability") or "") == unit.capability),
+                None,
+            )
+        )
+        raw = item.get("result") if isinstance(item, Mapping) else None
+        if not isinstance(raw, Mapping):
+            return None
+        try:
+            result = parse_worker_result(
+                raw,
+                capability=str(raw.get("capability") or item.get("capability") or unit.capability),
+                agent_name=str(raw.get("agent_name") or item.get("agent_name") or unit.agent_name),
+                stop_reason=(str(raw.get("stop_reason")) if raw.get("stop_reason") else None),
+            )
+        except WorkerResultRejected:
+            return None
+        if not result.is_trustworthy:
+            return None
+        if unit.unit_id.endswith("-build-rerun"):
+            rerun = parse_test_rerun_record(result.provenance.get("rerun_execution"))
+            if rerun is None:
+                return None
+        reused_units.append(replace(unit, unit_id=str(item.get("unit_id") or unit.unit_id)))
+        parsed.append(result)
+    return (tuple(reused_units), tuple(parsed), rerun) if rerun is not None and len(parsed) == len(units) else None
+
+
+def _has_reusable_test_evidence(
+    stored: Sequence[Mapping[str, object]],
+    *,
+    stage_attempt_id: str,
+) -> bool:
+    """Whether the current Test attempt has both trustworthy evidence roles."""
+
+    parsed: list[tuple[str, StageWorkerResult]] = []
+    for item in stored:
+        unit_id = str(item.get("unit_id") or "")
+        if str(item.get("stage_attempt_id") or "") != stage_attempt_id or not unit_id:
+            continue
+        raw = item.get("result")
+        if not isinstance(raw, Mapping):
+            continue
+        try:
+            result = parse_worker_result(
+                raw,
+                capability=str(raw.get("capability") or item.get("capability") or "recorded-test"),
+                agent_name=str(raw.get("agent_name") or item.get("agent_name") or "recorded-worker"),
+                stop_reason=(str(raw.get("stop_reason")) if raw.get("stop_reason") else None),
+            )
+        except WorkerResultRejected:
+            continue
+        if not result.is_trustworthy:
+            continue
+        parsed.append((unit_id, result))
+    for unit_id, result in reversed(parsed):
+        if not unit_id.endswith("-build-rerun") or parse_test_rerun_record(result.provenance.get("rerun_execution")) is None:
+            continue
+        prefix = unit_id.removesuffix("-build-rerun")
+        if any(other_id.startswith(f"{prefix}-") and isinstance(other.provenance.get("validity_assessment"), Mapping) for other_id, other in parsed):
+            return True
+    return False
 
 
 def _input_artifacts_intact(input_artifacts: Sequence[str], *, project_root: str) -> bool:
@@ -3711,7 +3817,14 @@ class LiveStageAdapter:
             return None
         view = await self._repo.build_test_view(cycle_id, project_id=project_id)
         assessment = dict((view or {}).get("validity_assessment") or {})
-        if assessment.get("recommendation") != "repeat_test":
+        repeat_test = assessment.get("recommendation") == "repeat_test"
+        test_attempt = next((item for item in cycle.get("stages", []) if item.get("stage") == "test"), None)
+        stage_attempt_id = str((test_attempt or {}).get("id") or "")
+        evidence_recovery = False
+        if not repeat_test and stage_attempt_id:
+            stored = await self._repo.list_worker_runs(cycle_id, project_id=project_id, stage="test")
+            evidence_recovery = _has_reusable_test_evidence(stored, stage_attempt_id=stage_attempt_id)
+        if not repeat_test and not evidence_recovery:
             return None
         return {
             "version": 1,
@@ -3719,7 +3832,7 @@ class LiveStageAdapter:
             "cycle_revision": int(cycle.get("db_revision") or 0),
             "approved_stage": "test",
             "next_stage": "test",
-            "surface_id": str(assessment.get("id") or cycle_id),
+            "surface_id": (str(assessment.get("id") or cycle_id) if repeat_test else f"test-evidence:{stage_attempt_id}"),
             "repeat_stage": True,
         }
 
@@ -3758,12 +3871,13 @@ class LiveStageAdapter:
         requested_action: str,
         config: RunnableConfig,
     ) -> dict[str, Any] | None:
-        """Raise a new governed choice after an earlier Build Hold.
+        """Raise a new governed choice after an earlier Build control disappeared.
 
         This is deliberately not a free-text command executor.  It turns an
-        explicit Build command into a fresh server-owned card, preserving the
-        earlier Hold and requiring the next state-changing action to be one of
-        the options the server actually emitted.
+        explicit Build command into a fresh server-owned card. This also
+        recovers an open durable control that chat has already marked answered
+        after a failed dispatch; the replacement still requires a second,
+        bound human choice before anything runs.
         """
         if not project_id or not cycle_id:
             return None
@@ -3783,6 +3897,7 @@ class LiveStageAdapter:
             lifecycle=None,
         )
         if not isinstance(latest, dict) or str(latest.get("lifecycle") or "") not in {
+            "open",
             "held",
             "answered",
         }:
@@ -5048,6 +5163,7 @@ class LiveStageAdapter:
                     reconciled = reconcile_published_manifest(
                         result,
                         published=phase_published,
+                        completion_condition=assignment.phase.done_condition,
                         required_version=required_phase_manifest_version(spec),
                     )
                     if reconciled is None:
@@ -5903,6 +6019,7 @@ class LiveStageAdapter:
         expected_stage: str | None = None,
         expected_cycle_revision: int | None = None,
         build_control: BuildControlAnswer | None = None,
+        reuse_recorded_test_evidence: bool = False,
     ) -> LiveStageResult:
         """Run the cycle's currently executable stage and record what it produced.
 
@@ -5930,6 +6047,7 @@ class LiveStageAdapter:
                     expected_stage=expected_stage,
                     expected_cycle_revision=expected_cycle_revision,
                     build_control=build_control,
+                    reuse_recorded_test_evidence=reuse_recorded_test_evidence,
                 )
         except asyncio.CancelledError:
             # A graceful Gateway reload/cancel reaches this boundary while the
@@ -5994,6 +6112,7 @@ class LiveStageAdapter:
         expected_stage: str | None = None,
         expected_cycle_revision: int | None = None,
         build_control: BuildControlAnswer | None = None,
+        reuse_recorded_test_evidence: bool = False,
     ) -> LiveStageResult:
         if not project_id or not cycle_id:
             return LiveStageResult(
@@ -6956,6 +7075,7 @@ class LiveStageAdapter:
                     project_root=project_root,
                 )
                 selected = preliminary.units[0]
+                reused_test_outcome = False
                 if isinstance(prepared, PreparedTestRerun):
                     rerun_unit = build_test_rerun_unit(
                         prepared,
@@ -6963,40 +7083,61 @@ class LiveStageAdapter:
                         agent_name=selected.agent_name,
                         via_generalist=selected.via_generalist,
                     )
-                    rerun_budget = replace(
-                        spec.budget,
-                        max_workers=1,
-                        max_turns=min(spec.budget.max_turns, 80),
-                        max_tokens=min(spec.budget.max_tokens, 120_000),
-                        timeout_seconds=min(spec.budget.timeout_seconds, 600),
-                        token_limit_enforced=True,
-                    )
-                    dispatched_rerun = await dispatcher((rerun_unit,), budget=rerun_budget)
-                    dispatched_receipt = dispatched_rerun[0] if dispatched_rerun else DispatchOutcome(unit_id=rerun_unit.unit_id, text=None, error="The rerun worker returned no dispatch outcome.")
-                    worker_rerun = StageWorkerResult(
-                        status=(WorkerStatus.FAILED if dispatched_receipt.error else WorkerStatus.COMPLETED),
-                        summary=dispatched_receipt.error or "The command attempt returned; server verification owns its verdict.",
-                        capability=rerun_unit.capability,
-                        agent_name=rerun_unit.agent_name,
-                        stop_reason=dispatched_receipt.stop_reason,
-                        token_usage=dict(dispatched_receipt.token_usage or {}),
-                    )
-                    test_rerun_record = await asyncio.to_thread(
-                        validate_test_rerun,
-                        worker_rerun,
-                        prepared,
-                        project_root=project_root,
-                        unit_workspace=_unit_stage_workspace(stage_workspace, rerun_unit.unit_id),
-                    )
-                    test_rerun_pair = (
-                        rerun_unit,
-                        rerun_result(
-                            test_rerun_record,
-                            agent_name=worker_rerun.agent_name,
-                            token_usage=dict(worker_rerun.token_usage),
-                        ),
-                    )
-                    rerun_rejected = ()
+                    reused = None
+                    if reuse_recorded_test_evidence:
+                        stored_test_runs = await self._repo.list_worker_runs(
+                            cycle_id,
+                            project_id=project_id,
+                            stage="test",
+                        )
+                        reused = _reusable_test_worker_results(
+                            stored_test_runs,
+                            stage_attempt_id=str((attempt or {}).get("id") or ""),
+                            units=(rerun_unit, *preliminary.units),
+                        )
+                    if reused is not None:
+                        reused_units, reused_results, test_rerun_record = reused
+                        outcome = StageExecutionOutcome(
+                            plan=replace(preliminary, units=reused_units),
+                            results=reused_results,
+                        )
+                        reused_test_outcome = True
+                        logger.info("Reused %d recorded Test worker results for %s after a server-side evidence refusal.", len(reused_results), cycle_id)
+                    else:
+                        rerun_budget = replace(
+                            spec.budget,
+                            max_workers=1,
+                            max_turns=min(spec.budget.max_turns, 80),
+                            max_tokens=min(spec.budget.max_tokens, 120_000),
+                            timeout_seconds=min(spec.budget.timeout_seconds, 600),
+                            token_limit_enforced=True,
+                        )
+                        dispatched_rerun = await dispatcher((rerun_unit,), budget=rerun_budget)
+                        dispatched_receipt = dispatched_rerun[0] if dispatched_rerun else DispatchOutcome(unit_id=rerun_unit.unit_id, text=None, error="The rerun worker returned no dispatch outcome.")
+                        worker_rerun = StageWorkerResult(
+                            status=(WorkerStatus.FAILED if dispatched_receipt.error else WorkerStatus.COMPLETED),
+                            summary=dispatched_receipt.error or "The command attempt returned; server verification owns its verdict.",
+                            capability=rerun_unit.capability,
+                            agent_name=rerun_unit.agent_name,
+                            stop_reason=dispatched_receipt.stop_reason,
+                            token_usage=dict(dispatched_receipt.token_usage or {}),
+                        )
+                        test_rerun_record = await asyncio.to_thread(
+                            validate_test_rerun,
+                            worker_rerun,
+                            prepared,
+                            project_root=project_root,
+                            unit_workspace=_unit_stage_workspace(stage_workspace, rerun_unit.unit_id),
+                        )
+                        test_rerun_pair = (
+                            rerun_unit,
+                            rerun_result(
+                                test_rerun_record,
+                                agent_name=worker_rerun.agent_name,
+                                token_usage=dict(worker_rerun.token_usage),
+                            ),
+                        )
+                        rerun_rejected = ()
                 else:
                     test_rerun_record = prepared
                     rerun_unit = WorkUnit(
@@ -7012,28 +7153,29 @@ class LiveStageAdapter:
                         rerun_result(test_rerun_record, agent_name="server"),
                     )
                     rerun_rejected = ()
-                test_context = "\n".join(
-                    [
-                        stage_context,
-                        "",
-                        "Server-owned Build rerun result (this overrides any worker-authored reproducibility check):",
-                        json.dumps(test_rerun_record.as_dict(), sort_keys=True, ensure_ascii=False),
-                    ]
-                )
-                outcome = await arun_stage(
-                    spec,
-                    self._candidates(),
-                    dispatcher,
-                    attempt_id=attempt_id,
-                    context=test_context,
-                )
-                if test_rerun_pair is not None:
-                    outcome = replace(
-                        outcome,
-                        plan=replace(outcome.plan, units=(test_rerun_pair[0], *outcome.plan.units)),
-                        results=(test_rerun_pair[1], *outcome.results),
-                        rejected=(*rerun_rejected, *outcome.rejected),
+                if not reused_test_outcome:
+                    test_context = "\n".join(
+                        [
+                            stage_context,
+                            "",
+                            "Server-owned Build rerun result (this overrides any worker-authored reproducibility check):",
+                            json.dumps(test_rerun_record.as_dict(), sort_keys=True, ensure_ascii=False),
+                        ]
                     )
+                    outcome = await arun_stage(
+                        spec,
+                        self._candidates(),
+                        dispatcher,
+                        attempt_id=attempt_id,
+                        context=test_context,
+                    )
+                    if test_rerun_pair is not None:
+                        outcome = replace(
+                            outcome,
+                            plan=replace(outcome.plan, units=(test_rerun_pair[0], *outcome.plan.units)),
+                            results=(test_rerun_pair[1], *outcome.results),
+                            rejected=(*rerun_rejected, *outcome.rejected),
+                        )
         else:
             outcome = await arun_stage(
                 spec,
@@ -7712,13 +7854,11 @@ class LiveStageAdapter:
             # somebody a deck that can never answer its gate.
             raise registration_error
 
-        # Test's decision surface is the typed chat card, not its evidence
-        # deck. The card reader intentionally accepts only ``awaiting_review``
-        # so a person can never decide against a half-written validity pack.
-        # Once the server has accepted the complete typed pack, move it across
-        # that non-decision boundary here; otherwise the only visible submit
-        # control is inside the deliberately inert Test deck and the workflow
-        # can never reach its human gate.
+        # The Test deck is the human input surface, but it can bind a decision
+        # only after the complete typed validity pack reaches
+        # ``awaiting_review``. Move the stage across that non-decision boundary
+        # here so the deck's Human gate can record the server-computed outcome;
+        # a person can never decide against a half-written pack.
         if stage == "test" and produced_usable_evidence and artifact_uri and artifact_hash:
             submitter = getattr(self._repo, "submit_stage_for_review", None)
             if callable(submitter):

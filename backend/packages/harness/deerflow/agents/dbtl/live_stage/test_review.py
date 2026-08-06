@@ -210,6 +210,7 @@ class TestReviewService:
         return {
             **assessment,
             "cycle_id": cycle_id,
+            "feedback_surface_id": str((surface or {}).get("id") or ""),
             "expected_db_revision": int(cycle["db_revision"]),
             "stage_attempt_id": str(test.get("id") or ""),
             "evidence_uri": str((evidence or {}).get("uri") or ""),

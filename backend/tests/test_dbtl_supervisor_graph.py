@@ -1043,7 +1043,7 @@ class TestPostApprovalStageHandoff:
 
         return Adapter()
 
-    async def _ask(self, adapter, *, thread_id: str):
+    async def _ask(self, adapter, *, thread_id: str, marker: dict | None = None):
         graph = build_supervisor_graph(
             lead_agent=fake_lead_agent([]),
             context=SupervisorContext(
@@ -1066,7 +1066,7 @@ class TestPostApprovalStageHandoff:
                         id="handoff-marker",
                         additional_kwargs={
                             "hide_from_ui": True,
-                            "dbtl_post_approval_handoff": self.MARKER,
+                            "dbtl_post_approval_handoff": marker or self.MARKER,
                         },
                     ),
                 ],
@@ -1176,6 +1176,40 @@ class TestPostApprovalStageHandoff:
         assert executed[0]["request_text"] == "Start the governed build stage now."
         assert executed[0]["expected_stage"] == "build"
         assert executed[0]["expected_cycle_revision"] == 7
+
+    @pytest.mark.parametrize(
+        ("surface_id", "reuses_recorded_evidence"),
+        [
+            ("test-evidence:attempt-1", True),
+            ("validity-assessment-1", False),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_only_path_recovery_reuses_test_evidence(self, surface_id, reuses_recorded_evidence):
+        executed: list[dict] = []
+        adapter = self._adapter(executed)
+        marker = {
+            **self.MARKER,
+            "approved_stage": "build",
+            "next_stage": "test",
+            "surface_id": surface_id,
+        }
+        asked = await self._ask(adapter, thread_id=f"test-recovery-{surface_id}", marker=marker)
+        request_id = asked["messages"][-1].artifact["human_input"]["request_id"]
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F"),
+            stage_adapter=adapter,
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        await graph.ainvoke(
+            {**FULL_STATE, "messages": [*asked["messages"], self._reply(request_id, "start_next_stage")]},
+            config={"configurable": {"thread_id": f"answer-{surface_id}"}},
+        )
+
+        assert len(executed) == 1
+        assert executed[0].get("reuse_recorded_test_evidence", False) is reuses_recorded_evidence
 
     @pytest.mark.asyncio
     async def test_an_unoffered_option_cannot_close_the_card_or_dispatch_the_stage(self):
@@ -2929,3 +2963,86 @@ class TestAPausedBuildIsNotTalkedPast:
         cards = [message for message in final["messages"] if isinstance(message, ToolMessage)]
         assert [message.tool_call_id for message in cards] == ["dbtl-build__cyc-1__deadbeef", "dbtl-build__cyc-1__deadbeef"]
         assert len({message.id for message in cards}) == 2
+
+    @pytest.mark.asyncio
+    async def test_restart_button_dispatches_instead_of_being_rejected_as_free_text(self):
+        from deerflow.agents.dbtl.supervisor import _build_control_message
+        from deerflow.dbtl.branches import BranchDecision
+        from deerflow.dbtl.build_control import BuildControlAction, step_failure_request
+        from deerflow.dbtl.routing import RouteKind, RouteSource, RoutingDecision
+
+        decision = BranchDecision(
+            branch=SupervisorBranch.CYCLE_CONTINUATION,
+            route=RoutingDecision(kind=RouteKind.CYCLE_CONTINUATION, source=RouteSource.SELECTED_CYCLE, cycle_id="cyc-1"),
+            cycle_id="cyc-1",
+        )
+        request_id = "dbtl-build__cyc-1__restart"
+        card = (
+            step_failure_request(
+                step_key="summarize_results",
+                step_label="Summarize results",
+                error_code="summary_contract_rejected",
+                error_summary="The result was not reviewable.",
+                cycle_id="cyc-1",
+                stage_attempt_id="sa-1",
+                workflow_spec_key="generic:build-workflow:v1",
+                cycle_revision=5,
+            )
+            .bound_to(request_id)
+            .as_card()
+        )
+        reply = HumanMessage(
+            content="Restart the build",
+            id="restart-answer",
+            additional_kwargs={
+                "hide_from_ui": True,
+                "human_input_response": {
+                    "version": 1,
+                    "kind": "human_input_response",
+                    "source": "ask_clarification",
+                    "request_id": request_id,
+                    "response_kind": "option",
+                    "option_id": "restart",
+                    "value": "Restart the build",
+                },
+            },
+        )
+        calls = []
+
+        class Adapter:
+            async def active_cycle_status(self, *, project_id):
+                return [
+                    {
+                        "cycle_id": "cyc-1",
+                        "title": "Linear pilot",
+                        "state": "ready_for_build",
+                        "parked": False,
+                        "stages": {"build": "in_progress"},
+                    }
+                ]
+
+            async def execute(self, **kwargs):
+                calls.append(kwargs)
+                return LiveStageResult(stage="build", cycle_id="cyc-1", note="Build restart accepted.")
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id=None),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    HumanMessage(content="Can I retry the Build stage?", id="recovery-request"),
+                    *_build_control_message(decision, card, request_nonce="run-1"),
+                    reply,
+                ],
+            },
+            config={"configurable": {"thread_id": "build-restart-button"}},
+        )
+
+        assert len(calls) == 1, final["messages"][-1]
+        assert calls[0]["build_control"].action is BuildControlAction.RESTART_BUILD

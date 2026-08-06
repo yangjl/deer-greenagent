@@ -261,6 +261,7 @@ def reconcile_published_manifest(
     result: StageWorkerResult,
     *,
     published: Sequence[Mapping[str, Any]],
+    completion_condition: str,
     required_version: int,
 ) -> BuildPhaseManifest | None:
     """Bind a phase manifest to the files the server actually published.
@@ -274,14 +275,16 @@ def reconcile_published_manifest(
     bookkeeping and stay hard.
     """
     manifest = parse_phase_manifest(result.provenance.get("phase_manifest"))
-    if manifest is None or manifest.version != required_version:
+    if manifest is None or manifest.version != required_version or manifest.completion_condition != completion_condition.strip() or (manifest.version >= 3 and not set(manifest.execution_inputs).issubset(manifest.declared_inputs)):
         return None
-    published_uris = tuple(
-        dict.fromkeys(str(item.get("uri") or "") for item in published if str(item.get("uri") or ""))
-    )
+    published_uris = tuple(dict.fromkeys(str(item.get("uri") or "") for item in published if str(item.get("uri") or "")))
     if not published_uris or not _entry_point_published(manifest.entry_point, published_uris):
         return None
     if required_version >= 3 and not is_server_executable_entry_point(manifest.entry_point):
+        return None
+    declared_names = [PurePosixPath(path).name for path in manifest.declared_outputs]
+    published_names = [PurePosixPath(str(item.get("source_path") or item.get("uri") or "")).name for item in published if str(item.get("uri") or "")]
+    if len(declared_names) != len(published_names) or len(set(declared_names)) != len(declared_names) or sorted(declared_names) != sorted(published_names):
         return None
     return replace(manifest, declared_outputs=published_uris)
 
@@ -516,6 +519,9 @@ def phase_unit(
         "Project context:",
         context.strip() or "(none supplied)",
         "",
+        "Write each approved deliverable at its exact project-relative path from",
+        "build_input_bundle.deliverable_manifest. Do not add an `outputs/` prefix or",
+        "otherwise move a path unless that prefix is already part of expected_paths.",
         f"Write every new implementation, derived output, and execution log under {STAGE_UNIT_WORKSPACE_PLACEHOLDER}.",
         "The server has already created src/, tests/, config/, artifacts/, and logs/ there.",
         "Use write_file or str_replace for source, configuration, and documentation. Use Bash",
@@ -581,10 +587,10 @@ def phase_unit(
                 "  'outputs/fit.py' in one place and '/mnt/user-data/.../outputs/fit.py' in another makes",
                 "  the server treat them as two different files and discard the whole phase. Pick the short",
                 "  workspace-relative form and reuse it verbatim. Correct, consistent shape:",
-                "    \"artifact_refs\": [\"outputs/fit.py\", \"outputs/model.json\", \"outputs/preds.csv\"],",
-                "    \"provenance\": {\"phase_manifest\": {\"version\": 3, \"entry_point\": \"outputs/fit.py\",",
-                "      \"declared_outputs\": [\"outputs/fit.py\", \"outputs/model.json\", \"outputs/preds.csv\"],",
-                "      \"completion_condition\": \"...\"}}   # entry_point is character-identical in all three",
+                '    "artifact_refs": ["outputs/fit.py", "outputs/model.json", "outputs/preds.csv"],',
+                '    "provenance": {"phase_manifest": {"version": 3, "entry_point": "outputs/fit.py",',
+                '      "declared_outputs": ["outputs/fit.py", "outputs/model.json", "outputs/preds.csv"],',
+                '      "completion_condition": "..."}}   # entry_point is character-identical in all three',
                 "- Your final structured result MUST be exactly one JSON object with nothing printed before",
                 "  or after it. Extra text or a trailing second object makes the result unparseable and",
                 "  discards the entire build.",
