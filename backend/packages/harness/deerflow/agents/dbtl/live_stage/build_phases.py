@@ -475,6 +475,15 @@ def phase_unit(
                 "- The server gives Jupyter and IPython writable state directories inside this phase",
                 "  workspace. For notebook structure only, prefer `python -m json.tool file.ipynb`;",
                 "  use `python -m jupyter nbconvert --execute ...` only when executed-cell evidence is required.",
+                "- Record package versions with importlib.metadata.version('numpy'), etc. NEVER read",
+                "  pkg.__version__: the jupyter meta-package has no __version__ and raises AttributeError,",
+                "  which has sunk whole phases here. Wrap each lookup in try/except and record 'unknown'",
+                "  on failure; a missing version string is never a reason to fail the phase.",
+                "- Run the whole build with the single interpreter already on PATH; it has the full stack.",
+                "  Never run python -m venv or pip install: a fresh venv lacks pandas and wastes the attempt.",
+                "- Your final structured result MUST be exactly one JSON object with nothing printed before",
+                "  or after it. Extra text or a trailing second object makes the result unparseable and",
+                "  discards the entire build.",
             ]
             if "granted_paths_only" in spec.validity_gates
             else []

@@ -197,7 +197,10 @@ def parse_rerun_spec(value: Any) -> BuildRerunSpec | None:
             return None
         return tuple(items)
 
-    inputs = exact_strings("inputs", required=True)
+    # A generative Build (e.g. a seed-based simulation) consumes no external input
+    # file at runtime, so an empty `inputs` list is valid: the entry point, command,
+    # seed, environment and expected_outputs still fully describe how to re-run it.
+    inputs = exact_strings("inputs", required=False)
     configuration = exact_strings("configuration", required=False)
     expected_outputs = exact_strings("expected_outputs", required=True)
     raw_environment = value.get("environment")
