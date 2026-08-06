@@ -13,7 +13,11 @@ from deerflow.agents.dbtl.live_stage.build_phase_verification import (
     execute_and_verify_phase,
     verification_shell_command,
 )
-from deerflow.agents.dbtl.live_stage.build_phases import BuildPhaseManifest
+from deerflow.agents.dbtl.live_stage.build_phases import (
+    BuildPhaseManifest,
+    _entry_point_published,
+    verify_unpublished_phase_manifest,
+)
 from deerflow.dbtl.build_grant import INPUT_ENV_PREFIX, WORKSPACE_ENV
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 
@@ -359,3 +363,96 @@ def test_build_verifier_keeps_jupyter_state_inside_the_phase_grant(
     assert env["JUPYTER_DATA_DIR"] == f"{workspace}/.jupyter/data"
     assert env["JUPYTER_RUNTIME_DIR"] == f"{workspace}/.jupyter/runtime"
     assert env["IPYTHONDIR"] == f"{workspace}/.ipython"
+
+
+class _Result:
+    """Minimal stand-in for a StageWorkerResult that the manifest verifier reads."""
+
+    def __init__(self, entry_point, artifact_refs, *, declared_outputs=None):
+        self.artifact_refs = tuple(artifact_refs)
+        self.provenance = {
+            "phase_manifest": {
+                "version": 3,
+                "entry_point": entry_point,
+                "declared_outputs": list(declared_outputs if declared_outputs is not None else artifact_refs),
+                "completion_condition": "done",
+                "declared_inputs": [],
+                "execution_inputs": [],
+            }
+        }
+
+
+def test_entry_point_published_tolerates_relative_vs_full_virtual_form():
+    ws = "/mnt/user-data/outputs/.dbtl-stage-work/dbtl-x/build/y"
+    refs = [f"{ws}/src/run.py", f"{ws}/outputs/model.json"]
+    # unit-relative entry point vs full virtual refs — same file
+    assert _entry_point_published("src/run.py", refs) is True
+    # symmetric
+    assert _entry_point_published(f"{ws}/src/run.py", ["src/run.py"]) is True
+    # a genuinely different file must not match on a shared basename
+    assert _entry_point_published("run.py", [f"{ws}/src/subrun.py"]) is False
+
+
+def test_unpublished_manifest_accepts_relative_entry_point_with_full_virtual_refs():
+    # Reproduces the pilot blocker: worker declared entry_point as the unit-relative
+    # path while listing artifact_refs as full virtual paths. The entry point IS
+    # published, so the phase must not be discarded over the path form.
+    ws = "/mnt/user-data/outputs/.dbtl-stage-work/dbtl-x/build/y"
+    refs = [f"{ws}/src/run.py", f"{ws}/outputs/fit_linear_model.py", f"{ws}/outputs/model.json"]
+    manifest, error = verify_unpublished_phase_manifest(
+        _Result("src/run.py", refs),
+        completion_condition="done",
+        required_version=3,
+    )
+    assert error == ""
+    assert manifest is not None
+    assert set(manifest.declared_outputs) == set(refs)
+
+
+def test_unpublished_manifest_still_rejects_entry_point_not_published():
+    ws = "/mnt/user-data/outputs/.dbtl-stage-work/dbtl-x/build/y"
+    refs = [f"{ws}/src/run.py", f"{ws}/outputs/model.json"]
+    manifest, error = verify_unpublished_phase_manifest(
+        _Result("src/ghost.py", refs),
+        completion_condition="done",
+        required_version=3,
+    )
+    assert manifest is None
+    assert "entry point" in error.lower()
+
+
+def test_verified_workspace_file_resolves_relative_entry_point_against_containment(tmp_path):
+    # Reproduces the pilot blocker: a contract-compliant workspace-relative entry
+    # point (src/run.py) must resolve against the phase workspace (containment),
+    # not the project root. Without the flag it is looked up under project_root
+    # and not found.
+    from deerflow.agents.dbtl.live_stage.workspace import verified_workspace_file
+
+    virtual, _host = _workspace(tmp_path)
+    assert (
+        verified_workspace_file(
+            "src/run.py",
+            project_root=str(tmp_path),
+            containment_reference=virtual,
+            relative_to_containment=True,
+        )
+        is not None
+    )
+    # Without the flag, the relative path is resolved under project_root -> missing.
+    assert (
+        verified_workspace_file(
+            "src/run.py",
+            project_root=str(tmp_path),
+            containment_reference=virtual,
+        )
+        is None
+    )
+    # The full virtual form resolves regardless of the flag.
+    assert (
+        verified_workspace_file(
+            f"{virtual}/src/run.py",
+            project_root=str(tmp_path),
+            containment_reference=virtual,
+        )
+        is not None
+    )

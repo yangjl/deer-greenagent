@@ -3062,6 +3062,24 @@ def _publish_build_worker_artifacts(
                 deduplicated.append(item)
             return deduplicated
 
+        def remap_entry_point(raw_entry_point: str) -> str:
+            # The remap is keyed on the worker's exact declared strings. A worker
+            # that names its entry point in a different but equivalent form
+            # (unit-relative vs full virtual) would otherwise skip the remap and
+            # leave a governed-tree check comparing an un-rewritten path —
+            # discarding a phase that already ran and published. Fall back to the
+            # published file whose path tail matches.
+            direct = file_remapped.get(raw_entry_point)
+            if direct is not None:
+                return direct
+            ep_parts = [p for p in raw_entry_point.strip("/").split("/") if p]
+            for key, mapped in file_remapped.items():
+                key_parts = [p for p in str(key).strip("/").split("/") if p]
+                n = min(len(ep_parts), len(key_parts))
+                if n and ep_parts[-n:] == key_parts[-n:]:
+                    return mapped
+            return raw_entry_point
+
         provenance = dict(result.provenance)
         raw_rerun = provenance.get("rerun_spec")
         if isinstance(raw_rerun, Mapping):
@@ -3071,7 +3089,7 @@ def _publish_build_worker_artifacts(
                 # An entry point is one exact file. Expanding a one-file
                 # directory into that child would let the server guess a
                 # declaration the worker never made.
-                rerun["entry_point"] = file_remapped.get(raw_entry_point, raw_entry_point)
+                rerun["entry_point"] = remap_entry_point(raw_entry_point)
             for field_name in ("inputs", "configuration", "expected_outputs"):
                 rerun[field_name] = remap_many(rerun.get(field_name))
             provenance["rerun_spec"] = rerun
@@ -3080,7 +3098,7 @@ def _publish_build_worker_artifacts(
             phase_manifest = dict(raw_phase_manifest)
             raw_entry_point = phase_manifest.get("entry_point")
             if isinstance(raw_entry_point, str):
-                phase_manifest["entry_point"] = file_remapped.get(raw_entry_point, raw_entry_point)
+                phase_manifest["entry_point"] = remap_entry_point(raw_entry_point)
             phase_manifest["declared_outputs"] = remap_many(phase_manifest.get("declared_outputs"))
             provenance["phase_manifest"] = phase_manifest
 

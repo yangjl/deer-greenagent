@@ -132,7 +132,12 @@ def execute_and_verify_phase(
     issued_inputs: tuple[str, ...] = (),
 ) -> BuildPhaseVerification:
     """Execute the declared entry point and derive the receipt from files."""
-    entry = verified_workspace_file(manifest.entry_point, project_root=project_root, containment_reference=unit_workspace)
+    entry = verified_workspace_file(
+        manifest.entry_point,
+        project_root=project_root,
+        containment_reference=unit_workspace,
+        relative_to_containment=True,
+    )
     if entry is None:
         return BuildPhaseVerification(False, "The declared Build entry point is missing or outside its phase grant.", "")
     if not is_server_executable_entry_point(manifest.entry_point):
@@ -193,7 +198,12 @@ def execute_and_verify_phase(
 
     outputs: list[dict[str, Any]] = []
     for declared in manifest.declared_outputs:
-        verified = verified_workspace_file(declared, project_root=project_root, containment_reference=unit_workspace)
+        verified = verified_workspace_file(
+            declared,
+            project_root=project_root,
+            containment_reference=unit_workspace,
+            relative_to_containment=True,
+        )
         if verified is None:
             return BuildPhaseVerification(
                 False,

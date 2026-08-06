@@ -156,6 +156,36 @@ def parse_phase_manifest(value: Any) -> BuildPhaseManifest | None:
     )
 
 
+def _entry_point_published(entry_point: str, refs: Sequence[str]) -> bool:
+    """Whether the entry point names one of the published files.
+
+    Tolerates a granularity mismatch that is not a real error: a worker may
+    give the entry point as its unit-relative path (``src/run.py``) while
+    listing the same file in ``artifact_refs`` as its full virtual path
+    (``/mnt/user-data/outputs/.../src/run.py``). Both resolve to one file, so
+    match when one path's trailing components equal the other's — which still
+    rejects an entry point that is genuinely not among the published files
+    (``run.py`` never matches ``.../subrun.py``, only ``.../run.py``).
+    """
+    ep = str(entry_point).strip()
+    if not ep:
+        return False
+    ep_parts = [p for p in ep.strip("/").split("/") if p]
+    if not ep_parts:
+        return False
+    for ref in refs:
+        r = str(ref).strip()
+        if not r:
+            continue
+        if r == ep:
+            return True
+        r_parts = [p for p in r.strip("/").split("/") if p]
+        n = min(len(ep_parts), len(r_parts))
+        if n and ep_parts[-n:] == r_parts[-n:]:
+            return True
+    return False
+
+
 def verify_phase_manifest(
     result: StageWorkerResult,
     *,
@@ -173,7 +203,7 @@ def verify_phase_manifest(
     published_uris = tuple(str(item.get("uri") or "") for item in published if str(item.get("uri") or ""))
     if set(manifest.declared_outputs) != set(published_uris) or len(manifest.declared_outputs) != len(published_uris):
         return None, "The Build phase manifest does not name exactly the outputs the server published."
-    if manifest.entry_point not in published_uris:
+    if not _entry_point_published(manifest.entry_point, published_uris):
         return None, "The Build phase entry point is not one of its governed published files."
     if required_version >= 3 and not is_server_executable_entry_point(manifest.entry_point):
         return None, "The Build phase entry point is not an executable script type supported by the server."
@@ -212,7 +242,7 @@ def verify_unpublished_phase_manifest(
     published_refs = tuple(dict.fromkeys(result.artifact_refs))
     if not published_refs:
         return None, "The Build phase did not ask the server to publish any outputs."
-    if manifest.entry_point not in published_refs:
+    if not _entry_point_published(manifest.entry_point, published_refs):
         return None, "The Build phase entry point is not one of the files it asked the server to publish."
     manifest = replace(manifest, declared_outputs=published_refs)
     if required_version >= 3 and not is_server_executable_entry_point(manifest.entry_point):
@@ -249,7 +279,7 @@ def reconcile_published_manifest(
     published_uris = tuple(
         dict.fromkeys(str(item.get("uri") or "") for item in published if str(item.get("uri") or ""))
     )
-    if not published_uris or manifest.entry_point not in published_uris:
+    if not published_uris or not _entry_point_published(manifest.entry_point, published_uris):
         return None
     if required_version >= 3 and not is_server_executable_entry_point(manifest.entry_point):
         return None
@@ -545,6 +575,16 @@ def phase_unit(
                 "  on failure; a missing version string is never a reason to fail the phase.",
                 "- Run the whole build with the single interpreter already on PATH; it has the full stack.",
                 "  Never run python -m venv or pip install: a fresh venv lacks pandas and wastes the attempt.",
+                "- Use ONE identical path string for a file everywhere it appears. A file's entry_point,",
+                "  its artifact_refs entry, and its declared_outputs entry must be byte-for-byte the same",
+                "  string. The server keys its publish remap on that exact string, so listing a file as",
+                "  'outputs/fit.py' in one place and '/mnt/user-data/.../outputs/fit.py' in another makes",
+                "  the server treat them as two different files and discard the whole phase. Pick the short",
+                "  workspace-relative form and reuse it verbatim. Correct, consistent shape:",
+                "    \"artifact_refs\": [\"outputs/fit.py\", \"outputs/model.json\", \"outputs/preds.csv\"],",
+                "    \"provenance\": {\"phase_manifest\": {\"version\": 3, \"entry_point\": \"outputs/fit.py\",",
+                "      \"declared_outputs\": [\"outputs/fit.py\", \"outputs/model.json\", \"outputs/preds.csv\"],",
+                "      \"completion_condition\": \"...\"}}   # entry_point is character-identical in all three",
                 "- Your final structured result MUST be exactly one JSON object with nothing printed before",
                 "  or after it. Extra text or a trailing second object makes the result unparseable and",
                 "  discards the entire build.",

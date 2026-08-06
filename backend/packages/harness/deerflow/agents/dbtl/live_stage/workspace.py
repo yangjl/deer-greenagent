@@ -301,8 +301,16 @@ def verified_workspace_file(
     project_root: str,
     containment_reference: str,
     max_bytes: int | None = None,
+    relative_to_containment: bool = False,
 ) -> tuple[str, int, str] | None:
-    """Return one stable contained file and its size/hash, or ``None``."""
+    """Return one stable contained file and its size/hash, or ``None``.
+
+    ``relative_to_containment`` resolves a plain relative reference (``src/run.py``)
+    against the containment root — the phase's own workspace — rather than the
+    project root, matching how the publisher resolves the same worker paths and
+    the contract's instruction to name the entry point by its workspace-relative
+    path. Full virtual (``/mnt/user-data/...``) references are unaffected.
+    """
     if not isinstance(reference, str) or not reference.strip():
         return None
     try:
@@ -311,6 +319,7 @@ def verified_workspace_file(
             project_root=project_root,
             containment_reference=containment_reference,
             max_files=1,
+            relative_to_containment=relative_to_containment,
         )
         if len(files) != 1 or not files[0][1].is_file():
             return None
