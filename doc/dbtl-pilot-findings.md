@@ -5,6 +5,21 @@
 
 ---
 
+## 0. Update — full DBTL cycle now completes end-to-end ✅
+
+On a rerun after the fixes below (plus another engineer's `keep build and discovery sandboxed` commit), a fresh DBTL cycle ran **Design → Build → Test → Learn to completion**, every gate approved, `state = completed`. All four stage artifacts were produced (`design_brief`, `build_package`, `validity_report`, `learn_summary`), Build lineage recorded, and the Build phase **succeeded on its first attempt** — versus four straight failures on the immediately prior cycle before the contract was hardened. Build result: 60-row seed-42 dataset, OLS **slope 2.051, 95% CI [1.877, 2.225]**, executed replay notebook + passing validator, reproducible CSV hash. Test recorded the validity assessment (correctly flagging that a simulation cannot establish real-world predictive/external/causal validity); Learn synthesized the candidate.
+
+**Is a specialist doing the phase work?** No — every phase attempt ran on `general-purpose` (`via_generalist=1`); no specialist is registered for the phase capability, so it always falls back to the stand-in. The reliability came from *hardening the shared contract*, which lifts the generalist rather than needing a specialist.
+
+**Additional fixes this rerun (committed):**
+- `build_execution.parse_rerun_spec` — `inputs` made optional: a seed-based simulation has no runtime inputs, so the server-built rerun record had empty inputs and was rejected as "invalid structured rerun record," blocking finalization. (Fix `5dcfd4e4`.)
+- `build_phases` phase contract — added rules for the exact repeated stand-in mistakes: record versions via `importlib.metadata.version()` (never `pkg.__version__`; the jupyter meta-package has none and raised `AttributeError`), run the build with the one provisioned interpreter (never build a venv — a fresh one lacks pandas), and return exactly one JSON object as the structured result. (Fix `5dcfd4e4`.)
+- Earlier committed fixes still in force: durable `dbtl-build` package extra, notebook-Done non-gating, `BUILD_SPEC_V12` budget 120K→500K, generative-build lineage.
+
+One known rough edge remains: a **gateway restart during a build orphans the in-flight run** (its conversational control cards go inert), so loading a code fix mid-build strands that cycle — the completed run avoided any mid-build restart. Worth a resume path, but not a blocker.
+
+---
+
 ## 1. Headline answers
 
 **RQ2 — why is Build so much slower than a chat turn?** A chat answer is *one* model turn; Build is a pipeline of sequential model-backed steps whose dominant one — the phase worker — is itself a full multi-turn sandbox agent. Measured on the identical task:
