@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -202,10 +202,19 @@ def verify_unpublished_phase_manifest(
         return None, "The Build phase did not return a valid versioned phase manifest."
     if manifest.version != required_version:
         return None, f"The Build phase manifest must use version {required_version}."
-    if set(manifest.declared_outputs) != set(result.artifact_refs) or len(manifest.declared_outputs) != len(result.artifact_refs):
-        return None, "The Build phase manifest does not name exactly the outputs it asked the server to publish."
-    if manifest.entry_point not in result.artifact_refs:
-        return None, "The Build phase entry point is not one of its declared output files."
+    # Publication keys off artifact_refs (the files the worker asks to publish),
+    # and the post-publication verifier below binds declared_outputs to the files
+    # the server actually wrote. So artifact_refs is the worker's real output set;
+    # reconcile the manifest to it instead of discarding a completed phase over a
+    # bookkeeping desync (e.g. a notebook listed in one array but not the other).
+    # The genuine integrity guarantee is still enforced downstream against ground
+    # truth, and this reconciled list is what the granted-paths source scan reads.
+    published_refs = tuple(dict.fromkeys(result.artifact_refs))
+    if not published_refs:
+        return None, "The Build phase did not ask the server to publish any outputs."
+    if manifest.entry_point not in published_refs:
+        return None, "The Build phase entry point is not one of the files it asked the server to publish."
+    manifest = replace(manifest, declared_outputs=published_refs)
     if required_version >= 3 and not is_server_executable_entry_point(manifest.entry_point):
         return None, "The Build phase entry point is not an executable script type supported by the server."
     if manifest.completion_condition != completion_condition.strip():

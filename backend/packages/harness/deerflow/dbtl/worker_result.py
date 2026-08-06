@@ -546,26 +546,47 @@ def extract_result_payload(text: str) -> Mapping[str, Any]:
     """Pull the JSON object out of a worker's final message.
 
     Workers are prompted to answer with a single JSON object, but models add
-    prose or a code fence often enough that refusing on the first stray
-    character would fail runs that did the work correctly. So the outermost
-    ``{...}`` span is extracted — and if that does not parse, the result is
-    rejected rather than salvaged, because a partially recovered result is worse
-    than none.
+    prose, a code fence, or a second object (an echoed manifest) often enough
+    that refusing on the first stray character would fail runs that did the work
+    correctly. So every top-level ``{...}`` object is parsed and the result one
+    (the object carrying a ``status`` field, emitted last) is returned. If
+    nothing parses, the result is rejected rather than salvaged, because a
+    partially recovered result is worse than none.
     """
     if not isinstance(text, str) or not text.strip():
         raise WorkerResultRejected("The worker returned no output.")
     stripped = text.strip()
-    start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start == -1 or end <= start:
+    # Scan every '{' with raw_decode so trailing prose, a code fence, or a
+    # second brace-bearing chunk (e.g. an echoed manifest) can't turn a correct
+    # result into an "Extra data" rejection. The result object is the one that
+    # carries a 'status' field; workers emit it last, so we scan right-to-left.
+    decoder = json.JSONDecoder()
+    objects: list[Mapping[str, Any]] = []
+    last_error: json.JSONDecodeError | None = None
+    index = 0
+    while True:
+        brace = stripped.find("{", index)
+        if brace == -1:
+            break
+        try:
+            parsed, offset = decoder.raw_decode(stripped, brace)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            index = brace + 1
+            continue
+        if isinstance(parsed, Mapping):
+            objects.append(parsed)
+        index = offset
+    if not objects:
+        if last_error is not None:
+            raise WorkerResultRejected(
+                f"The worker's structured result is not valid JSON: {last_error.msg}"
+            ) from last_error
         raise WorkerResultRejected("The worker returned prose instead of a structured result.")
-    try:
-        payload = json.loads(stripped[start : end + 1])
-    except json.JSONDecodeError as exc:
-        raise WorkerResultRejected(f"The worker's structured result is not valid JSON: {exc.msg}") from exc
-    if not isinstance(payload, Mapping):
-        raise WorkerResultRejected("The worker's structured result must be a JSON object.")
-    return payload
+    for candidate in reversed(objects):
+        if "status" in candidate:
+            return candidate
+    return objects[-1]
 
 
 def _render_summary_mapping(summary: Mapping[str, Any]) -> str:
