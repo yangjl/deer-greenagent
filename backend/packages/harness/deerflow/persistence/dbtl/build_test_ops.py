@@ -196,8 +196,6 @@ class BuildTestOpsMixin:
             raise ValueError("Build lineage requires code and configuration revisions.")
         if not isinstance(environment, dict) or not environment:
             raise ValueError("Build lineage requires a non-empty environment capture.")
-        if not input_artifacts:
-            raise ValueError("Build lineage requires at least one input file examined during Build.")
         if not output_artifacts:
             raise ValueError("Build lineage requires at least one versioned output artifact.")
         for item in output_artifacts:
@@ -206,6 +204,13 @@ class BuildTestOpsMixin:
         parsed_rerun = parse_rerun_spec(rerun_spec) if rerun_spec is not None else None
         if rerun_spec is not None and parsed_rerun is None:
             raise ValueError("Build lineage received an invalid structured rerun record.")
+        # A generative Build (e.g. a seed-based simulation) legitimately examines no
+        # external input file: its provenance is the reproducible rerun record plus the
+        # hashed, immutable outputs below. Permit zero inputs ONLY when such a rerun
+        # record is present; an empirical Build that declares neither inputs nor a rerun
+        # record is still refused, so the input-provenance guarantee is unchanged for it.
+        if not input_artifacts and parsed_rerun is None:
+            raise ValueError("Build lineage requires at least one input file examined during Build, or a reproducible rerun record for a generative build.")
         canonical_rerun = parsed_rerun.as_dict() if parsed_rerun is not None else {}
         lineage_input = {
             "code_revision": code_revision.strip(),

@@ -256,7 +256,18 @@ def is_non_gating_build_check(name: str) -> bool:
     """Whether Test, rather than Build, owns this failed check's verdict."""
 
     normalized = " ".join(name.lower().replace("_", " ").replace("-", " ").split())
-    return "reproduc" in normalized or "repeat run" in normalized or "rerun" in normalized
+    return (
+        "reproduc" in normalized
+        or "repeat run" in normalized
+        or "rerun" in normalized
+        # An optional notebook or report the sandbox cannot *execute* because a runtime
+        # tool (e.g. jupyter/nbconvert) is unavailable is a recorded limitation, not a
+        # Build gate: the phase is judged on its executable entry point and required data
+        # outputs. Test and the human reviewer own whether an un-run notebook matters.
+        or "notebook" in normalized
+        or "jupyter" in normalized
+        or "nbconvert" in normalized
+    )
 
 
 def gating_failed_phase_checks(result: StageWorkerResult, required_name: str = PHASE_DONE_CHECK) -> tuple[str, ...]:
@@ -437,6 +448,34 @@ def phase_unit(
             if "granted_paths_only" in spec.validity_gates
             else []
         ),
+        *(
+            [
+                "",
+                "WORKED EXAMPLE — the exact shape a correct entry point must have. Every path is",
+                "derived from the environment; not one is a literal. Copy this discipline:",
+                "```python",
+                "import os, json",
+                "ws = os.environ['DBTL_WORKSPACE']                      # your workspace root",
+                "n = int(os.environ.get('DBTL_INPUT_COUNT', '0'))",
+                "inputs = [os.environ[f'DBTL_INPUT_{i}'] for i in range(1, n + 1)]",
+                "out_csv = os.path.join(ws, 'artifacts', 'result.csv')  # write only under ws",
+                "# ... do the work; write every output beneath ws ...",
+                "print(json.dumps({'ok': True}))",
+                "```",
+                "Hard rules the server enforces — each one costs the ENTIRE phase when broken:",
+                "- Never put an absolute path literal in your source (no '/src/...', '/mnt/...',",
+                "  '/Users/...'). A static scan refuses the file and names the exact line. Build",
+                "  every path from os.environ['DBTL_WORKSPACE'] or DBTL_INPUT_n via os.path.join.",
+                "- Create the entry-point script inside the workspace (e.g. src/run.py) and refer",
+                "  to it only by that workspace-relative name — never by an absolute path.",
+                "- The server re-runs your entry point with a bare interpreter that already has",
+                "  numpy, scipy, pandas, matplotlib, statsmodels, scikit-learn, seaborn and jupyter.",
+                "  Import what you need directly; do NOT pip install at runtime and do NOT depend on",
+                "  a virtualenv you built — the verifier will not use it.",
+            ]
+            if "granted_paths_only" in spec.validity_gates
+            else []
+        ),
         "Your objective above was derived from the approved Design, so you normally do not need",
         "the Design itself. Project context names it and the manifest lists the project's files;",
         "read a named file only when you need its exact bytes, and do not read the Design merely",
@@ -450,8 +489,11 @@ def phase_unit(
                 "Set it to passed=true only after the phase's declared Done when condition is met",
                 "and every expected output exists. If either is incomplete, set it to false,",
                 "and do not set it true while another implementation quality check is false.",
-                "A failed repeat-run/reproducibility check is the sole exception: record that as",
-                "a limitation because Test and the human reviewer own that verdict.",
+                "Two kinds of failed check are exceptions, recorded as a limitation rather than",
+                "failing the phase: a repeat-run/reproducibility check, and an optional notebook or",
+                "report that could not be executed because a runtime tool (for example jupyter) is",
+                "unavailable — provided your executable entry point runs clean and every required",
+                "data output exists. Test and the human reviewer own whether an un-run notebook matters.",
                 "report status=failed, name the missing work in its detail, and stop. Partial files",
                 "remain auditable, but they cannot advance this build plan.",
                 *(

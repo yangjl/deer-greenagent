@@ -136,23 +136,24 @@ class TestDesignApprovalOpensBuild:
 
 
 class TestBuildOwnsInputBinding:
-    async def _record_lineage(self, repo: DbtlCycleRepository, *, input_artifacts: list[str] | None = None):
+    async def _record_lineage(self, repo: DbtlCycleRepository, *, input_artifacts: list[str] | None = None, rerun_spec: object = "__default__"):
+        default_rerun = {
+            "version": 1,
+            "entry_point": "/mnt/user-data/build.py",
+            "command": "python build.py",
+            "seed": "",
+            "inputs": ["/mnt/user-data/uploads/yield.csv"],
+            "environment": {"python": "3.12.13"},
+            "configuration": [],
+            "expected_outputs": ["/mnt/user-data/outputs/model.pkl"],
+        }
         return await repo.record_build_lineage(
             cycle_id="cycle-1",
             project_id="project-1",
             code_revision="git:abc123",
             config_revision="config:sha256:" + "c" * 64,
             environment={"python": "3.12.13"},
-            rerun_spec={
-                "version": 1,
-                "entry_point": "/mnt/user-data/build.py",
-                "command": "python build.py",
-                "seed": "",
-                "inputs": ["/mnt/user-data/uploads/yield.csv"],
-                "environment": {"python": "3.12.13"},
-                "configuration": [],
-                "expected_outputs": ["/mnt/user-data/outputs/model.pkl"],
-            },
+            rerun_spec=default_rerun if rerun_spec == "__default__" else rerun_spec,
             input_artifacts=input_artifacts if input_artifacts is not None else ["workspace_file:uploads/yield.csv:sha256:" + HASH_A],
             output_artifacts=[{"uri": "/mnt/user-data/outputs/model.pkl", "content_hash": "d" * 64, "revision": 1}],
             deviations=[],
@@ -179,11 +180,21 @@ class TestBuildOwnsInputBinding:
             await self._record_lineage(repo, input_artifacts=["workspace_file:uploads/yield.csv"])
 
     @pytest.mark.asyncio
-    async def test_build_refuses_to_record_a_result_that_names_no_data(self, tmp_path: Path, no_reconciliation):
+    async def test_build_refuses_a_result_with_neither_inputs_nor_a_rerun_record(self, tmp_path: Path, no_reconciliation):
         repo = await _approved_design(tmp_path)
 
         with pytest.raises(ValueError, match="at least one input file"):
-            await self._record_lineage(repo, input_artifacts=[])
+            await self._record_lineage(repo, input_artifacts=[], rerun_spec=None)
+
+    @pytest.mark.asyncio
+    async def test_build_accepts_a_generative_result_with_no_inputs_but_a_rerun_record(self, tmp_path: Path, no_reconciliation):
+        # A seed-based simulation examines no external input; its provenance is the
+        # reproducible rerun record plus the hashed outputs.
+        repo = await _approved_design(tmp_path)
+
+        lineage = await self._record_lineage(repo, input_artifacts=[])
+
+        assert lineage["input_artifacts"] == []
 
     @pytest.mark.asyncio
     async def test_one_click_build_approval_opens_test_from_ready_for_build(self, tmp_path: Path, no_reconciliation):

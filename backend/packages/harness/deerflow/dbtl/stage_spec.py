@@ -358,7 +358,12 @@ BUILD_SPEC_V12 = StageSpec(
     budget=WorkerBudget(
         max_workers=3,
         max_turns=450,
-        max_tokens=120_000,
+        # Raised from 120_000: the v12 Build contract does strictly more than v11
+        # (entry-point execution, granted-paths, narrow inputs) yet had a smaller
+        # budget, so a phase that finished its sandbox work was token_capped before
+        # emitting its structured result and the whole build was discarded. 500_000
+        # matches BUILD_SPEC_V11 and the Test stage's finalization headroom.
+        max_tokens=500_000,
         timeout_seconds=900,
         token_limit_enforced=True,
     ),
