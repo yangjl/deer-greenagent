@@ -908,11 +908,13 @@ artifact` is server-owned in full and is now stripped from external run input:
   failed step/control write stops dispatch; an incomplete durable workflow or
   unregistered review deck cannot be submitted for review. Migration `0028`
   forward-repairs stamped legacy step tables that lack `phase_slot`, preserving
-  their audit rows while restoring the phase/attempt uniqueness guarantees. The project rail's
-  **Build plan** section replaces
-  Blockers with a read-only projection of the same server view the transcript
-  uses; open work items keep their signal as a count on the stage they belong
-  to. See [backend/AGENTS.md](backend/AGENTS.md) and
+  their audit rows while restoring the phase/attempt uniqueness guarantees. The
+  project rail's fixed **To-dos** section replaces Blockers with a read-only
+  projection of the same server view the transcript uses. It appears only when
+  that view contains phased Build rows, keeps compact `completed of total`
+  progress, and never copies a generated plan/cycle title into the heading;
+  open work items keep their signal as a count on the stage they belong to. See
+  [backend/AGENTS.md](backend/AGENTS.md) and
   [frontend/AGENTS.md](frontend/AGENTS.md) for the control transport and the
   rail's one-moving-indicator rule.
 

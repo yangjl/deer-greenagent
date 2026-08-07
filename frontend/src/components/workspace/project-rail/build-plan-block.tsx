@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import {
+  type BuildPlanProjection,
   type BuildPlanRow,
   buildPlanProjection,
   movingRow,
@@ -82,9 +83,53 @@ function PhaseRow({
   );
 }
 
+export function BuildTodos({
+  projection,
+  onOpenPhase,
+  sectionId,
+}: {
+  projection: BuildPlanProjection;
+  onOpenPhase: () => void;
+  sectionId?: string;
+}) {
+  const moving = movingRow(projection);
+  if (!projection.rows.length) return null;
+
+  return (
+    <>
+      <div
+        id={sectionId}
+        className="mt-6 mb-1 flex items-center justify-between px-4"
+      >
+        <span className="text-muted-foreground/70 text-[11px] font-semibold tracking-widest uppercase">
+          To-dos
+        </span>
+        <span className="text-muted-foreground/70 text-[11px]">
+          {projection.progress}
+        </span>
+      </div>
+      <div className="px-2">
+        {projection.rows.map((row) => (
+          <PhaseRow
+            key={row.phaseKey}
+            row={row}
+            moving={moving === row.phaseKey}
+            onOpen={onOpenPhase}
+          />
+        ))}
+        {projection.attention && (
+          <p className="text-muted-foreground px-2 py-1 text-[11px] leading-4">
+            {projection.attention}
+          </p>
+        )}
+      </div>
+    </>
+  );
+}
+
 /**
- * The selected cycle's Build plan, rendered from the same server view the
- * transcript's workflow block uses.
+ * The selected cycle's phased Build to-dos, rendered from the same server view
+ * the transcript's workflow block uses.
  *
  * **Read-only.** No retry, no hold, no answer, no confirm — selecting a phase
  * navigates to the conversation that ran it. That is the whole interaction, and
@@ -95,56 +140,24 @@ export function BuildPlanBlock({
   cycleId,
   live,
   onOpenPhase,
+  sectionId,
 }: {
   projectId: string | null | undefined;
   cycleId: string | null | undefined;
   live: boolean;
   onOpenPhase: () => void;
+  sectionId?: string;
 }) {
   const workflow = useStageWorkflow(projectId, cycleId, "build", { live });
   const projection = buildPlanProjection(workflow.data);
-  const moving = movingRow(projection);
 
-  if (!cycleId) {
-    return (
-      <div className="text-muted-foreground px-2 py-1.5 text-xs">
-        Select a cycle to see its build plan.
-      </div>
-    );
-  }
-  if (workflow.isPending) {
-    return <div className="text-muted-foreground px-2 py-1.5 text-xs">Loading…</div>;
-  }
-  if (workflow.error) {
-    return (
-      <div className="text-muted-foreground px-2 py-1.5 text-xs">
-        The build plan is unavailable.
-      </div>
-    );
-  }
-  if (!projection.rows.length) {
-    return (
-      <div className="text-muted-foreground px-2 py-1.5 text-xs">
-        {projection.emptyNote}
-      </div>
-    );
-  }
+  if (!cycleId || workflow.isPending || workflow.error) return null;
 
   return (
-    <div>
-      {projection.rows.map((row) => (
-        <PhaseRow
-          key={row.phaseKey}
-          row={row}
-          moving={moving === row.phaseKey}
-          onOpen={onOpenPhase}
-        />
-      ))}
-      {projection.attention && (
-        <p className="text-muted-foreground px-2 py-1 text-[11px] leading-4">
-          {projection.attention}
-        </p>
-      )}
-    </div>
+    <BuildTodos
+      projection={projection}
+      onOpenPhase={onOpenPhase}
+      sectionId={sectionId}
+    />
   );
 }

@@ -15,8 +15,9 @@ Design–Build–Test–Learn (DBTL) governance.
   and editable outside GreenAgent.
 - **Project-first workspace** — projects organize conversations, files, DBTL
   cycles, evidence, reviews, and work items. The project rail can collapse to
-  an icon-width navigation spine for Cycles, Blockers, Agents, and
-  Conversations when the conversation needs more room. Agent and Skill
+  an icon-width navigation spine for Cycles, Agents, and Conversations when
+  the conversation needs more room; a **To-dos** item appears only when the
+  selected cycle has a phased Build plan. Agent and Skill
   management remain directly accessible from the first rail. The Agents page
   separates built-in agents and runtime-available subagents from user-created
   agents and deployment-configured custom subagents.
@@ -46,7 +47,7 @@ Design–Build–Test–Learn (DBTL) governance.
   summary lags their active stage recover from the active row instead of
   rerunning Build. Live worker cards use the actual DBTL stage instead of
   presenting Build work as another Design meeting. A paused Build is shown as
-  **Waiting for you** in both the stage row and Build plan, and the Human Input
+  **Waiting for you** in both the stage row and To-dos, and the Human Input
   Card remains the only control that can resume it. Worker cards render bounded
   prose while typed result JSON stays available as audit data. During a live
   Build, chat follows the current streamed phase rather than the prior planner

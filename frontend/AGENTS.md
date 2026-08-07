@@ -200,13 +200,17 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
   rail, and restores its prior state on close.
 - `src/components/workspace/project-rail/` owns the rail: a disclosure on the
   durable DBTL cycles (each expanding into its five stages with a status word),
-  the selected cycle's **Build plan**, an agents placeholder, and the project's
-  conversations. **The rail is read-only** — it holds no text inputs, and the
-  Cycles header is disclosure-only with no creation or demo actions. New-cycle
-  intent is classified from normal project chat and enters the native setup
-  flow there. A dedicated top-row panel toggle collapses the second rail from
-  16rem to a 3rem navigation spine: the full rail body unmounts and is replaced
-  by labeled icon controls for Cycles, Blockers, Agents, and Conversations.
+  the selected cycle's phased Build **To-dos**, an agents placeholder, and the
+  project's conversations. **The rail is read-only** — it holds no text
+  inputs, and the Cycles header is disclosure-only with no creation or demo
+  actions. New-cycle intent is classified from normal project chat and enters
+  the native setup flow there. A dedicated top-row panel toggle collapses the
+  second rail from 16rem to a 3rem navigation spine: the full rail body unmounts and is replaced
+  by labeled icon controls for Cycles, Agents, and Conversations. The fixed
+  **To-dos** heading and its collapsed icon exist only when the server Build
+  view contains phased rows; the compact `completed of total` progress remains
+  on the heading's right, and no cycle or generated plan title is copied into
+  that slot.
   Choosing one restores the rail at that section. The panel toggle stays
   separate from the Cycles header. Selecting a stage opens
   `cycle-stage-sheet.tsx` — evidence, open blockers **and the form that records
