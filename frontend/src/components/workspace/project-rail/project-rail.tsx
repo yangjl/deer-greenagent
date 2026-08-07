@@ -250,6 +250,17 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   const cycles = (cycleQuery.data?.cycles ?? []).filter(
     (cycle) => cycle.state !== "abandoned",
   );
+  // A cycle's originating conversation is already surfaced under that cycle as
+  // its "Origin ·" link, so drop it from the flat Conversations list to avoid
+  // showing the same thread twice.
+  const cycleOriginThreadIds = new Set(
+    cycles
+      .map((cycle) => cycle.originating_thread_id)
+      .filter((id): id is string => Boolean(id)),
+  );
+  const visibleConversations = conversations.data?.filter(
+    (conversation) => !cycleOriginThreadIds.has(conversation.threadId),
+  );
   const selected =
     cycles.find((item) => item.id === selectedCycleId) ??
     defaultSelectedCycle(cycles);
@@ -448,6 +459,17 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                         );
                         setExpandedCycleId(next);
                         selectCycle(next);
+                        // Bind the cycle to its conversation: selecting a cycle
+                        // also opens its originating chat in the main pane
+                        // (the rail still shows the cycle's stages).
+                        if (entry.originating_thread_id) {
+                          router.push(
+                            pathOfProjectThread(
+                              projectSlug,
+                              entry.originating_thread_id,
+                            ),
+                          );
+                        }
                       }}
                       className={cn(
                         "hover:bg-muted/60 flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 py-2 text-left text-sm transition-colors",
@@ -644,8 +666,8 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           <div className="text-muted-foreground px-2 py-1.5 text-xs">
             Loading…
           </div>
-        ) : conversations.data?.length ? (
-          conversations.data.map((conversation) => {
+        ) : visibleConversations?.length ? (
+          visibleConversations.map((conversation) => {
             const href = pathOfProjectThread(
               projectSlug,
               conversation.threadId,

@@ -552,6 +552,46 @@ async def test_fenced_worker_leaves_delivery_receipt_to_peer_recovery():
 
 
 @pytest.mark.anyio
+async def test_successful_first_turn_without_title_still_gets_fallback_titling(monkeypatch):
+    """A DBTL supervisor receipt branch finishes a first turn as ``success``
+    without running the lead-agent TitleMiddleware, so the thread would stay
+    'Untitled conversation'. The fallback-title routine must fire for success
+    turns, not just interrupted ones. Regression for the interrupted-only gate.
+    """
+    run_manager = RunManager()
+    record = await run_manager.create("thread-title-success")
+    store = MemoryRunEventStore()
+
+    ensure_title = AsyncMock(return_value="Start a new DBTL cycle")
+    monkeypatch.setattr("deerflow.runtime.runs.worker._ensure_interrupted_title", ensure_title)
+    # A non-None checkpointer also drives success-path rollback capture, which
+    # needs a full graph; neutralise it so this test isolates the title gate.
+    monkeypatch.setattr("deerflow.runtime.runs.worker._capture_rollback_point", AsyncMock(return_value=None))
+
+    checkpointer = SimpleNamespace(aget_tuple=AsyncMock(return_value=None))
+    thread_store = SimpleNamespace(update_display_name=AsyncMock(), update_status=AsyncMock())
+
+    class ReceiptAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="No cycle has been created yet.")]}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer, event_store=store, thread_store=thread_store),
+        agent_factory=lambda *, config: ReceiptAgent(),
+        graph_input={"messages": [HumanMessage(content="Start a new DBTL cycle")]},
+        config={},
+    )
+
+    assert record.status == RunStatus.success
+    # Before the fix this was never awaited for a success run, leaving the
+    # thread untitled; the interrupted-only gate is the bug under test.
+    ensure_title.assert_awaited()
+
+
+@pytest.mark.anyio
 async def test_delivery_event_is_singleton_across_goal_continuations(monkeypatch):
     run_manager = RunManager()
     record = await run_manager.create("thread-1")

@@ -1236,7 +1236,15 @@ async def run_agent(
             except Exception:
                 logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
-        if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
+        # Successful turns are included, not just interrupted ones: a DBTL
+        # supervisor branch that answers with a receipt (clarification, cycle
+        # setup, stage continuation, an answered discovery card) completes as
+        # ``success`` without running the lead agent, so its lead-agent
+        # TitleMiddleware never fires. Left to the interrupted-only gate, that
+        # first turn stayed untitled forever (later turns fail the "first
+        # exchange" check). ``_ensure_interrupted_title`` is idempotent: an
+        # ordinary turn that already carries a TitleMiddleware title short-circuits.
+        if started and not record.ownership_lost and checkpointer is not None and record.status in (RunStatus.interrupted, RunStatus.success) and not _is_edit_replay_run(record):
             try:
                 await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                 if not await run_manager.has_later_started_run(thread_id, run_id):
