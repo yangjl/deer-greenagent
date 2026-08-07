@@ -414,7 +414,6 @@ class TestItCarriesTheComputedAssessmentAndRoutes:
         assert {item["slug"] for item in routes} == {
             "repeat_test",
             "return_to_build",
-            "return_to_reconciliation",
             "return_to_design",
             "close_cycle",
         }

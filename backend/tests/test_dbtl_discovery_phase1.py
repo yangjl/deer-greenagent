@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.agents.dbtl.live_stage.types import LiveStageResult
 from deerflow.agents.dbtl.supervisor import build_supervisor_graph
+from deerflow.agents.dbtl.supervisor_support.card_history import setup_answered_immediately_before_card
 from deerflow.agents.middlewares.dbtl_discovery_policy_middleware import (
     DBTL_DISCOVERY_CONTEXT_KEY,
     DISCOVERY_READ_ONLY_TOOLS,
@@ -248,6 +249,7 @@ class _Store:
     def __init__(self) -> None:
         self.active = None
         self.begin_values = None
+        self.confirm_values = None
 
     async def get_active(self, **_scope):
         if self.active and self.active.get("status") in {"gathering", "ready", "offered"}:
@@ -291,6 +293,7 @@ class _Store:
         return self.active
 
     async def confirm_and_create_cycle(self, **values):
+        self.confirm_values = values
         self.active = {
             **self.active,
             "status": "confirmed",
@@ -553,6 +556,99 @@ async def test_ready_discovery_emits_server_card_and_start_answer_creates_cycle(
     assert store.active["status"] == "confirmed"
     assert store.active["cycle_id"] == "cycle-1"
     assert "was created" in str(third["messages"][-1].content)
+
+
+@pytest.mark.asyncio
+async def test_discovery_card_emitted_from_existing_cycle_setup_cannot_create_another_cycle() -> None:
+    store = _Store()
+
+    async def resolve_thread_cycle(**scope):
+        assert scope == {"project_id": "project-1", "thread_id": "thread-1"}
+        return "cycle-existing"
+
+    graph = build_supervisor_graph(
+        lead_agent=_Lead(),
+        discovery_lead_agent=_StructuredDiscoveryLead(),
+        context=SupervisorContext(project_id="project-1", discovery_enabled=True),
+        state_schema=MessagesState,
+        stage_adapter=_NoopStageAdapter(),
+        discovery_store=store,
+        thread_cycle_resolver=resolve_thread_cycle,
+    ).compile()
+    config = {"configurable": {"thread_id": "thread-1"}, "context": {"user_id": "user-1"}}
+    offered = await graph.ainvoke(
+        {"messages": [HumanMessage(content="Start a DBTL cycle for trial.csv", id="human-start")]},
+        config=config,
+    )
+    discovery_card_index = next(
+        index for index, message in enumerate(offered["messages"]) if isinstance(message, ToolMessage) and isinstance(message.artifact, dict) and message.artifact.get("human_input", {}).get("clarification_type") == "dbtl_discovery_start"
+    )
+    discovery_card = offered["messages"][discovery_card_index]
+    discovery_request = discovery_card.artifact["human_input"]
+    setup_request_id = "dbtl-setup__existing-cycle"
+    setup_card = ToolMessage(
+        content="Design inputs",
+        name="ask_clarification",
+        tool_call_id=setup_request_id,
+        artifact={
+            "human_input": {
+                "request_id": setup_request_id,
+                "clarification_type": "cycle_setup",
+            }
+        },
+    )
+    setup_answer = HumanMessage(
+        content="Use the proposed inputs",
+        id="human-setup-answer",
+        additional_kwargs={
+            "hide_from_ui": True,
+            "human_input_response": {
+                "version": 1,
+                "kind": "human_input_response",
+                "source": "ask_clarification",
+                "request_id": setup_request_id,
+                "response_kind": "text",
+                "value": "Use the proposed inputs",
+            },
+        },
+    )
+    start_answer = HumanMessage(
+        content="start_cycle",
+        id="human-discovery-answer",
+        additional_kwargs={
+            "hide_from_ui": True,
+            "human_input_response": {
+                "version": 1,
+                "kind": "human_input_response",
+                "source": "ask_clarification",
+                "request_id": discovery_request["request_id"],
+                "response_kind": "option",
+                "option_id": "start_cycle",
+                "value": "start_cycle",
+            },
+        },
+    )
+    history = [
+        *offered["messages"][:discovery_card_index],
+        setup_card,
+        setup_answer,
+        *offered["messages"][discovery_card_index:],
+        start_answer,
+    ]
+    assert setup_answered_immediately_before_card({"messages": history}, discovery_request["request_id"]) is True
+    deliberate_start = [
+        *history[: history.index(discovery_card)],
+        HumanMessage(content="Start another DBTL cycle", id="human-deliberate-start"),
+        *history[history.index(discovery_card) :],
+    ]
+    assert setup_answered_immediately_before_card({"messages": deliberate_start}, discovery_request["request_id"]) is False
+
+    final = await graph.ainvoke({"messages": history}, config=config)
+
+    assert store.confirm_values is None
+    assert store.active["status"] == "superseded"
+    assert "cycle-existing" in str(final["messages"][-1].content)
+    assert "No additional cycle was created" in str(final["messages"][-1].content)
 
 
 @pytest.mark.asyncio

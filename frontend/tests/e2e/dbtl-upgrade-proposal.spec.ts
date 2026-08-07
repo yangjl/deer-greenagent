@@ -381,6 +381,22 @@ test("the Design council preflight is an actionable native card", async ({
   ).toBeVisible();
 });
 
+test("the project rail omits Data reconciliation", async ({ page }) => {
+  await setupProject(page, CONTINUATION_RESPONSE, [EXISTING_CYCLE]);
+  await page.goto(`/workspace/test2/${MOCK_THREAD_ID}`);
+
+  await expect(
+    page.getByRole("button", {
+      name: `${EXISTING_CYCLE.title} Design`,
+      exact: true,
+    }),
+  ).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    page.getByRole("button", { name: /^Data reconciliation/ }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Build/ })).toBeVisible();
+});
+
 test("the native card's explicit confirmation creates exactly one cycle", async ({
   page,
 }) => {

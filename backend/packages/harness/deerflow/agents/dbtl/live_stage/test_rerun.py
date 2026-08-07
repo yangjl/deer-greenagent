@@ -70,6 +70,7 @@ class TestRerunRecord:
 class PreparedTestRerun:
     spec: BuildRerunSpec
     output_hashes: dict[str, str]
+    staged_files: tuple[tuple[str, str], ...] = ()
 
 
 def _rerun_output_name(expected: str) -> str:
@@ -94,10 +95,15 @@ def _server_bound_simple_command(spec: BuildRerunSpec) -> str:
     if len(tokens) != 2:
         return spec.command
     recorded_name = PurePosixPath(tokens[1]).name
-    published_name = _rerun_output_name(spec.entry_point)
+    entry_name = PurePosixPath(spec.entry_point).name
+    published_match = _PUBLISHED_NAME.fullmatch(entry_name)
+    published_name = published_match.group(1) if published_match is not None else entry_name
     if recorded_name != published_name:
         return spec.command
-    return entry_command(spec.entry_point)
+    # Execute the hash-verified staged copy when publication renamed the file.
+    # This preserves ordinary sibling imports and relative support-file reads
+    # inside the clean Test workspace.
+    return entry_command(published_name if published_match is not None else spec.entry_point)
 
 
 def parse_test_rerun_record(value: Any) -> TestRerunRecord | None:
@@ -226,9 +232,8 @@ def prepare_test_rerun(
     except (FileNotFoundError, OSError, ValueError):
         return _failure(spec.command, "A declared rerun input or configuration is missing, unreadable, or outside the project workspace.")
 
-    output_hashes = {
-        str(item.get("uri") or ""): str(item.get("content_hash") or "").lower() for item in lineage.get("output_artifacts") or () if isinstance(item, dict) and re.fullmatch(r"[0-9a-f]{64}", str(item.get("content_hash") or "").lower())
-    }
+    output_artifacts = [item for item in lineage.get("output_artifacts") or () if isinstance(item, dict)]
+    output_hashes = {str(item.get("uri") or ""): str(item.get("content_hash") or "").lower() for item in output_artifacts if re.fullmatch(r"[0-9a-f]{64}", str(item.get("content_hash") or "").lower())}
     missing_outputs = [expected for expected in spec.expected_outputs if expected not in output_hashes]
     if missing_outputs:
         return _failure(spec.command, f"The rerun record names expected outputs that are not bound by Build lineage: {', '.join(missing_outputs[:4])}.")
@@ -244,7 +249,43 @@ def prepare_test_rerun(
     reserved_names = {RERUN_STDOUT_NAME, RERUN_STDERR_NAME, RERUN_EXIT_STATUS_NAME}
     if any(name in reserved_names for name in output_names):
         return _failure(spec.command, "The rerun record uses a filename reserved for the server-owned execution receipt.")
-    return PreparedTestRerun(spec=spec, output_hashes=output_hashes)
+
+    staged_files: list[tuple[str, str]] = []
+    staged_hashes: dict[str, str] = {}
+    staged_bytes = 0
+    for artifact in output_artifacts:
+        source = str(artifact.get("uri") or "")
+        content_hash = str(artifact.get("content_hash") or "").lower()
+        if source in spec.expected_outputs or not re.fullmatch(r"[0-9a-f]{64}", content_hash):
+            continue
+        try:
+            verified = verified_workspace_file(
+                source,
+                project_root=project_root,
+                containment_reference=None,
+                max_bytes=MAX_RERUN_OUTPUT_BYTES,
+            )
+        except (FileNotFoundError, OSError, ValueError):
+            verified = None
+        if verified is None or verified[2] != content_hash:
+            return _failure(spec.command, f"The published Build support file {source!r} is missing, unreadable, or no longer matches its recorded hash.")
+        name = _rerun_output_name(source)
+        if name in reserved_names or name in output_names:
+            return _failure(spec.command, f"The published Build support filename {name!r} conflicts with a rerun output or server receipt.")
+        previous = staged_hashes.get(name)
+        if previous is not None:
+            if previous != content_hash:
+                return _failure(spec.command, f"Published Build support files named {name!r} have different recorded hashes.")
+            continue
+        staged_hashes[name] = content_hash
+        staged_files.append((source, name))
+        staged_bytes += verified[1]
+        if len(staged_files) > 64 or staged_bytes > MAX_RERUN_TOTAL_OUTPUT_BYTES:
+            return _failure(spec.command, "The published Build support files exceed the Test staging limits.")
+    published_entry = _PUBLISHED_NAME.fullmatch(PurePosixPath(spec.entry_point).name)
+    if published_entry is not None and published_entry.group(1) not in staged_hashes:
+        return _failure(spec.command, "The published Build entry point is not available in the hash-bound Test staging set.")
+    return PreparedTestRerun(spec=spec, output_hashes=output_hashes, staged_files=tuple(staged_files))
 
 
 def build_test_rerun_unit(
@@ -295,6 +336,7 @@ def build_test_rerun_unit(
             "kind": "build_rerun",
             "command": prepared.spec.command,
             "granted_inputs": list(prepared.spec.inputs),
+            "staged_files": [{"source": source, "name": name} for source, name in prepared.staged_files],
         },
     )
 
@@ -307,14 +349,28 @@ def build_test_rerun_tool(unit: WorkUnit, *, unit_workspace: str) -> BaseTool:
     command = unit.tool_contract.get("command")
     if not isinstance(command, str) or not command.strip():
         raise ValueError("The Test rerun unit has no executable command.")
+    raw_staged_files = unit.tool_contract.get("staged_files", [])
+    if not isinstance(raw_staged_files, list):
+        raise ValueError("The Test rerun unit has a malformed staging contract.")
+    staged_files: list[tuple[str, str]] = []
+    for item in raw_staged_files:
+        if not isinstance(item, dict):
+            raise ValueError("The Test rerun unit has a malformed staging contract.")
+        source = item.get("source")
+        name = item.get("name")
+        if not isinstance(source, str) or not source.startswith("/mnt/user-data/") or not isinstance(name, str) or not name or PurePosixPath(name).name != name:
+            raise ValueError("The Test rerun unit has a malformed staging contract.")
+        staged_files.append((source, name))
     workspace = unit_workspace.rstrip("/")
     stdout_path = f"{workspace}/{RERUN_STDOUT_NAME}"
     stderr_path = f"{workspace}/{RERUN_STDERR_NAME}"
     status_path = f"{workspace}/{RERUN_EXIT_STATUS_NAME}"
+    stage_commands = [f"cp {shlex.quote(source)} {shlex.quote(f'{workspace}/{name}')} || exit 96" for source, name in staged_files]
     shell_command = "\n".join(
         [
             "set +e",
             f"mkdir -p {shlex.quote(workspace)}",
+            *stage_commands,
             f"cd {shlex.quote(workspace)} || exit 97",
             f"export DBTL_WORKSPACE={shlex.quote(workspace)}",
             "export DBTL_PROJECT_ROOT=/mnt/user-data",

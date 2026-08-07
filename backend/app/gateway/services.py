@@ -394,6 +394,8 @@ _CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset(
     }
 )
 
+_SERVER_RUN_CONTEXT_KEYS: frozenset[str] = frozenset({"dbtl_evidence_retry"})
+
 
 async def file_thread_into_requested_project(
     request_context: dict | None,
@@ -587,6 +589,19 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
             runtime_context.setdefault(key, context[key])
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
+
+
+def merge_server_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None) -> None:
+    """Add in-process-only runtime markers after untrusted context is scrubbed."""
+    if not context:
+        return
+    unexpected = set(context).difference(_SERVER_RUN_CONTEXT_KEYS)
+    if unexpected:
+        raise ValueError(f"Unsupported server run context keys: {', '.join(sorted(unexpected))}")
+    runtime_context = config.setdefault("context", {})
+    if not isinstance(runtime_context, dict):
+        raise ValueError("Run context must be a mapping.")
+    runtime_context.update(context)
 
 
 async def resolve_trusted_internal_owner_for_attribution(request: Request, owner_user_id: str | None) -> Any | None:
@@ -1324,6 +1339,8 @@ async def start_run(
     body: RunCreateRequest,
     thread_id: str,
     request: Request,
+    *,
+    server_context: Mapping[str, Any] | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -1417,6 +1434,7 @@ async def start_run(
             # ``body.config`` is free-form and copied verbatim by
             # ``build_run_config``; scrub internal-only keys smuggled there.
             strip_internal_context_keys(config)
+        merge_server_run_context_overrides(config, server_context)
         # A new conversation's run request may carry the project to file it
         # into (validated against membership) — then the owning project is
         # re-derived from the durable scope row, never taken from the caller.

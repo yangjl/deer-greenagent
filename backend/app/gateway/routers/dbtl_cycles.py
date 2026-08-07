@@ -1808,20 +1808,22 @@ async def apply_design_feedback_action(
                         "dbtl_supervisor_enabled": True,
                         "dbtl_explicit_choice": "continue_cycle",
                         "dbtl_selected_cycle_id": cycle_id,
-                        "dbtl_evidence_retry": {
-                            "cycle_id": cycle_id,
-                            "cycle_revision": body.expected_db_revision,
-                            "stage": surface_stage,
-                            "dossier_hash": evidence_exception.get("content_hash"),
-                            "reason_codes": list(evidence_exception.get("reason_codes") or []),
-                            "available_artifacts": list(evidence_exception.get("available_artifacts") or []),
-                            "initial_hint": written_feedback,
-                        },
                     },
                     on_disconnect="continue",
                 ),
                 body.originating_thread_id,
                 request,
+                server_context={
+                    "dbtl_evidence_retry": {
+                        "cycle_id": cycle_id,
+                        "cycle_revision": body.expected_db_revision,
+                        "stage": surface_stage,
+                        "dossier_hash": evidence_exception.get("content_hash"),
+                        "reason_codes": list(evidence_exception.get("reason_codes") or []),
+                        "available_artifacts": list(evidence_exception.get("available_artifacts") or []),
+                        "initial_hint": written_feedback,
+                    }
+                },
             )
             receipt = {
                 "kind": "retry_with_guidance",
@@ -2712,7 +2714,6 @@ class ValidityAssessmentRequest(BaseModel):
         "learn_from_invalidated_evidence",
         "repeat_test",
         "return_to_build",
-        "return_to_reconciliation",
         "return_to_design",
         "close_cycle",
     ]

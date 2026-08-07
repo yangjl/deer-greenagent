@@ -1664,6 +1664,23 @@ def test_merge_run_context_overrides_forwards_dbtl_selection_runtime_only():
     assert "dbtl_selected_cycle_id" not in config["configurable"]
 
 
+def test_server_run_context_carries_evidence_retry_marker_without_making_it_client_configurable():
+    from app.gateway.services import build_run_config, merge_server_run_context_overrides
+
+    marker = {
+        "cycle_id": "cycle-7",
+        "cycle_revision": 12,
+        "stage": "test",
+        "dossier_hash": "a" * 64,
+    }
+    config = build_run_config("thread-1", None, None)
+
+    merge_server_run_context_overrides(config, {"dbtl_evidence_retry": marker})
+
+    assert config["context"]["dbtl_evidence_retry"] == marker
+    assert "dbtl_evidence_retry" not in config["configurable"]
+
+
 def test_merge_run_context_overrides_context_only_keys_do_not_override_existing():
     """A token already in ``config['context']`` must not be clobbered by a
     client-supplied one (defense in depth — the manager is the only legitimate

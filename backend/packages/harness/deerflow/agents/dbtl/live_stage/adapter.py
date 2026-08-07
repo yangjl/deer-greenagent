@@ -8113,7 +8113,6 @@ class LiveStageAdapter:
                     "learn_from_invalidated_evidence": "Learn from invalid evidence",
                     "repeat_test": "Repeat Test",
                     "return_to_build": "Return to Build",
-                    "return_to_reconciliation": "Return to Data Reconciliation",
                     "return_to_design": "Return to Design",
                     "close_cycle": "Close this cycle",
                 }

@@ -104,12 +104,7 @@ class TestRouteLegalityMatrix:
 
 
 class TestPhase7GoldenMapping:
-    """The re-expressed post-Test chooser must match Phase 7's allowed routes.
-
-    One deliberate exception: ``RETURN_TO_RECONCILIATION`` becomes the Build
-    edge blocked with the unreconciled-rows reason (plan §4). Everything else
-    maps one-to-one.
-    """
+    """The post-Test chooser must match the current allowed routes."""
 
     ALLOWED_PHASE7: dict[ValidityOutcome, set[WorkflowRecommendation]] = {
         ValidityOutcome.SUPPORTED: {WorkflowRecommendation.ADVANCE_TO_LEARN, WorkflowRecommendation.REPEAT_TEST, WorkflowRecommendation.CLOSE_CYCLE},
@@ -117,7 +112,6 @@ class TestPhase7GoldenMapping:
         ValidityOutcome.INCONCLUSIVE: {
             WorkflowRecommendation.REPEAT_TEST,
             WorkflowRecommendation.RETURN_TO_BUILD,
-            WorkflowRecommendation.RETURN_TO_RECONCILIATION,
             WorkflowRecommendation.RETURN_TO_DESIGN,
             WorkflowRecommendation.CLOSE_CYCLE,
         },
@@ -125,7 +119,6 @@ class TestPhase7GoldenMapping:
             WorkflowRecommendation.LEARN_FROM_INVALIDATED_EVIDENCE,
             WorkflowRecommendation.REPEAT_TEST,
             WorkflowRecommendation.RETURN_TO_BUILD,
-            WorkflowRecommendation.RETURN_TO_RECONCILIATION,
             WorkflowRecommendation.RETURN_TO_DESIGN,
             WorkflowRecommendation.CLOSE_CYCLE,
         },
@@ -144,14 +137,15 @@ class TestPhase7GoldenMapping:
     def test_same_routes_for_same_outcome(self, outcome: ValidityOutcome) -> None:
         routes = compute_stage_routes(RouteContext("test", outcome.value))
         offered = set(_slugs(routes))
-        expected = {self.RECOMMENDATION_TO_SLUG[rec] for rec in self.ALLOWED_PHASE7[outcome] if rec is not WorkflowRecommendation.RETURN_TO_RECONCILIATION}
+        expected = {self.RECOMMENDATION_TO_SLUG[rec] for rec in self.ALLOWED_PHASE7[outcome]}
         assert offered == expected
 
     @pytest.mark.parametrize("outcome", [ValidityOutcome.INCONCLUSIVE, ValidityOutcome.INVALIDATED])
-    def test_reconciliation_route_maps_to_an_open_build_edge(self, outcome: ValidityOutcome) -> None:
+    def test_removed_reconciliation_route_is_refused(self, outcome: ValidityOutcome) -> None:
         routes = compute_stage_routes(RouteContext("test", outcome.value))
         assert RouteSlug.RETURN_TO_BUILD in _slugs(routes)
-        assert transition_target("test", "return_to_reconciliation") == "build"
+        with pytest.raises(StageRoutesRefused, match="Unknown route"):
+            transition_target("test", "return_to_reconciliation")
 
 
 class TestTransitionTarget:

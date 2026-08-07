@@ -1019,23 +1019,24 @@ def render_council_deck(
         )
     cards = _decision_cards(decision_request) if decision_request is not None and decision_request.renders_as_cards else ""
     free_text = _decision_text(clarification_question) if surface_mode == "chair_feedback" and clarification_question.strip() and not cards else ""
+    decision_slide = None
     if cards or free_text or decisions:
         # The options replace the question's own bullet, not the rest of the
         # list: a contested topic the chair left open still needs settling
         # whether or not this one question came with choices.
         remaining = [item for item in decisions if item != _text(clarification_question)] if cards or free_text else decisions
-        slides.append(
-            _slide(
-                kind="decide",
-                eyebrow="Only you can settle these",
-                title="Needs your decision",
-                body=cards + free_text + _open_question_boxes(remaining),
-                # The chair's own question already carries a control, and every
-                # other open item now carries its own; a slide-level box on top
-                # would ask the same person the same thing twice.
-                note_id="",
-            )
+        decision_slide = _slide(
+            kind="decide",
+            eyebrow="Only you can settle these",
+            title="Needs your decision",
+            body=cards + free_text + _open_question_boxes(remaining),
+            # The chair's own question already carries a control, and every
+            # other open item now carries its own; a slide-level box on top
+            # would ask the same person the same thing twice.
+            note_id="",
         )
+        if surface_mode != "chair_feedback":
+            slides.append(decision_slide)
     if summary:
         paragraphs = [part.strip() for part in summary.split("\n") if part.strip()]
         slides.extend(
@@ -1104,6 +1105,11 @@ def render_council_deck(
     # the slide because it is the reader's turn.
     anchor = '<div class="note"' if '<div class="note"' in slides[-1] else "</section>"
     slides[-1] = slides[-1].replace(anchor, closing + anchor, 1)
+    # A paused chair has one actionable control: the answer that resumes the
+    # meeting. Put it where the surrounding chat tells the reader it is—the
+    # final slide—after all evidence and limitations the choice is based on.
+    if surface_mode == "chair_feedback" and decision_slide is not None:
+        slides.append(decision_slide)
     # The gate goes last, after everything it is a verdict on. A reviewer who
     # reaches it has passed every slide their notes are attached to, and the
     # deck ends on the one screen that records something.

@@ -221,9 +221,7 @@ def transition_target(stage: str, chosen_route: str) -> str:
         return stage
     if route in {"reject", "rejected"}:
         return stage
-    if route in {"return_to_build", "return_to_reconciliation"}:
-        # Reconciliation is not a graph node, so the historical route name
-        # records the Build target without making it a prerequisite.
+    if route == "return_to_build":
         return "build"
     if route == "return_to_design":
         return "design"

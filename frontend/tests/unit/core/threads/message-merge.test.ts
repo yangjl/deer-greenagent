@@ -137,6 +137,34 @@ test("mergeMessages preserves historical run metadata on a live checkpoint repla
   ]);
 });
 
+test("mergeMessages replaces stale checkpoint run metadata with canonical history", () => {
+  const persistedAi = {
+    id: "deck-message",
+    type: "ai",
+    content: "Open the Design deck.",
+  } as Message;
+  const history = buildVisibleHistoryMessages(
+    [
+      {
+        run_id: "run-design-meeting",
+        seq: 72,
+        content: persistedAi,
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-08-07T21:19:35Z",
+      },
+    ],
+    new Set(),
+  );
+  const staleCheckpointAi = {
+    ...persistedAi,
+    run_id: "run-earlier-discovery",
+  } as unknown as Message;
+
+  expect(mergeMessages(history, [staleCheckpointAi], [])).toEqual([
+    { ...staleCheckpointAi, run_id: "run-design-meeting" },
+  ]);
+});
+
 test("mergeMessages keeps a protected pre-compression input at its canonical position", () => {
   const canonicalInput = {
     id: "input-1",

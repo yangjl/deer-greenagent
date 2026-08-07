@@ -2824,6 +2824,15 @@ planner or worker is dispatched. Tests pin this in
 `test_dbtl_stage_worker_progress.py`, `test_dbtl_build_phase_verification.py`,
 and `test_dev_entrypoint.py`.
 
+The Test rerun workspace is clean, not empty of approved source. Before Test
+dispatch, `prepare_test_rerun` hash-verifies and stages every published Build
+support artifact that is not an expected rerun output (for example the entry
+point, an imported `fit.py`, and a replay notebook). Expected outputs are never
+preseeded. A content-addressed entry point executes by its restored filename in
+that workspace so sibling imports and reads do not depend on the published
+hash-prefixed path. Missing, changed, colliding, or oversized support files fail
+preflight; Test must not repair Build evidence.
+
 Build's structured-result parser is deliberately looser only about the label on
 a concrete implementation file. Models often return semantic kinds such as
 `manifest`, `execution_log`, `implementation`, or `test_suite` even though the

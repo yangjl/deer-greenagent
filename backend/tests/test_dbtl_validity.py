@@ -54,6 +54,7 @@ def test_high_accuracy_with_leakage_is_invalidated() -> None:
     assert "train_test_leakage" in result.reason_codes
     assert result.headline_success is True
     assert WorkflowRecommendation.ADVANCE_TO_LEARN not in result.allowed_recommendations
+    assert "return_to_reconciliation" not in {item.value for item in result.allowed_recommendations}
 
 
 def test_missing_independent_holdout_is_inconclusive() -> None:
@@ -65,6 +66,7 @@ def test_missing_independent_holdout_is_inconclusive() -> None:
     assert result.outcome is ValidityOutcome.INCONCLUSIVE
     assert result.reason_codes == ("missing_tester_holdout",)
     assert WorkflowRecommendation.ADVANCE_TO_LEARN not in result.allowed_recommendations
+    assert "return_to_reconciliation" not in {item.value for item in result.allowed_recommendations}
 
 
 def test_valid_negative_result_can_advance_to_learn() -> None:

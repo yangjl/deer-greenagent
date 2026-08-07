@@ -647,6 +647,35 @@ class TestSetupClarificationIsACard:
         assert marker == []
 
     @pytest.mark.asyncio
+    async def test_answering_existing_cycle_questions_stays_out_of_discovery(self):
+        asked = await self.ask("setup-discovery")
+        approved = await self.approve(asked, "setup-discovery-2")
+        questions = approved["messages"][-1].artifact["human_input"]
+
+        graph = compile_supervisor(
+            SupervisorContext(
+                project_id="proj-1",
+                project_name="test2",
+                discovery_enabled=True,
+            )
+        )
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    *approved["messages"],
+                    self.card_reply(questions["request_id"], self.ANSWER),
+                ],
+            },
+            config={"configurable": {"thread_id": "setup-discovery-3"}},
+        )
+
+        answer = final["messages"][-1]
+        assert isinstance(answer, AIMessage)
+        assert "Recorded your design inputs" in answer.content
+        assert "Conversational discovery" not in answer.content
+
+    @pytest.mark.asyncio
     async def test_declining_the_confirmation_creates_nothing_and_says_so(self):
         asked = await self.ask("setup-decline")
         request_id = asked[-1].artifact["human_input"]["request_id"]
@@ -2275,7 +2304,6 @@ class TestLiveStageBranch:
         assert [item["id"] for item in request["options"]] == [
             "advance_to_learn",
             "repeat_test",
-            "return_to_reconciliation",
         ]
 
     @pytest.mark.parametrize(

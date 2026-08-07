@@ -119,6 +119,7 @@ function SectionLabel({
 }
 
 const LOCKED_MARK = { icon: Lock, tone: "text-muted-foreground/50" } as const;
+const RAIL_STAGES = DBTL_STAGES.filter((stage) => stage !== "reconciliation");
 
 const STATUS_MARK: Record<string, { icon: typeof Lock; tone: string }> = {
   locked: { icon: Lock, tone: "text-muted-foreground/50" },
@@ -280,10 +281,9 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   // rather than deleted to make room. The full list stays in the stage sheet
   // that already renders it.
   const blockers = openWorkItems(detail.data);
-  const reconciliationBlockers = blockers.filter(
-    (item) => item.payload?.kind === "reconciliation",
+  const buildBlockers = blockers.filter(
+    (item) => item.payload?.kind !== "reconciliation",
   ).length;
-  const unattributedBlockers = blockers.length - reconciliationBlockers;
   const buildWorkflow = useStageWorkflow(project?.id, selected?.id, "build", {
     live: Boolean(selected && isLive(selected)),
   });
@@ -526,14 +526,10 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                   </div>
                   {active && (
                     <div className="border-border/70 ml-3 border-l pl-1.5">
-                      {DBTL_STAGES.map((stage) => {
+                      {RAIL_STAGES.map((stage) => {
                         let openWorkCount = 0;
-                        if (entry.id === selected?.id) {
-                          if (stage === "reconciliation") {
-                            openWorkCount = reconciliationBlockers;
-                          } else if (stage === "build") {
-                            openWorkCount = unattributedBlockers;
-                          }
+                        if (entry.id === selected?.id && stage === "build") {
+                          openWorkCount = buildBlockers;
                         }
                         return (
                           <StageRow

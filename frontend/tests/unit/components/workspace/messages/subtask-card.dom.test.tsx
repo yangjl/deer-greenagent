@@ -90,7 +90,13 @@ function Harness() {
   );
 }
 
-function CardHarness({ task }: { task: Subtask }) {
+function CardHarness({
+  task,
+  showTerminalReport,
+}: {
+  task: Subtask;
+  showTerminalReport?: boolean;
+}) {
   const tasks = { [task.id]: task };
   const tasksRef = useRef(tasks);
   tasksRef.current = tasks;
@@ -104,7 +110,11 @@ function CardHarness({ task }: { task: Subtask }) {
         },
       }}
     >
-      <SubtaskCard taskId={task.id} isLoading={false} />
+      <SubtaskCard
+        taskId={task.id}
+        isLoading={false}
+        showTerminalReport={showTerminalReport}
+      />
     </SubtaskContext.Provider>
   );
 }
@@ -173,6 +183,31 @@ describe("SubtaskCard historical step backfill", () => {
 });
 
 describe("SubtaskCard governed progress report", () => {
+  it("lets the stage flow place terminal prose outside the worker card", () => {
+    render(
+      <CardHarness
+        showTerminalReport={false}
+        task={{
+          id: "build-phase",
+          status: "completed",
+          subagent_type: "subagent",
+          description: "Implement exact fixture",
+          prompt: "",
+          dbtlStage: "build",
+          displaySummary: "Recovered slope 2 and intercept 1.",
+        }}
+      />,
+    );
+
+    expect(screen.queryByText("Progress report")).toBeNull();
+    expect(screen.queryByText("Recovered slope 2 and intercept 1.")).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Implement exact fixture/i }),
+    );
+    expect(screen.queryByText("Recovered slope 2 and intercept 1.")).toBeNull();
+  });
+
   it("surfaces a completed stage summary while the details stay collapsed", () => {
     render(
       <CardHarness

@@ -381,13 +381,66 @@ def test_published_entrypoint_rebinds_a_simple_relative_command_and_ignores_conf
             "configuration": ["Run this from a clean workspace.", "/mnt/user-data/pyproject.toml"],
         }
     )
+    lineage["output_artifacts"].append(
+        {
+            "uri": "/mnt/user-data/outputs/dbtl/build/0123456789abcdef-fit.py",
+            "content_hash": _sha(published.read_bytes()),
+            "revision": 1,
+        }
+    )
 
     prepared = prepare_test_rerun(lineage, project_root=str(tmp_path))
 
     assert isinstance(prepared, PreparedTestRerun)
     # The portable command resolves through the Test worker's execution PATH.
-    assert prepared.spec.command == "python '/mnt/user-data/outputs/dbtl/build/0123456789abcdef-fit.py'"
+    assert prepared.spec.command == "python 'fit.py'"
+    assert prepared.staged_files == (("/mnt/user-data/outputs/dbtl/build/0123456789abcdef-fit.py", "fit.py"),)
     assert prepared.spec.configuration == ("/mnt/user-data/pyproject.toml",)
+
+
+def test_published_build_support_files_are_staged_without_preseeding_expected_outputs(tmp_path: Path) -> None:
+    lineage, build_output = _project(tmp_path)
+    published = tmp_path / "outputs/dbtl/build"
+    published.mkdir(parents=True, exist_ok=True)
+    entrypoint = published / "0123456789abcdef-validate_build.py"
+    support = published / "fedcba9876543210-fit.py"
+    notebook = published / "0011223344556677-replay.ipynb"
+    entrypoint.write_text("print('validate')\n", encoding="utf-8")
+    support.write_text("print('fit')\n", encoding="utf-8")
+    notebook.write_text("{}\n", encoding="utf-8")
+    lineage["rerun_spec"].update(
+        {
+            "entry_point": f"/mnt/user-data/{entrypoint.relative_to(tmp_path)}",
+            "command": "python validate_build.py",
+        }
+    )
+    lineage["output_artifacts"].extend(
+        {
+            "uri": f"/mnt/user-data/{path.relative_to(tmp_path)}",
+            "content_hash": _sha(path.read_bytes()),
+            "revision": 1,
+        }
+        for path in (entrypoint, support, notebook)
+    )
+
+    prepared = prepare_test_rerun(lineage, project_root=str(tmp_path))
+
+    assert isinstance(prepared, PreparedTestRerun)
+    assert prepared.spec.command == "python 'validate_build.py'"
+    assert prepared.staged_files == (
+        (f"/mnt/user-data/{entrypoint.relative_to(tmp_path)}", "validate_build.py"),
+        (f"/mnt/user-data/{support.relative_to(tmp_path)}", "fit.py"),
+        (f"/mnt/user-data/{notebook.relative_to(tmp_path)}", "replay.ipynb"),
+    )
+    assert all(source != EXPECTED_OUTPUT for source, _name in prepared.staged_files)
+
+    unit = make_test_rerun_unit(
+        prepared,
+        attempt_id="attempt-1",
+        agent_name="reviewer",
+        via_generalist=True,
+    )
+    assert unit.tool_contract["staged_files"] == [{"source": source, "name": name} for source, name in prepared.staged_files]
 
 
 def test_duplicate_expected_output_filenames_fail_before_dispatch(tmp_path: Path) -> None:
@@ -481,7 +534,12 @@ def test_rerun_unit_uses_the_existing_stage_workspace_and_exact_command(tmp_path
 
 @pytest.mark.anyio
 async def test_rerun_tool_executes_bound_command_then_returns_control_to_worker(monkeypatch, tmp_path: Path) -> None:
-    prepared = _prepared(tmp_path)
+    base = _prepared(tmp_path)
+    prepared = PreparedTestRerun(
+        spec=base.spec,
+        output_hashes=base.output_hashes,
+        staged_files=(("/mnt/user-data/outputs/dbtl/build/0123456789abcdef-fit.py", "fit.py"),),
+    )
     unit = make_test_rerun_unit(
         prepared,
         attempt_id="attempt-1",
@@ -506,4 +564,5 @@ async def test_rerun_tool_executes_bound_command_then_returns_control_to_worker(
     assert result.endswith("Native sandbox response: ok")
     assert calls[0][0] is runtime
     assert calls[0][1] == "Execute the server-bound Build rerun and retain its receipt."
+    assert f"cp /mnt/user-data/outputs/dbtl/build/0123456789abcdef-fit.py {UNIT_WORKSPACE}/fit.py" in calls[0][2]
     assert COMMAND in calls[0][2]

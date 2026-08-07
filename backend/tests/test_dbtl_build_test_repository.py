@@ -724,7 +724,7 @@ async def test_high_accuracy_and_leakage_routes_back_to_build(tmp_path: Path) ->
     assert statuses["test"] == "locked"
 
 
-async def test_legacy_return_to_reconciliation_is_refused_by_stage_graph(
+async def test_legacy_return_to_reconciliation_is_not_an_allowed_recommendation(
     tmp_path: Path,
 ) -> None:
     repo = await _repo(tmp_path)
@@ -733,7 +733,7 @@ async def test_legacy_return_to_reconciliation_is_refused_by_stage_graph(
 
     with pytest.raises(
         ValidityRefused,
-        match="Reconciliation is not a cycle-stage destination",
+        match="is not a valid WorkflowRecommendation",
     ):
         await repo.record_validity_assessment(
             cycle_id="cycle-1",

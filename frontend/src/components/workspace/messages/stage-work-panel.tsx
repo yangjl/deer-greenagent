@@ -3,8 +3,10 @@
 import { Loader2Icon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useI18n } from "@/core/i18n/hooks";
 import { fetchStageWorkers, StageWorkerFetchError } from "@/core/tasks/api";
 import { useReconcileSubtasks, useSubtaskContext } from "@/core/tasks/context";
+import { terminalStageReportForDisplay } from "@/core/tasks/presentation";
 import {
   latestStageWorkRunId,
   runningStageWorkRunId,
@@ -14,6 +16,7 @@ import {
 } from "@/core/tasks/stage-work";
 import { cn } from "@/lib/utils";
 
+import { MarkdownContent } from "./markdown-content";
 import { SubtaskCard } from "./subtask-card";
 
 const MAX_HYDRATION_RETRIES = 3;
@@ -54,6 +57,7 @@ export function StageWorkPanel({
   runId?: string;
   isLoading: boolean;
 }) {
+  const { t } = useI18n();
   const { tasks: taskMap } = useSubtaskContext();
   const reconcileSubtasks = useReconcileSubtasks();
   const tasks = useMemo(() => Object.values(taskMap), [taskMap]);
@@ -160,6 +164,12 @@ export function StageWorkPanel({
     return null;
   }
 
+  const cappedFailureMessages = {
+    token_capped: t.subtasks.stageTokenCapped,
+    turn_capped: t.subtasks.stageTurnCapped,
+    loop_capped: t.subtasks.stageLoopCapped,
+  };
+
   return (
     <div className={cn("flex w-full flex-col gap-4", className)}>
       {groups.map((group) => {
@@ -185,21 +195,34 @@ export function StageWorkPanel({
                   : `${label} stage work finished`}
               </span>
             </div>
-            {group.tasks.map((task) => (
-              <SubtaskCard
-                key={task.id}
-                taskId={task.id}
-                threadId={threadId}
-                // The run this task was actually observed in. Passing the
-                // thread's latest run would backfill every older task from the
-                // wrong run's events, and silently get nothing back.
-                runId={task.runId ?? runId}
-                isLoading={task.status === "in_progress"}
-                // Governed stage work reads as native tool-call / script-writing
-                // progress, not a decorated card with a shine border.
-                flat
-              />
-            ))}
+            {group.tasks.map((task) => {
+              const report = terminalStageReportForDisplay(
+                task,
+                cappedFailureMessages,
+              );
+              return (
+                <div key={task.id} className="flex w-full flex-col gap-3">
+                  <SubtaskCard
+                    taskId={task.id}
+                    threadId={threadId}
+                    // The run this task was actually observed in. Passing the
+                    // thread's latest run would backfill every older task from the
+                    // wrong run's events, and silently get nothing back.
+                    runId={task.runId ?? runId}
+                    isLoading={task.status === "in_progress"}
+                    // Governed stage work reads as native tool-call / script-writing
+                    // progress, not a decorated card with a shine border.
+                    flat
+                    showTerminalReport={false}
+                  />
+                  {report ? (
+                    <div className="text-foreground text-sm leading-6">
+                      <MarkdownContent content={report} isLoading={false} />
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
           </section>
         );
       })}

@@ -14,7 +14,6 @@ export type WorkflowRecommendation =
   | "learn_from_invalidated_evidence"
   | "repeat_test"
   | "return_to_build"
-  | "return_to_reconciliation"
   | "return_to_design"
   | "close_cycle";
 
@@ -50,7 +49,6 @@ export const RECOMMENDATION_LABELS: Record<WorkflowRecommendation, string> = {
   learn_from_invalidated_evidence: "Learn from invalid evidence",
   repeat_test: "Repeat Test",
   return_to_build: "Return to Build",
-  return_to_reconciliation: "Return to Data reconciliation",
   return_to_design: "Return to Design",
   close_cycle: "Close cycle",
 };
@@ -239,14 +237,12 @@ export function recommendationOptions(
             "learn_from_invalidated_evidence",
             "repeat_test",
             "return_to_build",
-            "return_to_reconciliation",
             "return_to_design",
             "close_cycle",
           ]
       : [
           "repeat_test",
           "return_to_build",
-          "return_to_reconciliation",
           "return_to_design",
           "close_cycle",
         ];

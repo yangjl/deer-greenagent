@@ -63,6 +63,9 @@ describe("metric and validity separation", () => {
     expect(recommendationOptions(result).map((item) => item.id)).toContain(
       "learn_from_invalidated_evidence",
     );
+    expect(recommendationOptions(result).map((item) => item.id)).not.toContain(
+      "return_to_reconciliation",
+    );
   });
 
   test("missing holdout is inconclusive", () => {
@@ -73,6 +76,9 @@ describe("metric and validity separation", () => {
     expect(result.outcome).toBe("inconclusive");
     expect(recommendationOptions(result).map((item) => item.id)).not.toContain(
       "advance_to_learn",
+    );
+    expect(recommendationOptions(result).map((item) => item.id)).not.toContain(
+      "return_to_reconciliation",
     );
   });
 

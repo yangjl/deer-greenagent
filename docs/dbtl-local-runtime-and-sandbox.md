@@ -85,6 +85,27 @@ Relevant implementation:
 - `backend/packages/harness/deerflow/agents/dbtl/live_stage/workspace.py`
 - `backend/packages/harness/deerflow/agents/dbtl/live_stage/build_phase_verification.py`
 
+### Build-to-Test rerun staging
+
+Test never runs a Build validator in an empty directory and hopes its sibling
+files are globally discoverable. Before dispatch, the server separates the
+approved Build artifacts into two groups:
+
+- expected rerun outputs, which must be absent and regenerated in the clean
+  Test workspace; and
+- hash-verified support files such as the entry point, imported scripts, and a
+  replay notebook, which are copied into that workspace under their original
+  filenames.
+
+For content-addressed entry points, Test executes the staged filename rather
+than the published hash-prefixed path. Relative imports and sibling-file reads
+therefore resolve inside the clean workspace. A missing, changed, colliding, or
+oversized support file fails preflight; Test never repairs Build evidence.
+
+Relevant implementation:
+
+- `backend/packages/harness/deerflow/agents/dbtl/live_stage/test_rerun.py`
+
 ## Worked example: one Build stage, multiple internal steps
 
 Build is one DBTL stage, but a phased Build runs several server-governed steps
@@ -286,6 +307,7 @@ Common failures:
 | `ModuleNotFoundError: numpy` | Gateway started from an environment without `dbtl-build` | Run `uv sync --extra dbtl-build`, then launch with `uv run` |
 | Write permission error | Code wrote outside `DBTL_WORKSPACE` | Build all derived paths from `DBTL_WORKSPACE` |
 | Input permission error during verification | Code read a path not issued as `DBTL_INPUT_N` | Declare the input and read its issued variable |
+| Test validator cannot find `fit.py` or another sibling | Build support files were not staged into the clean Test workspace | Keep the support files in Build lineage and run the current server-owned Test staging path |
 | Build refuses before a worker starts | Scientific preflight or shell boundary is incomplete | Read the preflight message; repair the launcher or use a supported sandbox provider |
 | Local verification refused on Linux | No supported local process-tree sandbox | Use a remote/container provider with `bwrap` |
 
@@ -301,5 +323,7 @@ When changing DBTL execution, keep these invariants together:
 - Workers write only under their unit `DBTL_WORKSPACE`.
 - Server verification re-executes the entry point with the same environment and
   a stricter read boundary.
+- Test stages only hash-bound Build support files; expected outputs are always
+  regenerated from an otherwise clean workspace.
 - Missing packages or isolation fail before planner/worker spend whenever
   possible.

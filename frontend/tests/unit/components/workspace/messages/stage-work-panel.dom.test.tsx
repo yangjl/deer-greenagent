@@ -14,6 +14,18 @@ rs.mock("@/components/workspace/messages/subtask-card", () => ({
   SubtaskCard: ({ taskId }: { taskId: string }) => <div>{taskId}</div>,
 }));
 
+rs.mock("@/core/i18n/hooks", () => ({
+  useI18n: () => ({
+    t: {
+      subtasks: {
+        stageTokenCapped: "Stopped at the token budget.",
+        stageTurnCapped: "Stopped at the turn limit.",
+        stageLoopCapped: "Stopped at the loop guard.",
+      },
+    },
+  }),
+}));
+
 import { StageWorkPanel } from "@/components/workspace/messages/stage-work-panel";
 import { fetchStageWorkers, StageWorkerFetchError } from "@/core/tasks/api";
 import { SubtaskContext, SubtasksProvider } from "@/core/tasks/context";
@@ -204,6 +216,89 @@ describe("StageWorkPanel durable hydration", () => {
 });
 
 describe("StageWorkPanel live run selection", () => {
+  it("places each worker's model prose directly after its own card", () => {
+    mockedFetchStageWorkers.mockResolvedValue([]);
+    const implementation: Subtask = {
+      id: "implementation",
+      status: "completed",
+      subagent_type: "subagent",
+      description: "Implementation specialist",
+      prompt: "",
+      dbtlStage: "build",
+      runId: "run-1",
+      displaySummary: "Implemented the exact fixture.",
+    };
+    const audit: Subtask = {
+      id: "audit",
+      status: "completed",
+      subagent_type: "subagent",
+      description: "Independent audit specialist",
+      prompt: "",
+      dbtlStage: "build",
+      runId: "run-1",
+      displaySummary: "The independent rerun passed.",
+    };
+
+    const { container } = render(
+      <SeededTasks tasks={{ implementation, audit }}>
+        <StageWorkPanel threadId="thread-1" runId="run-1" isLoading={false} />
+      </SeededTasks>,
+    );
+
+    expect(container.textContent).toMatch(
+      /implementation.*Implemented the exact fixture\..*audit.*The independent rerun passed\./s,
+    );
+  });
+
+  it("does not narrate a worker before it finishes", () => {
+    const running: Subtask = {
+      id: "running-phase",
+      status: "in_progress",
+      subagent_type: "subagent",
+      description: "Implementation specialist",
+      prompt: "",
+      dbtlStage: "build",
+      runId: "run-1",
+      displaySummary: "Partial output must not read as a result.",
+    };
+
+    render(
+      <SeededTasks tasks={{ running }}>
+        <StageWorkPanel threadId="thread-1" runId="run-1" isLoading />
+      </SeededTasks>,
+    );
+
+    expect(
+      screen.queryByText("Partial output must not read as a result."),
+    ).toBeNull();
+  });
+
+  it("narrates the bounded stop reason instead of partial-success prose", () => {
+    mockedFetchStageWorkers.mockResolvedValue([]);
+    const capped: Subtask = {
+      id: "capped-phase",
+      status: "failed",
+      subagent_type: "subagent",
+      description: "Implementation specialist",
+      prompt: "",
+      dbtlStage: "build",
+      runId: "run-1",
+      stopReason: "token_capped",
+      error: "Implemented every requested output.",
+    };
+
+    render(
+      <SeededTasks tasks={{ capped }}>
+        <StageWorkPanel threadId="thread-1" runId="run-1" isLoading={false} />
+      </SeededTasks>,
+    );
+
+    expect(screen.getByText("Stopped at the token budget.")).toBeTruthy();
+    expect(
+      screen.queryByText("Implemented every requested output."),
+    ).toBeNull();
+  });
+
   it("follows the streamed worker instead of the previous transcript run", async () => {
     const oldTask: Subtask = {
       id: "old-planner",

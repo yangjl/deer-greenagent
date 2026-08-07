@@ -111,6 +111,9 @@ from deerflow.agents.dbtl.supervisor_support.card_history import (
     routing_input as _routing_input,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
+    setup_answered_immediately_before_card as _setup_answered_immediately_before_card,
+)
+from deerflow.agents.dbtl.supervisor_support.card_history import (
     unanswered_build_control_card as _unanswered_build_control_card,
 )
 from deerflow.agents.dbtl.supervisor_support.card_history import (
@@ -1098,7 +1101,6 @@ def _test_card_messages(
             "advance_to_learn": "Accept outcome and advance to Learn",
             "repeat_test": "Repeat Test",
             "return_to_build": "Return to Build",
-            "return_to_reconciliation": "Return to Data Reconciliation",
             "return_to_design": "Return to Design",
             "close_cycle": "Close this cycle",
         }
@@ -1580,6 +1582,11 @@ def build_supervisor_graph(
         if _confirmation_answer(state) == "create_cycle" and not _has_emitted_card(state, SETUP_CLARIFICATION_PREFIX):
             return SupervisorBranch.CLARIFICATION.value
 
+        # These answers belong to the cycle created by the preceding confirmed
+        # setup; conversational discovery must not offer another one.
+        if _design_inputs_acknowledgement(state) is not None:
+            return SupervisorBranch.CYCLE_SETUP.value
+
         active_discovery, discovery_suppressed = await _discovery_routing_state(config)
         decision = decide(
             state,
@@ -1702,6 +1709,19 @@ def build_supervisor_graph(
                 except ValueError:
                     return {"messages": [receipt_message("That discovery card is stale. No cycle was created; use the newest proposal in this conversation.")]}
             if action == DiscoveryAction.START.value:
+                existing_cycle_id = None
+                if _setup_answered_immediately_before_card(state, answered[0]):
+                    existing_cycle_id = await _conversation_cycle_id(config)
+                if existing_cycle_id and active.get("status") != DiscoveryStatus.CONFIRMED.value:
+                    try:
+                        await discovery_store.transition(
+                            discovery_id=str(active["id"]),
+                            expected_revision=int(active["revision"]),
+                            target=DiscoveryStatus.SUPERSEDED,
+                        )
+                    except ValueError:
+                        return {"messages": [receipt_message("That discovery card is stale. No cycle was created by this request.")]}
+                    return {"messages": [receipt_message(f"This conversation already created DBTL cycle {existing_cycle_id}. No additional cycle was created; continue the existing cycle instead.")]}
                 try:
                     confirmed = await discovery_store.confirm_and_create_cycle(
                         discovery_id=str(active["id"]),

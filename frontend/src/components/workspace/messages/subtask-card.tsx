@@ -56,6 +56,7 @@ export function SubtaskCard({
   runId,
   isLoading,
   flat = false,
+  showTerminalReport = true,
 }: {
   className?: string;
   taskId: string;
@@ -67,6 +68,7 @@ export function SubtaskCard({
   // ordinary tool-call / script-writing progress report rather than a
   // decorated card. Ordinary chat subagents keep the default look.
   flat?: boolean;
+  showTerminalReport?: boolean;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
@@ -238,7 +240,7 @@ export function SubtaskCard({
             </div>
           </Button>
         </div>
-        {collapsed && terminalStageReport ? (
+        {showTerminalReport && collapsed && terminalStageReport ? (
           <div className="border-border/60 border-t px-4 py-3">
             <div className="text-muted-foreground mb-1 text-[11px] font-medium tracking-wide uppercase">
               {task.status === "failed"
@@ -324,7 +326,9 @@ export function SubtaskCard({
                   key={entry.id}
                   id={entry.id}
                   name={entry.toolName ?? "tool"}
-                  args={(entry.args as Record<string, unknown> | undefined) ?? {}}
+                  args={
+                    (entry.args as Record<string, unknown> | undefined) ?? {}
+                  }
                   result={entry.text}
                   threadId={threadId}
                   isLoading={isLastWhileRunning}
@@ -368,7 +372,7 @@ export function SubtaskCard({
               />
             );
           })}
-          {task.status === "completed" && (
+          {showTerminalReport && task.status === "completed" && (
             <>
               <ChainOfThoughtStep
                 label={t.subtasks.completed}
@@ -386,7 +390,7 @@ export function SubtaskCard({
               ></ChainOfThoughtStep>
             </>
           )}
-          {task.status === "failed" && (
+          {showTerminalReport && task.status === "failed" && (
             <ChainOfThoughtStep
               label={<div className="text-red-500">{displayError}</div>}
               icon={<XCircleIcon className="size-4 text-red-500" />}

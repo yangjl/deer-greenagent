@@ -113,6 +113,35 @@ def emitted_card_request(state: dict, request_id: str) -> dict | None:
     return None
 
 
+def setup_answered_immediately_before_card(state: dict, request_id: str) -> bool:
+    """Whether ``request_id`` was emitted directly from a setup answer.
+
+    This identifies cards emitted by the former setup-to-discovery routing bug
+    without treating a later, explicit request to start another cycle as stale.
+    """
+    messages = state.get("messages") or []
+    card_index = next(
+        (index for index in range(len(messages) - 1, -1, -1) if isinstance(messages[index], ToolMessage) and messages[index].tool_call_id == request_id),
+        None,
+    )
+    if card_index is None:
+        return False
+    for message in reversed(messages[:card_index]):
+        if not isinstance(message, HumanMessage):
+            continue
+        response = read_human_input_response(getattr(message, "additional_kwargs", None) or {})
+        if not response or response.get("source") != "ask_clarification":
+            return False
+        setup_request_id = str(response.get("request_id") or "")
+        if not setup_request_id.startswith(SETUP_CLARIFICATION_PREFIX):
+            return False
+        request = emitted_card_request(state, setup_request_id)
+        if request is None or request.get("clarification_type") != "cycle_setup":
+            return False
+        return True
+    return False
+
+
 def _stage_handoff_option(request: dict[str, Any], response: dict[str, Any]) -> dict[str, Any] | None:
     """Resolve a reply only when it selects an offered Start/Hold option."""
     if request.get("clarification_type") != "dbtl_stage_handoff" or response.get("response_kind") != "option":

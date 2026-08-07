@@ -1440,6 +1440,36 @@ async def list_run_events(
     ]
 
 
+@router.get("/{thread_id}/stage-worker-events", response_model=StageWorkerEventsResponse)
+@require_permission("runs", "read", owner_check=True)
+async def list_stage_worker_events(
+    thread_id: ThreadId,
+    request: Request,
+    limit: int = Query(default=500, ge=1, le=2000),
+    before_seq: int | None = Query(default=None, ge=1),
+) -> dict[str, Any]:
+    """Return persisted stage-worker lifecycle events across every thread run."""
+    event_store = get_run_event_store(request)
+    events = await event_store.list_thread_events(
+        thread_id,
+        event_types=["subagent.start", "subagent.end"],
+        limit=limit,
+        before_seq=before_seq,
+    )
+    return {
+        "events": [
+            {
+                **event,
+                "metadata": redact_metadata_secrets(event.get("metadata")),
+            }
+            if isinstance(event, dict) and "metadata" in event
+            else event
+            for event in events
+        ],
+        "next_before_seq": (events[0].get("seq") if events and len(events) >= limit else None),
+    }
+
+
 @router.get("/{thread_id}/runs/{run_id}/workspace-changes")
 @require_permission("runs", "read", owner_check=True)
 async def get_run_workspace_changes(

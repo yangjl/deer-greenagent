@@ -482,12 +482,8 @@ class BuildTestOpsMixin:
             if lineage is None and (not exception_evidence or evaluation.outcome is not ValidityOutcome.INVALIDATED):
                 raise DbtlWorkflowRefused("Test validity cannot be assessed without Build lineage.")
 
-            # Phase 0 makes the stage graph the route authority. The legacy
-            # validity contract still parses old recommendation names, but it
-            # may not authorize an edge the graph does not offer. In
-            # Reconciliation is not a path destination. Historical
-            # ``return_to_reconciliation`` recommendations are refused; the
-            # graph's executable route is Return to Build.
+            # The stage graph is the route authority; a validity recommendation
+            # may not authorize an edge the graph does not offer.
             self._require_graph_route(
                 outcome=evaluation.outcome,
                 route=route,
@@ -609,7 +605,7 @@ class BuildTestOpsMixin:
         outcome: ValidityOutcome,
         route: WorkflowRecommendation,
     ) -> None:
-        """Refuse legacy recommendations that are not legal graph edges."""
+        """Refuse recommendations that are not legal graph edges."""
         routes = compute_stage_routes(
             RouteContext(
                 stage="test",
@@ -624,8 +620,6 @@ class BuildTestOpsMixin:
             WorkflowRecommendation.RETURN_TO_DESIGN: RouteSlug.RETURN_TO_DESIGN,
             WorkflowRecommendation.CLOSE_CYCLE: RouteSlug.CLOSE_CYCLE,
         }.get(route)
-        if route is WorkflowRecommendation.RETURN_TO_RECONCILIATION:
-            raise ValidityRefused("Reconciliation is not a cycle-stage destination; choose Return to Build instead.")
         selected = next(
             (candidate for candidate in routes if candidate.slug == route_slug),
             None,
@@ -674,12 +668,6 @@ class BuildTestOpsMixin:
             attempts["test"].status = StageStatus.LOCKED.value
             attempts["learn"].status = StageStatus.LOCKED.value
             cycle.state = "build"
-            return
-        if route is WorkflowRecommendation.RETURN_TO_RECONCILIATION:
-            attempts["reconciliation"].status = StageStatus.CHANGES_REQUESTED.value
-            for stage in ("build", "test", "learn"):
-                attempts[stage].status = StageStatus.LOCKED.value
-            cycle.state = "reconciliation"
             return
         if route is WorkflowRecommendation.RETURN_TO_DESIGN:
             attempts["design"].status = StageStatus.CHANGES_REQUESTED.value

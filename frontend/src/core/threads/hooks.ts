@@ -586,15 +586,21 @@ export function mergeMessages(
     if (!identity) {
       return message;
     }
+    // Run ownership comes from the canonical run-event history. A checkpoint
+    // snapshot can retain a stale run_id on messages appended by a later run;
+    // trusting that value moves run-scoped UI (meetings, duration, workers)
+    // onto the wrong turn after refresh.
+    const canonicalRunId = savedRunIds.get(identity);
     const shouldRestoreRunId =
-      savedRunIds.has(identity) && !getMessageRunId(message);
+      canonicalRunId !== undefined &&
+      getMessageRunId(message) !== canonicalRunId;
     const shouldRestoreTurnDuration =
       savedTurnDurations.has(identity) &&
       message.additional_kwargs?.turn_duration === undefined;
     if (shouldRestoreRunId || shouldRestoreTurnDuration) {
       return {
         ...message,
-        ...(shouldRestoreRunId ? { run_id: savedRunIds.get(identity) } : {}),
+        ...(shouldRestoreRunId ? { run_id: canonicalRunId } : {}),
         ...(shouldRestoreTurnDuration
           ? {
               additional_kwargs: {

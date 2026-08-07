@@ -40,7 +40,7 @@ def _request(**overrides: object) -> object:
     return parsed.request
 
 
-def _deck(*, decision: object | None = None, question: str = QUESTION) -> str:
+def _deck(*, decision: object | None = None, question: str = QUESTION, surface_mode: str = "") -> str:
     return render_council_deck(
         cycle_title="Genomic selection in maize",
         stage_title="Design meeting",
@@ -49,6 +49,8 @@ def _deck(*, decision: object | None = None, question: str = QUESTION) -> str:
         package_path="/mnt/user-data/outputs/dbtl/x/design/design-review-rev2-abc123.md",
         clarification_question=question,
         decision_request=decision,
+        surface_mode=surface_mode,
+        surface_id="dfs-chair-choice" if surface_mode else "",
     )
 
 
@@ -171,10 +173,12 @@ class TestFallbackAndOrdering:
         assert 'data-deck-action="chair_text"' in html
         assert "data-deck-comment" in html
 
-    def test_the_decision_slide_sits_between_contested_and_synthesis(self) -> None:
-        html = _deck(decision=_request())
+    def test_a_paused_chairs_decision_is_the_final_slide(self) -> None:
+        html = _deck(decision=_request(), surface_mode="chair_feedback")
 
-        assert html.index(">Contested<") < html.index(">Needs your decision<") < html.index(">Conclusions<")
+        titles = re.findall(r"<h2>(.*?)</h2>", html)
+        assert titles[-1] == "Needs your decision"
+        assert html.index(">Contested<") < html.index(">Conclusions<") < html.index(">Needs your decision<")
 
     def test_the_same_inputs_render_the_same_bytes(self) -> None:
         """The deck is hashed and bound to a review, so it must be stable."""

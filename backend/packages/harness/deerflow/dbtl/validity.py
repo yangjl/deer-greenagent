@@ -50,7 +50,6 @@ class WorkflowRecommendation(StrEnum):
     LEARN_FROM_INVALIDATED_EVIDENCE = "learn_from_invalidated_evidence"
     REPEAT_TEST = "repeat_test"
     RETURN_TO_BUILD = "return_to_build"
-    RETURN_TO_RECONCILIATION = "return_to_reconciliation"
     RETURN_TO_DESIGN = "return_to_design"
     CLOSE_CYCLE = "close_cycle"
 
@@ -211,7 +210,6 @@ _ALLOWED_RECOMMENDATIONS = MappingProxyType(
         ValidityOutcome.INCONCLUSIVE: (
             WorkflowRecommendation.REPEAT_TEST,
             WorkflowRecommendation.RETURN_TO_BUILD,
-            WorkflowRecommendation.RETURN_TO_RECONCILIATION,
             WorkflowRecommendation.RETURN_TO_DESIGN,
             WorkflowRecommendation.CLOSE_CYCLE,
         ),
@@ -219,7 +217,6 @@ _ALLOWED_RECOMMENDATIONS = MappingProxyType(
             WorkflowRecommendation.LEARN_FROM_INVALIDATED_EVIDENCE,
             WorkflowRecommendation.REPEAT_TEST,
             WorkflowRecommendation.RETURN_TO_BUILD,
-            WorkflowRecommendation.RETURN_TO_RECONCILIATION,
             WorkflowRecommendation.RETURN_TO_DESIGN,
             WorkflowRecommendation.CLOSE_CYCLE,
         ),
