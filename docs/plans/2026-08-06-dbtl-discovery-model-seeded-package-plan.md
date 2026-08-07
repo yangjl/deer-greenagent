@@ -1,8 +1,42 @@
-# DBTL discovery: tool-seeded package plan
+# DBTL discovery: model-seeded package plan
 
-**Status:** Proposed; this document does not authorize implementation or rollout.
+**Status:** In implementation (2026-08-07). Flags remain dark until a reviewed pilot.
 
-**Date:** 2026-08-06
+**Date:** 2026-08-06 (superseding decision 2026-08-07)
+
+---
+
+## Superseding decision (2026-08-07)
+
+This document was written around a registered `dbtl_workflow` **tool** the Lead
+Agent would call to propose a package (see §2, §4, §6, §10). After it was
+written, the owner explicitly chose the **structured-output** emit mechanism
+instead of the scoped tool ("structured output, yes!"), so the tool-vs-tool
+framing below is superseded. The implemented shape is:
+
+- The discovery Lead turn reuses the **existing** `lead_agent.ainvoke` call at
+  `supervisor.discovery`; no new per-turn model call and no registered
+  `dbtl_workflow` tool.
+- That call is compiled with `response_format` (LangChain `create_agent` +
+  `ToolStrategy`) bound to a closed discovery-package schema, so the model emits
+  the package as a validated `structured_response` **alongside** its ordinary
+  conversational reply — resolving the "structured output conflicts with the
+  reply" concern in §10 (LangChain returns both).
+- On a missing or invalid `structured_response`, the node falls back to the
+  deterministic `build_discovery_package()` (unchanged rollback path).
+- Budget: reuse the Lead Agent's **existing** bounded context window + durable
+  summary and the **existing** `discovery_context_provider` source-refs (the
+  "curated digest by reference"); heavy inputs stay by hash reference at zero
+  context cost. No new discovery-specific compaction/digest subsystem is built
+  in this slice (matches §7 non-goals); the owner's "~50k recent, compact
+  beyond, digest by reference" intent is served by that existing machinery.
+  Add a dedicated compactor only if a reviewed pilot shows decision-bearing
+  turns are being truncated.
+
+Everywhere below that says "register `dbtl_workflow`" or "the tool", read
+"compile the discovery Lead call with `response_format` and read
+`structured_response`". Authority, phases, package fields, provenance, failure
+rules, and acceptance criteria are otherwise unchanged.
 
 **Goal:** Let the Lead Agent suggest a DBTL cycle from ordinary project chat
 with a useful, evidence-labelled seed—without a hidden model call on every turn,

@@ -12,8 +12,14 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result
+from deerflow.dbtl.discovery import DISCOVERY_PACKAGE_TOOL_NAME
 
 DBTL_DISCOVERY_CONTEXT_KEY = "dbtl_discovery_context"
+
+# The model-seeded discovery package is emitted as a structured-output tool
+# (``response_format``). It carries no side effect and must survive the
+# read-only filter below, or the Lead turn could never propose a package.
+_DISCOVERY_ALLOWED_TOOL_NAMES = frozenset({DISCOVERY_PACKAGE_TOOL_NAME})
 
 DISCOVERY_READ_ONLY_TOOLS = frozenset(
     {
@@ -49,14 +55,14 @@ class DbtlDiscoveryPolicyMiddleware(AgentMiddleware):
     def _filter(request: ModelRequest) -> ModelRequest:
         if not _discovery_active(request):
             return request
-        return request.override(tools=[tool for tool in request.tools if str(getattr(tool, "name", "")) in DISCOVERY_READ_ONLY_TOOLS])
+        return request.override(tools=[tool for tool in request.tools if str(getattr(tool, "name", "")) in DISCOVERY_READ_ONLY_TOOLS or str(getattr(tool, "name", "")) in _DISCOVERY_ALLOWED_TOOL_NAMES])
 
     @staticmethod
     def _blocked(request: ToolCallRequest) -> ToolMessage | None:
         if not _discovery_active(request):
             return None
         name = str(request.tool_call.get("name") or "")
-        if name in DISCOVERY_READ_ONLY_TOOLS:
+        if name in DISCOVERY_READ_ONLY_TOOLS or name in _DISCOVERY_ALLOWED_TOOL_NAMES:
             return None
         return normalize_tool_result(
             ToolMessage(

@@ -177,6 +177,7 @@ from deerflow.dbtl.discovery import (
     assess_discovery_readiness,
     build_discovery_package,
     discovery_card_request,
+    normalize_model_discovery_package,
     wants_discovery_offer,
 )
 from deerflow.dbtl.routing import ExplicitChoice, RouteKind, RouteSource, RoutingDecision
@@ -1423,6 +1424,7 @@ def build_supervisor_graph(
     discovery_store=None,
     discovery_context_provider=None,
     cycle_creator=None,
+    discovery_lead_agent=None,
 ) -> StateGraph:
     """Build (but do not compile) the supervisor graph.
 
@@ -1837,7 +1839,25 @@ def build_supervisor_graph(
         run_id = run_id_from_config(config)
         parent_id = supervisor_activity_id(run_id) if isinstance(run_id, str) and run_id else None
         with activity_parent_context(parent_id):
-            lead_result = await lead_agent.ainvoke(state, config=discovery_config, context=active_context)
+            lead_result = await (discovery_lead_agent or lead_agent).ainvoke(state, config=discovery_config, context=active_context)
+
+        # The discovery Lead turn ran with the full conversation and (when the
+        # flag is on) a ``response_format`` bound to the closed package schema.
+        # Prefer its comprehension over the last-turn regex builder; fall back
+        # to the already-persisted deterministic draft if the model emitted no
+        # valid structured package, so an invalid proposal can never seed a card.
+        model_draft = normalize_model_discovery_package(lead_result.get("structured_response"), previous=previous_draft)
+        if model_draft is not None:
+            if discovery_evidence:
+                model_draft["context_refs"] = list(discovery_evidence.get("source_refs") or [])
+                model_draft["context_conflicts"] = list(discovery_evidence.get("conflicts") or [])
+            structured_draft = model_draft
+            active = await discovery_store.record_turn(
+                discovery_id=str(active["id"]),
+                expected_revision=int(active["revision"]),
+                latest_user_turn=latest_text,
+                structured_draft=structured_draft,
+            )
 
         draft = DiscoveryDraft(
             discovery_id=str(active["id"]),
@@ -2889,6 +2909,17 @@ def make_project_supervisor(config: RunnableConfig):
     # ``make_lead_agent`` re-freezes the same mode (idempotent) and builds the
     # full middleware chain, so the ordinary branch is the production agent.
     lead_agent = make_lead_agent(config)
+
+    # A second compilation bound to the closed discovery-package schema, used
+    # only for the read-only discovery turn so the model emits a validated
+    # ``structured_response`` alongside its reply. Built only when the flag is
+    # on (dark by default) to avoid the extra compile when discovery cannot run;
+    # the discovery node degrades to the deterministic builder when it is None.
+    discovery_lead_agent = None
+    if runtime_app_config.dbtl.conversational_discovery_enabled:
+        from deerflow.agents.lead_agent.agent import make_discovery_lead_agent
+
+        discovery_lead_agent = make_discovery_lead_agent(config)
     from deerflow.agents.dbtl.stage_execution import (
         LiveStageAdapter,
         make_llm_intent_interpreter,
@@ -2989,6 +3020,7 @@ def make_project_supervisor(config: RunnableConfig):
     )
     graph = build_supervisor_graph(
         lead_agent=lead_agent,
+        discovery_lead_agent=discovery_lead_agent,
         context=supervisor_context,
         state_schema=get_thread_state_schema(mode),
         stage_adapter=LiveStageAdapter(

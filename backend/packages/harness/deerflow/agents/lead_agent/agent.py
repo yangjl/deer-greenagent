@@ -658,8 +658,15 @@ def _load_enabled_available_skills(available_skills: set[str] | None, *, app_con
     return [skill for skill in skills if skill.name in available_skills]
 
 
-def make_lead_agent(config: RunnableConfig):
-    """LangGraph graph factory; keep the signature compatible with LangGraph Server."""
+def _prepare_and_make_lead_agent(config: RunnableConfig, *, response_format=None):
+    """Freeze the checkpoint mode, then build the lead agent.
+
+    ``response_format`` (a LangChain structured-output strategy/schema) is set
+    only for the read-only DBTL discovery turn, so the model emits a validated
+    package as ``structured_response`` alongside its reply. It is ``None`` for
+    every ordinary turn, and is not forwarded then so existing ``_make_lead_agent``
+    seams (and their test stubs) keep their original signature.
+    """
     runtime_config = _get_runtime_config(config)
     runtime_app_config = runtime_config.get("app_config")
     if not isinstance(runtime_app_config, AppConfig):
@@ -686,10 +693,31 @@ def make_lead_agent(config: RunnableConfig):
     # configurable key must not recompile the channel table either).
     freeze_checkpoint_snapshot_frequency(runtime_app_config.database.checkpoint_delta.snapshot_frequency)
     inject_checkpoint_mode(config, mode)
-    return _make_lead_agent(config, app_config=runtime_app_config)
+    return _make_lead_agent(
+        config,
+        app_config=runtime_app_config,
+        **({"response_format": response_format} if response_format is not None else {}),
+    )
 
 
-def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
+def make_lead_agent(config: RunnableConfig):
+    """LangGraph graph factory; keep the signature ``(config)`` compatible with
+    LangGraph Server (pinned by ``test_..._factory_abi``)."""
+    return _prepare_and_make_lead_agent(config)
+
+
+def make_discovery_lead_agent(config: RunnableConfig):
+    """Lead agent for the read-only DBTL discovery turn, compiled with a
+    ``response_format`` bound to the closed package schema so the model emits a
+    validated ``structured_response`` alongside its conversational reply."""
+    from langchain.agents.structured_output import ToolStrategy
+
+    from deerflow.dbtl.discovery_schema import DbtlDiscoveryPackage
+
+    return _prepare_and_make_lead_agent(config, response_format=ToolStrategy(schema=DbtlDiscoveryPackage))
+
+
+def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, response_format=None):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
@@ -947,4 +975,5 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             skill_names=skill_setup.skill_names or None,
         ),
         state_schema=get_thread_state_schema(mode),
+        **({"response_format": response_format} if response_format is not None else {}),
     )

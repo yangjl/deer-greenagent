@@ -204,6 +204,119 @@ def build_discovery_package(request_text: str, previous: dict[str, Any] | None =
     }
 
 
+# Stable tool name for the model-seeded structured-output package. The discovery
+# read-only tool policy must allow this name through, and the Lead call's
+# ``response_format`` schema (``discovery_schema.DbtlDiscoveryPackage``) must be
+# named to match, because LangChain derives the structured tool name from the
+# schema class name.
+DISCOVERY_PACKAGE_TOOL_NAME = "DbtlDiscoveryPackage"
+
+# Bounds for a model-seeded package. Kept here (not in the schema) so the pure
+# normaliser is the one authority: the model may over- or under-fill, and this
+# closes the payload before it can seed a card.
+_MAX_TITLE_LEN = 120
+_MAX_TEXT_LEN = 2000
+_MAX_ITEM_LEN = 280
+_MAX_KNOWN_INPUTS = 20
+_MAX_INTENDED_OUTPUTS = 10
+_MAX_SUCCESS_CRITERIA = 10
+_MAX_REJECTION_CRITERIA = 10
+_MAX_CONFLICTS = 10
+_MAX_OPEN_QUESTIONS = 5
+# The deterministic builder's placeholder output; a model that only echoes this
+# has added nothing concrete, so it is dropped rather than offered.
+_GENERIC_OUTPUT_PREFIX = "a reviewed result for"
+
+_ACCEPTED_PROVENANCE_FIELDS = (
+    "objective",
+    "rationale",
+    "known_inputs",
+    "intended_outputs",
+    "success_criteria",
+    "rejection_criteria",
+)
+
+
+def _clean_str(value: Any, *, limit: int) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _clean_list(value: Any, *, limit_items: int, limit_len: int = _MAX_ITEM_LEN) -> list[str]:
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        value = [value] if value else []
+    cleaned: list[str] = []
+    for item in value:
+        text = str(item or "").strip()[:limit_len]
+        if text and text not in cleaned:
+            cleaned.append(text)
+        if len(cleaned) >= limit_items:
+            break
+    return cleaned
+
+
+def normalize_model_discovery_package(
+    raw: Any,
+    *,
+    previous: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Close a model-emitted discovery package into the deterministic payload shape.
+
+    Returns ``None`` when the structured output is missing, malformed, or lacks a
+    concrete objective and intended output. The caller falls back to
+    :func:`build_discovery_package` on ``None`` so an invalid model proposal can
+    never seed a card. The returned dict is shape-compatible with
+    :func:`build_discovery_package` (plus an additive ``conflicts`` list) so the
+    rest of the discovery pipeline is unchanged.
+    """
+
+    if hasattr(raw, "model_dump"):
+        try:
+            raw = raw.model_dump()
+        except Exception:  # noqa: BLE001 - a schema object that will not dump is not usable
+            return None
+    if not isinstance(raw, dict):
+        return None
+
+    objective = _clean_str(raw.get("objective"), limit=_MAX_TEXT_LEN)
+    if not objective:
+        return None
+
+    outputs = [item for item in _clean_list(raw.get("intended_outputs"), limit_items=_MAX_INTENDED_OUTPUTS) if not item.lower().startswith(_GENERIC_OUTPUT_PREFIX)]
+    if not outputs:
+        return None
+
+    title = _clean_str(raw.get("proposed_title"), limit=_MAX_TITLE_LEN) or objective[:_MAX_TITLE_LEN]
+    rationale = _clean_str(raw.get("rationale"), limit=_MAX_TEXT_LEN)
+    known_inputs = _clean_list(raw.get("known_inputs"), limit_items=_MAX_KNOWN_INPUTS)
+    success_list = _clean_list(raw.get("success_criteria"), limit_items=_MAX_SUCCESS_CRITERIA)
+    rejection = _clean_list(raw.get("rejection_criteria"), limit_items=_MAX_REJECTION_CRITERIA)
+    conflicts = _clean_list(raw.get("conflicts"), limit_items=_MAX_CONFLICTS)
+    open_questions = _clean_list(raw.get("open_questions"), limit_items=_MAX_OPEN_QUESTIONS)
+
+    accepted = {str(name).strip() for name in (raw.get("accepted_fields") or []) if isinstance(name, str)}
+    provenance: dict[str, dict[str, Any]] = {}
+    for field in _ACCEPTED_PROVENANCE_FIELDS:
+        is_accepted = field in accepted
+        provenance[field] = {
+            "source": DiscoveryProvenance.USER_TURN.value if is_accepted else DiscoveryProvenance.MODEL_SUGGESTION.value,
+            "accepted": is_accepted,
+        }
+
+    prior = dict(previous or {})
+    return {
+        "proposed_title": title,
+        "objective": objective,
+        "rationale": rationale or str(prior.get("rationale") or "").strip(),
+        "known_inputs": known_inputs or list(prior.get("known_inputs") or []),
+        "intended_outputs": outputs,
+        "success_criteria": "; ".join(success_list),
+        "rejection_criteria": rejection,
+        "conflicts": conflicts,
+        "open_questions": open_questions,
+        "provenance": provenance,
+    }
+
+
 _ALLOWED_TRANSITIONS: dict[DiscoveryStatus, frozenset[DiscoveryStatus]] = {
     DiscoveryStatus.GATHERING: frozenset(
         {

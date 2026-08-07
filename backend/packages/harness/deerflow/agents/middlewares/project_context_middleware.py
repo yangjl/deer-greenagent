@@ -202,6 +202,15 @@ def build_dbtl_discovery_reminder(value: object) -> str | None:
             "No cycle exists yet. Ask at most one high-value question unless the owner requests a checklist.",
             "You may inspect project evidence and explain recommendations. You may not create or advance a cycle, "
             "run or delegate governed work, mutate files or memory, call side-effecting connectors, or describe this conversation as a stage result.",
+            "Reply to the owner in ordinary prose: a brief note on whether DBTL helps and why, plus at most one material question.",
+            "Then, when — and only when — the conversation holds a concrete objective, at least one concrete intended "
+            "output, and a real reproducibility/risk reason for DBTL, also fill the DbtlDiscoveryPackage structured output "
+            "from the whole conversation (not just the last message).",
+            "In that package: name concrete outputs (files, tables, decisions), never a placeholder like 'a reviewed result "
+            "for ...'; list in accepted_fields only what the owner actually stated, leaving your own inferences tentative; "
+            "carry any contradictions into conflicts verbatim without resolving them; and include an open question only when it "
+            "materially changes the design and is not already answered — never restate a field label. Omit the package entirely "
+            "for read-only questions, explanations, or small errands.",
             f"Discovery id: {discovery_id}; revision: {revision}.",
             "The server, not you, decides readiness and renders any start control.",
             "</dbtl_discovery>",
