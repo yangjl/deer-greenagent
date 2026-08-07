@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
+import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
@@ -15,6 +18,43 @@ VERIFY_STDOUT = "logs/server-verification.stdout.log"
 VERIFY_STDERR = "logs/server-verification.stderr.log"
 VERIFY_STATUS = ".server-verification-exit-status"
 MAX_VERIFY_LOG_BYTES = 5 * 1024 * 1024
+
+REQUIRED_SCIENTIFIC_MODULES: tuple[tuple[str, str], ...] = (
+    ("numpy", "NumPy"),
+    ("scipy", "SciPy"),
+    ("pandas", "pandas"),
+    ("matplotlib", "Matplotlib"),
+    ("statsmodels", "statsmodels"),
+    ("sklearn", "scikit-learn"),
+    ("seaborn", "seaborn"),
+    ("jupyter", "Jupyter"),
+    ("nbconvert", "nbconvert"),
+    ("ipykernel", "ipykernel"),
+)
+
+
+def missing_scientific_packages() -> tuple[str, ...]:
+    """Scientific packages absent from the gateway interpreter."""
+    return tuple(label for module, label in REQUIRED_SCIENTIFIC_MODULES if importlib.util.find_spec(module) is None)
+
+
+def local_dbtl_runtime_env() -> dict[str, str]:
+    """Select the gateway venv for DBTL commands executed on the local host.
+
+    The command stays portable (``python script.py``). PATH is the environment
+    contract that makes that name resolve to the same provisioned interpreter
+    which imported the gateway and owns the ``dbtl-build`` scientific stack.
+    """
+    # Preserve the venv path even when its ``python`` is a symlink to a base
+    # interpreter. Resolving the symlink would discard the environment whose
+    # site-packages are the reason for this overlay.
+    bin_dir = os.path.dirname(os.path.abspath(sys.executable))
+    current = os.environ.get("PATH", "")
+    path_parts = [bin_dir, *(part for part in current.split(os.pathsep) if part and part != bin_dir)]
+    return {
+        "PATH": os.pathsep.join(path_parts),
+        "VIRTUAL_ENV": os.path.dirname(bin_dir),
+    }
 
 
 def resolve_issued_input_tokens(
@@ -72,6 +112,12 @@ class BuildPhaseVerification:
 
 
 def entry_command(entry_point: str) -> str:
+    """The portable command recorded on the phase receipt and rerun contract.
+
+    Deliberately uses generic interpreter names: this string travels into the
+    Test rerun spec and remains reproducible outside this host. Local execution
+    selects the provisioned interpreter through :func:`local_dbtl_runtime_env`.
+    """
     suffix = PurePosixPath(entry_point).suffix.lower()
     quoted = _quoted_path(entry_point)
     interpreters = {
@@ -103,7 +149,7 @@ def verification_shell_command(
 ) -> tuple[str, dict[str, str]]:
     """Return the bounded command and server-issued environment for a phase."""
     workspace = unit_workspace.rstrip("/")
-    command = entry_command(manifest.entry_point)
+    run_script = entry_command(manifest.entry_point)
     stdout = f"{workspace}/{VERIFY_STDOUT}"
     stderr = f"{workspace}/{VERIFY_STDERR}"
     status = f"{workspace}/{VERIFY_STATUS}"
@@ -113,7 +159,7 @@ def verification_shell_command(
             f"mkdir -p {_quoted_path(workspace + '/logs')}",
             f"cd {_quoted_path(workspace)} || exit 97",
             "ulimit -f 1048576 || exit 98",
-            f"({command}) > {_quoted_path(stdout)} 2> {_quoted_path(stderr)}",
+            f"{run_script} > {_quoted_path(stdout)} 2> {_quoted_path(stderr)}",
             "dbtl_verify_status=$?",
             f"printf '%s\\n' \"$dbtl_verify_status\" > {_quoted_path(status)}",
             "exit 0",
@@ -125,6 +171,30 @@ def verification_shell_command(
         declared_inputs=manifest.execution_inputs if issued_inputs is None else issued_inputs,
     )
     return shell, env
+
+
+#: How much of a failing phase's stderr rides along in the receipt text.
+MAX_STDERR_EXCERPT_CHARS = 400
+
+
+def _stderr_excerpt(*, project_root: str, unit_workspace: str) -> str:
+    """The last meaningful stderr lines of a failed phase, bounded for a receipt.
+
+    The tail rather than the head: a traceback ends with the error that actually
+    stopped the run. Best-effort by design — an unreadable log must never turn a
+    real execution failure into a different one.
+    """
+    resolved = workspace_relative_path(f"{unit_workspace.rstrip('/')}/{VERIFY_STDERR}", project_root=project_root)
+    if resolved is None:
+        return ""
+    try:
+        lines = [line.strip() for line in resolved[1].read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+    except OSError:
+        return ""
+    if not lines:
+        return ""
+    excerpt = " | ".join(lines[-3:])
+    return excerpt[:MAX_STDERR_EXCERPT_CHARS] + ("…" if len(excerpt) > MAX_STDERR_EXCERPT_CHARS else "")
 
 
 def _clear_verification_receipts(*, project_root: str, unit_workspace: str) -> str:
@@ -217,9 +287,17 @@ def execute_and_verify_phase(
         logs.append({"stream": stream, "path": f"/mnt/user-data/{relative}", "bytes": size, "content_hash": content_hash})
 
     if exit_status != 0:
+        # Carry the failure's own words, not just its number. A bare "exited
+        # with status 127" sent every reader hunting for a log file that already
+        # said "python: command not found"; the cause belongs in the receipt the
+        # human and Test actually read.
+        cause = _stderr_excerpt(project_root=project_root, unit_workspace=unit_workspace)
+        reason = f"The server executed the declared Build entry point and it exited with status {exit_status}."
+        if cause:
+            reason = f"{reason} It reported: {cause}"
         return BuildPhaseVerification(
             False,
-            f"The server executed the declared Build entry point and it exited with status {exit_status}.",
+            reason,
             entry_command(manifest.entry_point),
             exit_status=exit_status,
             logs=tuple(logs),

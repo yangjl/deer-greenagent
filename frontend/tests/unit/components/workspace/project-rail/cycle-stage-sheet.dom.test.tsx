@@ -246,8 +246,6 @@ describe("CycleStageSheet Design read-only review", () => {
           to_stage: "build",
           label: "Continue to Build",
           value: "Open Build.",
-          blocked: true,
-          blocked_reason: "Reconciliation is incomplete.",
         },
         {
           slug: "park",
@@ -269,7 +267,6 @@ describe("CycleStageSheet Design read-only review", () => {
       screen.getByText("The field intervention cannot be reversed."),
     ).toBeTruthy();
     expect(screen.getByText("Continue to Build")).toBeTruthy();
-    expect(screen.getByText("Reconciliation is incomplete.")).toBeTruthy();
     expect(screen.getByText("Park — work with the lead agent")).toBeTruthy();
     expect(screen.getByText(/Parked — ordinary requests/)).toBeTruthy();
   });

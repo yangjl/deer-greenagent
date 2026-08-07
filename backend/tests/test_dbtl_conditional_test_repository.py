@@ -45,13 +45,6 @@ def conditional_test(monkeypatch):
     monkeypatch.setattr("deerflow.persistence.dbtl.cycles.conditional_test_enabled", lambda: True)
 
 
-@pytest.fixture(autouse=True)
-def _skip_reconciliation(monkeypatch):
-    """Keep these cases about Test; reconciliation has its own suite."""
-    monkeypatch.setattr("deerflow.persistence.dbtl.cycles.reconciliation_required", lambda: False)
-    monkeypatch.setattr("deerflow.persistence.dbtl.build_test_ops.reconciliation_required", lambda: False)
-
-
 async def _revision(repo: DbtlCycleRepository) -> int:
     current = await repo.get_cycle("cycle-1", project_id="project-1")
     assert current is not None

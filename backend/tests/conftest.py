@@ -112,30 +112,10 @@ def _reset_frozen_checkpoint_channel_mode(monkeypatch):
 
 
 @pytest.fixture
-def strict_reconciliation(monkeypatch):
-    """Pin Build's reconciliation gate to the shipped default (required).
-
-    ``reconciliation_required()`` reads the ambient ``config.yaml``, so a
-    developer who sets ``dbtl.reconciliation_required: false`` silently flips
-    the rule under every test that asserts the strict path — an approved
-    Design opens Build directly and two dozen unrelated assertions fail on
-    their machine while CI, running the default, stays green.
-
-    A test states the mode it exercises rather than inheriting one. This is
-    the strict counterpart to the ``no_reconciliation`` fixture in
-    ``test_dbtl_optional_reconciliation_repository.py``; both patch the two
-    persistence writers that consult the rule.
-    """
-    monkeypatch.setattr("deerflow.persistence.dbtl.cycles.reconciliation_required", lambda: True)
-    monkeypatch.setattr("deerflow.persistence.dbtl.build_test_ops.reconciliation_required", lambda: True)
-
-
-@pytest.fixture
 def mandatory_test(monkeypatch):
     """Pin the Test gate to the shipped default (retention qualification required).
 
-    Same hazard as ``strict_reconciliation``: ``conditional_test_enabled()``
-    reads the ambient ``config.yaml``, so a developer who sets
+    ``conditional_test_enabled()`` reads the ambient ``config.yaml``, so a developer who sets
     ``dbtl.conditional_test: true`` locally makes an exploratory closeout
     legal under every test that asserts a Build approval opens Test — and the
     failures look like a regression in whatever was last touched.
@@ -151,8 +131,7 @@ def mandatory_test(monkeypatch):
 def build_workflow_steps_off(monkeypatch):
     """Pin Build's durable-workflow requirement to the shipped default (off).
 
-    Same hazard as ``strict_reconciliation``: ``build_workflow_steps_enabled()``
-    reads the ambient ``config.yaml``, so a developer running the phased Build
+    ``build_workflow_steps_enabled()`` reads the ambient ``config.yaml``, so a developer running the phased Build
     workflow makes every test that submits Build from a plain artifact fail
     with "Build's durable workflow is incomplete". Tests that mean to exercise
     the workflow chain build one explicitly.

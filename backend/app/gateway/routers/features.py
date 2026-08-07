@@ -48,10 +48,6 @@ class DbtlFeature(BaseModel):
     graph_execution_enabled: bool
     design_deck_feedback: bool
     progressive_gate: bool
-    #: False when an approved Design opens Build directly. The UI needs the
-    #: rule because stage statuses alone cannot distinguish a stage that is
-    #: locked because it was skipped from one locked because it is not reached.
-    reconciliation_required: bool
     stage_meetings: dict[str, bool]
     #: Build runs as the five-step workflow rather than one opaque worker. The
     #: UI cannot infer this: a step list and a single stretch of work look the
@@ -100,9 +96,6 @@ async def list_features(config: AppConfig = Depends(get_config)) -> FeaturesResp
             graph_execution_enabled=config.dbtl.graph_execution_enabled,
             design_deck_feedback=config.dbtl.design_deck_feedback,
             progressive_gate=config.dbtl.progressive_gate,
-            # Defensive like ``stage_meetings`` above: a partial config must not
-            # 500 this endpoint, and the safe answer is the strict rule.
-            reconciliation_required=bool(getattr(config.dbtl, "reconciliation_required", True)),
             stage_meetings=stage_meeting_flags,
             build_workflow_steps=bool(getattr(config.dbtl, "build_workflow_steps", False)),
             reason=dbtl_mode_reason(config.dbtl),

@@ -13,6 +13,8 @@ adapter growing a second copy of the cursor.
 """
 
 import asyncio
+import importlib.util
+import os
 import sys
 import types
 from dataclasses import dataclass
@@ -111,13 +113,21 @@ def dispatch(monkeypatch):
     tools_module.get_available_tools = lambda **kwargs: []
     monkeypatch.setitem(sys.modules, "deerflow.tools", tools_module)
 
-    async def run(units, *, stage="build", meeting=False, budget=None):
+    async def run(
+        units,
+        *,
+        stage="build",
+        meeting=False,
+        budget=None,
+        state=None,
+        stage_workspace=None,
+    ):
         adapter = adapter_module.LiveStageAdapter(repo=object(), app_config=None)
         outcomes = await adapter._dispatch_units(
             units,
             budget=budget or WorkerBudget(),
             config={},
-            state={},
+            state=state or {},
             runtime={"run_id": "run-1", "thread_id": "thread-1"},
             metadata={},
             project_id="proj-1",
@@ -125,7 +135,7 @@ def dispatch(monkeypatch):
             cycle_id="cycle-1",
             stage=stage,
             meeting=meeting,
-            stage_workspace=None,
+            stage_workspace=stage_workspace,
         )
         return outcomes, events
 
@@ -165,6 +175,42 @@ class TestAStageWorkerReportsItsSteps:
             == ""
         )
 
+    async def test_build_preflight_rejects_a_missing_scientific_runtime_before_dispatch(self, monkeypatch):
+        tools_module = types.ModuleType("deerflow.tools")
+        tools_module.get_available_tools = lambda **kwargs: [SimpleNamespace(name="bash")]
+        monkeypatch.setitem(sys.modules, "deerflow.tools", tools_module)
+        real_find_spec = importlib.util.find_spec
+        monkeypatch.setattr(
+            importlib.util,
+            "find_spec",
+            lambda name: None if name == "numpy" else real_find_spec(name),
+        )
+        adapter = adapter_module.LiveStageAdapter(repo=object(), app_config=None)
+
+        refusal = adapter._build_execution_preflight_error(
+            config={},
+            stage_workspace="/mnt/user-data/outputs/.dbtl-stage-work/run/build",
+        )
+
+        assert "NumPy" in refusal
+        assert "No planner or Build worker ran" in refusal
+
+    async def test_remote_build_preflight_leaves_runtime_validation_to_the_sandbox_image(self, monkeypatch):
+        tools_module = types.ModuleType("deerflow.tools")
+        tools_module.get_available_tools = lambda **kwargs: [SimpleNamespace(name="bash")]
+        monkeypatch.setitem(sys.modules, "deerflow.tools", tools_module)
+        monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+        adapter = adapter_module.LiveStageAdapter(repo=object(), app_config=None)
+
+        assert (
+            adapter._build_execution_preflight_error(
+                config={},
+                stage_workspace="/mnt/user-data/outputs/.dbtl-stage-work/run/build",
+                sandbox_state={"sandbox_id": "aio:remote"},
+            )
+            == ""
+        )
+
     async def test_legacy_uncapped_build_gets_the_operational_safety_ceiling(self, dispatch):
         budget = WorkerBudget(
             max_workers=3,
@@ -181,6 +227,66 @@ class TestAStageWorkerReportsItsSteps:
         assert _FakeExecutor.last_kwargs["token_budget_enabled"] is None
         assert _FakeExecutor.last_kwargs["loop_detection_enabled"] is None
         assert len(_FakeExecutor.last_kwargs["extra_middlewares"]) == 1
+
+    @pytest.mark.parametrize(
+        ("stage", "role"),
+        (("build", "phase"), ("test", "rerun")),
+    )
+    async def test_local_build_and_test_workers_use_the_gateway_venv(
+        self,
+        dispatch,
+        monkeypatch,
+        stage,
+        role,
+    ):
+        monkeypatch.setattr(adapter_module.sys, "executable", "/opt/deerflow/.venv/bin/python")
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+        if role == "rerun":
+            monkeypatch.setattr(
+                adapter_module,
+                "build_test_rerun_tool",
+                lambda *_args, **_kwargs: SimpleNamespace(name="execute_build_rerun"),
+            )
+        unit = WorkUnit(
+            unit_id="runtime-check",
+            capability="software_and_workflow_engineering",
+            agent_name="general-purpose",
+            prompt="Run it.",
+            role=role,
+        )
+
+        await dispatch(
+            [unit],
+            stage=stage,
+            state={"sandbox": {"sandbox_id": "local:user:thread"}},
+            stage_workspace="/mnt/user-data/outputs/.dbtl-stage-work/run/stage",
+        )
+
+        execution_env = _FakeExecutor.last_kwargs["execution_env"]
+        assert execution_env["PATH"].split(os.pathsep)[0] == "/opt/deerflow/.venv/bin"
+        assert execution_env["VIRTUAL_ENV"] == "/opt/deerflow/.venv"
+
+    async def test_remote_worker_keeps_the_sandbox_image_path(self, dispatch, monkeypatch):
+        monkeypatch.setattr(adapter_module.sys, "executable", "/app/backend/.venv/bin/python")
+        monkeypatch.setenv("PATH", "/app/backend/.venv/bin:/usr/bin")
+
+        await dispatch(
+            [
+                WorkUnit(
+                    unit_id="remote-runtime-check",
+                    capability="software_and_workflow_engineering",
+                    agent_name="general-purpose",
+                    prompt="Run it.",
+                    role="phase",
+                )
+            ],
+            state={"sandbox": {"sandbox_id": "aio:remote"}},
+            stage_workspace="/mnt/user-data/outputs/.dbtl-stage-work/run/build",
+        )
+
+        execution_env = _FakeExecutor.last_kwargs["execution_env"]
+        assert "PATH" not in execution_env
+        assert "VIRTUAL_ENV" not in execution_env
 
     async def test_each_captured_step_becomes_a_running_event(self, dispatch):
         _FakeExecutor.steps = [

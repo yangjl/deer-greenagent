@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from deerflow.agents.dbtl.live_stage.build_phase_verification import (
     VERIFY_STDERR,
     VERIFY_STDOUT,
     execute_and_verify_phase,
+    local_dbtl_runtime_env,
     resolve_issued_input_tokens,
     verification_shell_command,
 )
@@ -86,6 +88,14 @@ def test_the_server_issues_paths_and_derives_a_passing_receipt(tmp_path: Path) -
 def test_local_server_verifier_handles_a_project_path_with_spaces(tmp_path: Path) -> None:
     from deerflow.agents.middlewares.dbtl_output_policy_middleware import sandbox_exec_command
 
+    probe = subprocess.run(
+        ["sandbox-exec", "-p", "(version 1) (allow default)", "/usr/bin/true"],
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        pytest.skip("sandbox-exec is unavailable inside the current parent sandbox")
+
     project_root = tmp_path / "project with spaces"
     project_root.mkdir()
     workspace, _host = _workspace(project_root)
@@ -103,7 +113,7 @@ def test_local_server_verifier_handles_a_project_path_with_spaces(tmp_path: Path
             readable_paths=("/mnt/user-data/trial.csv",),
             restricted_read_roots=("/mnt/user-data",),
         )
-        return sandbox.execute_command(isolated, env=env, timeout=timeout)
+        return sandbox.execute_command(isolated, env={**env, **local_dbtl_runtime_env()}, timeout=timeout)
 
     record = execute_and_verify_phase(
         _manifest(workspace, inputs=("/mnt/user-data/trial.csv",)),
@@ -286,6 +296,8 @@ def test_python_entry_points_have_a_server_owned_command() -> None:
 
     command, _env = verification_shell_command(_manifest(workspace), unit_workspace=workspace)
 
+    # The receipt stays portable. Local execution selects the gateway venv by
+    # prepending its bin directory to PATH, not by recording a host-only path.
     assert f"python '{workspace}/src/run.py'" in command
     assert "server-verification.stdout.log" in command
 
@@ -482,3 +494,49 @@ def test_verified_workspace_file_resolves_relative_entry_point_against_containme
         )
         is not None
     )
+
+
+# --- Build execution failure receipts --------------------------------------
+
+
+def _local_execute(root: Path):
+    """Run the generated phase shell for real, mapping the virtual root to tmp.
+
+    The interpreter-resolution behaviour only exists in the emitted shell, so
+    these cases execute it instead of faking the receipts.
+    """
+    import os
+    def execute(command: str, env: dict[str, str], timeout: float) -> str:
+        mapped = command.replace("/mnt/user-data", str(root))
+        subprocess.run(  # noqa: S603 - fixed interpreter, test-owned script
+            ["/bin/bash", "-c", mapped],
+            env={
+                **os.environ,
+                **local_dbtl_runtime_env(),
+                **{key: value.replace("/mnt/user-data", str(root)) for key, value in env.items()},
+            },
+            timeout=timeout,
+            capture_output=True,
+            check=False,
+        )
+        return ""
+
+    return execute
+
+
+def test_a_failing_phase_carries_its_stderr_cause_on_the_receipt(tmp_path: Path) -> None:
+    workspace, host = _workspace(tmp_path)
+    (host / "src").mkdir(parents=True, exist_ok=True)
+    (host / "src" / "run.py").write_text("import sys; sys.stderr.write('ModuleNotFoundError: numpy\\n'); sys.exit(3)\n", encoding="utf-8")
+
+    verification = execute_and_verify_phase(
+        _manifest(workspace),
+        project_root=str(tmp_path),
+        unit_workspace=workspace,
+        execute=_local_execute(tmp_path),
+        timeout_seconds=30.0,
+    )
+
+    assert not verification.passed
+    assert verification.exit_status == 3
+    assert "ModuleNotFoundError: numpy" in verification.reason

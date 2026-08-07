@@ -160,30 +160,29 @@ class TestTheSkipIsSteppedOver:
 
 class TestTheRouteMenuOffersTheChoice:
     def test_an_approved_build_offers_the_exploratory_route(self):
-        routes = compute_stage_routes(RouteContext(stage="build", outcome="approved", reconciliation_settled=True, conditional_test=True))
+        routes = compute_stage_routes(RouteContext(stage="build", outcome="approved", conditional_test=True))
 
         exploratory = next(route for route in routes if route.slug == RouteSlug.LEARN_EXPLORATORY)
         assert exploratory.to_stage == "learn"
-        assert exploratory.blocked is False
 
     def test_the_route_is_absent_by_default(self):
-        routes = compute_stage_routes(RouteContext(stage="build", outcome="approved", reconciliation_settled=True))
+        routes = compute_stage_routes(RouteContext(stage="build", outcome="approved"))
 
         assert RouteSlug.LEARN_EXPLORATORY not in {route.slug for route in routes}
 
     def test_qualifying_stays_on_the_menu_beside_it(self):
-        routes = compute_stage_routes(RouteContext(stage="build", outcome="approved", reconciliation_settled=True, conditional_test=True))
+        routes = compute_stage_routes(RouteContext(stage="build", outcome="approved", conditional_test=True))
 
         slugs = [route.slug for route in routes]
         assert slugs.index(RouteSlug.ADVANCE) < slugs.index(RouteSlug.LEARN_EXPLORATORY)
 
     def test_no_other_stage_offers_it(self):
         for stage in ("design", "learn"):
-            routes = compute_stage_routes(RouteContext(stage=stage, outcome="approved", reconciliation_settled=True, conditional_test=True))
+            routes = compute_stage_routes(RouteContext(stage=stage, outcome="approved", conditional_test=True))
             assert RouteSlug.LEARN_EXPLORATORY not in {route.slug for route in routes}
 
     def test_a_build_that_was_not_approved_does_not_offer_it(self):
-        routes = compute_stage_routes(RouteContext(stage="build", outcome="changes_requested", reconciliation_settled=True, conditional_test=True))
+        routes = compute_stage_routes(RouteContext(stage="build", outcome="changes_requested", conditional_test=True))
 
         assert RouteSlug.LEARN_EXPLORATORY not in {route.slug for route in routes}
 
@@ -262,10 +261,9 @@ class TestSkippingWorksWithoutReconciliation:
             statuses,
             "build",
             ReviewDecision.APPROVE,
-            reconciliation_required=False,
             build_disposition=BuildDisposition.LEARN_EXPLORATORY,
         )
 
         assert updated["test"] is StageStatus.SKIPPED
         assert updated["learn"] is StageStatus.IN_PROGRESS
-        assert next_cycle_state("build", updated, reconciliation_required=False) == "learn"
+        assert next_cycle_state("build", updated) == "learn"

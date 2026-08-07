@@ -117,7 +117,7 @@ def test_changes_requested_on_design_closes_build_again() -> None:
 @pytest.mark.parametrize(
     ("current", "statuses", "expected"),
     [
-        ("design", {"design": StageStatus.APPROVED}, "reconciliation"),
+        ("design", {"design": StageStatus.APPROVED}, "ready_for_build"),
         (
             "reconciliation",
             {"design": StageStatus.APPROVED, "reconciliation": StageStatus.APPROVED},
@@ -139,7 +139,6 @@ def test_allowed_forward_transitions(current: str, statuses: dict, expected: str
     [
         ("design", {}),
         ("design", {"design": StageStatus.AWAITING_REVIEW}),
-        ("reconciliation", {"design": StageStatus.APPROVED}),
         ("completed", {}),
         ("abandoned", {}),
     ],
@@ -233,6 +232,6 @@ def test_reviewing_an_unknown_stage_is_refused() -> None:
 def test_approving_a_stage_unlocks_only_the_next_one() -> None:
     approved = apply_review(_statuses(design=StageStatus.AWAITING_REVIEW), "design", ReviewDecision.APPROVE)
 
-    assert approved["reconciliation"] is StageStatus.IN_PROGRESS
-    assert approved["build"] is StageStatus.LOCKED
+    assert approved["reconciliation"] is StageStatus.LOCKED
+    assert approved["build"] is StageStatus.IN_PROGRESS
     assert approved["test"] is StageStatus.LOCKED

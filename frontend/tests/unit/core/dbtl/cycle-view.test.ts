@@ -138,21 +138,20 @@ describe("controls follow the durable status only", () => {
 });
 
 describe("why a stage is locked", () => {
-  test("build names both outstanding approvals", () => {
+  test("build names Design as its only prerequisite", () => {
     const reason = stageBlockReason(cycle(), "build");
 
     expect(reason.blocked).toBe(true);
     expect(reason.reason).toContain("Design");
-    expect(reason.reason).toContain("Data reconciliation");
-    expect(reason.reason).toContain("are approved");
+    expect(reason.reason).not.toContain("Data reconciliation");
+    expect(reason.reason).toContain("is approved");
   });
 
-  test("build names only the one still outstanding", () => {
+  test("a locked build with Design approved names no reconciliation gate", () => {
     const reason = stageBlockReason(cycle({ design: "approved" }), "build");
 
-    expect(reason.reason).toContain("Data reconciliation");
-    expect(reason.reason).not.toContain("Design and");
-    expect(reason.reason).toContain("is approved");
+    expect(reason.reason).not.toContain("Data reconciliation");
+    expect(reason.reason).toBe("Build is not open yet.");
   });
 
   test("an unlocked stage reports no blockage", () => {
@@ -162,6 +161,17 @@ describe("why a stage is locked", () => {
   test("later stages name their immediate predecessor", () => {
     expect(stageBlockReason(cycle(), "test").reason).toContain("Build");
     expect(stageBlockReason(cycle(), "learn").reason).toContain("Test");
+  });
+
+  test("reconciliation describes opt-in evidence work after Design approval", () => {
+    const reason = stageBlockReason(
+      cycle({ design: "approved" }),
+      "reconciliation",
+    );
+
+    expect(reason.reason).toBe(
+      "Data reconciliation starts when evidence is attached; it does not block Build.",
+    );
   });
 
   test("a missing cycle is blocked rather than silently permissive", () => {
@@ -391,22 +401,5 @@ describe("cycle disclosure", () => {
   test("clicking a folded cycle unfolds only that cycle", () => {
     expect(toggleCycleDisclosure(null, "cycle-1")).toBe("cycle-1");
     expect(toggleCycleDisclosure("cycle-1", "cycle-2")).toBe("cycle-2");
-  });
-});
-
-describe("why a stage is locked when reconciliation is not required", () => {
-  test("build names only Design", () => {
-    const reason = stageBlockReason(cycle(), "build", false);
-
-    expect(reason.reason).toContain("Design");
-    expect(reason.reason).not.toContain("Data reconciliation");
-    expect(reason.reason).toContain("is approved");
-  });
-
-  test("a locked build with Design approved says nothing about reconciliation", () => {
-    const reason = stageBlockReason(cycle({ design: "approved" }), "build", false);
-
-    expect(reason.reason).not.toContain("Data reconciliation");
-    expect(reason.reason).toBe("Build is not open yet.");
   });
 });

@@ -34,7 +34,6 @@ from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.build_workflow import BUILD_WORKFLOW_V1, BuildErrorCode, BuildStepKey, StepState
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.council_deck import extract_commentable_slides
-from deerflow.dbtl.reconciliation_policy import reconciliation_required
 from deerflow.dbtl.stage_runner import DispatchOutcome
 from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlWorkflowRefused
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
@@ -303,77 +302,8 @@ async def _approve_design(repo: DbtlCycleRepository, *, content_hash: str) -> No
 
 
 async def _ready_for_build(repo: DbtlCycleRepository, *, design_hash: str = DESIGN_HASH) -> None:
-    """Walk the cycle to the point where Build is the executable stage.
-
-    Reconciliation is only walked when this deployment requires it: with
-    `dbtl.reconciliation_required` off, an approved Design opens Build directly
-    and the reconciliation stage is legitimately closed, so submitting evidence
-    to it is refused. Reading the policy rather than assuming one keeps this
-    fixture honest under either setting.
-    """
+    """Walk the cycle to the point where Build is the executable stage."""
     await _approve_design(repo, content_hash=design_hash)
-    if not reconciliation_required():
-        return
-    await repo.declare_dataset(
-        cycle_id="cycle-1",
-        project_id="project-1",
-        source_key="yield",
-        uri="/mnt/user-data/yield.csv",
-        content_hash=DATA_HASH,
-        recorded_by="user-1",
-        expected_db_revision=await _revision(repo),
-        idempotency_key="dataset",
-    )
-    row = await repo.open_reconciliation_row(
-        cycle_id="cycle-1",
-        project_id="project-1",
-        check="units_and_encoding",
-        field_name="Yield units",
-        created_by="user-1",
-        expected_db_revision=await _revision(repo),
-        idempotency_key="row",
-    )
-    await repo.decide_reconciliation_row(
-        row_id=row["id"],
-        project_id="project-1",
-        status="resolved",
-        resolution="Converted to Mg/ha.",
-        actor_type="human",
-        actor_user_id="reviewer-1",
-        expected_db_revision=await _revision(repo),
-        expected_work_item_revision=row["db_revision"],
-        idempotency_key="row-decision",
-    )
-    await repo.attach_artifact(
-        cycle_id="cycle-1",
-        project_id="project-1",
-        stage="reconciliation",
-        artifact_type="reconciliation_report",
-        uri="/mnt/user-data/outputs/reconciliation.json",
-        content_hash="b" * 64,
-        created_by="user-1",
-        expected_db_revision=await _revision(repo),
-        idempotency_key="artifact-reconciliation",
-    )
-    await repo.submit_stage_for_review(
-        cycle_id="cycle-1",
-        project_id="project-1",
-        stage="reconciliation",
-        expected_db_revision=await _revision(repo),
-        actor_user_id="user-1",
-        idempotency_key="submit-reconciliation",
-    )
-    await repo.review_stage(
-        cycle_id="cycle-1",
-        project_id="project-1",
-        stage="reconciliation",
-        decision="approve",
-        rationale="Every judgement row is settled.",
-        expected_db_revision=await _revision(repo),
-        reviewer_user_id="reviewer-1",
-        reviewer_project_role="owner",
-        idempotency_key="review-reconciliation",
-    )
 
 
 @pytest_asyncio.fixture
@@ -1289,7 +1219,6 @@ class TestWorkflowPersistenceIsAuthoritative:
             lambda: SimpleNamespace(
                 dbtl=SimpleNamespace(
                     build_workflow_steps=True,
-                    reconciliation_required=False,
                 )
             ),
         )
@@ -1306,6 +1235,42 @@ class TestWorkflowPersistenceIsAuthoritative:
 
 
 class TestAPhaseSucceedsOnlyOnceItsOutputsArePublished:
+    async def test_a_failed_worker_explanation_is_the_build_stop_reason(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+
+        class _MissingScientificRuntime(_WritingDispatcher):
+            async def __call__(self, units, *, budget):
+                if units[0].role == "phase":
+                    self.phase_units.append(units[0])
+                    return [
+                        DispatchOutcome(
+                            unit_id=units[0].unit_id,
+                            text=json.dumps(
+                                {
+                                    "status": "failed",
+                                    "summary": "The available Python interpreter cannot import NumPy.",
+                                }
+                            ),
+                        )
+                    ]
+                return await super().__call__(units, budget=budget)
+
+        result, _dispatcher = await _run_build(
+            repo,
+            root,
+            dispatcher=_MissingScientificRuntime(plan=SINGLE_PHASE_PLAN),
+        )
+
+        phases = await repo.build_workflow_view(
+            project_id="project-1",
+            stage_attempt_id=stage_attempt_id,
+        )
+        assert "cannot import NumPy" in result.note
+        assert "cannot import NumPy" in phases["phases"][0]["error_summary"]
+        assert "returned no usable result" not in result.note
+
     async def test_a_missing_artifact_is_named_as_missing_not_outside(self, project) -> None:
         repo, root = project
         await _ready_for_build(repo)
@@ -1613,6 +1578,28 @@ class _FreshCorrectionDispatcher(_WritingDispatcher):
                         "output_tokens": 5 if is_correction else 10,
                         "total_tokens": 25 if is_correction else 110,
                     },
+                )
+            )
+        return revised
+
+
+class _FailedStatusFreshCorrectionDispatcher(_FreshCorrectionDispatcher):
+    """Report the failed done condition honestly before the fresh correction."""
+
+    async def __call__(self, units, *, budget):
+        outcomes = await super().__call__(units, budget=budget)
+        revised = []
+        for unit, outcome in zip(units, outcomes, strict=True):
+            if unit.role != "phase" or unit.tool_contract.get("correction_attempt") or not outcome.text:
+                revised.append(outcome)
+                continue
+            payload = json.loads(outcome.text)
+            payload["status"] = "failed"
+            revised.append(
+                DispatchOutcome(
+                    unit_id=outcome.unit_id,
+                    text=json.dumps(payload),
+                    token_usage=outcome.token_usage,
                 )
             )
         return revised
@@ -1933,6 +1920,20 @@ class TestAPartialPhaseCannotAdvanceThePlan:
         # The unit id in the committed digest/payload is the fresh worker, so a
         # replay cannot accidentally resurrect the rejected first result.
         assert "correction" in correction.unit_id
+
+    async def test_v12_gives_an_honest_failed_phase_its_fresh_correction(self, project) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        dispatcher = _FailedStatusFreshCorrectionDispatcher(plan=SINGLE_PHASE_PLAN)
+
+        result, _ = await _run_build(repo, root, dispatcher=dispatcher)
+
+        assert result.produced_usable_evidence, result.note
+        assert len(dispatcher.phase_units) == 2
+        first, correction = dispatcher.phase_units
+        assert not first.tool_contract.get("correction_attempt")
+        assert correction.tool_contract["correction_attempt"] is True
+        assert "The generated implementation test failed" in correction.prompt
 
     async def test_a_failed_done_condition_stops_before_the_next_phase(self, project) -> None:
         repo, root = project

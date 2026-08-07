@@ -50,6 +50,7 @@ from deerflow.dbtl import (
     render_claim_markdown,
     validate_candidate_grade,
 )
+from deerflow.dbtl.policy import DBTL_POLICY_VERSION
 from deerflow.dbtl.reconciliation_policy import conditional_test_enabled
 from deerflow.dbtl.stage_feedback import filter_stage_feedback_intents, is_core_review_artifact
 from deerflow.dbtl.stage_meetings import (
@@ -160,7 +161,7 @@ def _surface_meeting_gate(
 
 
 def _route_available(gate: dict[str, Any], slug: str) -> bool:
-    return any(str(route.get("slug") or "") == slug and not bool(route.get("blocked")) for route in gate.get("routes", []) if isinstance(route, dict))
+    return any(str(route.get("slug") or "") == slug for route in gate.get("routes", []) if isinstance(route, dict))
 
 
 def _slide_feedback_text(surface: dict[str, Any], comments: dict[str, str]) -> str:
@@ -1890,7 +1891,7 @@ async def apply_design_feedback_action(
         assessment_rationale = str(assessment.get("rationale") or "")
         human_override = body.action.difficulty_override
         effective_difficulty = human_override or assessed_difficulty
-        offered_routes = [str(route.get("slug")) for route in (transition_gate or {}).get("routes", []) if isinstance(route, dict) and route.get("slug") and not route.get("blocked")]
+        offered_routes = [str(route.get("slug")) for route in (transition_gate or {}).get("routes", []) if isinstance(route, dict) and route.get("slug")]
         progressive_transition = (
             {
                 "assessed_difficulty": assessed_difficulty,
@@ -2391,7 +2392,7 @@ async def create_cycle(
             objective=body.objective,
             success_criteria=body.success_criteria,
             created_by=user_id,
-            policy_version=getattr(request.app.state, "dbtl_config_override", config.dbtl).policy_version,
+            policy_version=DBTL_POLICY_VERSION,
             idempotency_key=body.idempotency_key,
             parent_cycle_id=body.parent_cycle_id,
             originating_thread_id=(str(body.originating_thread_id) if body.originating_thread_id is not None else None),

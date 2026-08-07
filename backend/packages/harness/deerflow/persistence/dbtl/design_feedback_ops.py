@@ -665,13 +665,13 @@ class DesignFeedbackOpsMixin:
                 routes = transition_gate.get("routes") if isinstance(transition_gate, dict) else []
 
                 def route_is_available(slug: str) -> bool:
-                    return any(isinstance(route, dict) and route.get("slug") == slug and not bool(route.get("blocked")) for route in (routes if isinstance(routes, list) else []))
+                    return any(isinstance(route, dict) and route.get("slug") == slug for route in (routes if isinstance(routes, list) else []))
 
                 # Policy checks happen before the single-use ledger row is
                 # inserted. A refused click must not consume the deck and
                 # prevent the reviewer from correcting their choice.
                 if action_kind == "advance" and not route_is_available("advance"):
-                    raise DesignFeedbackConflict("Continue to Build is currently blocked.")
+                    raise DesignFeedbackConflict("Continue to Build is not an offered route.")
                 if action_kind == "park" and not route_is_available("park"):
                     raise DesignFeedbackConflict("Park is not a legal route from this gate.")
                 # Depth changes how carefully a verdict must be justified, not

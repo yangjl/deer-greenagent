@@ -6,7 +6,7 @@ import pytest
 
 from deerflow.agents.dbtl.live_stage.adapter import (
     LiveStageAdapter,
-    _reconciliation_ready_after_design_approval,
+    make_llm_transition_assessor,
 )
 from deerflow.dbtl.transition_assessment import (
     DEFAULT_STANDARD_RATIONALE,
@@ -47,6 +47,24 @@ def test_standard_fallback_never_silently_becomes_routine() -> None:
 
 
 @pytest.mark.asyncio
+async def test_transition_assessor_reuses_the_shared_helper_model(monkeypatch) -> None:
+    app_config = SimpleNamespace(
+        dbtl=SimpleNamespace(setup_draft_model_name="shared-helper-model"),
+    )
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: app_config)
+
+    async def run_oneshot_llm(**kwargs) -> str:
+        return kwargs["model_name"]
+
+    monkeypatch.setattr("deerflow.utils.oneshot_llm.run_oneshot_llm", run_oneshot_llm)
+
+    assessor = make_llm_transition_assessor()
+
+    assert assessor is not None
+    assert await assessor("Assess the remaining work.") == "shared-helper-model"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["null", "outage", "malformed"])
 async def test_live_assessor_failures_degrade_to_standard(mode: str) -> None:
     async def outage(_prompt: str) -> str:
@@ -72,27 +90,3 @@ async def test_live_assessor_failures_degrade_to_standard(mode: str) -> None:
     )
 
     assert result.difficulty is TransitionDifficulty.STANDARD
-
-
-def test_design_click_may_satisfy_only_the_design_approval_gate_reason() -> None:
-    assert _reconciliation_ready_after_design_approval(
-        {
-            "gate": {
-                "ready": False,
-                "blocking_rows": [],
-                "reasons": ["The Design stage has not been approved, so there is nothing to reconcile against."],
-            }
-        }
-    )
-    assert not _reconciliation_ready_after_design_approval(
-        {
-            "gate": {
-                "ready": False,
-                "blocking_rows": [],
-                "reasons": [
-                    "The Design stage has not been approved, so there is nothing to reconcile against.",
-                    "No data sources have been declared, so nothing can be reconciled.",
-                ],
-            }
-        }
-    )

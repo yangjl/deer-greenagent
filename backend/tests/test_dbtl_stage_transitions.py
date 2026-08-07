@@ -26,9 +26,8 @@ from deerflow.persistence.workspaces import WorkspaceRepository
 
 
 @pytest.fixture(autouse=True)
-def _shipped_dbtl_gates(strict_reconciliation, build_workflow_steps_off):
-    """Every case here asserts the shipped gate rules, so it states them rather
-    than inheriting whatever the developer's config.yaml happens to say."""
+def _shipped_dbtl_gates(build_workflow_steps_off):
+    """Pin the optional phased-Build rule for this suite."""
 
 
 pytestmark = pytest.mark.asyncio
@@ -381,7 +380,7 @@ async def test_test_assessment_appends_a_test_edge_with_the_recommended_route(tm
             "configuration": [],
             "expected_outputs": ["/mnt/user-data/outputs/model.bin"],
         },
-        input_artifacts=["artifact://approved-reconciliation"],
+            input_artifacts=[f"workspace_file:reconciliation.json:sha256:{HASH_A}"],
         output_artifacts=[{"uri": "/mnt/user-data/outputs/model.bin", "content_hash": HASH_B, "revision": 1}],
         deviations=[],
         logs_uri="/mnt/user-data/outputs/build.log",
@@ -441,7 +440,7 @@ async def test_return_to_design_records_revisit_and_invalidates_forward_stage_st
             "configuration": [],
             "expected_outputs": ["/mnt/user-data/outputs/model.bin"],
         },
-        input_artifacts=["artifact://approved-reconciliation"],
+            input_artifacts=[f"workspace_file:reconciliation.json:sha256:{HASH_A}"],
         output_artifacts=[
             {
                 "uri": "/mnt/user-data/outputs/model.bin",

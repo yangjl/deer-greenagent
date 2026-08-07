@@ -144,7 +144,7 @@ class TestStageSpecRegistry:
 
     def test_current_build_has_enough_bounded_turns_to_execute(self) -> None:
         assert BUILD_SPEC_V12.budget.max_turns == 450
-        assert BUILD_SPEC_V12.budget.max_tokens == 120_000
+        assert BUILD_SPEC_V12.budget.max_tokens == 500_000
         assert BUILD_SPEC_V12.budget.token_limit_enforced is True
 
     def test_learn_can_only_create_candidates(self) -> None:
@@ -1153,7 +1153,7 @@ class TestBuildContract:
             "granted_paths_only",
             "server_executed_entry_point",
         )
-        assert BUILD_SPEC_V12.budget.max_tokens == 120_000
+        assert BUILD_SPEC_V12.budget.max_tokens == 500_000
 
     def test_test_still_requires_the_reproducibility_check(self) -> None:
         from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK, ValidityCheckName

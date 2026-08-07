@@ -385,6 +385,7 @@ def test_published_entrypoint_rebinds_a_simple_relative_command_and_ignores_conf
     prepared = prepare_test_rerun(lineage, project_root=str(tmp_path))
 
     assert isinstance(prepared, PreparedTestRerun)
+    # The portable command resolves through the Test worker's execution PATH.
     assert prepared.spec.command == "python '/mnt/user-data/outputs/dbtl/build/0123456789abcdef-fit.py'"
     assert prepared.spec.configuration == ("/mnt/user-data/pyproject.toml",)
 

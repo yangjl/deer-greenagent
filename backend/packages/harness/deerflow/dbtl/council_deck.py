@@ -385,20 +385,12 @@ def _review_controls(
     difficulty = _text(assessment.get("difficulty") or "standard", limit=32)
     rationale = _text(assessment.get("rationale") or "", limit=2_000)
     difficulty_label = difficulty.replace("_", " ")
-    routes = gate.get("routes")
-    route_items = [dict(item) for item in routes if isinstance(item, Mapping)] if isinstance(routes, Sequence) and not isinstance(routes, str) else []
-    advance_route = next((route for route in route_items if _text(route.get("slug") or "", limit=64) == "advance"), {})
-    advance_blocked_reason = _text(advance_route.get("blocked_reason") or "", limit=600) if advance_route.get("blocked") else ""
     options = (
         _gate_option(
             value="approve",
             label="Approve",
-            # What approving actually opens depends on whether the data work is
-            # already settled. Promising the Build gate while reconciliation is
-            # outstanding describes a stage that will still be locked.
-            detail=("Accept this Design and open the Build gate." if not advance_blocked_reason else "Accept this Design and open Data reconciliation."),
+            detail="Accept this Design and open Build.",
             recommended=difficulty == "routine",
-            note=advance_blocked_reason,
         )
         + _gate_option(
             value="revise",

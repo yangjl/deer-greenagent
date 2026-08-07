@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from deerflow.config.dbtl_config import DbtlConfig
+from deerflow.dbtl.policy import DBTL_POLICY_VERSION
 
 
 def test_dbtl_defaults_to_audit_only() -> None:
@@ -13,6 +14,15 @@ def test_dbtl_defaults_to_audit_only() -> None:
     assert config.mutations_enabled is False
     assert config.graph_execution_enabled is False
     assert config.degraded_evidence_continuation is False
+
+
+def test_policy_version_is_not_operator_configurable() -> None:
+    assert "policy_version" not in DbtlConfig.model_fields
+    assert DBTL_POLICY_VERSION == "greenagent-dbtl-v2-draft"
+
+
+def test_reconciliation_cannot_be_configured_as_a_build_gate() -> None:
+    assert "reconciliation_required" not in DbtlConfig.model_fields
 
 
 @pytest.mark.parametrize("mode", ["disabled", "audit_only", "manual", "graph_enabled"])

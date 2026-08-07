@@ -295,14 +295,7 @@ function TransitionGateFallback({
         <ul className="mt-1.5 space-y-1.5">
           {gate.routes.map((route) => (
             <li key={route.slug} className="text-sm">
-              <span className={cn(route.blocked && "text-muted-foreground")}>
-                {route.label}
-              </span>
-              {route.blocked && route.blocked_reason && (
-                <span className="text-muted-foreground block text-xs">
-                  {route.blocked_reason}
-                </span>
-              )}
+              <span>{route.label}</span>
             </li>
           ))}
         </ul>
@@ -345,16 +338,9 @@ export function CycleStageSheet({
     open && (stage === "build" || stage === "test") ? cycleId : null,
   );
   const dbtl = useDbtlFeature();
-
   const cycle = detail.data ?? null;
   const record = stage ? stageOf(cycle, stage) : null;
-  const block = stage
-    ? stageBlockReason(
-        cycle,
-        stage,
-        dbtl.feature?.reconciliation_required ?? true,
-      )
-    : null;
+  const block = stage ? stageBlockReason(cycle, stage) : null;
   const artifacts = useMemo(
     () => (stage ? latestArtifactsForStage(cycle, stage) : []),
     [cycle, stage],

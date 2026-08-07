@@ -1221,10 +1221,6 @@ projects:
 # operator decisions; neither is inferred from a successful validation.
 dbtl:
   mode: graph_enabled # disabled | audit_only | manual | graph_enabled
-  policy_version: greenagent-dbtl-v2-draft
-  # Record what the DBTL classifier believes about each project request.
-  # Observation only: an evaluation never creates or advances a cycle.
-  classifier_shadow_enabled: true
   # Explicit new-cycle requests may first enter a durable, read-only discovery
   # conversation. No cycle is created until the later revision-bound start
   # action. Requires mode=graph_enabled; default false during rollout.
@@ -1234,8 +1230,8 @@ dbtl:
   discovery_classifier_entry: false
   discovery_auto_offer: false
   # Model used by fail-soft DBTL one-shot helpers: setup questions, intent
-  # interpretation, meeting rosters, and short meeting summaries. null keeps
-  # their deterministic fallbacks.
+  # interpretation, meeting rosters, transition assessments, and short meeting
+  # summaries. null keeps their deterministic fallbacks.
   setup_draft_model_name: null
   # Default model for design-meeting participants whose seat does not name one.
   # null inherits whatever model the composer is set to, so a meeting convened
@@ -1247,21 +1243,6 @@ dbtl:
   # the registered feedback deck. Set false for the one-release rollback path;
   # durable deck responses and reviews are retained.
   design_deck_feedback: true
-  # Gate Build on a settled Data Reconciliation matrix. Default true: an
-  # approved Design opens Reconciliation, and Build waits until every required
-  # matrix row is settled by a person. Set false and an approved Design opens
-  # Build directly, while the Reconciliation stage, its endpoints, and its
-  # matrix stay available for projects that use them.
-  #
-  # The data guarantees are not dropped with the gate. Build still binds the
-  # content hashes of the datasets it ran on, and still refuses to record
-  # lineage when none are declared or a raw source is not declared immutable —
-  # `dataset_fingerprint([])` is a valid hash of nothing, so an undeclared
-  # build would otherwise bind silently and be unable to say what produced it.
-  # What is given up is the human-settled judgement matrix: contradictory
-  # sources, trait direction, exclusions, leakage, and train/test separation
-  # are no longer required to be adjudicated before Build.
-  reconciliation_required: true
   # Progressive Design gate (Phases 0-1): show the durable path strip and put
   # the assessment plus the Approve / Revise / Park choice on registered Design
   # decks. Off restores the uniform two-step gate. Transition records accumulate
@@ -1290,13 +1271,6 @@ dbtl:
   # failure. Every option states what it costs, nothing is preselected, and the
   # answer is recorded with who gave it.
   build_workflow_steps: false
-  # Which agent implements a Build phase whose capability has no registered
-  # specialist. null keeps the registered generalist. This is an efficiency
-  # dial, never a correctness one: the path grant, the entry-point refusal, and
-  # the server's own verification hold whichever agent runs, because the
-  # failure they exist to stop crossed both the specialist and the generalist.
-  # An unregistered name falls back rather than failing the Build.
-  build_implementer_agent: null
   # Show the recorded plan before any phase runs: Start the build, Change the
   # plan, Hold here. Redirecting a build here costs a sentence; redirecting it
   # afterwards costs the run. "Change the plan" carries your words verbatim into
@@ -1329,10 +1303,6 @@ dbtl:
   # scientific candidate, and every retry still requires a chat control.
   degraded_evidence_continuation: false
   progressive_gate: false
-  # One-shot model that assesses the remaining work as routine, standard, or
-  # high_stakes after a Design meeting produces bound evidence. null, provider
-  # failure, or malformed output safely selects the standard two-step gate.
-  transition_assessor_model_name: null
   # Optional post-evidence review meetings. Each stage rolls out independently.
   # routine skips; standard offers; high_stakes requires completion unless a
   # human explicitly lowers the assessment.

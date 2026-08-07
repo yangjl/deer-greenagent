@@ -12,13 +12,8 @@ from sqlalchemy import func, select
 
 from deerflow.dbtl.build_execution import parse_rerun_spec
 from deerflow.dbtl.cycle_state import StageStatus
-from deerflow.dbtl.reconciliation import dataset_fingerprint
-from deerflow.dbtl.reconciliation_policy import (
-    degraded_evidence_continuation_enabled,
-    reconciliation_required,
-)
+from deerflow.dbtl.reconciliation_policy import degraded_evidence_continuation_enabled
 from deerflow.dbtl.stage_routes import (
-    UNRECONCILED_REASON,
     RouteContext,
     RouteSlug,
     compute_stage_routes,
@@ -39,7 +34,6 @@ from deerflow.dbtl.validity import (
 from deerflow.persistence.dbtl.model import (
     DbtlArtifactRow,
     DbtlBuildLineageRow,
-    DbtlDatasetRow,
     DbtlReviewRow,
     DbtlStageAttemptRow,
     DbtlValidityAssessmentRow,
@@ -62,15 +56,15 @@ def _is_sha256(value: object) -> bool:
 
 
 def _build_input_fingerprint(input_artifacts: list[str]) -> str:
-    """Fingerprint server-bound Build inputs when Reconciliation is skipped."""
+    """Fingerprint the exact server-bound inputs examined by Build."""
     unbound = [item for item in input_artifacts if not any(_is_sha256(part) for part in str(item).lower().split(":"))]
     if unbound:
         raise ValueError("Every Build input must include a server-computed SHA-256 content hash.")
     return _sha256(sorted(dict.fromkeys(str(item) for item in input_artifacts)))
 
 
-def _server_owned_optional_provenance(checks: list[ValidityCheck]) -> list[ValidityCheck]:
-    """Replace the optional-mode input check with the server's own verdict.
+def _server_owned_input_provenance(checks: list[ValidityCheck]) -> list[ValidityCheck]:
+    """Replace the input-provenance check with the server's own verdict.
 
     A human may assess scientific evidence, but cannot truthfully declare that
     the server did not bind inputs when the durable Build-lineage writer did.
@@ -81,7 +75,7 @@ def _server_owned_optional_provenance(checks: list[ValidityCheck]) -> list[Valid
     authoritative = ValidityCheck(
         check=ValidityCheckName.RECONCILED_INPUTS,
         status=CheckStatus.PASSED,
-        detail=("The Build lineage binds every examined input to a server-computed content hash; Data Reconciliation is intentionally not required in this deployment."),
+        detail=("The Build lineage binds every examined input to a server-computed content hash; Data Reconciliation is not a Build prerequisite."),
         evidence_refs=("server://dbtl/build-lineage",),
     )
     replaced = False
@@ -262,7 +256,6 @@ class BuildTestOpsMixin:
             self._require_revision(cycle, expected_db_revision)
             attempts = {item.stage: item for item in stages}
             build = attempts["build"]
-            reconciliation = attempts["reconciliation"]
             stage_spec_key = build.stage_spec_key or resolve_stage_spec("build").spec_key
             pinned_spec = resolve_spec_by_key(stage_spec_key)
             if "structured_rerun_spec" in pinned_spec.validity_gates and parsed_rerun is None:
@@ -274,19 +267,10 @@ class BuildTestOpsMixin:
                 StageStatus.CHANGES_REQUESTED.value,
             }:
                 raise DbtlWorkflowRefused(f"Build lineage cannot be recorded while Build is {build.status!r}.")
-            dataset_rows = list((await session.execute(select(DbtlDatasetRow).where(DbtlDatasetRow.cycle_id == cycle_id))).scalars())
-            bindings = [self._binding_from_row(item) for item in dataset_rows]
-            fingerprint = dataset_fingerprint(bindings)
-            if reconciliation_required():
-                if reconciliation.status != StageStatus.APPROVED.value or not reconciliation.approved_dataset_fingerprint or reconciliation.approved_dataset_fingerprint != fingerprint:
-                    raise DbtlWorkflowRefused("Build lineage is not bound to the currently approved reconciled inputs.")
-            else:
-                # With no Reconciliation gate, Build owns discovery. Workers
-                # name what they read and the server computes those files'
-                # hashes; no person has to declare a dataset or paste a digest
-                # before useful work can start. Test later checks leakage,
-                # splits, and whether execution stayed bound to this lineage.
-                fingerprint = _build_input_fingerprint(input_artifacts)
+            # Build owns input discovery. Workers name what they read and the
+            # server computes those files' hashes; Test later checks leakage,
+            # splits, and whether execution stayed bound to this lineage.
+            fingerprint = _build_input_fingerprint(input_artifacts)
 
             highest = await session.scalar(select(func.max(DbtlBuildLineageRow.lineage_revision)).where(DbtlBuildLineageRow.stage_attempt_id == build.id))
             revision = int(highest or 0) + 1
@@ -394,8 +378,7 @@ class BuildTestOpsMixin:
             )
             for item in checks
         ]
-        if not reconciliation_required():
-            parsed_checks = _server_owned_optional_provenance(parsed_checks)
+        parsed_checks = _server_owned_input_provenance(parsed_checks)
         evaluation = evaluate_validity(
             metrics=parsed_metrics,
             checks=parsed_checks,
@@ -502,18 +485,12 @@ class BuildTestOpsMixin:
             # Phase 0 makes the stage graph the route authority. The legacy
             # validity contract still parses old recommendation names, but it
             # may not authorize an edge the graph does not offer. In
-            # particular, Reconciliation is not a path destination:
-            # ``return_to_reconciliation`` is refused, and an unsettled matrix
-            # appears as a blocked Build edge instead.
-            reconciliation_settled = await self._reconciliation_is_settled(
-                session,
-                cycle_id=cycle_id,
-                attempts=attempts,
-            )
+            # Reconciliation is not a path destination. Historical
+            # ``return_to_reconciliation`` recommendations are refused; the
+            # graph's executable route is Return to Build.
             self._require_graph_route(
                 outcome=evaluation.outcome,
                 route=route,
-                reconciliation_settled=reconciliation_settled,
             )
 
             bound_projection_hash = cycle.projection_hash
@@ -626,34 +603,17 @@ class BuildTestOpsMixin:
                 "validity_assessment": self._assessment_payload(assessment),
             }
 
-    async def _reconciliation_is_settled(
-        self,
-        session,
-        *,
-        cycle_id: str,
-        attempts: dict[str, DbtlStageAttemptRow],
-    ) -> bool:
-        """Whether the current dataset still has an approved Build bridge."""
-        reconciliation = attempts["reconciliation"]
-        if reconciliation.status != StageStatus.APPROVED.value or not reconciliation.approved_dataset_fingerprint:
-            return False
-        dataset_rows = list((await session.execute(select(DbtlDatasetRow).where(DbtlDatasetRow.cycle_id == cycle_id))).scalars())
-        current = dataset_fingerprint([self._binding_from_row(item) for item in dataset_rows])
-        return reconciliation.approved_dataset_fingerprint == current
-
     @staticmethod
     def _require_graph_route(
         *,
         outcome: ValidityOutcome,
         route: WorkflowRecommendation,
-        reconciliation_settled: bool,
     ) -> None:
         """Refuse legacy recommendations that are not legal graph edges."""
         routes = compute_stage_routes(
             RouteContext(
                 stage="test",
                 outcome=outcome.value,
-                reconciliation_settled=reconciliation_settled,
             )
         )
         route_slug = {
@@ -665,15 +625,13 @@ class BuildTestOpsMixin:
             WorkflowRecommendation.CLOSE_CYCLE: RouteSlug.CLOSE_CYCLE,
         }.get(route)
         if route is WorkflowRecommendation.RETURN_TO_RECONCILIATION:
-            raise ValidityRefused(f"Reconciliation is not a cycle-stage destination. {UNRECONCILED_REASON}")
+            raise ValidityRefused("Reconciliation is not a cycle-stage destination; choose Return to Build instead.")
         selected = next(
             (candidate for candidate in routes if candidate.slug == route_slug),
             None,
         )
         if selected is None:
             raise ValidityRefused(f"Recommendation {route.value!r} is not a legal route from {outcome.value!r} Test evidence.")
-        if selected.blocked:
-            raise ValidityRefused(selected.blocked_reason or f"Route {route.value!r} is blocked.")
 
     @staticmethod
     def _review_decision_for_route(

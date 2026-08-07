@@ -244,7 +244,7 @@ def test_governance_validation_requires_operator_and_blocks_sqlite_cutover(tmp_p
     assert validation.status_code == 200
     assert validation.json()["database_backend"] == "sqlite"
     assert validation.json()["technical_ready"] is False
-    assert validation.json()["total_checks"] == 10
+    assert validation.json()["total_checks"] == 11
     assert validation.json()["checks"][-1]["status"] == "waiting"
     assert validation.json()["conversational_discovery"] == {
         "rollout_stage": "server_owned_setup_fallback",

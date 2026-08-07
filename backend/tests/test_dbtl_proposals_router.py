@@ -108,6 +108,22 @@ def test_a_research_request_is_reported_for_shadow_telemetry(tmp_path: Path) -> 
         assert set(body) == {"evaluation_id", "route_kind", "route_source"}
 
 
+def test_obsolete_classifier_shadow_setting_cannot_disable_telemetry(tmp_path: Path) -> None:
+    workspace_repo, evaluation_repo, _ = anyio.run(_make_repos, tmp_path)
+    app = _make_app(workspace_repo, evaluation_repo)
+    app.state.dbtl_config_override = DbtlConfig(
+        mode="manual",
+        classifier_shadow_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        project_id = _seed_project(client)
+        body = _evaluate(client, project_id)
+
+    rows = anyio.run(evaluation_repo.list_evaluations, project_id)
+    assert [row["evaluation_id"] for row in rows] == [body["evaluation_id"]]
+
+
 def test_a_data_request_is_classified_for_shadow_telemetry(tmp_path: Path) -> None:
     workspace_repo, evaluation_repo, _ = anyio.run(_make_repos, tmp_path)
     with TestClient(_make_app(workspace_repo, evaluation_repo)) as client:

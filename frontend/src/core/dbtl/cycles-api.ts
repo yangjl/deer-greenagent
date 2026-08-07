@@ -53,8 +53,6 @@ export interface TransitionGate {
     to_stage: string;
     label: string;
     value: string;
-    blocked?: boolean;
-    blocked_reason?: string;
   }>;
 }
 

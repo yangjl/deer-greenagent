@@ -121,7 +121,7 @@ class TestTheBundleIsCheckableByConstruction:
                 ),
             ),
             manifest=({"path": "/mnt/user-data/trial.csv", "size_bytes": 12},),
-            policy={"reconciliation_required": True},
+            policy={"stage_spec_key": "generic:build:v2"},
         )
 
         restored = restore_build_input_bundle(bundle.as_dict())
@@ -156,14 +156,14 @@ class TestResolutionSucceeds:
             project_root=root,
             datasets=[{"source_key": "trial", "content_hash": _hash("a")}],
             manifest=[{"path": "/mnt/user-data/data.csv", "kind": "file", "size_bytes": 12}],
-            policy={"reconciliation_required": False},
+            policy={"stage_spec_key": "generic:build:v2"},
         )
         assert bundle.design.reference == uri
         assert bundle.design.content_hash == _hash(DESIGN_BODY)
         assert bundle.design_text == DESIGN_BODY
         assert not bundle.design_truncated
         assert [item.reference for item in bundle.inputs] == ["dataset:trial"]
-        assert bundle.policy["reconciliation_required"] is False
+        assert bundle.policy["stage_spec_key"] == "generic:build:v2"
 
     def test_the_newest_revision_of_the_approved_attempt_wins(self, tmp_path: Path) -> None:
         root, uri = _project(tmp_path)

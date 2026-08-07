@@ -29,9 +29,8 @@ from deerflow.persistence.workspaces import WorkspaceRepository
 
 
 @pytest.fixture(autouse=True)
-def _shipped_dbtl_gates(strict_reconciliation, build_workflow_steps_off):
-    """Every case here asserts the shipped gate rules, so it states them rather
-    than inheriting whatever the developer's config.yaml happens to say."""
+def _shipped_dbtl_gates(build_workflow_steps_off):
+    """Pin the optional phased-Build rule for this suite."""
 
 
 pytestmark = pytest.mark.asyncio
@@ -401,25 +400,24 @@ async def _approve(repo, project_id, cycle, stage, *, key):
     )
 
 
-async def test_design_approval_opens_reconciliation_but_not_build(tmp_path: Path) -> None:
+async def test_design_approval_opens_build_without_reconciliation(tmp_path: Path) -> None:
     repo, project_id = await _repos(tmp_path)
     cycle = await _cycle(repo, project_id)
 
     after = await _approve(repo, project_id, cycle, "design", key="design")
 
     statuses = {stage["stage"]: stage["status"] for stage in after["stages"]}
-    assert after["state"] == "reconciliation"
-    assert statuses["reconciliation"] == StageStatus.IN_PROGRESS
-    assert statuses["build"] == StageStatus.LOCKED
+    assert after["state"] == "ready_for_build"
+    assert statuses["reconciliation"] == StageStatus.LOCKED
+    assert statuses["build"] == StageStatus.IN_PROGRESS
 
 
-async def test_build_readiness_requires_both_approvals(tmp_path: Path) -> None:
-    """The Phase 3 rule, end to end through durable storage."""
+async def test_reconciliation_review_does_not_gate_or_advance_build(tmp_path: Path) -> None:
     repo, project_id = await _repos(tmp_path)
     cycle = await _cycle(repo, project_id)
 
     after_design = await _approve(repo, project_id, cycle, "design", key="design")
-    assert after_design["state"] == "reconciliation"
+    assert after_design["state"] == "ready_for_build"
 
     after_reconciliation = await _approve(repo, project_id, after_design, "reconciliation", key="recon")
     assert after_reconciliation["state"] == "ready_for_build"
@@ -431,7 +429,7 @@ async def test_the_full_manual_cycle_reaches_completed_without_state_lag(tmp_pat
     current = await _cycle(repo, project_id)
 
     current = await _approve(repo, project_id, current, "design", key="design")
-    assert current["state"] == "reconciliation"
+    assert current["state"] == "ready_for_build"
     current = await _approve(
         repo,
         project_id,
@@ -459,7 +457,7 @@ async def test_the_full_manual_cycle_reaches_completed_without_state_lag(tmp_pat
             "configuration": [],
             "expected_outputs": ["/mnt/user-data/outputs/model.bin"],
         },
-        input_artifacts=["artifact://reconciliation"],
+        input_artifacts=[f"workspace_file:reconciliation.json:sha256:{'a' * 64}"],
         output_artifacts=[
             {
                 "uri": "/mnt/user-data/outputs/model.bin",
@@ -719,7 +717,7 @@ async def test_state_survives_a_fresh_repository_instance(tmp_path: Path) -> Non
     restored = await reopened.get_cycle(cycle["id"], project_id=project_id)
 
     assert restored is not None
-    assert restored["state"] == "reconciliation"
+    assert restored["state"] == "ready_for_build"
     assert restored["research_question"] == "Which lines hold yield under late drought?"
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.gateway.dbtl_readiness import scan_dbtl_readiness
+from deerflow.agents.dbtl.live_stage.build_phase_verification import missing_scientific_packages
 from deerflow.config.dbtl_config import DbtlConfig
 from deerflow.persistence.dbtl import DbtlGovernanceRepository
 
@@ -66,6 +67,10 @@ async def build_governance_report(
         sandbox_provider,
         allow_host_bash=allow_host_bash,
     )
+    # A missing scientific stack is an environment problem, so it belongs in
+    # readiness rather than surfacing after a worker spends its token budget.
+    local_sandbox = "LocalSandboxProvider" in sandbox_provider or "sandbox.local" in sandbox_provider
+    missing_packages = missing_scientific_packages() if local_sandbox else ()
     checks = [
         _check(
             "postgres-authority",
@@ -120,6 +125,20 @@ async def build_governance_report(
             "Ordinary runs cannot bypass DBTL stage output ownership",
             stage_output_isolated,
             stage_output_detail,
+        ),
+        _check(
+            "dbtl-python-runtime",
+            "DBTL scientific Python runtime is installed",
+            not missing_packages,
+            (
+                "The local Gateway interpreter includes the DBTL scientific stack."
+                if local_sandbox and not missing_packages
+                else (
+                    "The remote sandbox owns its DBTL scientific runtime."
+                    if not local_sandbox
+                    else "The local Gateway interpreter is missing: " + ", ".join(missing_packages) + ". Install the dbtl-build extra before enabling Build or Test."
+                )
+            ),
         ),
     ]
     technical_ready = all(check["status"] == "passed" for check in checks)

@@ -145,7 +145,7 @@ def test_detect_from_config_sqlite_returns_no_extras(tmp_path):
 
 def test_detect_from_config_dbtl_build_via_graph_enabled(tmp_path):
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("dbtl:\n  mode: graph_enabled\n  proposals_visible: true\n")
+    cfg.write_text("dbtl:\n  mode: graph_enabled\n")
     assert detect.detect_from_config(cfg) == ["dbtl-build"]
 
 

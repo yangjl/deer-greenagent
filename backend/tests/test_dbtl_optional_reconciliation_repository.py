@@ -1,9 +1,7 @@
-"""The optional-reconciliation flag, driven through the real repository.
+"""The ungated Design → Build path, driven through the real repository.
 
-The pure tests prove the legal-move tables are right. These prove the switch
-reaches a database write: that an approved Design opens Build with no matrix
-settled, and — the half that matters more — that the data guarantees
-reconciliation used to carry did not leave with it.
+An approved Design opens Build with no matrix settled, while the server still
+binds every Build input and Test verifies that lineage.
 """
 
 from __future__ import annotations
@@ -28,13 +26,6 @@ HASH_B = "b" * 64
 async def _close_test_engine():
     yield
     await close_engine()
-
-
-@pytest.fixture
-def no_reconciliation(monkeypatch):
-    """The deployment rule, as the two writers that consult it see it."""
-    monkeypatch.setattr("deerflow.persistence.dbtl.cycles.reconciliation_required", lambda: False)
-    monkeypatch.setattr("deerflow.persistence.dbtl.build_test_ops.reconciliation_required", lambda: False)
 
 
 async def _repo(tmp_path: Path) -> DbtlCycleRepository:
@@ -110,7 +101,7 @@ async def _approved_design(tmp_path: Path) -> DbtlCycleRepository:
 
 class TestDesignApprovalOpensBuild:
     @pytest.mark.asyncio
-    async def test_an_approved_design_reaches_ready_for_build_with_no_matrix(self, tmp_path: Path, no_reconciliation):
+    async def test_an_approved_design_reaches_ready_for_build_with_no_matrix(self, tmp_path: Path):
         repo = await _approved_design(tmp_path)
 
         cycle = await repo.get_cycle("cycle-1", project_id="project-1")
@@ -120,20 +111,6 @@ class TestDesignApprovalOpensBuild:
         assert statuses["build"] == "in_progress"
         # Skipped, not worked and not deleted.
         assert statuses["reconciliation"] == "locked"
-
-    @pytest.mark.asyncio
-    async def test_the_gate_still_holds_when_the_flag_is_left_alone(self, tmp_path: Path, strict_reconciliation):
-        # "Left alone" means the shipped default, which is pinned here rather
-        # than read from the ambient config: a developer who opted out locally
-        # would otherwise turn this into a second copy of the test above.
-        repo = await _approved_design(tmp_path)
-
-        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
-        assert cycle is not None
-        assert cycle["state"] == "reconciliation"
-        statuses = {item["stage"]: item["status"] for item in cycle["stages"]}
-        assert statuses["build"] == "locked"
-
 
 class TestBuildOwnsInputBinding:
     async def _record_lineage(self, repo: DbtlCycleRepository, *, input_artifacts: list[str] | None = None, rerun_spec: object = "__default__"):
@@ -164,7 +141,7 @@ class TestBuildOwnsInputBinding:
         )
 
     @pytest.mark.asyncio
-    async def test_build_accepts_a_server_bound_input_without_a_dataset_declaration(self, tmp_path: Path, no_reconciliation):
+    async def test_build_accepts_a_server_bound_input_without_a_dataset_declaration(self, tmp_path: Path):
         repo = await _approved_design(tmp_path)
 
         lineage = await self._record_lineage(repo)
@@ -173,21 +150,21 @@ class TestBuildOwnsInputBinding:
         assert lineage["input_artifacts"] == ["workspace_file:uploads/yield.csv:sha256:" + HASH_A]
 
     @pytest.mark.asyncio
-    async def test_build_refuses_an_input_without_a_server_content_hash(self, tmp_path: Path, no_reconciliation):
+    async def test_build_refuses_an_input_without_a_server_content_hash(self, tmp_path: Path):
         repo = await _approved_design(tmp_path)
 
         with pytest.raises(ValueError, match="server-computed SHA-256"):
             await self._record_lineage(repo, input_artifacts=["workspace_file:uploads/yield.csv"])
 
     @pytest.mark.asyncio
-    async def test_build_refuses_a_result_with_neither_inputs_nor_a_rerun_record(self, tmp_path: Path, no_reconciliation):
+    async def test_build_refuses_a_result_with_neither_inputs_nor_a_rerun_record(self, tmp_path: Path):
         repo = await _approved_design(tmp_path)
 
         with pytest.raises(ValueError, match="at least one input file"):
             await self._record_lineage(repo, input_artifacts=[], rerun_spec=None)
 
     @pytest.mark.asyncio
-    async def test_build_accepts_a_generative_result_with_no_inputs_but_a_rerun_record(self, tmp_path: Path, no_reconciliation):
+    async def test_build_accepts_a_generative_result_with_no_inputs_but_a_rerun_record(self, tmp_path: Path):
         # A seed-based simulation examines no external input; its provenance is the
         # reproducible rerun record plus the hashed outputs.
         repo = await _approved_design(tmp_path)
@@ -197,7 +174,7 @@ class TestBuildOwnsInputBinding:
         assert lineage["input_artifacts"] == []
 
     @pytest.mark.asyncio
-    async def test_one_click_build_approval_opens_test_from_ready_for_build(self, tmp_path: Path, no_reconciliation):
+    async def test_one_click_build_approval_opens_test_from_ready_for_build(self, tmp_path: Path):
         repo = await _approved_design(tmp_path)
         await self._record_lineage(repo)
         await repo.attach_artifact(

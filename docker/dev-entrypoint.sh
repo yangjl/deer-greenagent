@@ -5,8 +5,8 @@
 # (PR #2767, addressing review on Issue #2754).
 #
 # Responsibilities:
-#   1. Resolve `--extra X` flags from UV_EXTRAS (comma- or whitespace-separated,
-#      mirroring scripts/detect_uv_extras.py for parity with local `make dev`).
+#   1. Resolve `--extra X` flags from UV_EXTRAS, or auto-detect them from the
+#      mounted config with the same script used by local `make dev`.
 #   2. Validate each extra against [A-Za-z][A-Za-z0-9_-]* so a stray shell
 #      metacharacter in `.env` cannot reach `uv sync`.
 #   3. `uv sync --all-packages` so workspace member extras (deerflow-harness's
@@ -38,7 +38,19 @@ fi
 # ── Resolve extras ──────────────────────────────────────────────────────────
 
 EXTRAS_FLAGS=""
-if [ -n "${UV_EXTRAS:-}" ]; then
+if [ "${UV_EXTRAS+x}" != "x" ]; then
+    EXTRAS_DETECTOR="${DEER_FLOW_EXTRAS_DETECTOR:-/app/project/scripts/detect_uv_extras.py}"
+    if [ -f "$EXTRAS_DETECTOR" ]; then
+        if command -v python3 >/dev/null 2>&1; then
+            EXTRAS_FLAGS=$(python3 "$EXTRAS_DETECTOR")
+        elif command -v python >/dev/null 2>&1; then
+            EXTRAS_FLAGS=$(python "$EXTRAS_DETECTOR")
+        else
+            echo "[startup] cannot auto-detect optional dependencies: no bootstrap Python is available" >&2
+            exit 1
+        fi
+    fi
+elif [ -n "$UV_EXTRAS" ]; then
     # Normalize comma → space, then split on whitespace via the unquoted `for`.
     for raw in $(printf '%s' "$UV_EXTRAS" | tr ',' ' '); do
         [ -z "$raw" ] && continue

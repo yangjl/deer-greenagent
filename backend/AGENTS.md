@@ -1808,21 +1808,11 @@ passes `--force`. Tests live in
 - For lightweight config/utility modules, prefer pure unit tests with no external dependencies
 - If a module causes circular import issues in tests, add a `sys.modules` mock in `tests/conftest.py` (see existing example for `deerflow.subagents.executor`)
 - **A test states the deployment switch it exercises; it never inherits one.**
-  Some rules are read from the ambient `config.yaml` at call time rather than
-  passed as arguments — `reconciliation_required()` and
-  `build_workflow_steps_enabled()` in
-  `deerflow.dbtl.reconciliation_policy` are the current examples. A developer
-  who sets `dbtl.reconciliation_required: false` or
-  `dbtl.build_workflow_steps: true` locally then silently flips the rule under
-  every test that asserts the other path, so two dozen unrelated assertions
-  fail on their machine while CI, running the shipped defaults, stays green —
-  and the failures look like real regressions in whatever was last touched.
-  `tests/conftest.py` provides `strict_reconciliation` and
-  `build_workflow_steps_off` to pin the shipped defaults, and
-  `test_dbtl_optional_reconciliation_repository.py::no_reconciliation` pins the
-  opt-out; a file whose cases all assume one mode requests the matching fixture
-  from a module-level `autouse` fixture. When adding a config-read rule, add
-  its pinning fixture in the same change set.
+  Rules such as `build_workflow_steps_enabled()` read the ambient `config.yaml`
+  at call time. `tests/conftest.py` provides `build_workflow_steps_off` to pin
+  the shipped default so local configuration cannot silently change unrelated
+  tests. When adding a config-read rule, add its pinning fixture in the same
+  change set.
 
 ```bash
 # Run all offline tests
@@ -2121,13 +2111,11 @@ never report cutover-ready. These controls do not start or advance a cycle.
 DBTL Phase 3 turns the workflow on for humans. `deerflow.dbtl.cycle_state` is
 the **pure** state machine both the manual UI and the later Supervisor Graph
 call, so the two cannot drift into different notions of a legal transition:
-five stages (`design → reconciliation → build → test → learn`) with
-`ready_for_build` as an explicit state rather than an inference, because that
-is the thing a reviewer approves. Its central rule is that Build requires
-**two** independent approvals — Design _and_ Data Reconciliation — and
-`apply_review` opens only the immediate successor, so approving Design can
-never make Build workable while Reconciliation is outstanding. Refusals raise
-`TransitionRefused`; the machine never falls back to a default state.
+the governed path (`design → build → test → learn`) with `ready_for_build` as
+an explicit state rather than an inference. Design approval opens Build.
+Reconciliation remains an opt-in evidence workflow and cannot block or advance
+the cycle. Refusals raise `TransitionRefused`; the machine never falls back to
+a default state.
 
 Migration `0012_dbtl_cycle_hierarchy` adds `dbtl_cycles.parent_cycle_id`
 (self-FK with `RESTRICT`, so deleting a parent cannot erase child records). It
@@ -2296,11 +2284,10 @@ routes are not classifier misses.
 holds only the telemetry repository, so it has nothing to create a cycle with;
 `{id}/outcome` attaches the human's choice from the supervisor's native setup
 card; `evaluations` is the internal drawer and is administrator-only.
-`dbtl.classifier_shadow_enabled` (default on) controls measurement only. The
-evaluation response contains routing identity, not a second browser proposal
-payload; the supervisor owns visible setup and confirmation. A telemetry write
-failure is logged and swallowed: a measurement surface must not degrade the
-product it measures.
+Classifier measurement is always on. The evaluation response contains routing
+identity, not a second browser proposal payload; the supervisor owns visible
+setup and confirmation. A telemetry write failure is logged and swallowed: a
+measurement surface must not degrade the product it measures.
 
 DBTL Phase 5 adds the thin project supervisor graph. Interactive project
 threads remain durably pinned to `lead_agent`; after the Gateway has re-derived
@@ -2782,17 +2769,17 @@ Build lineage and Test decisions share the cycle revision and activity ledger.
 `dbtl_build_lineage` binds a Build revision to its input fingerprint, stage
 spec, code/config, environment, versioned outputs, deviations, and logs. When
 Reconciliation is required that fingerprint remains the approved dataset set;
-when it is optional, Build workers report the workspace files they examined and
+Build workers report the workspace files they examined and
 the server computes their hashes automatically from files that existed before
 the run. No separate dataset declaration or human-supplied digest is required.
 Test then owns leakage, split, and validity checks against that lineage.
-The live stage context makes that policy explicit: when Reconciliation is
-optional it projects the stage as intentionally skipped, identifies
+The live stage context makes that policy explicit: it projects Reconciliation
+as not required for later stages, identifies
 server-bound Build lineage as the data authority, and defines the retained
 `reconciled_inputs` validity key as bound input provenance. Missing dataset
 declarations or matrix rows are therefore neither a limitation nor a failed
 Test check. Historical Build prose cannot override the active server policy.
-The assessment writer enforces the same boundary: optional mode replaces the
+The assessment writer enforces the same boundary: it replaces the
 submitted `reconciled_inputs` status with a server-owned pass bound to Build
 lineage, while the existing no-lineage refusal prevents that normalization from
 manufacturing provenance. The frontend constructs the review form from the
@@ -2817,6 +2804,25 @@ inputs are its inputs, each worker has an enforced 120K-token, 450-superstep,
 earlier committed phases available for replay. Build records a structured
 rerun procedure, while Test and the human decide whether the result is
 reproducible.
+
+Build and Test share one Python environment contract. The `dbtl-build` optional
+extra in `packages/harness/pyproject.toml` owns NumPy, SciPy, pandas,
+Matplotlib, statsmodels, scikit-learn, seaborn, Jupyter, nbconvert, and
+ipykernel. `scripts/detect_uv_extras.py` selects it whenever `dbtl.mode` is
+`manual` or `graph_enabled`; local, Docker-dev, and deploy launchers all honor
+that detector when `UV_EXTRAS` is not explicitly set. For a local sandbox,
+`LiveStageAdapter` adds the active Gateway interpreter's venv `bin` directory
+to the front of `PATH` and sets `VIRTUAL_ENV` for all Build phase workers, the
+server phase verifier, and the Test rerun worker. Portable Build/Test receipts
+continue to record `python`, while remote sandboxes receive no host path and
+must provide their scientific runtime in the sandbox image. Do not add an
+interpreter-name fallback table or pass `sys.executable` as a command: either
+approach separates the executable from its installed packages. A direct manual
+Gateway launch is valid only after `uv sync --extra dbtl-build` and through the
+backend venv (`uv run ...`); otherwise the Build preflight fails before any
+planner or worker is dispatched. Tests pin this in
+`test_dbtl_stage_worker_progress.py`, `test_dbtl_build_phase_verification.py`,
+and `test_dev_entrypoint.py`.
 
 Build's structured-result parser is deliberately looser only about the label on
 a concrete implementation file. Models often return semantic kinds such as
@@ -3459,9 +3465,8 @@ Learn from `build` only when Test itself carries the skip — the shortcut is
 keyed on the recorded status, never on the stage pair.
 
 `stage_routes.RouteSlug.LEARN_EXPLORATORY` is the edge. `RouteContext.
-conditional_test` defaults **false** for the same reason `reconciliation_required`
-defaults true: a route menu is a safety surface, and the forgiving default
-belongs on the other side. `transition_target` refuses the route from any stage
+conditional_test` defaults **false** because a route menu is a safety surface.
+`transition_target` refuses the route from any stage
 but Build. The route is offered *beside* `advance`, never instead of it — the
 point is that a person chooses between qualifying and not, and a menu showing
 one option has taken the decision for them.
@@ -3511,9 +3516,8 @@ hash-registered); the server's read model is what enables it. Tests:
 graph** (plan: `docs/plans/2026-07-29-progressive-dbtl-gate-plan.md`).
 `deerflow.dbtl.stage_routes` is the pure authority for legal edges: the graph's
 nodes are Design, Build, Test, Learn only, and reconciliation is never a
-destination — where Phase 7's post-Test chooser offered "return to
-reconciliation", the re-expression is a **blocked Build edge carrying the
-unreconciled-rows reason**. The production Test-validity write path consults
+destination. Build edges are never conditioned on reconciliation. The
+production Test-validity write path consults
 this authority before applying its legacy recommendation; the old
 `return_to_reconciliation` value is refused without changing cycle state.
 `TransitionOpsMixin`
@@ -3961,15 +3965,10 @@ same switch:
   a local platform without a process-tree write boundary likewise fails
   closed. The refusal is the cheap early
   half; the execution is what actually decides whether the paths were real.
-  `dbtl.build_implementer_agent` selects which agent implements a phase whose
-  capability has no registered specialist. It replaces only the *stand-in* and
-  is still recorded as one (`via_generalist=True`) — nothing about a preferred
-  agent covers the capability, and a reviewer who cannot tell a specialist from
-  a preference has lost the distinction capability selection exists to keep. A
-  registered specialist still wins, and an unregistered name falls back rather
-  than failing the phase: this is an efficiency dial, and correctness does not
-  rest on which agent runs, which is precisely what the two-agent failure
-  showed. Tests: `tests/test_dbtl_build_grant.py`,
+  Build phases use the normal capability selector: a registered specialist wins,
+  otherwise the registered generalist is recorded as the stand-in
+  (`via_generalist=True`). With neither available, the phase is refused rather
+  than silently routed to an arbitrary agent. Tests: `tests/test_dbtl_build_grant.py`,
   `tests/test_dbtl_build_granted_paths.py`.
 
   Each persisted `subagent.step` AI row also carries that AIMessage's own

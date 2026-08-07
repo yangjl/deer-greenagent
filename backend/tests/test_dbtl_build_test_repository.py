@@ -15,9 +15,8 @@ from deerflow.persistence.workspaces import WorkspaceRepository
 
 
 @pytest.fixture(autouse=True)
-def _shipped_dbtl_gates(strict_reconciliation, build_workflow_steps_off):
-    """Every case here asserts the shipped gate rules, so it states them rather
-    than inheriting whatever the developer's config.yaml happens to say."""
+def _shipped_dbtl_gates(build_workflow_steps_off):
+    """Pin the optional phased-Build rule for this suite."""
 
 
 pytestmark = pytest.mark.asyncio
@@ -166,7 +165,7 @@ async def _record_lineage(repo: DbtlCycleRepository, *, rerun_spec: dict | None 
         config_revision="config:sha256:def",
         environment={"python": "3.12", "platform": "linux"},
         rerun_spec=rerun_spec,
-        input_artifacts=["artifact://approved-reconciliation"],
+        input_artifacts=[f"workspace_file:yield.csv:sha256:{HASH_A}"],
         output_artifacts=[
             {
                 "uri": "/mnt/user-data/outputs/model.bin",

@@ -1512,11 +1512,9 @@ def test_concurrent_stage_units_receive_distinct_workspace_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_optional_reconciliation_tells_test_to_judge_bound_build_lineage(
+async def test_test_judges_bound_build_lineage_without_a_reconciliation_gate(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("deerflow.agents.dbtl.live_stage.adapter.reconciliation_required", lambda: False)
     repo = FakeRepo(_cycle(state="test"))
     repo.lineage.append(
         {
@@ -1548,7 +1546,7 @@ async def test_optional_reconciliation_tells_test_to_judge_bound_build_lineage(
     assert result.stage == "test"
     prompt = dispatcher.calls[0][0][0].prompt
     assert '"authority": "server_bound_build_lineage"' in prompt
-    assert '"status": "skipped"' in prompt
+    assert '"status": "not_required"' in prompt
     assert "Missing dataset declarations or reconciliation matrix rows are not a blocker" in prompt
     assert "a validity check named reconciled_inputs means bound input provenance" in prompt
     assert '"pack_key": "generic-predictive:v2"' in prompt
@@ -1563,7 +1561,6 @@ async def test_test_runs_build_command_first_and_records_server_verified_reprodu
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("deerflow.agents.dbtl.live_stage.adapter.reconciliation_required", lambda: False)
     source = tmp_path / "yield.csv"
     source.write_text("yield\n1\n", encoding="utf-8")
     (tmp_path / "fit.py").write_text("print('fit')\n", encoding="utf-8")

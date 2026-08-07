@@ -1,13 +1,7 @@
 """Legal next edges over the DBTL stage graph.
 
-The graph's nodes are **Design, Build, Test, Learn only**. Data readiness /
-reconciliation is deliberately not a node: it is dataset-scoped precondition
-state that locks Build edges until every required matrix row is settled, so
-where Phase 7's post-Test chooser offered "return to reconciliation" as a
-destination, this module renders a **blocked Build edge carrying the reason**
-instead. The human settles the matrix through the existing reconciliation
-surface (outside the path) and the Build edge unlocks; no transition row is
-ever written for data work.
+The graph's nodes are **Design, Build, Test, Learn only**. Data Reconciliation
+is an explicit evidence workflow, not a graph node or a Build prerequisite.
 
 Everything here is pure values. The same computation answers "which routes may
 the deck offer?" and "which route did this recorded decision take?", so the
@@ -27,9 +21,6 @@ _NEXT_STAGE: dict[str, str] = {"design": "build", "build": "test", "test": "lear
 #: stage may close the cycle (recorded today as ``cycle.abandoned``).
 COMPLETED = "completed"
 ABANDONED = "abandoned"
-
-UNRECONCILED_REASON = "Build is locked until every required reconciliation matrix row is settled."
-
 
 class StageRoutesRefused(ValueError):
     """The supplied stage or outcome is not part of the stage graph."""
@@ -58,28 +49,22 @@ _TEST_OUTCOMES: frozenset[str] = frozenset({"supported", "not_supported", "incon
 class StageRoute:
     """One legal edge, in the ``decision_request`` option shape.
 
-    A blocked route is still returned — the deck must be able to say *why*
-    Build is not on offer — but a blocked edge is never choosable.
+    Route availability is represented by presence. There is no second
+    disabled-route state for callers to reinterpret.
     """
 
     slug: str
     to_stage: str
     label: str
     value: str
-    blocked: bool = False
-    blocked_reason: str = ""
 
     def as_dict(self) -> dict[str, object]:
-        payload: dict[str, object] = {
+        return {
             "slug": self.slug,
             "to_stage": self.to_stage,
             "label": self.label,
             "value": self.value,
         }
-        if self.blocked:
-            payload["blocked"] = True
-            payload["blocked_reason"] = self.blocked_reason
-        return payload
 
 
 @dataclass(frozen=True)
@@ -88,36 +73,21 @@ class RouteContext:
 
     stage: str
     outcome: str | None
-    reconciliation_settled: bool = False
-    #: Whether this deployment gates Build on a settled reconciliation matrix.
-    #: Defaults to ``True`` so a caller that has not been taught about the flag
-    #: keeps the stricter behaviour; a route menu is a safety surface, and the
-    #: forgiving default belongs on the other side.
-    reconciliation_required: bool = True
     #: Whether this deployment lets a reviewer close a Build without retention
     #: qualification. Defaults to ``False`` for the same reason: a menu that
     #: offered the skip to a deployment which never enabled it would be
     #: offering an edge nobody vetted.
     conditional_test: bool = False
 
-    @property
-    def build_edge_open(self) -> bool:
-        """Whether the data work behind the Build edge is out of the way."""
-        return self.reconciliation_settled or not self.reconciliation_required
-
-
-def _advance(stage: str, *, build_edge_open: bool) -> StageRoute:
+def _advance(stage: str) -> StageRoute:
     target = _NEXT_STAGE.get(stage, COMPLETED)
     if stage == "learn":
         return StageRoute(RouteSlug.ADVANCE, COMPLETED, "Conclude the cycle", "Record Learn's outcome and close the cycle as completed.")
-    blocked = target == "build" and not build_edge_open
     return StageRoute(
         RouteSlug.ADVANCE,
         target,
         f"Continue to {target.capitalize()}",
         f"Open {target.capitalize()} as the next stage attempt.",
-        blocked=blocked,
-        blocked_reason=UNRECONCILED_REASON if blocked else "",
     )
 
 
@@ -163,15 +133,12 @@ def _park(stage: str) -> StageRoute:
     )
 
 
-def _return_to_build(*, build_edge_open: bool) -> StageRoute:
-    blocked = not build_edge_open
+def _return_to_build() -> StageRoute:
     return StageRoute(
         RouteSlug.RETURN_TO_BUILD,
         "build",
         "Run another Build",
         "Add a Build attempt with changed inputs or parameters.",
-        blocked=blocked,
-        blocked_reason=UNRECONCILED_REASON if blocked else "",
     )
 
 
@@ -180,7 +147,7 @@ def _return_to_design() -> StageRoute:
 
 
 def compute_stage_routes(context: RouteContext) -> tuple[StageRoute, ...]:
-    """The legal edges from *context*, blocked edges included.
+    """The legal edges from *context*.
 
     An unknown stage or outcome is refused rather than answered: a menu
     computed from a fact this module does not understand would offer edges
@@ -199,14 +166,14 @@ def compute_stage_routes(context: RouteContext) -> tuple[StageRoute, ...]:
             raise StageRoutesRefused(f"Unknown Test outcome {outcome!r}.")
         if outcome in {"supported", "not_supported"}:
             return (
-                _advance("test", build_edge_open=context.build_edge_open),
+                _advance("test"),
                 _revise("test"),
                 _close(),
             )
         return (
             _revise("test"),
             *((_learn_from_invalidated_evidence(),) if outcome == "invalidated" else ()),
-            _return_to_build(build_edge_open=context.build_edge_open),
+            _return_to_build(),
             _return_to_design(),
             _close(),
         )
@@ -215,7 +182,7 @@ def compute_stage_routes(context: RouteContext) -> tuple[StageRoute, ...]:
         raise StageRoutesRefused(f"Unknown review outcome {outcome!r} for stage {stage!r}.")
     if outcome in {"approve", "approved"}:
         return (
-            _advance(stage, build_edge_open=context.build_edge_open),
+            _advance(stage),
             *((_learn_exploratory(),) if stage == "build" and context.conditional_test else ()),
             *(() if stage == "learn" else (_revise(stage),)),
             *(() if stage == "learn" else (_park(stage),)),
@@ -255,9 +222,8 @@ def transition_target(stage: str, chosen_route: str) -> str:
     if route in {"reject", "rejected"}:
         return stage
     if route in {"return_to_build", "return_to_reconciliation"}:
-        # Phase 7 offered "return to reconciliation" as a route; the stage
-        # graph has no such node, so the recorded target is the Build edge the
-        # reconciliation work exists to unlock.
+        # Reconciliation is not a graph node, so the historical route name
+        # records the Build target without making it a prerequisite.
         return "build"
     if route == "return_to_design":
         return "design"

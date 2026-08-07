@@ -33,8 +33,6 @@ def _app_with_config(
             graph_execution_enabled=dbtl_mode == "graph_enabled",
             design_deck_feedback=True,
             progressive_gate=False,
-            reconciliation_required=True,
-            policy_version="greenagent-dbtl-v2-draft",
         ),
     )
     app.dependency_overrides[get_config] = lambda: fake_config
@@ -58,7 +56,6 @@ def test_features_reports_agents_api_enabled() -> None:
             "graph_execution_enabled": False,
             "design_deck_feedback": True,
             "progressive_gate": False,
-            "reconciliation_required": True,
             "stage_meetings": {
                 "build": False,
                 "test": False,

@@ -30,14 +30,6 @@ class DbtlConfig(BaseModel):
         default="audit_only",
         description="DBTL operating mode: disabled, audit_only, manual, or graph_enabled.",
     )
-    policy_version: str = Field(
-        default="greenagent-dbtl-v2-draft",
-        description="Vocabulary/policy contract shown in the readiness report.",
-    )
-    classifier_shadow_enabled: bool = Field(
-        default=True,
-        description="Record classifier shadow evaluations. Observation only: an evaluation never creates or advances a cycle.",
-    )
     conversational_discovery: bool = Field(
         default=False,
         description=("Route explicit new-cycle requests into a durable, read-only conversation before cycle creation. This interaction switch does not grant workflow authority and requires graph_enabled."),
@@ -63,18 +55,6 @@ class DbtlConfig(BaseModel):
         description=("Use authenticated Design feedback decks for chair answers and Design review. Set false to restore the visible Design Human Input card and Design stage sheet without deleting surfaces, actions, reviews, or artifacts."),
     )
 
-    reconciliation_required: bool = Field(
-        default=True,
-        description=(
-            "Gate Build on a settled Data Reconciliation matrix. Default true. Set false and an approved Design opens "
-            "Build directly, while the reconciliation stage, its endpoints, and its matrix remain available for projects "
-            "that use them. The data guarantees are not dropped: Build still binds the content hashes of the datasets it "
-            "ran on and still refuses to record lineage when none are declared or a raw source is not declared immutable. "
-            "What is given up is the human-settled judgement matrix — contradictory sources, trait direction, exclusions, "
-            "leakage, and train/test separation are no longer required to be adjudicated before Build."
-        ),
-    )
-
     build_workflow_steps: bool = Field(
         default=False,
         description=(
@@ -92,18 +72,6 @@ class DbtlConfig(BaseModel):
             "past a phase boundary, or choose Retry / Replan / Restart / Hold after a failure — and every option states "
             "what it costs. Retrying one step from a button in the read model is deliberately not offered: the card owns "
             "that decision so it stays durable in the conversation."
-        ),
-    )
-
-    build_implementer_agent: str | None = Field(
-        default=None,
-        description=(
-            "Agent that implements Build phases whose capability has no registered specialist. null keeps the "
-            "existing behaviour, which selects the registered generalist and records the stand-in. This is an "
-            "efficiency dial and never a correctness one: the server-issued path grant, the entry-point refusal, "
-            "and the server's own execution of that entry point hold whichever agent runs, because the observed "
-            "failure crossed both the specialist and the generalist. A name that is not a registered agent is "
-            "ignored with a warning rather than failing the Build."
         ),
     )
 
@@ -161,17 +129,13 @@ class DbtlConfig(BaseModel):
             "four-stage display. Transition records accumulate either way, so toggling this never creates an audit gap."
         ),
     )
-    transition_assessor_model_name: str | None = Field(
-        default=None,
-        description=("Model used for the nostream assessment of work remaining at a stage boundary. null, an unavailable model, or malformed output fails safely to the standard review path."),
-    )
     stage_meetings: DbtlStageMeetingsConfig = Field(
         default_factory=DbtlStageMeetingsConfig,
         description=("Per-stage post-evidence meeting rollout. Build, Test, and Learn default off and can be enabled independently."),
     )
     setup_draft_model_name: str | None = Field(
         default=None,
-        description=("Model used by fail-soft DBTL one-shot helpers: setup questions, intent interpretation, meeting rosters, and short meeting summaries. null keeps their deterministic fallbacks."),
+        description=("Model used by fail-soft DBTL one-shot helpers: setup questions, intent interpretation, meeting rosters, transition assessments, and short meeting summaries. null keeps their deterministic fallbacks."),
     )
 
     council_model_name: str | None = Field(

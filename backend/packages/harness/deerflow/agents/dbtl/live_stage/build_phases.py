@@ -376,9 +376,16 @@ def gating_failed_phase_checks(result: StageWorkerResult, required_name: str = P
 def phase_completion_error(result: StageWorkerResult, required_name: str) -> str:
     """Explain why a server-required Build phase assertion did not pass."""
 
-    if not required_name or result.status is not WorkerStatus.COMPLETED:
+    if not required_name or result.status not in {WorkerStatus.COMPLETED, WorkerStatus.FAILED}:
         return ""
     checks = [item for item in result.quality_checks if item.name.strip() == required_name]
+    # A failed result never satisfies the phase, but one precise failed done
+    # check is enough to tell v12's separate correction worker what to repair.
+    # Other failed shapes remain untrusted and fail closed as before.
+    if result.status is WorkerStatus.FAILED:
+        if len(checks) == 1 and not checks[0].passed:
+            return checks[0].detail.strip() or f"The worker reported that {required_name!r} was not satisfied."
+        return ""
     if len(checks) != 1:
         return f"The worker must return exactly one {required_name!r} quality check before this phase can finish."
     if not checks[0].passed:
@@ -412,8 +419,6 @@ class PhaseAssignment:
 def assign_phase(
     phase: BuildPhase,
     candidates: Sequence[AgentCandidate],
-    *,
-    implementer: str = "",
 ) -> PhaseAssignment:
     """Resolve one phase's capability against the registered agents.
 
@@ -433,17 +438,6 @@ def assign_phase(
     specialist = next((item for item in available if phase.capability in item.capabilities), None)
     if specialist is not None:
         return PhaseAssignment(phase=phase, agent_name=specialist.name, via_generalist=False)
-    # A configured implementer replaces only the *stand-in*, never a registered
-    # specialist: the deployment is stating which agent implements best, not
-    # overruling a declared capability. It is still recorded as a stand-in,
-    # because it is one -- nothing about it covers the capability, and a
-    # reviewer who cannot tell a specialist from a preference has lost the
-    # distinction capability selection exists to keep. An unregistered name
-    # falls through to the generalist rather than failing the phase: this is an
-    # efficiency dial, and correctness does not rest on which agent runs.
-    preferred = next((item for item in available if implementer and item.name == implementer), None)
-    if preferred is not None:
-        return PhaseAssignment(phase=phase, agent_name=preferred.name, via_generalist=True)
     generalist = next((item for item in available if item.name == GENERALIST), None)
     return PhaseAssignment(phase=phase, agent_name=generalist.name if generalist else "", via_generalist=bool(generalist))
 

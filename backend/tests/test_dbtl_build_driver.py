@@ -48,6 +48,7 @@ class TestThePhasesRunInTheOrderTheyRan:
             _phase("Shell", "/mnt/user-data/src/c.sh"),
         )
 
+        # The portable command resolves through the execution environment.
         assert "python '/mnt/user-data/src/a.py'" in script
         assert "Rscript '/mnt/user-data/src/b.R'" in script
         assert "/bin/bash '/mnt/user-data/src/c.sh'" in script

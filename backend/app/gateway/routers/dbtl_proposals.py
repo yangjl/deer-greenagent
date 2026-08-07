@@ -38,6 +38,7 @@ from app.gateway.deps import (
     require_admin_user,
 )
 from deerflow.config.app_config import AppConfig
+from deerflow.dbtl.policy import DBTL_POLICY_VERSION
 from deerflow.dbtl.routing import ExplicitChoice, RouteKind, RoutingRequest, route_request
 from deerflow.persistence.telemetry import ClassifierEvaluationConflict
 
@@ -192,31 +193,30 @@ async def evaluate_request(
         )
     )
     evaluation_id = _evaluation_id(project_id, user_id, body.idempotency_key)
-    if dbtl_config.classifier_shadow_enabled:
-        classifier = decision.classifier
-        try:
-            await repo.record_evaluation(
-                evaluation_id=evaluation_id,
-                project_id=project_id,
-                thread_id=body.thread_id,
-                user_id=user_id,
-                route_kind=str(decision.kind),
-                route_source=str(decision.source),
-                request_fingerprint=_request_fingerprint(body),
-                band=str(classifier.band) if classifier else "low",
-                confidence=classifier.confidence if classifier else 0.0,
-                rule_hits=[{"rule_id": hit.rule_id, "weight": hit.weight, "evidence": hit.evidence} for hit in (classifier.rule_hits if classifier else ())],
-                missing_fields=list(classifier.missing_fields) if classifier else [],
-                proposed_objective=classifier.proposed_objective if classifier else "",
-                policy_version=dbtl_config.policy_version,
-            )
-        except ClassifierEvaluationConflict as exc:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-        except Exception:
-            # Telemetry is observation. Losing a row must not break the user's
-            # request — that would let a measurement surface degrade the
-            # product it is measuring.
-            logger.warning("Failed to record DBTL classifier evaluation for project %s", project_id, exc_info=True)
+    classifier = decision.classifier
+    try:
+        await repo.record_evaluation(
+            evaluation_id=evaluation_id,
+            project_id=project_id,
+            thread_id=body.thread_id,
+            user_id=user_id,
+            route_kind=str(decision.kind),
+            route_source=str(decision.source),
+            request_fingerprint=_request_fingerprint(body),
+            band=str(classifier.band) if classifier else "low",
+            confidence=classifier.confidence if classifier else 0.0,
+            rule_hits=[{"rule_id": hit.rule_id, "weight": hit.weight, "evidence": hit.evidence} for hit in (classifier.rule_hits if classifier else ())],
+            missing_fields=list(classifier.missing_fields) if classifier else [],
+            proposed_objective=classifier.proposed_objective if classifier else "",
+            policy_version=DBTL_POLICY_VERSION,
+        )
+    except ClassifierEvaluationConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except Exception:
+        # Telemetry is observation. Losing a row must not break the user's
+        # request — that would let a measurement surface degrade the
+        # product it is measuring.
+        logger.warning("Failed to record DBTL classifier evaluation for project %s", project_id, exc_info=True)
 
     return {
         "evaluation_id": evaluation_id,

@@ -26,13 +26,6 @@ from deerflow.persistence.dbtl import DbtlCycleRepository
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
 
-
-@pytest.fixture(autouse=True)
-def _strict_reconciliation(strict_reconciliation):
-    """Every case here asserts the strict gate, so it states that rule rather
-    than inheriting whatever the developer's config.yaml happens to say."""
-
-
 _USER_ID = UUID("11111111-2222-3333-4444-555555555555")
 _OTHER_USER_ID = UUID("99999999-8888-7777-6666-555555555555")
 
@@ -400,7 +393,7 @@ def test_the_full_manual_path_reaches_build_readiness(tmp_path: Path) -> None:
 
         _attach(client, project_id, cycle["id"], "design")
         after_design = _approve(client, project_id, cycle["id"], "design", cycle["db_revision"], key="design")
-        assert after_design["state"] == "reconciliation"
+        assert after_design["state"] == "ready_for_build"
 
         blocker = client.post(
             f"/api/projects/{project_id}/dbtl/cycles/{cycle['id']}/work-items",

@@ -293,13 +293,7 @@ class TestProgressiveTransitionGate:
         assert 'data-deck-action="advance"' not in controls
         assert 'data-deck-action="reject"' not in controls
 
-    def test_a_blocked_build_edge_states_a_consequence_without_disabling_approve(self) -> None:
-        """A locked Build edge is not a reason the Design cannot be approved.
-
-        Approving Design is what opens the reconciliation work the Build edge
-        waits on, so disabling Approve here deadlocks the cycle: the matrix can
-        never be settled, and the edge never unblocks.
-        """
+    def test_a_stale_blocked_build_edge_cannot_restore_the_removed_gate(self) -> None:
         html = render_council_deck(
             cycle_title="Genomic selection in maize",
             stage_title="Design meeting",
@@ -324,12 +318,9 @@ class TestProgressiveTransitionGate:
         )
 
         controls = html.split("<script>")[0]
-        assert "Two reconciliation rows are unsettled." in controls
-        # The reason is shown; the choice stays choosable once activated.
+        assert "Two reconciliation rows are unsettled." not in controls
         assert "data-route-blocked" not in controls
-        # And the label tells the truth about what approving opens next.
-        assert "open Data reconciliation" in controls
-        assert "open the Build gate" not in controls
+        assert "Accept this Design and open Build." in controls
 
     def test_the_gate_submit_maps_one_choice_to_one_intent(self) -> None:
         html = self._progressive_deck()

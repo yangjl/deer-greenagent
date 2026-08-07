@@ -1,14 +1,12 @@
 """The durable DBTL cycle state machine.
 
-Five stages run in order, and each is gated by a human review:
+The governed execution path is:
 
-    design → reconciliation → [ready_for_build] → build → test → learn
+    design → [ready_for_build] → build → test → learn
 
-``ready_for_build`` is an explicit state rather than an inference, because it
-is the thing a reviewer approves. Reaching it requires **two independent
-approvals** — Design and Data Reconciliation — which is the central Phase 3
-rule: a design that nobody has reconciled against real data must not be
-buildable.
+Data Reconciliation remains an explicit evidence workflow, but it is not a
+prerequisite for Build. ``ready_for_build`` records the Design approval that
+opens Build.
 
 Everything here is pure and immutable. The same functions answer "may this
 happen?" for a human clicking a button today and for the Supervisor Graph
@@ -123,52 +121,9 @@ _REVIEW_RESULT: Mapping[ReviewDecision, StageStatus] = MappingProxyType(
     }
 )
 
-# Stages whose approval a target stage depends on. Build depends on *both*
-# earlier approvals; the rest depend only on their immediate predecessor.
+# Stages whose approval a target stage depends on. Reconciliation may be worked
+# explicitly, but Build depends on Design only.
 _STAGE_PREREQUISITES: Mapping[str, tuple[str, ...]] = MappingProxyType(
-    {
-        "design": (),
-        "reconciliation": ("design",),
-        "build": ("design", "reconciliation"),
-        "test": ("build",),
-        "learn": ("test",),
-    }
-)
-
-# The cycle state a stage must be reachable from.
-_ENTRY_STATES: Mapping[str, frozenset[str]] = MappingProxyType(
-    {
-        "design": frozenset({"design"}),
-        "reconciliation": frozenset({"design", "reconciliation"}),
-        "build": frozenset({"ready_for_build", "build"}),
-        "test": frozenset({"build", "test"}),
-        "learn": frozenset({"test", "learn"}),
-    }
-)
-
-# Forward moves, each keyed by the stage approvals it requires.
-_FORWARD_TRANSITIONS: Mapping[str, tuple[str, tuple[str, ...]]] = MappingProxyType(
-    {
-        "design": ("reconciliation", ("design",)),
-        "reconciliation": ("ready_for_build", ("design", "reconciliation")),
-        "ready_for_build": ("build", ("design", "reconciliation")),
-        "build": ("test", ("build",)),
-        "test": ("learn", ("test",)),
-        "learn": ("completed", ("learn",)),
-    }
-)
-
-# The same three tables with Data Reconciliation lifted out of the path, used
-# when a deployment sets ``dbtl.reconciliation_required = false``. Design
-# approval then opens Build directly.
-#
-# Reconciliation is *skipped*, not deleted: the stage row still exists, its
-# endpoints still work, and a project may still declare datasets and settle
-# rows. What changes is only whether Build waits for it. Expressing that as a
-# second set of tables rather than as branches inside the functions keeps the
-# legal moves readable as data — the property this module exists to make
-# checkable.
-_STAGE_PREREQUISITES_WITHOUT_RECONCILIATION: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
         "design": (),
         "reconciliation": ("design",),
@@ -178,22 +133,21 @@ _STAGE_PREREQUISITES_WITHOUT_RECONCILIATION: Mapping[str, tuple[str, ...]] = Map
     }
 )
 
-_ENTRY_STATES_WITHOUT_RECONCILIATION: Mapping[str, frozenset[str]] = MappingProxyType(
+# The cycle state a stage must be reachable from.
+_ENTRY_STATES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "design": frozenset({"design"}),
-        "reconciliation": frozenset({"design", "reconciliation"}),
+        "reconciliation": frozenset({"design", "reconciliation", "ready_for_build"}),
         "build": frozenset({"ready_for_build", "build"}),
         "test": frozenset({"build", "test"}),
         "learn": frozenset({"test", "learn"}),
     }
 )
 
-_FORWARD_TRANSITIONS_WITHOUT_RECONCILIATION: Mapping[str, tuple[str, tuple[str, ...]]] = MappingProxyType(
+# Forward moves, each keyed by the stage approvals it requires.
+_FORWARD_TRANSITIONS: Mapping[str, tuple[str, tuple[str, ...]]] = MappingProxyType(
     {
         "design": ("ready_for_build", ("design",)),
-        # Retained so a cycle that *did* work reconciliation before the flag
-        # changed still has a legal move forward. A cycle mid-flight must not
-        # become unadvanceable because an operator flipped a switch.
         "reconciliation": ("ready_for_build", ("design",)),
         "ready_for_build": ("build", ("design",)),
         "build": ("test", ("build",)),
@@ -201,18 +155,6 @@ _FORWARD_TRANSITIONS_WITHOUT_RECONCILIATION: Mapping[str, tuple[str, tuple[str, 
         "learn": ("completed", ("learn",)),
     }
 )
-
-
-def _tables(reconciliation_required: bool):
-    """The three legal-move tables for this deployment's reconciliation rule."""
-    if reconciliation_required:
-        return _STAGE_PREREQUISITES, _ENTRY_STATES, _FORWARD_TRANSITIONS
-    return (
-        _STAGE_PREREQUISITES_WITHOUT_RECONCILIATION,
-        _ENTRY_STATES_WITHOUT_RECONCILIATION,
-        _FORWARD_TRANSITIONS_WITHOUT_RECONCILIATION,
-    )
-
 
 def validate_cycle_class(value: str) -> CycleClass:
     """Return the :class:`CycleClass` for *value*, or raise ``ValueError``."""
@@ -267,8 +209,6 @@ def can_enter_stage(
     stage: str,
     current_state: str,
     statuses: Mapping[str, StageStatus],
-    *,
-    reconciliation_required: bool = True,
 ) -> bool:
     """Whether *stage* may be worked, given the cycle state and approvals.
 
@@ -276,15 +216,14 @@ def can_enter_stage(
     cycle is in a state from which this stage is reachable. Checking only the
     approvals would let a completed cycle re-open a stage.
     """
-    prerequisites, entry_states, _forward = _tables(reconciliation_required)
-    stage_prerequisites = prerequisites.get(stage)
+    stage_prerequisites = _STAGE_PREREQUISITES.get(stage)
     if stage_prerequisites is None or is_terminal(current_state):
         return False
     if statuses.get(stage) is StageStatus.SKIPPED:
         return False
     if not _settled_for_target(statuses, stage_prerequisites, stage):
         return False
-    if current_state in entry_states[stage]:
+    if current_state in _ENTRY_STATES[stage]:
         return True
     # A skipped Test is stepped over rather than passed through, so Learn is
     # reachable while the cycle still sits at Build. Nothing else may take this
@@ -295,12 +234,9 @@ def can_enter_stage(
 def next_cycle_state(
     current_state: str,
     statuses: Mapping[str, StageStatus],
-    *,
-    reconciliation_required: bool = True,
 ) -> str:
     """The single legal forward state, or raise :class:`TransitionRefused`."""
-    _prerequisites, _entry_states, forward = _tables(reconciliation_required)
-    move = forward.get(current_state)
+    move = _FORWARD_TRANSITIONS.get(current_state)
     if move is None:
         raise TransitionRefused(f"No forward transition exists from state {current_state!r}.")
     target, required = move
@@ -312,7 +248,7 @@ def next_cycle_state(
         # cycle steps over Test rather than entering it. The skip stays on the
         # record; what it does not do is hold the cycle at a stage nobody will
         # work.
-        stepped = forward.get(target)
+        stepped = _FORWARD_TRANSITIONS.get(target)
         if stepped is None:
             raise TransitionRefused(f"No forward transition exists past skipped stage {target!r}.")
         return stepped[0]
@@ -324,16 +260,13 @@ def apply_review(
     stage: str,
     decision: ReviewDecision,
     *,
-    reconciliation_required: bool = True,
     build_disposition: BuildDisposition | None = None,
 ) -> dict[str, StageStatus]:
     """Return a **new** status map with *decision* applied to *stage*.
 
     An approval also opens the next stage, but only that one — approving
-    Design must not make Build workable while Reconciliation is outstanding.
-    When reconciliation is not required, the successor of Design is Build, and
-    reconciliation is stepped over rather than opened: opening a stage nothing
-    waits for would leave every cycle showing permanent outstanding work.
+    Design opens Build directly. Reconciliation stays locked unless it is
+    worked explicitly, so it does not appear as permanent outstanding work.
 
     ``build_disposition`` says what the reviewer decided a finished Build is
     for. It is accepted only on an approved Build, because that is the only
@@ -351,7 +284,6 @@ def apply_review(
     if decision is ReviewDecision.ADVANCE_WITH_EXCEPTION and stage not in {"build", "test"}:
         raise TransitionRefused("Only Build or Test may advance with an evidence exception.")
 
-    prerequisites, _entry_states, _forward = _tables(reconciliation_required)
     updated = dict(statuses)
     updated[stage] = _REVIEW_RESULT[decision]
 
@@ -364,15 +296,15 @@ def apply_review(
         return updated
 
     if decision in {ReviewDecision.APPROVE, ReviewDecision.ADVANCE_WITH_EXCEPTION}:
-        successor = _successor_stage(stage, reconciliation_required=reconciliation_required)
+        successor = _successor_stage(stage)
         prerequisites_ready = False
         if successor is not None:
             prerequisites_ready = (
-                _approved(updated, prerequisites[successor])
+                _approved(updated, _STAGE_PREREQUISITES[successor])
                 if decision is ReviewDecision.APPROVE
                 else _settled_for_target(
                     updated,
-                    prerequisites[successor],
+                    _STAGE_PREREQUISITES[successor],
                     successor,
                 )
             )
@@ -381,11 +313,11 @@ def apply_review(
     return updated
 
 
-def _successor_stage(stage: str, *, reconciliation_required: bool) -> str | None:
+def _successor_stage(stage: str) -> str | None:
     """The stage an approval of *stage* opens, if any."""
     index = STAGE_ORDER.index(stage)
     for candidate in STAGE_ORDER[index + 1 :]:
-        if candidate == "reconciliation" and not reconciliation_required:
+        if candidate == "reconciliation":
             continue
         return candidate
     return None

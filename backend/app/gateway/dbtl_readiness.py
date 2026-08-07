@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from deerflow.config.dbtl_config import DbtlConfig, DbtlMode
+from deerflow.dbtl.policy import DBTL_POLICY_VERSION
 
 DBTL_TEST_OUTCOMES = ("supported", "not_supported", "inconclusive", "invalidated")
 KNOWLEDGE_CANDIDATE_STATUSES = ("candidate", "promoted", "rejected", "superseded")
@@ -199,7 +200,7 @@ def scan_dbtl_readiness(root: Path, config: DbtlConfig) -> DbtlReadinessReport:
         mutations_enabled=config.mutations_enabled,
         graph_execution_enabled=config.graph_execution_enabled,
         reason=dbtl_mode_reason(config),
-        policy_version=config.policy_version,
+        policy_version=DBTL_POLICY_VERSION,
         counts=counts,
         items=items,
         checks=checks,

@@ -10,7 +10,6 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.dbtl.live_stage.test_rerun import TestRerunRecord, TestRerunStatus, parse_test_rerun_record
 from deerflow.dbtl.cycle_state import StageStatus
-from deerflow.dbtl.reconciliation_policy import reconciliation_required
 from deerflow.dbtl.stage_meetings import review_meeting_recorded, surface_meeting_gate
 from deerflow.dbtl.stage_spec import StageSpecNotFound, resolve_spec_by_key
 from deerflow.dbtl.validity import (
@@ -92,17 +91,16 @@ def validated_test_assessment(
                         evidence_refs=rerun_evidence,
                     )
                 )
-            if not reconciliation_required():
-                checks = [item for item in checks if item.check is not ValidityCheckName.RECONCILED_INPUTS]
-                if lineage:
-                    checks.append(
-                        ValidityCheck(
-                            check=ValidityCheckName.RECONCILED_INPUTS,
-                            status=CheckStatus.PASSED,
-                            detail="The server recorded immutable input provenance in the approved Build lineage.",
-                            evidence_refs=(str(lineage.get("id") or lineage.get("dataset_fingerprint") or "build_lineage"),),
-                        )
+            checks = [item for item in checks if item.check is not ValidityCheckName.RECONCILED_INPUTS]
+            if lineage:
+                checks.append(
+                    ValidityCheck(
+                        check=ValidityCheckName.RECONCILED_INPUTS,
+                        status=CheckStatus.PASSED,
+                        detail="The server recorded immutable input provenance in the approved Build lineage.",
+                        evidence_refs=(str(lineage.get("id") or lineage.get("dataset_fingerprint") or "build_lineage"),),
                     )
+                )
             if {item.check.value for item in checks} != required or not metrics:
                 continue
             evaluation = evaluate_validity(metrics=metrics, checks=checks)

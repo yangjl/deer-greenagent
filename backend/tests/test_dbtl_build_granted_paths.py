@@ -9,6 +9,8 @@ paths and a refusal that catches source which invents its own.
 
 from __future__ import annotations
 
+import inspect
+
 from deerflow.agents.dbtl.live_stage.build_phases import (
     BuildPhaseManifest,
     assign_phase,
@@ -126,7 +128,7 @@ class TestTheContractIssuesPathsRatherThanDemandingThem:
         assert "provenance.rerun_spec" in prompt
 
 
-class TestChoosingAnImplementerIsEfficiencyNotAuthority:
+class TestBuildPhaseCapabilitySelection:
     def _phase(self) -> BuildPhase:
         return BuildPhase(
             phase_key="implement",
@@ -135,28 +137,8 @@ class TestChoosingAnImplementerIsEfficiencyNotAuthority:
             capability=Capability.SOFTWARE_ENGINEERING,
         )
 
-    def test_a_configured_implementer_replaces_the_stand_in(self) -> None:
-        candidates = [
-            AgentCandidate(name="general-purpose", is_generalist=True),
-            AgentCandidate(name="coder"),
-        ]
-
-        assignment = assign_phase(self._phase(), candidates, implementer="coder")
-
-        assert assignment.agent_name == "coder"
-
-    def test_a_configured_implementer_is_still_recorded_as_a_stand_in(self) -> None:
-        # Nothing about the preferred agent covers the capability. A reviewer
-        # who cannot tell a specialist from a preference has lost the
-        # distinction capability selection exists to keep.
-        candidates = [
-            AgentCandidate(name="general-purpose", is_generalist=True),
-            AgentCandidate(name="coder"),
-        ]
-
-        assignment = assign_phase(self._phase(), candidates, implementer="coder")
-
-        assert assignment.via_generalist is True
+    def test_there_is_no_build_specific_implementer_override(self) -> None:
+        assert tuple(inspect.signature(assign_phase).parameters) == ("phase", "candidates")
 
     def test_a_registered_specialist_still_wins(self) -> None:
         candidates = [
@@ -165,26 +147,18 @@ class TestChoosingAnImplementerIsEfficiencyNotAuthority:
             AgentCandidate(name="engineer", capabilities=frozenset({Capability.SOFTWARE_ENGINEERING})),
         ]
 
-        assignment = assign_phase(self._phase(), candidates, implementer="coder")
+        assignment = assign_phase(self._phase(), candidates)
 
         assert assignment.agent_name == "engineer"
         assert assignment.via_generalist is False
 
-    def test_an_unregistered_implementer_falls_back_rather_than_failing(self) -> None:
-        candidates = [AgentCandidate(name="general-purpose", is_generalist=True)]
-
-        assignment = assign_phase(self._phase(), candidates, implementer="not-registered")
-
-        assert assignment.agent_name == "general-purpose"
-        assert assignment.covered is True
-
-    def test_no_implementer_configured_keeps_the_existing_behaviour(self) -> None:
+    def test_no_specialist_falls_back_to_the_registered_generalist(self) -> None:
         candidates = [AgentCandidate(name="general-purpose", is_generalist=True)]
 
         assert assign_phase(self._phase(), candidates).agent_name == "general-purpose"
 
     def test_an_uncoverable_phase_is_still_refused(self) -> None:
-        assignment = assign_phase(self._phase(), [AgentCandidate(name="other")], implementer="missing")
+        assignment = assign_phase(self._phase(), [AgentCandidate(name="other")])
 
         assert assignment.agent_name == ""
         assert assignment.covered is False

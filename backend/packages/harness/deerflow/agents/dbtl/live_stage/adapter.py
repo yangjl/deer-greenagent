@@ -34,6 +34,8 @@ from deerflow.agents.dbtl.live_stage.build_phase_verification import (
     BuildPhaseVerification,
     entry_command,
     execute_and_verify_phase,
+    local_dbtl_runtime_env,
+    missing_scientific_packages,
     resolve_issued_input_tokens,
 )
 from deerflow.agents.dbtl.live_stage.build_phases import (
@@ -191,7 +193,6 @@ from deerflow.dbtl.evidence_exception import (
 from deerflow.dbtl.meeting_intent import _NEW_DEBATE_PATTERN as _shared_new_debate_pattern
 from deerflow.dbtl.meeting_intent import _RESTART_TYPOS as _shared_restart_typos
 from deerflow.dbtl.meeting_intent import wants_new_debate
-from deerflow.dbtl.reconciliation_policy import reconciliation_required
 from deerflow.dbtl.review_markdown import render_review_markdown, render_stage_digest
 from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
 from deerflow.dbtl.revision_intent import (
@@ -920,20 +921,6 @@ IntentInterpreter = Callable[[str], Any]
 TransitionAssessor = Callable[[str], Any]
 
 
-def _reconciliation_ready_after_design_approval(
-    view: Mapping[str, Any] | None,
-) -> bool:
-    """Whether data-specific Build preconditions are already settled.
-
-    A pre-verdict view always says Design itself is unapproved. The progressive
-    one-click action satisfies that reason atomically; it may not waive any
-    dataset, matrix, or unreadable-row reason.
-    """
-    gate = dict((view or {}).get("gate") or {})
-    data_reasons = [str(reason) for reason in gate.get("reasons", []) if "Design stage has not been approved" not in str(reason)]
-    return bool(gate and (bool(gate.get("ready")) or (not data_reasons and not gate.get("blocking_rows"))))
-
-
 #: The deterministic phrases stay the fast path and the audit anchor; this
 #: interpreter reads only the requests they did not match. Human chat input is
 #: kept verbatim in the record but may carry typos and paraphrases, and those
@@ -1064,7 +1051,7 @@ def make_llm_transition_assessor(request_context: Mapping[str, Any] | None = Non
         app_config = get_app_config()
     except Exception:  # noqa: BLE001 - assessment failure keeps the standard gate
         return None
-    model_name = getattr(getattr(app_config, "dbtl", None), "transition_assessor_model_name", None)
+    model_name = getattr(getattr(app_config, "dbtl", None), "setup_draft_model_name", None)
     if not model_name:
         return None
 
@@ -1700,10 +1687,9 @@ def _build_input_artifacts(
 ) -> list[str]:
     """Bind Build's actual inputs without a separate declaration ceremony.
 
-    Required-Reconciliation deployments continue to contribute their durable
-    dataset bindings.  In optional mode, exact workspace paths come from the
-    validated worker contract and hashes are computed by the server, never
-    requested from the person running the cycle.
+    Durable dataset bindings may contribute context, while exact workspace
+    paths come from the validated worker contract and hashes are computed by
+    the server, never requested from the person running the cycle.
 
     `run_published` is what *this run* already published, keyed by project-
     relative path and carrying the hash the publisher computed.  A multi-phase
@@ -1933,6 +1919,8 @@ def _execute_server_build_command(
         raise RuntimeError("the run's sandbox is no longer available")
     try:
         is_local = sandbox_id == "local" or sandbox_id.startswith("local:")
+        if is_local:
+            execution_env.update(local_dbtl_runtime_env())
         if is_local and sys.platform != "darwin":
             raise RuntimeError("local Build verification has no process-tree write sandbox on this platform")
         readable_inputs = tuple(value for key, value in env.items() if key.startswith(INPUT_ENV_PREFIX) and key != f"{INPUT_ENV_PREFIX}COUNT")
@@ -1958,6 +1946,33 @@ def _execute_server_build_command(
     finally:
         if acquired:
             provider.release(sandbox_id)
+
+
+def _uses_local_sandbox(sandbox_state: Any) -> bool:
+    """Whether this run executes commands in the Gateway host environment."""
+    unwrapped, _ = unwrap_sandbox(sandbox_state)
+    sandbox_id = unwrapped.get("sandbox_id") if isinstance(unwrapped, dict) else None
+    if isinstance(sandbox_id, str) and sandbox_id:
+        return sandbox_id == "local" or sandbox_id.startswith("local:")
+    return type(get_sandbox_provider()).__name__ == "LocalSandboxProvider"
+
+
+def _dbtl_worker_execution_env(
+    *,
+    sandbox_state: Any,
+    workspace: str,
+    project_root: str,
+    declared_inputs: tuple[str, ...],
+) -> dict[str, str]:
+    """Issue the file grant and, only for local sandboxes, the gateway venv."""
+    env = build_input_grant(
+        workspace=workspace,
+        project_root=project_root,
+        declared_inputs=declared_inputs,
+    )
+    if _uses_local_sandbox(sandbox_state):
+        env.update(local_dbtl_runtime_env())
+    return env
 
 
 _WORKSPACE_INPUT_BINDING = re.compile(r"^workspace_file:(.+):sha256:([0-9a-f]{64})$")
@@ -4137,6 +4152,7 @@ class LiveStageAdapter:
         *,
         config: RunnableConfig,
         stage_workspace: str | None,
+        sandbox_state: Any = None,
     ) -> str:
         """Return a refusal before planning when no executable shell exists."""
         if self._dispatcher is not None:
@@ -4162,6 +4178,9 @@ class LiveStageAdapter:
         names = {str(getattr(tool, "name", "")).strip() for tool in tools}
         if "bash" not in names:
             return "The Build worker has no Bash execution tool. No planner or Build worker ran. Enable Bash for this sandbox, then retry the preflight."
+        missing_packages = missing_scientific_packages() if _uses_local_sandbox(sandbox_state) else ()
+        if missing_packages:
+            return f"The DBTL scientific Python runtime is incomplete (missing: {', '.join(missing_packages)}). No planner or Build worker ran. Start DeerFlow through the standard launcher so the dbtl-build extra is installed, then retry."
         return ""
 
     async def parked_design_context(
@@ -4747,7 +4766,8 @@ class LiveStageAdapter:
                 thinking_enabled=unit.reasoning == REASONING_EXTENDED,
                 extra_middlewares=extra_middlewares,
                 execution_env=(
-                    build_input_grant(
+                    _dbtl_worker_execution_env(
+                        sandbox_state=state.get("sandbox"),
                         workspace=unit_workspace,
                         project_root=WORKSPACE_VIRTUAL_ROOT,
                         declared_inputs=tuple(unit.tool_contract.get("granted_inputs") or ()),
@@ -4990,8 +5010,7 @@ class LiveStageAdapter:
         summary/deck retry unreachable. A freshly run phase still stops at its
         own boundary regardless, because that one has never been shown.
         """
-        implementer = str(getattr(getattr(self._app_config, "dbtl", None), "build_implementer_agent", "") or "").strip()
-        assignments = [assign_phase(phase, candidates, implementer=implementer) for phase in plan.phases]
+        assignments = [assign_phase(phase, candidates) for phase in plan.phases]
         selection = SelectionResult(
             assignments=tuple(Assignment(capability=item.phase.capability, agent_name=item.agent_name, via_generalist=item.via_generalist or not item.covered) for item in assignments),
             notes=plan_notes(plan, assignments),
@@ -5187,15 +5206,16 @@ class LiveStageAdapter:
                 stopped = question
                 paused, paused_title = True, assignment.phase.title
                 break
-            if result is None or not result.is_trustworthy:
+            completion_error = phase_completion_error(result, unit.completion_check) if result is not None else ""
+            correction_eligible = bool(result is not None and completion_error and spec.version >= 12 and not unit.tool_contract.get("correction_attempt") and not result.was_capped)
+            if result is None or (not result.is_trustworthy and not correction_eligible):
                 results.extend(phase_outcome.results)
-                stopped = "; ".join(phase_outcome.rejected) or f"Phase {assignment.phase.title!r} returned no usable result."
+                stopped = "; ".join(phase_outcome.rejected) or (str(result.summary).strip() if result is not None else "") or f"Phase {assignment.phase.title!r} returned no usable result."
                 failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
                 await recorder.fail(handle, failure_code, stopped)
                 break
 
-            completion_error = phase_completion_error(result, unit.completion_check)
-            if completion_error and spec.version >= 12 and not unit.tool_contract.get("correction_attempt"):
+            if correction_eligible:
                 first_unit = unit
                 first_result = result
                 first_workspace = _unit_stage_workspace(stage_workspace, first_unit.unit_id)
@@ -5240,7 +5260,7 @@ class LiveStageAdapter:
                 phase_outcome = correction_outcome
                 if result is None or not result.is_trustworthy:
                     results.extend(correction_outcome.results)
-                    stopped = "; ".join(correction_outcome.rejected) or f"The fresh correction for phase {assignment.phase.title!r} returned no usable result."
+                    stopped = "; ".join(correction_outcome.rejected) or (str(result.summary).strip() if result is not None else "") or f"The fresh correction for phase {assignment.phase.title!r} returned no usable result."
                     failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
                     await recorder.fail(handle, failure_code, stopped)
                     break
@@ -6472,7 +6492,6 @@ class LiveStageAdapter:
                     )
 
         datasets = await self._repo.list_datasets(cycle_id, project_id=project_id)
-        requires_reconciliation = reconciliation_required()
         reconciliation = await self._repo.reconciliation_view(cycle_id, project_id=project_id) if stage in {"design", "reconciliation", "build", "test", "learn"} else None
         build_test = await self._repo.build_test_view(cycle_id, project_id=project_id) if stage in {"build", "test", "learn"} else None
         upstream_evidence_exception: dict[str, Any] | None = None
@@ -6724,6 +6743,7 @@ class LiveStageAdapter:
             preflight_error = self._build_execution_preflight_error(
                 config=config,
                 stage_workspace=stage_workspace,
+                sandbox_state=state.get("sandbox"),
             )
             if preflight_error:
                 control = await control_gate.raise_control(
@@ -6765,7 +6785,6 @@ class LiveStageAdapter:
                     datasets=datasets,
                     manifest=project_manifest,
                     policy={
-                        "reconciliation_required": requires_reconciliation,
                         "stage_spec_key": spec.spec_key,
                     },
                 )
@@ -6804,7 +6823,6 @@ class LiveStageAdapter:
                     datasets=datasets,
                     manifest=project_manifest,
                     policy={
-                        "reconciliation_required": requires_reconciliation,
                         "stage_spec_key": spec.spec_key,
                     },
                 )
@@ -6830,33 +6848,26 @@ class LiveStageAdapter:
                 )
             },
             "declared_datasets": datasets,
-            # Optional mode deliberately moves data authority into Build/Test.
-            # Do not hand later workers the old gate's unsettled matrix as if
-            # it were still an active prerequisite: that caused a correct
-            # Build to report ``reconciled_inputs`` as failed and made Test
-            # invalidate a cycle solely because the skipped stage was skipped.
+            # Do not hand later workers an unsettled reconciliation matrix as
+            # if it were a Build prerequisite. Reconciliation is shown only to
+            # its own evidence workflow; Build/Test authority comes from the
+            # server-bound lineage.
             "reconciliation": (
                 reconciliation
-                if requires_reconciliation
+                if stage == "reconciliation"
                 else {
-                    "required": False,
-                    "status": "skipped",
-                    "instruction": ("Data Reconciliation is intentionally skipped for this deployment. Missing dataset declarations or reconciliation matrix rows are not a blocker, limitation, or failed validity check."),
+                    "status": "not_required",
+                    "instruction": ("Data Reconciliation is not a Build prerequisite. Missing dataset declarations or reconciliation matrix rows are not a blocker, limitation, or failed validity check."),
                 }
             ),
             "build_test": build_test,
             "input_provenance_policy": {
-                "reconciliation_required": requires_reconciliation,
-                "authority": "approved_reconciliation" if requires_reconciliation else "server_bound_build_lineage",
+                "authority": "server_bound_build_lineage",
                 "instruction": (
-                    "Use the approved reconciliation record as the input prerequisite."
-                    if requires_reconciliation
-                    else (
-                        "Build binds the exact files it reads with server-computed content hashes, and Test verifies that durable Build lineage. "
-                        "For compatibility, a validity check named reconciled_inputs means bound input provenance in this mode; judge the Build lineage, "
-                        "not the existence of reconciliation rows. An older Build package may describe absent reconciliation as a limitation; that is "
-                        "historical worker commentary, not the active deployment policy."
-                    )
+                    "Build binds the exact files it reads with server-computed content hashes, and Test verifies that durable Build lineage. "
+                    "For compatibility, a validity check named reconciled_inputs means bound input provenance; judge the Build lineage, "
+                    "not the existence of reconciliation rows. An older Build package may describe absent reconciliation as a limitation; that is "
+                    "historical worker commentary, not active policy."
                 ),
             },
             "test_validity_contract": (
@@ -6873,11 +6884,7 @@ class LiveStageAdapter:
                     },
                     "authoritative_rules": [
                         "Only required_checks may determine the overall Test outcome. Do not invent or require an additional gate.",
-                        (
-                            "The server-bound Build lineage satisfies reconciled_inputs when present. Data Reconciliation is intentionally skipped; do not require a declaration, matrix, or reconciliation artifact."
-                            if not requires_reconciliation
-                            else "Judge reconciled_inputs from the approved reconciliation and Build lineage."
-                        ),
+                        "The server-bound Build lineage satisfies reconciled_inputs when present. Do not require a declaration, matrix, or reconciliation artifact.",
                         (
                             "duplicates_relatedness is not in this validity pack. Missing pedigree, genotype, kinship, or relatedness columns may be noted as a limitation, but cannot fail, block, or make this Test inconclusive."
                             if ValidityCheckName.DUPLICATES_RELATEDNESS not in DEFAULT_VALIDITY_PACK.required_checks
@@ -6916,15 +6923,10 @@ class LiveStageAdapter:
             "project_workspace_manifest": project_manifest,
             "build_input_policy": (
                 {
-                    "reconciliation_required": requires_reconciliation,
                     "instruction": (
                         "Read the data files needed to implement the approved design and list every exact workspace path in "
                         "provenance.inputs_examined. The server will compute and record their hashes automatically. "
-                        + (
-                            "An approved reconciliation remains a prerequisite."
-                            if requires_reconciliation
-                            else "No dataset declaration or reconciliation matrix is required, and their absence must not be reported as a failure or limitation."
-                        )
+                        "No dataset declaration or reconciliation matrix is required, and their absence must not be reported as a failure or limitation."
                     ),
                 }
                 if stage == "build"
@@ -8093,20 +8095,10 @@ class LiveStageAdapter:
                     cycle=cycle,
                     evidence_summary=artifact_digest or f"Design evidence: {artifact_uri} ({artifact_hash})",
                 )
-                # Before this Design verdict, the reconciliation evaluator
-                # necessarily includes one reason saying Design is not yet
-                # approved. For the one-click action, approval and route
-                # selection are atomic, so that reason is satisfied by the
-                # click itself; every data-specific reason must already be
-                # absent. This does not approve reconciliation or bypass its
-                # durable review—it only decides whether the Build edge may be
-                # offered after Design approval.
-                reconciliation_settled = _reconciliation_ready_after_design_approval(reconciliation if isinstance(reconciliation, Mapping) else None)
                 routes = compute_stage_routes(
                     RouteContext(
                         stage="design",
                         outcome="approved",
-                        reconciliation_settled=reconciliation_settled,
                     )
                 )
                 transition_gate = {

@@ -45,7 +45,6 @@ from deerflow.dbtl.reconciliation_policy import (
     build_workflow_steps_enabled,
     conditional_test_enabled,
     degraded_evidence_continuation_enabled,
-    reconciliation_required,
 )
 from deerflow.dbtl.stage_routes import GRAPH_STAGES, RouteSlug
 from deerflow.persistence.dbtl.build_test_ops import BuildTestOpsMixin
@@ -755,7 +754,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
             self._require_revision(cycle, expected_db_revision)
 
             statuses = self._statuses(stages)
-            if not can_enter_stage(stage, cycle.state, statuses, reconciliation_required=reconciliation_required()):
+            if not can_enter_stage(stage, cycle.state, statuses):
                 raise DbtlWorkflowRefused(f"Stage {stage!r} is not open in state {cycle.state!r}.")
             if statuses[stage] not in {StageStatus.IN_PROGRESS, StageStatus.CHANGES_REQUESTED}:
                 raise DbtlWorkflowRefused(f"Stage {stage!r} is {statuses[stage]} and cannot be submitted.")
@@ -1003,7 +1002,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
                     cycle.state = "build"
             bound_projection_hash = cycle.projection_hash
             try:
-                updated = apply_review(statuses, stage, verdict, reconciliation_required=reconciliation_required(), build_disposition=disposition)
+                updated = apply_review(statuses, stage, verdict, build_disposition=disposition)
             except TransitionRefused as exc:
                 raise DbtlWorkflowRefused(str(exc)) from exc
 
@@ -1012,9 +1011,9 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
 
             # Advance only when the machine says so; an approval that leaves a
             # prerequisite outstanding must leave the cycle where it is.
-            if verdict in {ReviewDecision.APPROVE, ReviewDecision.ADVANCE_WITH_EXCEPTION} and not is_terminal(cycle.state):
+            if stage != "reconciliation" and verdict in {ReviewDecision.APPROVE, ReviewDecision.ADVANCE_WITH_EXCEPTION} and not is_terminal(cycle.state):
                 try:
-                    cycle.state = next_cycle_state(cycle.state, updated, reconciliation_required=reconciliation_required())
+                    cycle.state = next_cycle_state(cycle.state, updated)
                 except TransitionRefused:
                     logger.debug("Cycle %s stays in %s after approving %s", cycle.id, cycle.state, stage)
 
@@ -1197,8 +1196,14 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
             if attempt is None:
                 raise DbtlWorkflowRefused(f"Unknown stage {stage!r}.")
             statuses = self._statuses(stages)
-            if not can_enter_stage(stage, cycle.state, statuses, reconciliation_required=reconciliation_required()):
+            if not can_enter_stage(stage, cycle.state, statuses):
                 raise DbtlWorkflowRefused(f"Stage {stage!r} is not open in state {cycle.state!r}.")
+            if stage == "reconciliation" and statuses[stage] is StageStatus.LOCKED:
+                # Reconciliation is opt-in evidence work, not a path gate. The
+                # first attached artifact opens its dormant attempt without
+                # changing the cycle cursor or Build availability.
+                statuses[stage] = StageStatus.IN_PROGRESS
+                attempt.status = str(StageStatus.IN_PROGRESS)
             if statuses[stage] not in {StageStatus.IN_PROGRESS, StageStatus.CHANGES_REQUESTED}:
                 raise DbtlWorkflowRefused(f"Stage {stage!r} is {statuses[stage]} and cannot accept new evidence.")
 

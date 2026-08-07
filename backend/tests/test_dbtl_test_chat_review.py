@@ -79,11 +79,7 @@ def _assessment_result() -> StageWorkerResult:
     )
 
 
-def test_server_computes_supported_from_complete_typed_test_evidence(monkeypatch):
-    monkeypatch.setattr(
-        "deerflow.agents.dbtl.live_stage.test_review.reconciliation_required",
-        lambda: False,
-    )
+def test_server_computes_supported_from_complete_typed_test_evidence():
     snapshot = _validated_test_assessment(
         [_assessment_result()],
         build_test={"build_lineage": {"id": "lineage-1"}},
@@ -95,11 +91,7 @@ def test_server_computes_supported_from_complete_typed_test_evidence(monkeypatch
     assert provenance["evidence_refs"] == ["lineage-1"]
 
 
-def test_server_reloads_its_derived_metric_fields(monkeypatch):
-    monkeypatch.setattr(
-        "deerflow.agents.dbtl.live_stage.test_review.reconciliation_required",
-        lambda: False,
-    )
+def test_server_reloads_its_derived_metric_fields():
     result = _assessment_result()
     result.provenance["validity_assessment"]["metrics"][0]["meets_threshold"] = True
 
@@ -112,11 +104,7 @@ def test_server_reloads_its_derived_metric_fields(monkeypatch):
     assert snapshot["evaluation"]["outcome"] == "supported"
 
 
-def test_server_normalizes_typed_worker_evidence_references(monkeypatch):
-    monkeypatch.setattr(
-        "deerflow.agents.dbtl.live_stage.test_review.reconciliation_required",
-        lambda: False,
-    )
+def test_server_normalizes_typed_worker_evidence_references():
     result = _assessment_result()
     result.provenance["validity_assessment"]["checks"][0]["evidence_refs"] = [
         {
@@ -146,11 +134,7 @@ def test_a_prose_pass_without_typed_test_evidence_is_not_reviewable():
     assert _validated_test_assessment([result], build_test={}) is None
 
 
-def test_server_rerun_failure_overrides_worker_authored_reproducibility_pass(monkeypatch):
-    monkeypatch.setattr(
-        "deerflow.agents.dbtl.live_stage.test_review.reconciliation_required",
-        lambda: False,
-    )
+def test_server_rerun_failure_overrides_worker_authored_reproducibility_pass():
     rerun = RerunRecord(
         status=RerunStatus.FAILED,
         command="python fit.py",
@@ -172,11 +156,7 @@ def test_server_rerun_failure_overrides_worker_authored_reproducibility_pass(mon
 
 
 @pytest.mark.asyncio
-async def test_review_snapshot_uses_the_newest_test_retry(monkeypatch):
-    monkeypatch.setattr(
-        "deerflow.agents.dbtl.live_stage.test_review.reconciliation_required",
-        lambda: False,
-    )
+async def test_review_snapshot_uses_the_newest_test_retry():
     assessment = _assessment_result().as_dict()
     failed_rerun = StageWorkerResult(
         status=WorkerStatus.FAILED,
@@ -261,11 +241,7 @@ async def test_review_snapshot_uses_the_newest_test_retry(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_review_snapshot_never_pairs_a_new_rerun_with_an_older_assessment(monkeypatch):
-    monkeypatch.setattr(
-        "deerflow.agents.dbtl.live_stage.test_review.reconciliation_required",
-        lambda: False,
-    )
+async def test_review_snapshot_never_pairs_a_new_rerun_with_an_older_assessment():
     old_assessment = _assessment_result().as_dict()
     passed_rerun = StageWorkerResult(
         status=WorkerStatus.COMPLETED,

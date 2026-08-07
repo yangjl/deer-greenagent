@@ -18,12 +18,19 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ENTRYPOINT = REPO_ROOT / "docker" / "dev-entrypoint.sh"
 
 
-def _run(uv_extras: str | None) -> subprocess.CompletedProcess[str]:
+def _run(
+    uv_extras: str | None,
+    *,
+    config_path: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Invoke `dev-entrypoint.sh --print-extras` with UV_EXTRAS set."""
     env = os.environ.copy()
     env.pop("UV_EXTRAS", None)
     if uv_extras is not None:
         env["UV_EXTRAS"] = uv_extras
+    if config_path is not None:
+        env["DEER_FLOW_CONFIG_PATH"] = str(config_path)
+        env["DEER_FLOW_EXTRAS_DETECTOR"] = str(REPO_ROOT / "scripts" / "detect_uv_extras.py")
     return subprocess.run(
         ["sh", str(ENTRYPOINT), "--print-extras"],
         env=env,
@@ -58,6 +65,16 @@ def test_no_uv_extras_yields_empty_flags():
     proc = _run(None)
     assert proc.returncode == 0
     assert proc.stdout.strip() == ""
+
+
+def test_dbtl_config_enables_the_scientific_runtime_extra(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("dbtl:\n  mode: graph_enabled\n", encoding="utf-8")
+
+    proc = _run(None, config_path=config)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "--extra dbtl-build"
 
 
 def test_single_extra():

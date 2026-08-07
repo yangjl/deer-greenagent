@@ -30,13 +30,6 @@ from deerflow.persistence.engine import close_engine, get_session_factory, init_
 from deerflow.persistence.workspaces import WorkspaceRepository
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 
-
-@pytest.fixture(autouse=True)
-def _strict_reconciliation(strict_reconciliation):
-    """Every case here asserts the strict gate, so it states that rule rather
-    than inheriting whatever the developer's config.yaml happens to say."""
-
-
 _USER_ID = UUID("11111111-2222-3333-4444-555555555555")
 _OTHER_USER_ID = UUID("99999999-8888-7777-6666-555555555555")
 
@@ -1118,15 +1111,7 @@ def test_a_standard_gate_approves_in_one_action_too(tmp_path: Path) -> None:
         assert design["status"] == "approved"
 
 
-def test_a_blocked_build_edge_does_not_block_the_design_verdict(tmp_path: Path) -> None:
-    """The deadlock this exists to prevent.
-
-    Reconciliation is locked until Design is approved, and the Build edge is
-    blocked until reconciliation is settled. Gating the Design verdict on that
-    edge therefore makes the cycle unadvanceable by any route: the matrix can
-    never be settled, so the edge never opens, so the verdict never becomes
-    available.
-    """
+def test_a_stale_blocked_build_edge_cannot_restore_the_removed_gate(tmp_path: Path) -> None:
     workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
     with TestClient(_make_app(workspace_repo, cycle_repo, progressive_gate=True)) as client:
         project_id = _seed_project(client)
@@ -1174,9 +1159,10 @@ def test_a_blocked_build_edge_does_not_block_the_design_verdict(tmp_path: Path) 
         )
         read = client.get(_url(project_id, cycle["id"], surface["surface_id"]) + "?viewer_thread_id=thread-1").json()
 
-        # Offered: the verdict. Not offered: the edge it cannot take yet.
+        # The verdict remains server-owned; stale deck metadata cannot restore
+        # reconciliation as a runtime prerequisite.
         assert "approve" in read["allowed_actions"]
-        assert "advance" not in read["allowed_actions"]
+        assert "advance" in read["allowed_actions"]
 
         response = client.post(
             f"{_url(project_id, cycle['id'], surface['surface_id'])}/actions",
@@ -1199,9 +1185,8 @@ def test_a_blocked_build_edge_does_not_block_the_design_verdict(tmp_path: Path) 
         assert response.status_code == 200, response.text
         stages = {item["stage"]: item["status"] for item in response.json()["cycle"]["stages"]}
         assert stages["design"] == "approved"
-        # The verdict opened the data work; Build stays locked, as it should.
-        assert stages["reconciliation"] != "locked"
-        assert stages["build"] == "locked"
+        assert stages["reconciliation"] == "locked"
+        assert stages["build"] == "in_progress"
 
 
 def test_revise_records_the_verdict_without_a_separate_submit(

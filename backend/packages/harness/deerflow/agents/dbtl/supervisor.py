@@ -180,6 +180,7 @@ from deerflow.dbtl.discovery import (
     normalize_model_discovery_package,
     wants_discovery_offer,
 )
+from deerflow.dbtl.policy import DBTL_POLICY_VERSION
 from deerflow.dbtl.routing import ExplicitChoice, RouteKind, RouteSource, RoutingDecision
 from deerflow.dbtl.setup_questions import (
     SetupQuestion,
@@ -3039,7 +3040,7 @@ def make_project_supervisor(config: RunnableConfig):
         discovery_enabled=runtime_app_config.dbtl.conversational_discovery_enabled,
         discovery_classifier_entry=runtime_app_config.dbtl.discovery_classifier_entry,
         discovery_auto_offer=runtime_app_config.dbtl.discovery_auto_offer,
-        policy_version=runtime_app_config.dbtl.policy_version,
+        policy_version=DBTL_POLICY_VERSION,
     )
     graph = build_supervisor_graph(
         lead_agent=lead_agent,

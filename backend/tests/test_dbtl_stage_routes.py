@@ -14,7 +14,6 @@ from deerflow.dbtl.stage_routes import (
     ABANDONED,
     COMPLETED,
     GRAPH_STAGES,
-    UNRECONCILED_REASON,
     RouteContext,
     RouteSlug,
     StageRoutesRefused,
@@ -29,11 +28,10 @@ def _slugs(routes) -> list[str]:
 
 
 class TestRouteLegalityMatrix:
-    """Every stage × outcome × reconciliation state."""
+    """Every stage × outcome."""
 
-    @pytest.mark.parametrize("settled", [True, False])
-    def test_design_approved_offers_build_revise_close(self, settled: bool) -> None:
-        routes = compute_stage_routes(RouteContext("design", "approve", reconciliation_settled=settled))
+    def test_design_approved_offers_build_revise_close(self) -> None:
+        routes = compute_stage_routes(RouteContext("design", "approve"))
         assert _slugs(routes) == [
             RouteSlug.ADVANCE,
             RouteSlug.REVISE_HERE,
@@ -42,12 +40,9 @@ class TestRouteLegalityMatrix:
         ]
         advance = routes[0]
         assert advance.to_stage == "build"
-        assert advance.blocked is (not settled)
-        if not settled:
-            assert advance.blocked_reason == UNRECONCILED_REASON
 
     def test_build_approved_offers_test(self) -> None:
-        routes = compute_stage_routes(RouteContext("build", "approve", reconciliation_settled=True))
+        routes = compute_stage_routes(RouteContext("build", "approve"))
         assert _slugs(routes) == [
             RouteSlug.ADVANCE,
             RouteSlug.REVISE_HERE,
@@ -55,45 +50,38 @@ class TestRouteLegalityMatrix:
             RouteSlug.CLOSE_CYCLE,
         ]
         assert routes[0].to_stage == "test"
-        assert not routes[0].blocked
 
     def test_learn_approved_concludes_only(self) -> None:
-        routes = compute_stage_routes(RouteContext("learn", "approve", reconciliation_settled=True))
+        routes = compute_stage_routes(RouteContext("learn", "approve"))
         assert _slugs(routes) == [RouteSlug.ADVANCE]
         assert routes[0].to_stage == COMPLETED
 
     @pytest.mark.parametrize("stage", ["design", "build", "learn"])
     def test_changes_requested_offers_revise_and_close(self, stage: str) -> None:
-        routes = compute_stage_routes(RouteContext(stage, "request_changes", reconciliation_settled=True))
+        routes = compute_stage_routes(RouteContext(stage, "request_changes"))
         assert _slugs(routes) == [RouteSlug.REVISE_HERE, RouteSlug.CLOSE_CYCLE]
         assert routes[0].to_stage == stage
 
     @pytest.mark.parametrize("stage", ["design", "build", "learn"])
     def test_rejected_offers_close_only(self, stage: str) -> None:
-        routes = compute_stage_routes(RouteContext(stage, "reject", reconciliation_settled=True))
+        routes = compute_stage_routes(RouteContext(stage, "reject"))
         assert _slugs(routes) == [RouteSlug.CLOSE_CYCLE]
         assert routes[0].to_stage == ABANDONED
 
     @pytest.mark.parametrize("outcome", ["supported", "not_supported"])
     def test_conclusive_test_offers_learn_repeat_close(self, outcome: str) -> None:
-        routes = compute_stage_routes(RouteContext("test", outcome, reconciliation_settled=True))
+        routes = compute_stage_routes(RouteContext("test", outcome))
         assert _slugs(routes) == [RouteSlug.ADVANCE, RouteSlug.REVISE_HERE, RouteSlug.CLOSE_CYCLE]
         assert routes[0].to_stage == "learn"
-        assert not routes[0].blocked
 
     @pytest.mark.parametrize("outcome", ["inconclusive", "invalidated"])
-    @pytest.mark.parametrize("settled", [True, False])
-    def test_unresolved_test_offers_repeat_build_design_close(self, outcome: str, settled: bool) -> None:
-        routes = compute_stage_routes(RouteContext("test", outcome, reconciliation_settled=settled))
+    def test_unresolved_test_offers_repeat_build_design_close(self, outcome: str) -> None:
+        routes = compute_stage_routes(RouteContext("test", outcome))
         expected = [RouteSlug.REVISE_HERE]
         if outcome == "invalidated":
             expected.append(RouteSlug.LEARN_FROM_INVALIDATED_EVIDENCE)
         expected.extend([RouteSlug.RETURN_TO_BUILD, RouteSlug.RETURN_TO_DESIGN, RouteSlug.CLOSE_CYCLE])
         assert _slugs(routes) == expected
-        build_edge = next(route for route in routes if route.slug == RouteSlug.RETURN_TO_BUILD)
-        assert build_edge.blocked is (not settled)
-        if not settled:
-            assert build_edge.blocked_reason == UNRECONCILED_REASON
 
     def test_no_outcome_offers_no_menu(self) -> None:
         assert compute_stage_routes(RouteContext("design", None)) == ()
@@ -111,9 +99,8 @@ class TestRouteLegalityMatrix:
     def test_reconciliation_is_never_a_destination(self) -> None:
         for stage in GRAPH_STAGES:
             for outcome in ["approve", "request_changes", "reject"] if stage != "test" else list(ValidityOutcome):
-                for settled in (True, False):
-                    routes = compute_stage_routes(RouteContext(stage, str(outcome), reconciliation_settled=settled))
-                    assert all(route.to_stage != "reconciliation" for route in routes)
+                routes = compute_stage_routes(RouteContext(stage, str(outcome)))
+                assert all(route.to_stage != "reconciliation" for route in routes)
 
 
 class TestPhase7GoldenMapping:
@@ -155,17 +142,15 @@ class TestPhase7GoldenMapping:
 
     @pytest.mark.parametrize("outcome", list(ValidityOutcome))
     def test_same_routes_for_same_outcome(self, outcome: ValidityOutcome) -> None:
-        routes = compute_stage_routes(RouteContext("test", outcome.value, reconciliation_settled=True))
+        routes = compute_stage_routes(RouteContext("test", outcome.value))
         offered = set(_slugs(routes))
         expected = {self.RECOMMENDATION_TO_SLUG[rec] for rec in self.ALLOWED_PHASE7[outcome] if rec is not WorkflowRecommendation.RETURN_TO_RECONCILIATION}
         assert offered == expected
 
     @pytest.mark.parametrize("outcome", [ValidityOutcome.INCONCLUSIVE, ValidityOutcome.INVALIDATED])
-    def test_reconciliation_route_becomes_blocked_build_edge(self, outcome: ValidityOutcome) -> None:
-        routes = compute_stage_routes(RouteContext("test", outcome.value, reconciliation_settled=False))
-        build_edge = next(route for route in routes if route.slug == RouteSlug.RETURN_TO_BUILD)
-        assert build_edge.blocked
-        assert build_edge.blocked_reason == UNRECONCILED_REASON
+    def test_reconciliation_route_maps_to_an_open_build_edge(self, outcome: ValidityOutcome) -> None:
+        routes = compute_stage_routes(RouteContext("test", outcome.value))
+        assert RouteSlug.RETURN_TO_BUILD in _slugs(routes)
         assert transition_target("test", "return_to_reconciliation") == "build"
 
 

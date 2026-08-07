@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from deerflow.dbtl.classifier import derive_objective, missing_clarification_fields
+from deerflow.dbtl.policy import DBTL_POLICY_VERSION
 from deerflow.dbtl.routing import (
     ExplicitChoice,
     RouteKind,
@@ -84,7 +85,7 @@ class SupervisorContext:
     discovery_classifier_entry: bool = False
     discovery_suppressed: bool = False
     discovery_auto_offer: bool = False
-    policy_version: str = "greenagent-dbtl-v2-draft"
+    policy_version: str = DBTL_POLICY_VERSION
 
 
 @dataclass(frozen=True, slots=True)

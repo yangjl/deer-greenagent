@@ -196,16 +196,14 @@ Breeding-workspace note:
   replay the durable stage event instead of dispatching workers again. Stages
   are versioned `StageSpec` data, work units declare capabilities rather than
   role names, and workers return a structured `StageWorkerResult` — free-form
-  text cannot satisfy a stage contract. Data
-  Readiness and Reconciliation is a real gate: every declared input is pinned
-  by content hash, raw data must be declared immutable, and Build stays locked
-  until every required matrix row is settled. An agent may propose a
+  text cannot satisfy a stage contract. Data Readiness and Reconciliation is
+  an explicit evidence workflow, not a Build gate. Every declared input is
+  pinned by content hash and raw data must be declared immutable. An agent may propose a
   resolution but may never close a _judgement_ row (contradictory sources,
   trait direction, exclusions, leakage, train/test separation) — that stays a
   person's decision, enforced at the write boundary. An approval binds the
   dataset fingerprint, stage-spec version, and policy version it was granted
-  against, so a later dataset change invalidates it instead of carrying it
-  into Build.
+  against, so a later dataset change invalidates that evidence record.
 - DBTL Phase 7 added executable Build and Test `StageSpec` contracts while
   leaving Learn unavailable for Phase 8. Build can start only at
   `ready_for_build`; every reviewable Build records the approved dataset
@@ -763,26 +761,18 @@ artifact` is server-owned in full and is now stripped from external run input:
   as the review row plus an append-only `learn_exploratory` transition row
   bound to the Build evidence hash and the reviewer, and a third record of the
   same act could only drift from those two.
-- **Data Reconciliation can be a required gate or an optional stage.**
-  `dbtl.reconciliation_required` (default **true**) keeps today's rule: an
-  approved Design opens Reconciliation, and Build waits for a settled matrix.
-  Set it false and an approved Design opens Build directly, while the stage,
-  its endpoints, and its matrix stay available — it is _skipped_, never
-  deleted, and a cycle already working the matrix stays advanceable in either
-  direction so flipping the switch cannot strand one. The rule lives in
-  `deerflow.dbtl.reconciliation_policy`, read by the state machine, the route
-  menu, and the Build lineage writer so they cannot disagree; an unreadable
-  config keeps the gate, because a deployment that cannot state its rule has
-  not asked for the looser one. **The data guarantees move into Build/Test
-  without becoming a pre-Build form**: Build workers name the exact workspace
+- **Data Reconciliation is not a Build gate.** An approved Design opens Build
+  directly. The Reconciliation records, endpoints, and matrix remain available
+  as explicit evidence, but no config option can make them a prerequisite.
+  **The data guarantees live in Build/Test without becoming a pre-Build form**:
+  Build workers name the exact workspace
   files they actually examined, the server computes and records their SHA-256
   bindings automatically, and Build refuses only when no real input was used or
   an input changed during execution. Test owns leakage, split, and validity
   checks against that lineage. People do not declare a dataset or paste a
-  digest before Build can start; what optional mode gives up is the
-  human-settled judgement matrix.
-  In optional mode, later workers receive a server-owned provenance policy
-  instead of the skipped gate's unsettled projection: the compatibility
+  digest before Build can start. Later workers receive a server-owned
+  provenance policy instead of treating the reconciliation projection as a
+  prerequisite: the compatibility
   validity key `reconciled_inputs` means "bound input provenance" and is judged
   from Build lineage, so absent declarations or matrix rows cannot invalidate
   Test. One-click Build approval also normalizes `ready_for_build` to the Build
@@ -794,7 +784,7 @@ artifact` is server-owned in full and is now stripped from external run input:
   cross-cutting predictive checks but does not make population structure,
   within-group analysis, or duplicates/relatedness mandatory unless a later
   explicitly selected pack says so; a worker may report those as limitations
-  but cannot invent them as gates. In optional mode the backend replaces any
+  but cannot invent them as gates. The backend replaces any
   client/worker `reconciled_inputs` verdict with the server-owned Build-lineage
   pass, and still refuses assessment when no lineage exists.
   Current Build uses an enforced 120K-token, 450-superstep worker ceiling.
@@ -813,9 +803,9 @@ artifact` is server-owned in full and is now stripped from external run input:
   boundary is unavailable. V12 restores the 120K phase cap; one failed implementation check gets
   a fresh 40K correction over the staged files, not the old transcript.
   Provider usage is persisted on each AI ReAct step and rendered once with its
-  input/output split after reload. `dbtl.build_implementer_agent` picks who implements a phase with no
-  registered specialist — an efficiency dial only, since correctness now holds
-  whichever agent runs. See [backend/AGENTS.md](backend/AGENTS.md) for the grant,
+  input/output split after reload. Build phases use the normal capability selector:
+  a registered specialist wins, otherwise the registered generalist is recorded as
+  the stand-in. See [backend/AGENTS.md](backend/AGENTS.md) for the grant,
   the scanner's deliberate narrowness, and why an unreadable entry point is not
   refused by that check.
 - **A Build that ran every planned phase must be able to reach its gate.** Two
@@ -964,6 +954,20 @@ cd frontend && pnpm test      # Unit tests
 
 Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
 (`pnpm`) = per-module work.**
+
+**DBTL Build/Test runtime invariant:** start the Gateway through a repository
+launcher (`make dev`, `make start`, the DBTL manual-profile targets, or Docker),
+not by invoking a system Python directly. When `dbtl.mode` is `manual` or
+`graph_enabled`, startup auto-installs the backend `dbtl-build` extra. Local
+Build phase verification and Test rerun workers deliberately prepend the
+running Gateway interpreter's venv `bin` directory to `PATH`; their portable
+records still say `python`, and remote sandboxes keep their own image `PATH`.
+Therefore a manual Gateway restart must run from `backend/.venv` (normally via
+`uv run`) after `uv sync --extra dbtl-build`. Never repair a missing dependency
+by hardcoding `python3`, an absolute host interpreter, or a host venv path into
+a Build/Test command—the dependency-bearing execution environment is the
+contract. The Build preflight must reject a missing scientific stack before
+planner or worker token spend.
 
 Host-side pnpm consumers, including the root/frontend Makefiles and local diagnostic scripts, must run through `scripts/pnpm.py`. The runner preserves direct `pnpm`/`pnpm.cmd` priority, falls back to `corepack pnpm`, and is invoked from `frontend/` so Corepack honors the package-manager version pinned by that project.
 

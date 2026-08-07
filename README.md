@@ -574,6 +574,16 @@ Set it up and capture a checkpoint once:
    make dev
    ```
 
+   If DBTL is configured in `manual` or `graph_enabled` mode, the standard
+   launchers automatically install the `dbtl-build` scientific Python extra.
+   Build verification and Test reruns in a local sandbox use the running
+   Gateway venv through `PATH`. If you start only the Gateway by hand, first run
+   `cd backend && uv sync --extra dbtl-build`, then launch it through `uv run`;
+   a system `python3` may exist while still lacking NumPy and the rest of the
+   required stack. Remote sandboxes use the dependencies in their own image.
+   See [DBTL Local Runtime and Sandbox](docs/dbtl-local-runtime-and-sandbox.md)
+   for the developer-facing path, environment, package, and isolation contract.
+
 6. **Access**: http://localhost:2026
 
 #### Startup Modes
