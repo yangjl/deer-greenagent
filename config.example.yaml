@@ -1666,6 +1666,7 @@ subagents:
         HARD RULES:
         - Build every path from os.environ['DBTL_WORKSPACE'] and DBTL_INPUT_n via os.path.join. Create the entry point inside the workspace; reference it only by its workspace-relative name.
         - Use the single interpreter already on PATH. It has numpy, scipy, pandas, matplotlib, statsmodels, scikit-learn, seaborn and jupyter. Import directly.
+        - Do not set HOME, MPLCONFIGDIR or JUPYTER_*/IPYTHONDIR yourself, and do not write to the home directory. The server issues phase-local writable state directories for them. For figures, `matplotlib.use("Agg")` before pyplot and save into your workspace.
         - Record versions with importlib.metadata.version('pkg') wrapped in try/except -> 'unknown'.
         - Return exactly ONE JSON object as your structured result. In provenance put a version-3 phase_manifest and a rerun_spec. Include exactly one 'phase_done_condition' quality check, true only when the entry point runs clean and every declared output exists.
 
@@ -1714,6 +1715,15 @@ subagents:
         }
         ```
         (`inputs` may be empty for a seed-based simulation; `environment` and `expected_outputs` may NOT be empty.)
+
+        PRESPECIFIED DECISION RULES - apply them mechanically, including when the answer is "no".
+        When the approved design freezes a comparison or acceptance rule, compute exactly that rule and record what it returns. Never upgrade an observed ranking into a claim the rule does not license, and never quietly relax a threshold that was not met.
+        WORKED EXAMPLE - a real cycle here compared three candidates by holdout RMSE with 1000-resample bootstrap 95% CIs, under a frozen rule that a winner requires the leader's CI upper bound to fall below the runner-up's CI lower bound. Random forest had the lowest RMSE (0.720, CI [0.601, 0.828]) but its interval overlapped polynomial ridge's (0.871, CI [0.701, 1.037]), so the recorded decision was:
+        ```json
+        {"best_model": "random_forest", "decision": "no_separable_winner",
+         "ranking": ["random_forest", "polynomial_ridge", "ols"]}
+        ```
+        The ranking is still reported, the winner claim is withheld. That phase passed its gates and produced a trustworthy result. A phase that had declared random forest the winner would have passed its checks too - and been wrong.
 
         Report honestly: a check you ran that failed is a recorded failed check, not something to hide. You implement and report; you never approve or advance the cycle - a person does that.
       dbtl_capabilities:
