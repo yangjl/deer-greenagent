@@ -24,6 +24,25 @@ from deerflow.dbtl.validity import (
 from deerflow.dbtl.worker_result import StageWorkerResult, WorkerResultRejected, parse_worker_result
 
 
+def _evidence_reference(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, Mapping):
+        for key in ("reference", "path", "uri", "id"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return ""
+
+
+def _validity_check_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(value)
+    evidence_refs = payload.get("evidence_refs")
+    if isinstance(evidence_refs, Sequence) and not isinstance(evidence_refs, (str, bytes)):
+        payload["evidence_refs"] = tuple(reference for item in evidence_refs if (reference := _evidence_reference(item)))
+    return payload
+
+
 def validated_test_assessment(
     results: Sequence[StageWorkerResult],
     *,
@@ -56,7 +75,7 @@ def validated_test_assessment(
             # after refresh instead of rejecting the server's own projection.
             metric_fields = {"name", "value", "threshold", "criterion", "plausible_max", "unit"}
             metrics = [HeadlineMetric(**{key: value for key, value in dict(item).items() if key in metric_fields}) for item in raw_metrics if isinstance(item, Mapping)]
-            checks = [ValidityCheck(**dict(item)) for item in raw_checks if isinstance(item, Mapping)]
+            checks = [ValidityCheck(**_validity_check_payload(item)) for item in raw_checks if isinstance(item, Mapping)]
             if rerun is not None:
                 checks = [item for item in checks if item.check is not ValidityCheckName.REPRODUCIBILITY]
                 rerun_status = {
@@ -87,7 +106,7 @@ def validated_test_assessment(
             if {item.check.value for item in checks} != required or not metrics:
                 continue
             evaluation = evaluate_validity(metrics=metrics, checks=checks)
-        except (TypeError, ValueError):
+        except (AttributeError, TypeError, ValueError):
             continue
         limitations = raw.get("limitations")
         rationale = raw.get("rationale")
@@ -116,6 +135,63 @@ class TestReviewService:
         test = next((item for item in cycle.get("stages", []) if item.get("stage") == "test"), None)
         if not isinstance(test, Mapping) or str(test.get("status") or "") != StageStatus.AWAITING_REVIEW.value:
             return None
+        artifacts = list(cycle.get("artifacts") or [])
+        exception_evidence = max(
+            (item for item in artifacts if isinstance(item, Mapping) and item.get("stage_attempt_id") == test.get("id") and item.get("artifact_type") == "evidence_exception"),
+            key=lambda item: int(item.get("revision") or 0),
+            default=None,
+        )
+        exception_dossier: dict[str, Any] = {}
+        if exception_evidence is not None and bool(
+            getattr(
+                getattr(self.app_config, "dbtl", None),
+                "degraded_evidence_continuation",
+                False,
+            )
+        ):
+            surface = await self.repo.latest_stage_feedback_surface(
+                project_id=project_id,
+                cycle_id=cycle_id,
+                stage="test",
+                stage_attempt_id=str(test.get("id") or ""),
+                mode="stage_review",
+            )
+            exception_dossier = dict(dict(dict((surface or {}).get("decision_request") or {}).get("transition_gate") or {}).get("evidence_exception") or {})
+            if exception_dossier.get("condition") == "untrusted":
+                evidence_ref = str(exception_evidence.get("uri") or "")
+                metrics = [
+                    HeadlineMetric(
+                        name="scientific_support",
+                        value=0.0,
+                        threshold=1.0,
+                        criterion="gte",
+                    )
+                ]
+                checks = [
+                    ValidityCheck(
+                        check=check,
+                        status=CheckStatus.FAILED,
+                        detail=("The upstream evidence is untrusted; this check cannot pass without laundering quarantined claims."),
+                        evidence_refs=(evidence_ref,),
+                    )
+                    for check in DEFAULT_VALIDITY_PACK.required_checks
+                ]
+                evaluation = evaluate_validity(metrics=metrics, checks=checks)
+                return {
+                    "metrics": [item.as_dict() for item in metrics],
+                    "checks": [item.as_dict() for item in checks],
+                    "limitations": ["The Test outcome records invalid evidence only and cannot support a scientific claim."],
+                    "rationale": ("The server deterministically invalidated Test from the content-addressed evidence-exception dossier; no Test worker was dispatched."),
+                    "evaluation": evaluation.as_dict(),
+                    "cycle_id": cycle_id,
+                    "feedback_surface_id": str((surface or {}).get("id") or ""),
+                    "expected_db_revision": int(cycle["db_revision"]),
+                    "stage_attempt_id": str(test.get("id") or ""),
+                    "evidence_uri": evidence_ref,
+                    "evidence_hash": str(exception_evidence.get("content_hash") or ""),
+                    "evidence_exception": exception_dossier,
+                    "meeting": None,
+                }
         stored = await self.repo.list_worker_runs(cycle_id, project_id=project_id, stage="test")
         parsed: list[StageWorkerResult] = []
         rerun: TestRerunRecord | None = None
@@ -178,6 +254,8 @@ class TestReviewService:
             key=lambda item: int(item.get("revision") or 0),
             default=None,
         )
+        if evidence is None and exception_evidence is not None and exception_dossier.get("condition") == "degraded_verified" and str(dict(assessment.get("evaluation") or {}).get("outcome") or "") == "invalidated":
+            evidence = exception_evidence
         if evidence is None:
             return None
         meeting_completed = review_meeting_recorded(
@@ -198,6 +276,7 @@ class TestReviewService:
         )
         gate_payload = dict((surface or {}).get("decision_request") or {}).get("transition_gate")
         assessed = dict(gate_payload or {}).get("assessment")
+        evidence_exception = dict(dict(gate_payload or {}).get("evidence_exception") or {})
         if isinstance(assessed, Mapping):
             difficulty = str(assessed.get("difficulty") or difficulty)
         meetings = getattr(getattr(self.app_config, "dbtl", None), "stage_meetings", None)
@@ -215,6 +294,7 @@ class TestReviewService:
             "stage_attempt_id": str(test.get("id") or ""),
             "evidence_uri": str((evidence or {}).get("uri") or ""),
             "evidence_hash": str((evidence or {}).get("content_hash") or ""),
+            "evidence_exception": evidence_exception or None,
             "meeting": gate.as_dict() if gate is not None else None,
         }
 
@@ -227,6 +307,8 @@ class TestReviewService:
         recommendation: str,
         config: RunnableConfig,
         idempotency_key: str,
+        human_rationale: str | None = None,
+        review_provenance: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         runtime = self.runtime_reader(config)
         user_id = str(runtime.get("user_id") or "")
@@ -238,11 +320,23 @@ class TestReviewService:
             raise RuntimeError("Test is no longer awaiting a decision with complete typed evidence.")
         if str(fresh.get("stage_attempt_id") or "") != str(snapshot.get("stage_attempt_id") or "") or str(fresh.get("evidence_hash") or "") != str(snapshot.get("evidence_hash") or ""):
             raise RuntimeError("The Test evidence changed after this chat card was issued; review the new card.")
+        fresh_exception_hash = str(dict(fresh.get("evidence_exception") or {}).get("content_hash") or "")
+        snapshot_exception_hash = str(dict(snapshot.get("evidence_exception") or {}).get("content_hash") or "")
+        if fresh_exception_hash != snapshot_exception_hash:
+            raise RuntimeError("The Test evidence exception changed after this chat card was issued; review the new card.")
         if dict(fresh.get("meeting") or {}).get("transition_routes_locked") is True:
             raise RuntimeError("The required Test review meeting must finish before an outcome can be recorded.")
         current = await self.repo.get_cycle(cycle_id, project_id=project_id)
         if current is None:
             raise RuntimeError("The selected cycle is no longer available.")
+        assessment_rationale = (
+            "Human selected "
+            f"{recommendation.replace('_', ' ')} from the Test chat card for the "
+            f"server-computed {str(dict(fresh.get('evaluation') or {}).get('outcome') or 'unknown').replace('_', ' ')} outcome. "
+            f"Evidence assessment: {str(fresh.get('rationale') or 'No additional worker rationale was recorded.')}"
+        )
+        if human_rationale and human_rationale.strip():
+            assessment_rationale = f"Human rationale: {human_rationale.strip()}\n\n{assessment_rationale}"
         return await self.repo.record_validity_assessment(
             cycle_id=cycle_id,
             project_id=project_id,
@@ -250,14 +344,10 @@ class TestReviewService:
             checks=[dict(item) for item in fresh.get("checks", []) if isinstance(item, Mapping)],
             recommendation=recommendation,
             limitations=[str(item) for item in fresh.get("limitations", [])],
-            rationale=(
-                "Human selected "
-                f"{recommendation.replace('_', ' ')} from the Test chat card for the "
-                f"server-computed {str(dict(fresh.get('evaluation') or {}).get('outcome') or 'unknown').replace('_', ' ')} outcome. "
-                f"Evidence assessment: {str(fresh.get('rationale') or 'No additional worker rationale was recorded.')}"
-            )[:10_000],
+            rationale=assessment_rationale[:10_000],
             reviewer_user_id=user_id,
             reviewer_project_role=project_role,
             expected_db_revision=int(current["db_revision"]),
             idempotency_key=idempotency_key,
+            review_provenance=(dict(review_provenance) if review_provenance else None),
         )

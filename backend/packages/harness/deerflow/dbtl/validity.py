@@ -47,6 +47,7 @@ class ValidityOutcome(StrEnum):
 
 class WorkflowRecommendation(StrEnum):
     ADVANCE_TO_LEARN = "advance_to_learn"
+    LEARN_FROM_INVALIDATED_EVIDENCE = "learn_from_invalidated_evidence"
     REPEAT_TEST = "repeat_test"
     RETURN_TO_BUILD = "return_to_build"
     RETURN_TO_RECONCILIATION = "return_to_reconciliation"
@@ -215,6 +216,7 @@ _ALLOWED_RECOMMENDATIONS = MappingProxyType(
             WorkflowRecommendation.CLOSE_CYCLE,
         ),
         ValidityOutcome.INVALIDATED: (
+            WorkflowRecommendation.LEARN_FROM_INVALIDATED_EVIDENCE,
             WorkflowRecommendation.REPEAT_TEST,
             WorkflowRecommendation.RETURN_TO_BUILD,
             WorkflowRecommendation.RETURN_TO_RECONCILIATION,

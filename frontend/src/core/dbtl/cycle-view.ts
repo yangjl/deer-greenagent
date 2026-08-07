@@ -22,6 +22,7 @@ export type StageStatus =
   | "in_progress"
   | "awaiting_review"
   | "changes_requested"
+  | "advanced_with_exception"
   | "approved"
   | "rejected"
   // A stage a person chose not to run. Deliberately distinct from both
@@ -186,6 +187,7 @@ export const STATUS_LABELS: Record<StageStatus, string> = {
   in_progress: "In progress",
   awaiting_review: "Awaiting review",
   changes_requested: "Changes requested",
+  advanced_with_exception: "Advanced with red flag",
   approved: "Approved",
   rejected: "Rejected",
   skipped: "Skipped \u2014 not validated",

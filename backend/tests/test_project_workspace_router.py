@@ -348,6 +348,27 @@ def test_project_file_content_is_available_without_a_conversation(tmp_path):
     assert response.headers["content-type"].startswith("text/markdown")
 
 
+def test_project_html_file_is_available_to_the_safe_preview(tmp_path):
+    repo = anyio.run(_make_repo, tmp_path)
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    projects_root = tmp_path / "Documents" / "projects"
+
+    with TestClient(_make_app(repo, thread_store, projects_root=projects_root)) as client:
+        _, project_id = _seed_project(client)
+        deck = projects_root / "Drought Resistance" / "outputs" / "review.html"
+        deck.write_text("<h1>Human gate</h1>", encoding="utf-8")
+
+        response = client.get(
+            f"/api/projects/{project_id}/file",
+            params={"path": "/mnt/user-data/outputs/review.html"},
+        )
+
+    assert response.status_code == 200
+    assert response.text == "<h1>Human gate</h1>"
+    assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["content-disposition"].startswith("attachment;")
+
+
 def test_project_file_content_rejects_path_traversal(tmp_path):
     repo = anyio.run(_make_repo, tmp_path)
     thread_store = MemoryThreadMetaStore(InMemoryStore())

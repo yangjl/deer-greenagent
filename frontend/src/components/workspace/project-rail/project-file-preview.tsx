@@ -8,6 +8,7 @@ import {
   FileIcon,
   LoaderCircleIcon,
 } from "lucide-react";
+import { useParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -44,6 +45,7 @@ export function ProjectFilePreview({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { thread_id: threadId = "" } = useParams<{ thread_id?: string }>();
   const filename = path ? getFileName(path) : "";
   const fileKind = useMemo(() => (path ? checkCodeFile(path) : null), [path]);
   const language = fileKind?.language ?? null;
@@ -184,7 +186,9 @@ export function ProjectFilePreview({
               <ArtifactFilePreview
                 content={content}
                 language={language}
+                projectId={projectId}
                 scrollKey={`project:${projectId}:${path}`}
+                threadId={threadId}
                 url={fileUrl}
                 resolveArtifactLinks={false}
               />

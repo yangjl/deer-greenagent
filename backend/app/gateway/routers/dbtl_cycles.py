@@ -51,7 +51,7 @@ from deerflow.dbtl import (
     validate_candidate_grade,
 )
 from deerflow.dbtl.reconciliation_policy import conditional_test_enabled
-from deerflow.dbtl.stage_feedback import filter_stage_feedback_intents
+from deerflow.dbtl.stage_feedback import filter_stage_feedback_intents, is_core_review_artifact
 from deerflow.dbtl.stage_meetings import (
     TRANSITION_INTENTS,
     apply_meeting_gate,
@@ -71,7 +71,14 @@ logger = logging.getLogger(__name__)
 
 StageName = Literal["design", "reconciliation", "build", "test", "learn"]
 CycleWeight = Literal["full", "light", "retroactive"]
-_TRANSITION_DIFFICULTIES = frozenset({"routine", "standard", "high_stakes"})
+_TRANSITION_DIFFICULTIES = frozenset({"routine", "standard", "high_stakes", "exception"})
+
+
+def _reviewable_attempt_artifacts(stage: str, artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    core = [item for item in artifacts if is_core_review_artifact(stage, item.get("artifact_type"))]
+    if core:
+        return core
+    return [item for item in artifacts if item.get("artifact_type") == "evidence_exception"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +104,7 @@ def _surface_transition_gate(surface: dict[str, Any]) -> dict[str, Any] | None:
     rationale = str(assessment.get("rationale") or "").strip()
     if difficulty not in _TRANSITION_DIFFICULTIES or not rationale:
         return None
-    return {
+    result = {
         "stage": str(gate.get("stage") or "design"),
         "assessment": {
             "difficulty": difficulty,
@@ -106,6 +113,10 @@ def _surface_transition_gate(surface: dict[str, Any]) -> dict[str, Any] | None:
         },
         "routes": [dict(item) for item in routes if isinstance(item, dict)],
     }
+    evidence_exception = gate.get("evidence_exception")
+    if isinstance(evidence_exception, dict):
+        result["evidence_exception"] = dict(evidence_exception)
+    return result
 
 
 def _surface_meeting_gate(
@@ -176,6 +187,28 @@ def _exploratory_actions(surface_stage: str) -> list[str]:
     if surface_stage != "build" or not conditional_test_enabled():
         return []
     return ["learn_exploratory"]
+
+
+def _evidence_exception_review_actions(
+    *,
+    stage: str,
+    stage_status: str,
+    evidence_exception: dict[str, Any],
+    enabled: bool,
+    route_slugs: set[str],
+) -> list[str] | None:
+    """Return exception controls only for the stage whose evidence failed.
+
+    Learn inherits the dossier as a scientific restriction, but its deck
+    reviews the new process-learning evidence. Treating that inherited banner
+    as a second Build/Test exception leaves Learn's human gate permanently
+    read-only because Learn deliberately cannot record either exception intent.
+    """
+    if stage == "test" and "learn_from_invalidated_evidence" not in route_slugs:
+        return None
+    if stage in {"build", "test"} and evidence_exception and enabled and stage_status in {"in_progress", "changes_requested", "awaiting_review"}:
+        return ["retry_with_guidance", "continue_with_red_flag"]
+    return None
 
 
 async def _post_design_meeting_turn(
@@ -259,6 +292,10 @@ def _next_open_stage(cycle: dict[str, Any], approved_stage: str) -> str | None:
     )
 
 
+def _stage_advanced_with_exception(cycle: dict[str, Any], stage: str) -> bool:
+    return any(item.get("stage") == stage and item.get("status") == "advanced_with_exception" for item in cycle.get("stages", []))
+
+
 async def _start_post_approval_handoff(
     request: Request,
     *,
@@ -279,6 +316,7 @@ async def _start_post_approval_handoff(
         "approved_stage": approved_stage,
         "next_stage": next_stage,
         "surface_id": surface_id,
+        "advanced_with_exception": _stage_advanced_with_exception(cycle, approved_stage),
     }
     try:
         record = await start_run(
@@ -441,6 +479,8 @@ class DesignFeedbackAction(BaseModel):
         "submit_for_review",
         "approve",
         "learn_exploratory",
+        "continue_with_red_flag",
+        "retry_with_guidance",
         "request_changes",
         "reject",
         "advance",
@@ -644,7 +684,7 @@ async def get_cycle(project_id: str, cycle_id: str, request: Request, repo=Depen
             (item for item in cycle.get("stages", []) if item.get("stage") == "design"),
             None,
         )
-        attempt_artifacts = [item for item in cycle.get("artifacts", []) if surface is not None and item.get("stage_attempt_id") == surface.get("stage_attempt_id")]
+        attempt_artifacts = _reviewable_attempt_artifacts("design", [item for item in cycle.get("artifacts", []) if surface is not None and item.get("stage_attempt_id") == surface.get("stage_attempt_id")])
         newest_evidence = max(
             attempt_artifacts,
             key=lambda item: int(item.get("revision") or 0),
@@ -860,12 +900,10 @@ async def _design_feedback_read_model(
             mode="stage_review",
         )
         surface_is_live = newest_review is None or str(newest_review["surface_id"]) == surface_id
-        # A review-meeting package annotates the core stage evidence.  The
-        # registered gate remains bound to the Build/Test/Learn artifact the
-        # meeting reviewed, so a newly written meeting package must not make
-        # that surface look stale merely because it has a higher revision.
-        meeting_artifact_type = f"{surface_stage}_review_meeting"
-        attempt_artifacts = [item for item in (cycle or {}).get("artifacts", []) if item.get("stage_attempt_id") == surface.get("stage_attempt_id") and item.get("artifact_type") != meeting_artifact_type]
+        # Supplemental dossiers and review-meeting packages annotate the core
+        # stage evidence. They must never replace the Build/Test/Learn artifact
+        # this deck is actually asking a person to review.
+        attempt_artifacts = _reviewable_attempt_artifacts(surface_stage, [item for item in (cycle or {}).get("artifacts", []) if item.get("stage_attempt_id") == surface.get("stage_attempt_id")])
         artifact = max(
             attempt_artifacts,
             key=lambda item: int(item.get("revision") or 0),
@@ -903,9 +941,22 @@ async def _design_feedback_read_model(
                 options = request_payload.get("options") if isinstance(request_payload, dict) else None
                 allowed_actions = ["chair_option"] if options else ["chair_text"]
         elif surface["mode"] == "stage_review":
-            if "stage_review" not in groups:
+            exception_gate = _surface_transition_gate(surface) or {}
+            evidence_exception = exception_gate.get("evidence_exception")
+            evidence_exception = dict(evidence_exception) if isinstance(evidence_exception, dict) else {}
+            stage_review_action = groups.get("stage_review")
+            if stage_review_action is None or stage_review_action.get("status") == "failed":
                 gate = _surface_transition_gate(surface) if dbtl_config.progressive_gate else None
-                if stage_status in {"in_progress", "changes_requested"} and "stage_submit" not in groups:
+                exception_actions = _evidence_exception_review_actions(
+                    stage=surface_stage,
+                    stage_status=stage_status,
+                    evidence_exception=evidence_exception,
+                    enabled=dbtl_config.degraded_evidence_continuation,
+                    route_slugs={str(item.get("slug") or "") for item in (gate or {}).get("routes", []) if isinstance(item, dict)},
+                )
+                if exception_actions is not None:
+                    allowed_actions = exception_actions
+                elif stage_status in {"in_progress", "changes_requested"} and "stage_submit" not in groups:
                     if gate is not None:
                         # The simple gate card: Approve, Revise, Park — each
                         # recorded in one action. Legacy decks still render a
@@ -938,7 +989,9 @@ async def _design_feedback_read_model(
         allowed_actions = filter_stage_feedback_intents(surface_stage, allowed_actions)
         if latest_action is not None and latest_action.get("status") == "handoff_failed":
             retry_kind = str(latest_action.get("action_kind") or "")
-            allowed_actions = [retry_kind] if retry_kind in {"approve", "advance", "learn_exploratory"} else []
+            allowed_actions = [retry_kind] if retry_kind in {"approve", "advance", "learn_exploratory", "continue_with_red_flag"} else []
+        elif latest_action is not None and latest_action.get("status") == "failed" and latest_action.get("action_kind") == "retry_with_guidance":
+            allowed_actions = ["retry_with_guidance"]
         interactive = bool(allowed_actions)
 
     note = ""
@@ -1114,6 +1167,7 @@ def _handoff_receipt(
     *,
     approved_stage: str,
     handoff: _PostApprovalHandoff,
+    decision_label: str = "approval",
 ) -> dict[str, Any]:
     """Keep review authority separate from best-effort chat delivery."""
     updated = {
@@ -1124,25 +1178,26 @@ def _handoff_receipt(
         "handoff_run_id": handoff.run_id,
     }
     if handoff.status == "failed":
-        updated["message"] = f"{approved_stage.title()} approval is recorded, but the next-stage prompt could not start. Reopen this deck and retry the same decision; the approval will not be recorded twice."
+        updated["message"] = f"{approved_stage.title()} {decision_label} is recorded, but the next-stage prompt could not start. Reopen this deck and retry the same decision; it will not be recorded twice."
         updated["handoff_failure_code"] = handoff.failure_code
     elif handoff.status == "started":
-        updated["message"] = "Approval recorded. Choose the next governed action in the originating conversation."
+        updated["message"] = f"{decision_label.capitalize()} recorded. Choose the next governed action in the originating conversation."
         updated.pop("handoff_failure_code", None)
     else:
-        updated["message"] = f"{approved_stage.title()} approval is recorded. No later stage is currently waiting for a start decision."
+        updated["message"] = f"{approved_stage.title()} {decision_label} is recorded. No later stage is currently waiting for a start decision."
         updated.pop("handoff_failure_code", None)
     return updated
 
 
-async def _handoff_card_is_visible(
+async def _human_input_card_is_visible(
     request: Request,
     *,
     thread_id: str,
     run_id: str,
     user_id: str,
+    clarification_type: str,
 ) -> bool:
-    """Whether the run's Start/Hold card reached durable thread history.
+    """Whether one server-owned control reached durable thread history.
 
     A successful run is not a delivered control. The 2026-08-01 replay completed
     without error and held the card in its final graph state, yet persisted no
@@ -1170,9 +1225,89 @@ async def _handoff_card_is_visible(
             continue
         artifact = content.get("artifact")
         payload = artifact.get("human_input") if isinstance(artifact, dict) else None
-        if isinstance(payload, dict) and payload.get("clarification_type") == "dbtl_stage_handoff":
+        if isinstance(payload, dict) and payload.get("clarification_type") == clarification_type:
             return True
     return False
+
+
+async def _handoff_card_is_visible(
+    request: Request,
+    *,
+    thread_id: str,
+    run_id: str,
+    user_id: str,
+) -> bool:
+    return await _human_input_card_is_visible(
+        request,
+        thread_id=thread_id,
+        run_id=run_id,
+        user_id=user_id,
+        clarification_type="dbtl_stage_handoff",
+    )
+
+
+def _watch_evidence_retry_delivery(
+    request: Request,
+    *,
+    repo,
+    user_id: str,
+    project_id: str,
+    thread_id: str,
+    surface_id: str,
+    action_id: str,
+    run_id: str,
+    stage: str,
+) -> None:
+    """Reopen the deck action if its chat guidance control never arrives."""
+
+    async def card_delivered() -> bool:
+        visible = await _human_input_card_is_visible(
+            request,
+            thread_id=thread_id,
+            run_id=run_id,
+            user_id=user_id,
+            clarification_type="dbtl_evidence_retry",
+        )
+        if not visible and not await _handoff_delivery_is_settled(
+            request,
+            thread_id=thread_id,
+            run_id=run_id,
+        ):
+            raise RuntimeError("Evidence-retry delivery is still finalizing")
+        return visible
+
+    async def mark_failed(run_status: str) -> None:
+        actions = await repo.stage_feedback_actions(surface_id, project_id=project_id)
+        current = next(
+            (item for item in actions if str(item.get("client_submission_id") or "") == action_id),
+            None,
+        )
+        if current is None or current.get("status") != "resume_started" or str(current.get("run_id") or "") != run_id:
+            return
+        await repo.update_stage_feedback_action(
+            action_id,
+            project_id=project_id,
+            status="failed",
+            run_id=run_id,
+            receipt={
+                "kind": "retry_with_guidance",
+                "run_id": run_id,
+                "run_status": run_status,
+                "message": f"The {stage.title()} retry control stopped before it appeared. Edit the guidance if needed, then send it again from this deck.",
+            },
+            failure_code=f"retry_control_{run_status}"[:64],
+        )
+
+    _watch_round_if_possible(
+        request,
+        user_id=user_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        surface_id=surface_id,
+        explanation=f"The {stage.title()} retry control stopped before it appeared. Reopen the exception deck to retry; no worker ran.",
+        success_has_follow_up=card_delivered,
+        on_failure=mark_failed,
+    )
 
 
 async def _handoff_delivery_is_settled(
@@ -1207,6 +1342,7 @@ def _watch_post_approval_handoff(
     action_id: str,
     approved_stage: str,
     handoff: _PostApprovalHandoff,
+    decision_label: str = "approval",
 ) -> None:
     """Make an admitted handoff recoverable if its run dies or delivers nothing."""
     if handoff.status != "started" or not handoff.run_id:
@@ -1250,7 +1386,7 @@ def _watch_post_approval_handoff(
             receipt.update(
                 {
                     "handoff_status": "delivered",
-                    "message": "Approval recorded. The next-stage choice is ready in this conversation.",
+                    "message": f"{decision_label.capitalize()} recorded. The next-stage choice is ready in this conversation.",
                 }
             )
             receipt.pop("handoff_failure_code", None)
@@ -1267,7 +1403,7 @@ def _watch_post_approval_handoff(
             {
                 "handoff_status": "failed",
                 "handoff_failure_code": f"run_{run_status}"[:64],
-                "message": (f"{approved_stage.title()} approval remains recorded, but the next-stage prompt stopped before it appeared. Reopen this deck and retry the same decision."),
+                "message": (f"{approved_stage.title()} {decision_label} remains recorded, but the next-stage prompt stopped before it appeared. Reopen this deck and retry the same decision."),
             }
         )
         await repo.transition_stage_feedback_handoff(
@@ -1285,7 +1421,7 @@ def _watch_post_approval_handoff(
         thread_id=thread_id,
         run_id=handoff.run_id,
         surface_id=surface_id,
-        explanation=(f"{approved_stage.title()} approval is recorded, but the prompt for the next stage stopped before it appeared. Reopen the same feedback deck to retry the handoff."),
+        explanation=(f"{approved_stage.title()} {decision_label} is recorded, but the prompt for the next stage stopped before it appeared. Reopen the same feedback deck to retry the handoff."),
         # A run that succeeds without leaving its card in thread history has
         # delivered nothing, so it is treated exactly like one that died: the
         # ledger action reopens for retry and the conversation says so.
@@ -1351,6 +1487,7 @@ async def apply_design_feedback_action(
             difficulty_override=body.action.difficulty_override,
             slide_comments=body.slide_comments,
             active_slide_id=body.active_slide_id,
+            degraded_evidence_continuation=dbtl_config.degraded_evidence_continuation,
         )
     except Exception as exc:  # noqa: BLE001
         _feedback_event(
@@ -1387,6 +1524,7 @@ async def apply_design_feedback_action(
         approved_stage: str,
         receipt: dict[str, Any],
     ) -> tuple[dict[str, Any], _PostApprovalHandoff]:
+        decision_label = "red-flag continuation" if receipt.get("kind") == "continue_with_red_flag" else "approval"
         handoff = await _start_post_approval_handoff(
             request,
             cycle=cycle,
@@ -1399,6 +1537,7 @@ async def apply_design_feedback_action(
             receipt,
             approved_stage=approved_stage,
             handoff=handoff,
+            decision_label=decision_label,
         )
         updated = await repo.update_stage_feedback_action(
             action_id,
@@ -1419,6 +1558,7 @@ async def apply_design_feedback_action(
             action_id=action_id,
             approved_stage=approved_stage,
             handoff=handoff,
+            decision_label=decision_label,
         )
         return updated, handoff
 
@@ -1641,6 +1781,73 @@ async def apply_design_feedback_action(
             )
             return {**updated, "replayed": replayed}
 
+        if body.action.kind == "retry_with_guidance":
+            surface_gate = _surface_transition_gate(surface) or {}
+            evidence_exception = surface_gate.get("evidence_exception")
+            if not dbtl_config.degraded_evidence_continuation or surface_stage not in {"build", "test"} or not isinstance(evidence_exception, dict):
+                raise DesignFeedbackConflict("This deck does not own an active evidence-exception retry.")
+            if not written_feedback:
+                raise DesignFeedbackConflict("Retry with guidance requires a comment for the next attempt.")
+            record = await start_run(
+                RunCreateRequest(
+                    input={
+                        "messages": [
+                            {
+                                "role": "user",
+                                "id": f"dbtl-evidence-retry__{uuid4().hex}",
+                                "content": f"Retry {surface_stage.title()} with human guidance. Show the server-owned retry control before dispatching work.\n\nGuidance: {written_feedback}",
+                                "additional_kwargs": {
+                                    "hide_from_ui": True,
+                                    "design_feedback_surface_id": surface_id,
+                                },
+                            }
+                        ]
+                    },
+                    context={
+                        "dbtl_supervisor_enabled": True,
+                        "dbtl_explicit_choice": "continue_cycle",
+                        "dbtl_selected_cycle_id": cycle_id,
+                        "dbtl_evidence_retry": {
+                            "cycle_id": cycle_id,
+                            "cycle_revision": body.expected_db_revision,
+                            "stage": surface_stage,
+                            "dossier_hash": evidence_exception.get("content_hash"),
+                            "reason_codes": list(evidence_exception.get("reason_codes") or []),
+                            "available_artifacts": list(evidence_exception.get("available_artifacts") or []),
+                            "initial_hint": written_feedback,
+                        },
+                    },
+                    on_disconnect="continue",
+                ),
+                body.originating_thread_id,
+                request,
+            )
+            receipt = {
+                "kind": "retry_with_guidance",
+                "run_id": record.run_id,
+                "originating_thread_id": body.originating_thread_id,
+                "message": f"The {surface_stage.title()} retry guidance is recorded. Confirm the server-owned retry control in chat to dispatch work.",
+            }
+            updated = await repo.update_stage_feedback_action(
+                action_id,
+                project_id=project_id,
+                status="resume_started",
+                run_id=record.run_id,
+                receipt=receipt,
+            )
+            _watch_evidence_retry_delivery(
+                request,
+                repo=repo,
+                user_id=user_id,
+                project_id=project_id,
+                thread_id=body.originating_thread_id,
+                surface_id=surface_id,
+                action_id=action_id,
+                run_id=record.run_id,
+                stage=surface_stage,
+            )
+            return {**updated, "replayed": replayed}
+
         binding = {
             "feedback_surface_id": surface_id,
             "deck_content_hash": surface["deck_content_hash"],
@@ -1648,7 +1855,9 @@ async def apply_design_feedback_action(
             "evidence": expected_evidence,
         }
         workflow_key = f"design-deck:{action_id}"
-        transition_gate = _surface_transition_gate(surface) if dbtl_config.progressive_gate else None
+        surface_transition_gate = _surface_transition_gate(surface)
+        transition_gate = surface_transition_gate if dbtl_config.progressive_gate else None
+        evidence_exception = dict((surface_transition_gate or {}).get("evidence_exception") or {})
         if surface_stage != "design" and body.action.kind in TRANSITION_INTENTS:
             current_cycle = await repo.get_cycle(cycle_id, project_id=project_id)
             current_stage = next(
@@ -1798,6 +2007,87 @@ async def apply_design_feedback_action(
             )
             return {**updated, "cycle": cycle, "replayed": replayed}
 
+        if body.action.kind == "continue_with_red_flag":
+            if not dbtl_config.degraded_evidence_continuation or surface_stage not in {"build", "test"} or not evidence_exception:
+                raise DesignFeedbackConflict("This deck does not own an active evidence exception.")
+            if not written_feedback:
+                raise DesignFeedbackConflict("Continue with red flag requires the reviewer's written rationale.")
+            if surface_stage == "test":
+                service = TestReviewService(
+                    repo=repo,
+                    app_config=config,
+                    runtime_reader=lambda _config: {
+                        "user_id": user_id,
+                        "project_role": str(project["current_user_role"]),
+                    },
+                )
+                snapshot = await service.snapshot(project_id=project_id, cycle_id=cycle_id)
+                if snapshot is None or str(dict(snapshot.get("evaluation") or {}).get("outcome") or "") != "invalidated":
+                    raise DesignFeedbackConflict("Test does not have a current server-computed invalidated assessment.")
+                recorded = await service.record_outcome(
+                    project_id=project_id,
+                    cycle_id=cycle_id,
+                    snapshot=snapshot,
+                    recommendation="learn_from_invalidated_evidence",
+                    config={},
+                    idempotency_key=workflow_key,
+                    human_rationale=written_feedback,
+                    review_provenance={
+                        "input_source": "stage_deck",
+                        "feedback_surface_id": surface_id,
+                        "deck_content_hash": surface["deck_content_hash"],
+                        "deck_schema_version": surface["deck_schema_version"],
+                        "selected_action": body.action.kind,
+                        "human_comment": body.comment.strip(),
+                        "rationale_projection": written_feedback,
+                        "rationale_source": "human",
+                    },
+                )
+                cycle = dict(recorded.get("cycle") or {})
+            else:
+                current = await repo.get_cycle(cycle_id, project_id=project_id)
+                current_status = next((str(item.get("status") or "") for item in (current or {}).get("stages", []) if item.get("stage") == surface_stage), "")
+                cycle = await repo.review_stage(
+                    cycle_id=cycle_id,
+                    project_id=project_id,
+                    stage=surface_stage,
+                    decision="advanced_with_exception",
+                    rationale=written_feedback,
+                    expected_db_revision=body.expected_db_revision,
+                    reviewer_user_id=user_id,
+                    reviewer_project_role=str(project["current_user_role"]),
+                    idempotency_key=workflow_key,
+                    design_feedback_provenance={
+                        "input_source": "stage_deck",
+                        "feedback_surface_id": surface_id,
+                        "deck_content_hash": surface["deck_content_hash"],
+                        "deck_schema_version": surface["deck_schema_version"],
+                        "selected_action": body.action.kind,
+                        "human_comment": body.comment.strip(),
+                        "slide_comments": recorded_slide_comments,
+                        "active_slide_id": active_slide_id,
+                        "rationale_projection": written_feedback,
+                        "rationale_source": "human",
+                        "evidence_exception": evidence_exception,
+                    },
+                    progressive_transition={
+                        "assessed_difficulty": "exception",
+                        "assessment_rationale": written_feedback,
+                        "offered_routes": list(evidence_exception.get("recovery_options") or []),
+                    },
+                    auto_submit=current_status in {"in_progress", "changes_requested"},
+                )
+            updated, _handoff = await finish_approval_handoff(
+                cycle,
+                approved_stage=surface_stage,
+                receipt={
+                    "kind": "continue_with_red_flag",
+                    "db_revision": cycle["db_revision"],
+                    "evidence_exception_hash": evidence_exception.get("content_hash"),
+                },
+            )
+            return {**updated, "cycle": cycle, "replayed": replayed}
+
         if transition_gate is not None and human_override is None:
             prior_actions = await repo.stage_feedback_actions(surface_id, project_id=project_id)
             prior_submit = next(
@@ -1843,6 +2133,17 @@ async def apply_design_feedback_action(
                 recommendation=recommendation,
                 config={},
                 idempotency_key=workflow_key,
+                human_rationale=written_feedback,
+                review_provenance={
+                    "input_source": "stage_deck",
+                    "feedback_surface_id": surface_id,
+                    "deck_content_hash": surface["deck_content_hash"],
+                    "deck_schema_version": surface["deck_schema_version"],
+                    "selected_action": body.action.kind,
+                    "human_comment": body.comment.strip(),
+                    "rationale_projection": written_feedback,
+                    "rationale_source": "human" if written_feedback else "server",
+                },
             )
             cycle = dict(recorded.get("cycle") or {})
             receipt = {
@@ -2407,6 +2708,7 @@ class ValidityAssessmentRequest(BaseModel):
     checks: list[ValidityCheckRequest] = Field(max_length=100)
     recommendation: Literal[
         "advance_to_learn",
+        "learn_from_invalidated_evidence",
         "repeat_test",
         "return_to_build",
         "return_to_reconciliation",

@@ -83,6 +83,19 @@ def test_typing_start_a_dbtl_cycle_is_deterministic_not_classified() -> None:
     assert decision.classifier is None
 
 
+def test_typing_start_a_new_governed_dbtl_cycle_is_an_explicit_request() -> None:
+    decision = route_request(
+        _request(
+            text="Start a new governed DBTL cycle for a deterministic linear experiment",
+            discovery_enabled=True,
+            discovery_classifier_entry=True,
+        )
+    )
+
+    assert decision.kind is RouteKind.DISCOVERY
+    assert decision.source is RouteSource.EXPLICIT_REQUEST
+
+
 def test_typing_start_a_cycle_is_deterministic_even_with_existing_cycles() -> None:
     decision = route_request(
         _request(

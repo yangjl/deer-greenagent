@@ -60,6 +60,9 @@ describe("metric and validity separation", () => {
     expect(result.headline_success).toBe(true);
     expect(outcomeTone(result.outcome)).toBe("critical");
     expect(assessmentHeadline(result)).toContain("does not override");
+    expect(recommendationOptions(result).map((item) => item.id)).toContain(
+      "learn_from_invalidated_evidence",
+    );
   });
 
   test("missing holdout is inconclusive", () => {

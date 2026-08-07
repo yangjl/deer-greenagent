@@ -128,6 +128,7 @@ from deerflow.agents.dbtl.supervisor_support.human_input_protocol import (
     DESIGN_AUTHORING_PREFIX,
     DESIGN_CLARIFICATION_PREFIX,
     DISCOVERY_START_PREFIX,
+    EVIDENCE_RETRY_PREFIX,
     PRESENT_ARTIFACT_PREFIX,
     SETUP_CLARIFICATION_PREFIX,
     SETUP_CONFIRMATION_PREFIX,
@@ -606,14 +607,19 @@ def _stage_handoff_message(
     approved_label = approved_stage.replace("_", " ").title()
     next_label = next_stage.replace("_", " ").title()
     repeating = bool(marker.get("repeat_stage"))
-    question = f"Run {next_label} again now?" if repeating else f"{approved_label} is approved. What should happen next?"
+    advanced_with_exception = bool(marker.get("advanced_with_exception"))
+    question = f"Run {next_label} again now?" if repeating else (f"{approved_label} advanced with a red flag. What should happen next?" if advanced_with_exception else f"{approved_label} is approved. What should happen next?")
     # The cycle is named, not implied. A project can run several cycles at once
     # and this card can be re-presented long after the approval that raised it,
     # so "this cycle" leaves a reader to guess which one they are starting.
     context = (
         f"{next_label} was reset for cycle {cycle_id}. The prior evidence remains recorded, and no worker starts until you choose."
         if repeating
-        else f"{next_label} is open for cycle {cycle_id}, but it will not start until you choose. Holding here leaves the approved record unchanged."
+        else (
+            f"{next_label} is open for cycle {cycle_id}, but it will not start until you choose. Holding here leaves the exception record unchanged."
+            if advanced_with_exception
+            else f"{next_label} is open for cycle {cycle_id}, but it will not start until you choose. Holding here leaves the approved record unchanged."
+        )
     )
     options = [
         {
@@ -635,7 +641,7 @@ def _stage_handoff_message(
         "source": "ask_clarification",
         "request_id": request_id,
         "clarification_type": "dbtl_stage_handoff",
-        "title": f"Repeat {next_label}" if repeating else f"{approved_label} approved",
+        "title": (f"Repeat {next_label}" if repeating else (f"{approved_label} advanced with red flag" if advanced_with_exception else f"{approved_label} approved")),
         "question": question,
         "context": context,
         "input_mode": "single_choice",
@@ -654,6 +660,65 @@ def _stage_handoff_message(
             "context": context,
             "clarification_type": "dbtl_stage_handoff",
             "options": options,
+        },
+        request=request,
+        fallback_content=f"{context}\n\n{question}",
+    )
+
+
+def _evidence_retry_message(
+    decision: BranchDecision,
+    marker: Mapping[str, Any],
+    *,
+    request_nonce: str,
+) -> tuple[AIMessage, ToolMessage]:
+    """Collect retry guidance in chat without dispatching stage work."""
+    cycle_id = str(marker.get("cycle_id") or decision.cycle_id or "")
+    stage = str(marker.get("stage") or "").strip().lower()
+    dossier_hash = str(marker.get("dossier_hash") or "")
+    request_id = card_request_id(
+        EVIDENCE_RETRY_PREFIX,
+        cycle_id,
+        stage,
+        dossier_hash,
+    )
+    failed = [str(item) for item in marker.get("reason_codes") or [] if str(item)]
+    retained = [str(item.get("path") or item.get("content_hash") or "") for item in marker.get("available_artifacts") or [] if isinstance(item, Mapping)]
+    question = f"What should change when {stage.title()} is retried?"
+    context = "\n".join(
+        [
+            f"Cycle: {cycle_id}",
+            f"Failed checks: {', '.join(failed) or 'see the bound dossier'}",
+            f"Evidence retained: {', '.join(retained) or 'the immutable exception dossier only'}",
+            f"Work to rerun: the governed {stage.title()} attempt; completed evidence remains in history.",
+            "Nothing reruns until you submit guidance here.",
+        ]
+    )
+    initial_hint = str(marker.get("initial_hint") or "").strip()
+    if initial_hint:
+        context += f"\nHint from the deck: {initial_hint}"
+    request = {
+        "version": 1,
+        "kind": "human_input_request",
+        "source": "ask_clarification",
+        "request_id": request_id,
+        "clarification_type": "dbtl_evidence_retry",
+        "title": f"Guide the {stage.title()} retry",
+        "question": question,
+        "context": context,
+        "input_mode": "free_text",
+        "dbtl_cycle_id": cycle_id,
+        "cycle_revision": int(marker.get("cycle_revision") or 0),
+        "stage": stage,
+        "dossier_hash": dossier_hash,
+    }
+    return build_human_input_messages(
+        request_id=request_id,
+        message_id=f"{request_id}:delivery:{request_nonce or 'initial'}",
+        tool_args={
+            "question": question,
+            "context": context,
+            "clarification_type": "dbtl_evidence_retry",
         },
         request=request,
         fallback_content=f"{context}\n\n{question}",
@@ -1993,6 +2058,32 @@ def build_supervisor_graph(
                 )
         raw_context = request_context(config)
         request_nonce = str(raw_context.get("run_id") or "")
+        evidence_retry: tuple[str, str, Mapping[str, Any]] | None = None
+        retry_marker = raw_context.get("dbtl_evidence_retry")
+        retry_answer = _card_answer(state, EVIDENCE_RETRY_PREFIX)
+        if isinstance(retry_marker, Mapping) and retry_answer is None:
+            marker_cycle = str(retry_marker.get("cycle_id") or "")
+            if marker_cycle and marker_cycle == str(decision.cycle_id or ""):
+                return {
+                    "messages": list(
+                        _evidence_retry_message(
+                            decision,
+                            retry_marker,
+                            request_nonce=request_nonce,
+                        )
+                    )
+                }
+        if retry_answer is not None and retry_answer[1].strip():
+            retry_request = _emitted_card_request(state, retry_answer[0])
+            retry_stage = str((retry_request or {}).get("stage") or "")
+            retry_cycle = str((retry_request or {}).get("dbtl_cycle_id") or "")
+            if retry_stage in {"build", "test"} and retry_cycle == str(decision.cycle_id or ""):
+                evidence_retry = (
+                    retry_stage,
+                    retry_answer[1].strip(),
+                    retry_request or {},
+                )
+                unscoped_stage_intent = None
         preflight_answer = _card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
         if preflight_answer is not None and discovery_store is not None and context.project_id:
             preflight_request = _emitted_card_request(state, preflight_answer[0])
@@ -2108,6 +2199,44 @@ def build_supervisor_graph(
                     }
 
         request_text = f"Start the governed {str(handoff_answer[1].get('next_stage') or '').replace('_', ' ')} stage now." if handoff_answer is not None and handoff_answer[0] == "start_next_stage" else _latest_cycle_request_text(state)
+        if evidence_retry is not None:
+            retry_stage, retry_guidance, retry_request = evidence_retry
+            validator = getattr(stage_adapter, "validate_evidence_retry", None)
+            if not callable(validator):
+                return {"messages": [receipt_message("The retry remains held because its evidence validator is unavailable. No worker ran.")]}
+            valid_retry = validator(
+                project_id=str(context.project_id or ""),
+                cycle_id=str(decision.cycle_id or ""),
+                request=retry_request,
+            )
+            if isawaitable(valid_retry):
+                valid_retry = await valid_retry
+            if not valid_retry:
+                return {"messages": [receipt_message("The evidence or cycle revision changed before this retry was confirmed. No worker ran; reopen the current exception deck.")]}
+            request_text = f"Retry the governed {retry_stage.title()} stage with human guidance: {retry_guidance}"
+            if retry_stage == "test":
+                snapshot_reader = getattr(stage_adapter, "test_review_snapshot", None)
+                recorder = getattr(stage_adapter, "record_test_outcome", None)
+                if not callable(snapshot_reader) or not callable(recorder):
+                    return {"messages": [receipt_message("The Test retry is still held because its server-owned review port is unavailable. No worker ran.")]}
+                snapshot = snapshot_reader(
+                    project_id=str(context.project_id or ""),
+                    cycle_id=str(decision.cycle_id or ""),
+                )
+                if isawaitable(snapshot):
+                    snapshot = await snapshot
+                if not isinstance(snapshot, Mapping):
+                    return {"messages": [receipt_message("The Test evidence changed before the retry was confirmed. No worker ran; reopen the current exception deck.")]}
+                recorded = recorder(
+                    project_id=str(context.project_id or ""),
+                    cycle_id=str(decision.cycle_id or ""),
+                    snapshot=snapshot,
+                    recommendation="repeat_test",
+                    config=config,
+                    idempotency_key=f"{retry_answer[0]}:repeat-test",
+                )
+                if isawaitable(recorded):
+                    await recorded
         review_intent = _review_intent(request_text)
         if review_intent is not None:
             return {

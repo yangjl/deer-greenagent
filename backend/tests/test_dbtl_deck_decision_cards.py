@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from deerflow.dbtl.council_deck import render_council_deck
+from deerflow.dbtl.council_deck import render_council_deck, render_stage_review_controls
 from deerflow.dbtl.decision_request import parse_decision_request
 
 QUESTION = "Which population structure should define validation?"
@@ -223,3 +223,36 @@ class TestFormalReviewControls:
 
         assert "data-deck-issue" in rendered
         assert 'value="issue-1"' in rendered
+
+    def test_exception_gate_is_visibly_red_flagged_and_requires_a_comment(self) -> None:
+        rendered = render_stage_review_controls(
+            "build",
+            {
+                "evidence_exception": {
+                    "condition": "untrusted",
+                    "content_hash": "a" * 64,
+                    "scientific_effect": "invalidates_support",
+                }
+            },
+        )
+
+        assert 'data-deck-action="continue_with_red_flag"' in rendered
+        assert "this evidence remains failed or untrusted" in rendered
+        assert "cannot be reported as scientific support" in rendered
+        assert "required" in rendered
+
+    def test_learn_keeps_upstream_exception_visible_without_offering_exception_actions(self) -> None:
+        rendered = render_stage_review_controls(
+            "learn",
+            {
+                "evidence_exception": {
+                    "condition": "untrusted",
+                    "content_hash": "a" * 64,
+                    "scientific_effect": "invalidates_support",
+                }
+            },
+        )
+
+        assert "this evidence remains failed or untrusted" in rendered
+        assert 'data-deck-action="retry_with_guidance"' not in rendered
+        assert 'data-deck-action="continue_with_red_flag"' not in rendered

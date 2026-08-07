@@ -10,6 +10,7 @@ drift apart.
 from __future__ import annotations
 
 import argparse
+import copy
 import fcntl
 import hashlib
 import json
@@ -203,6 +204,31 @@ def initialize_profile(
         if sandbox.get("allow_host_bash") is not True:
             sandbox["allow_host_bash"] = True
             changed = True
+        if dbtl.get("degraded_evidence_continuation") is not True:
+            dbtl["degraded_evidence_continuation"] = True
+            changed = True
+        # Older isolated profiles predate the ready-to-use DBTL specialists.
+        # Copy them only when the manual profile has no custom roster, so a
+        # tester's deliberate local agents are never overwritten.
+        profile_subagents = loaded_profile.setdefault("subagents", {})
+        if not isinstance(profile_subagents, dict):
+            profile_subagents = {}
+            loaded_profile["subagents"] = profile_subagents
+        profile_agents = profile_subagents.get("custom_agents")
+        if not isinstance(profile_agents, dict) or not profile_agents:
+            source_loaded = (
+                yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+                if source.is_file()
+                else {}
+            )
+            source_agents = (
+                (source_loaded.get("subagents") or {}).get("custom_agents")
+                if isinstance(source_loaded, dict)
+                else None
+            )
+            if isinstance(source_agents, dict) and source_agents:
+                profile_subagents["custom_agents"] = copy.deepcopy(source_agents)
+                changed = True
         # Make the Build contract under manual evaluation explicit while
         # preserving an operator's deliberate legacy rollback selection.
         if changed:
@@ -278,6 +304,8 @@ def initialize_profile(
     dbtl["build_workflow_steps"] = True
     dbtl["build_plan_confirmation"] = True
     dbtl["build_work_meetings"] = True
+    # Exercise the explicit human exception path only in this isolated profile.
+    dbtl["degraded_evidence_continuation"] = True
 
     # The isolated manual profile is a developer-operated local environment.
     # Build workers are required to execute the implementation they produce,

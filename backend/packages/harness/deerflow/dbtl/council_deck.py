@@ -472,6 +472,8 @@ def _stage_review_controls(
     assessment = dict(assessment) if isinstance(assessment, Mapping) else {}
     difficulty = _text(assessment.get("difficulty") or "standard", limit=32)
     rationale = _text(assessment.get("rationale") or "", limit=2_000)
+    evidence_exception = gate.get("evidence_exception")
+    evidence_exception = dict(evidence_exception) if isinstance(evidence_exception, Mapping) else {}
     assessment_html = (
         f'<div class="assessment" data-assessed-difficulty="{html.escape(difficulty)}"><p><strong>Agent assessment: {html.escape(difficulty.replace("_", " "))}</strong></p><p>{html.escape(rationale)}</p></div>' if assessment else ""
     )
@@ -504,13 +506,26 @@ def _stage_review_controls(
         # be opened long after the deployment's rules changed, so it must not
         # be the thing that decides which decisions exist.
         buttons.append('<button type="button" data-deck-action="learn_exploratory" disabled>Keep, but do not validate</button>')
+    exception_html = ""
+    if evidence_exception:
+        if normalized in {"build", "test"}:
+            buttons.append('<button type="button" data-deck-action="retry_with_guidance" disabled>Retry with guidance</button>')
+            buttons.append('<button type="button" data-deck-action="continue_with_red_flag" disabled>Continue with red flag</button>')
+        limits_scope = evidence_exception.get("scientific_effect") == "limits_scope"
+        exception_html = (
+            '<div class="assessment evidence-exception" role="alert"><p><strong>'
+            + ("Red flag: this evidence remains scope-limited." if limits_scope else "Red flag: this evidence remains failed or untrusted.")
+            + "</strong></p><p>"
+            + ("Any supported result and later claim must retain this limitation." if limits_scope else "Continuing does not approve it, and it cannot be reported as scientific support.")
+            + "</p></div>"
+        )
     test_note = '<p class="option-detail">The scientific outcome and route are computed from the structured validity review; the meeting may annotate that pack but cannot choose an outcome.</p>' if normalized == "test" else ""
     stage_label = normalized.title() or "Stage"
     return (
         f'<fieldset class="review" disabled><legend>Move this {html.escape(stage_label)} evidence through its human gate</legend>'
-        f"{assessment_html}{test_note}"
+        f"{assessment_html}{exception_html}{test_note}"
         f'<div class="comment"><label for="stage-review-comment">Reviewer comment or meeting brief</label>'
-        '<textarea id="stage-review-comment" data-deck-comment rows="4" disabled></textarea></div>'
+        f'<textarea id="stage-review-comment" data-deck-comment rows="4" {"required " if normalized in {"build", "test"} and evidence_exception else ""}disabled></textarea></div>'
         f'<div class="review-actions">{"".join(buttons)}</div></fieldset>'
         '<p class="inert" data-deck-status role="status" aria-live="polite">' + html.escape(INERT_NOTICE) + "</p>"
     )

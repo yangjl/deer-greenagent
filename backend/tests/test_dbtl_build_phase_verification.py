@@ -11,6 +11,7 @@ from deerflow.agents.dbtl.live_stage.build_phase_verification import (
     VERIFY_STDERR,
     VERIFY_STDOUT,
     execute_and_verify_phase,
+    resolve_issued_input_tokens,
     verification_shell_command,
 )
 from deerflow.agents.dbtl.live_stage.build_phases import (
@@ -253,6 +254,31 @@ def test_execution_inputs_must_come_from_the_issued_grant(tmp_path: Path) -> Non
     assert record.passed is False
     assert "not in the server-issued phase grant" in record.reason
     assert called is False
+
+
+def test_server_resolves_declared_environment_tokens_to_the_issued_grant() -> None:
+    workspace = "/mnt/user-data/outputs/.dbtl-stage-work/a/build/p"
+    manifest = _manifest(workspace, inputs=("DBTL_INPUT_2",), execution_inputs=("DBTL_INPUT_2",))
+
+    resolved = resolve_issued_input_tokens(
+        manifest,
+        issued_inputs=("/mnt/user-data/train.csv", "/mnt/user-data/holdout.csv"),
+    )
+
+    assert resolved.declared_inputs == ("/mnt/user-data/holdout.csv",)
+    assert resolved.execution_inputs == ("/mnt/user-data/holdout.csv",)
+
+
+def test_unknown_declared_environment_token_stays_invalid() -> None:
+    workspace = "/mnt/user-data/outputs/.dbtl-stage-work/a/build/p"
+    manifest = _manifest(workspace, inputs=("DBTL_INPUT_3",), execution_inputs=("DBTL_INPUT_3",))
+
+    resolved = resolve_issued_input_tokens(
+        manifest,
+        issued_inputs=("/mnt/user-data/train.csv", "/mnt/user-data/holdout.csv"),
+    )
+
+    assert resolved.execution_inputs == ("DBTL_INPUT_3",)
 
 
 def test_python_entry_points_have_a_server_owned_command() -> None:

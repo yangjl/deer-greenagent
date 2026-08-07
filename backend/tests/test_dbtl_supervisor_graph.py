@@ -2618,6 +2618,46 @@ class TestLiveStageBranch:
         ]
 
     @pytest.mark.asyncio
+    async def test_invalidated_test_handoff_keeps_the_red_flag_in_card_copy(self):
+        class Adapter:
+            async def recover_test_learn_handoff(self, **kwargs):
+                return {
+                    "cycle_id": kwargs["cycle_id"],
+                    "cycle_revision": 16,
+                    "approved_stage": "test",
+                    "next_stage": "learn",
+                    "surface_id": "validity-invalidated",
+                    "advanced_with_exception": True,
+                }
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id="cyc-1",
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [HumanMessage(content="continue the cycle", id="human-1")],
+            },
+            config={
+                "configurable": {"thread_id": "test-invalidated-learn-handoff"},
+                "context": {"run_id": "run-test-invalidated-learn-handoff"},
+            },
+        )
+
+        request = final["messages"][-1].artifact["human_input"]
+        assert request["title"] == "Test advanced with red flag"
+        assert request["question"] == "Test advanced with a red flag. What should happen next?"
+        assert "exception record" in request["context"]
+
+    @pytest.mark.asyncio
     async def test_recorded_test_outcome_replaces_an_answered_older_handoff(self):
         executed: list[dict] = []
         old_request_id = "dbtl-stage-handoff__cyc-1__old"

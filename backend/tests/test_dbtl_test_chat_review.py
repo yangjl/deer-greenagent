@@ -112,6 +112,29 @@ def test_server_reloads_its_derived_metric_fields(monkeypatch):
     assert snapshot["evaluation"]["outcome"] == "supported"
 
 
+def test_server_normalizes_typed_worker_evidence_references(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.agents.dbtl.live_stage.test_review.reconciliation_required",
+        lambda: False,
+    )
+    result = _assessment_result()
+    result.provenance["validity_assessment"]["checks"][0]["evidence_refs"] = [
+        {
+            "kind": "workspace_file",
+            "reference": "/mnt/user-data/outputs/validity.json",
+            "description": "Independent validity pack.",
+        }
+    ]
+
+    snapshot = _validated_test_assessment(
+        [result],
+        build_test={"build_lineage": {"id": "lineage-1"}},
+    )
+
+    assert snapshot is not None
+    assert snapshot["checks"][0]["evidence_refs"] == ["/mnt/user-data/outputs/validity.json"]
+
+
 def test_a_prose_pass_without_typed_test_evidence_is_not_reviewable():
     result = StageWorkerResult(
         status=WorkerStatus.COMPLETED,
@@ -315,6 +338,150 @@ async def test_review_snapshot_never_pairs_a_new_rerun_with_an_older_assessment(
     assert await service.snapshot(project_id="project-1", cycle_id="cycle-1") is None
 
 
+@pytest.mark.asyncio
+async def test_untrusted_exception_is_invalidated_without_dispatch_or_worker_evidence():
+    class Repo:
+        async def get_cycle(self, cycle_id: str, *, project_id: str):
+            return {
+                "id": cycle_id,
+                "db_revision": 12,
+                "stages": [
+                    {
+                        "id": "attempt-test",
+                        "stage": "test",
+                        "status": "awaiting_review",
+                    }
+                ],
+                "artifacts": [
+                    {
+                        "id": "test-exception",
+                        "stage_attempt_id": "attempt-test",
+                        "artifact_type": "evidence_exception",
+                        "revision": 1,
+                        "uri": "/mnt/user-data/outputs/test-exception.json",
+                        "content_hash": "c" * 64,
+                    }
+                ],
+            }
+
+        async def list_worker_runs(self, *args, **kwargs):
+            raise AssertionError("An untrusted exception must not require a Test worker.")
+
+        async def latest_stage_feedback_surface(self, **kwargs):
+            return {
+                "id": "dfs-test-exception",
+                "decision_request": {
+                    "transition_gate": {
+                        "evidence_exception": {
+                            "condition": "untrusted",
+                            "content_hash": "c" * 64,
+                        }
+                    }
+                },
+            }
+
+    service = TestReviewService(
+        repo=Repo(),
+        app_config=SimpleNamespace(dbtl=SimpleNamespace(degraded_evidence_continuation=True)),
+        runtime_reader=lambda _config: {},
+    )
+
+    snapshot = await service.snapshot(
+        project_id="project-1",
+        cycle_id="cycle-1",
+    )
+
+    assert snapshot is not None
+    assert snapshot["evaluation"]["outcome"] == "invalidated"
+    assert snapshot["evaluation"]["allowed_recommendations"][0] == ("learn_from_invalidated_evidence")
+    assert snapshot["evidence_exception"]["content_hash"] == "c" * 64
+    assert all(check["status"] == "failed" for check in snapshot["checks"])
+
+
+@pytest.mark.asyncio
+async def test_degraded_verified_exception_uses_typed_worker_assessment_as_review_evidence():
+    result = _assessment_result().as_dict()
+    reproducibility = next(item for item in result["provenance"]["validity_assessment"]["checks"] if item["check"] == "reproducibility")
+    reproducibility.update(
+        status="failed",
+        detail="The authoritative rerun could not establish clean execution.",
+        evidence_refs=[],
+    )
+
+    class Repo:
+        async def get_cycle(self, cycle_id: str, *, project_id: str):
+            return {
+                "id": cycle_id,
+                "db_revision": 12,
+                "stages": [
+                    {
+                        "id": "attempt-test",
+                        "stage": "test",
+                        "status": "awaiting_review",
+                        "stage_spec_key": "",
+                    }
+                ],
+                "artifacts": [
+                    {
+                        "id": "test-exception",
+                        "stage_attempt_id": "attempt-test",
+                        "artifact_type": "evidence_exception",
+                        "revision": 1,
+                        "uri": "/mnt/user-data/outputs/test-exception.json",
+                        "content_hash": "c" * 64,
+                    }
+                ],
+            }
+
+        async def list_worker_runs(self, *args, **kwargs):
+            return [
+                {
+                    "unit_id": "round-1-validity",
+                    "capability": "validity_assessment",
+                    "agent_name": "analyst",
+                    "result": result,
+                }
+            ]
+
+        async def build_test_view(self, *args, **kwargs):
+            return {"build_lineage": {"id": "lineage-1"}}
+
+        async def latest_stage_feedback_surface(self, **kwargs):
+            return {
+                "id": "dfs-test-exception",
+                "decision_request": {
+                    "transition_gate": {
+                        "assessment": {
+                            "difficulty": "exception",
+                            "rationale": "The clean evidence contract failed.",
+                        },
+                        "evidence_exception": {
+                            "condition": "degraded_verified",
+                            "content_hash": "c" * 64,
+                        },
+                    }
+                },
+            }
+
+    service = TestReviewService(
+        repo=Repo(),
+        app_config=SimpleNamespace(
+            dbtl=SimpleNamespace(
+                degraded_evidence_continuation=True,
+                stage_meetings=SimpleNamespace(test=False),
+            )
+        ),
+        runtime_reader=lambda _config: {},
+    )
+
+    snapshot = await service.snapshot(project_id="project-1", cycle_id="cycle-1")
+
+    assert snapshot is not None
+    assert snapshot["evaluation"]["outcome"] == "invalidated"
+    assert snapshot["evidence_hash"] == "c" * 64
+    assert snapshot["evidence_exception"]["condition"] == "degraded_verified"
+
+
 def test_chat_review_card_recovers_cycle_and_carries_bound_snapshot():
     snapshot = {
         "evaluation": {
@@ -460,3 +627,54 @@ def test_rollout_cursor_projects_build_approved_test_active_as_test():
     payload = DbtlCycleRepository._cycle_payload(cycle, stages)
 
     assert payload["state"] == "test"
+
+
+@pytest.mark.asyncio
+async def test_deck_outcome_preserves_human_rationale_and_surface_binding():
+    recorded: dict[str, object] = {}
+    snapshot = {
+        "stage_attempt_id": "attempt-test",
+        "evidence_hash": "a" * 64,
+        "evidence_exception": {"content_hash": "b" * 64},
+        "evaluation": {"outcome": "invalidated"},
+        "metrics": [],
+        "checks": [],
+        "limitations": [],
+        "rationale": "The authoritative rerun hash did not match.",
+        "meeting": {"transition_routes_locked": False},
+    }
+
+    class Repo:
+        async def get_cycle(self, cycle_id: str, *, project_id: str):
+            return {"id": cycle_id, "db_revision": 7}
+
+        async def record_validity_assessment(self, **kwargs):
+            recorded.update(kwargs)
+            return {"cycle": {"id": "cycle-1"}}
+
+    class Service(TestReviewService):
+        async def snapshot(self, *, project_id: str, cycle_id: str):
+            return snapshot
+
+    service = Service(
+        repo=Repo(),
+        app_config=SimpleNamespace(dbtl=SimpleNamespace()),
+        runtime_reader=lambda _config: {
+            "user_id": "reviewer-1",
+            "project_role": "owner",
+        },
+    )
+
+    await service.record_outcome(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        snapshot=snapshot,
+        recommendation="learn_from_invalidated_evidence",
+        config={},
+        idempotency_key="deck-outcome",
+        human_rationale="Continue as process learning only.",
+        review_provenance={"feedback_surface_id": "dfs-test"},
+    )
+
+    assert str(recorded["rationale"]).startswith("Human rationale: Continue as process learning only.")
+    assert recorded["review_provenance"] == {"feedback_surface_id": "dfs-test"}

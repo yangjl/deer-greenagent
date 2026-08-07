@@ -293,7 +293,9 @@ class TestEachStageGetsItsOwnReviewPage:
         repo, _result = await _run(stage, tmp_path, progressive_gate=False)
 
         assert repo.surfaces, "the review page is not the progressive gate"
-        assert repo.surfaces[0]["decision_request"] is None
+        request = repo.surfaces[0]["decision_request"]
+        assert request.get("transition_gate") is None
+        assert request["commentable_slides"]
 
 
 class TestLearnsPageCannotPromoteOrPublish:

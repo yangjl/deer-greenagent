@@ -171,6 +171,44 @@ async def test_path_recovery_uses_a_distinct_surface_even_when_an_assessment_exi
     assert marker["surface_id"] == "test-evidence:test-attempt"
 
 
+@pytest.mark.asyncio
+async def test_invalidated_evidence_route_recovers_the_learn_handoff() -> None:
+    class Repo:
+        async def get_cycle(self, cycle_id, *, project_id):
+            return {
+                "id": cycle_id,
+                "state": "learn",
+                "db_revision": 15,
+                "stages": [
+                    {"stage": "test", "status": "advanced_with_exception"},
+                    {"stage": "learn", "status": "in_progress"},
+                ],
+            }
+
+        async def build_test_view(self, cycle_id, *, project_id):
+            return {
+                "validity_assessment": {
+                    "id": "assessment-invalidated",
+                    "recommendation": "learn_from_invalidated_evidence",
+                }
+            }
+
+    marker = await LiveStageAdapter(repo=Repo(), app_config=None).recover_test_learn_handoff(
+        project_id="project-1",
+        cycle_id="cycle-1",
+    )
+
+    assert marker == {
+        "version": 1,
+        "cycle_id": "cycle-1",
+        "cycle_revision": 15,
+        "approved_stage": "test",
+        "next_stage": "learn",
+        "surface_id": "assessment-invalidated",
+        "advanced_with_exception": True,
+    }
+
+
 def _sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 

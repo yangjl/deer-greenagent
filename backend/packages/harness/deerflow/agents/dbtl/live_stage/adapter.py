@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
+import html
 import json
 import logging
 import os
@@ -29,7 +30,12 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.dbtl.live_stage.build_controls import DISABLED_GATE, BuildControlGate, BuildControlNotRecorded
 from deerflow.agents.dbtl.live_stage.build_meeting import BUILD_WORK_MEETING_CONTRACT, MeetingContext, meeting_units, parse_recommendation
-from deerflow.agents.dbtl.live_stage.build_phase_verification import BuildPhaseVerification, entry_command, execute_and_verify_phase
+from deerflow.agents.dbtl.live_stage.build_phase_verification import (
+    BuildPhaseVerification,
+    entry_command,
+    execute_and_verify_phase,
+    resolve_issued_input_tokens,
+)
 from deerflow.agents.dbtl.live_stage.build_phases import (
     GENERALIST,
     MAX_SCANNED_ENTRY_POINT_BYTES,
@@ -147,7 +153,15 @@ from deerflow.dbtl.council import (
     recommend_depth,
 )
 from deerflow.dbtl.council_deck import chair_result as _chair_result_of
-from deerflow.dbtl.council_deck import extract_commentable_slides, render_authored_design_deck, render_council_deck
+from deerflow.dbtl.council_deck import (
+    extract_commentable_slides,
+    render_authored_design_deck,
+    render_council_deck,
+    render_design_deck_shell,
+    render_design_deck_slide,
+    render_stage_feedback_bridge,
+    render_stage_review_controls,
+)
 from deerflow.dbtl.council_proposal import (
     CouncilProposal,
     build_proposal_prompt,
@@ -167,6 +181,12 @@ from deerflow.dbtl.deliverables import (
     DELIVERABLE_MANIFEST_CONTRACT,
     DeliverableManifestRejected,
     parse_deliverable_manifest,
+)
+from deerflow.dbtl.evidence_exception import (
+    EvidenceExceptionDossier,
+    EvidenceReason,
+    build_evidence_exception_dossier,
+    invalidated_test_exception_facts,
 )
 from deerflow.dbtl.meeting_intent import _NEW_DEBATE_PATTERN as _shared_new_debate_pattern
 from deerflow.dbtl.meeting_intent import _RESTART_TYPOS as _shared_restart_typos
@@ -1231,6 +1251,7 @@ def _learn_synthesis_payload(
     *,
     test_outcome: str,
     fallback_summary: str,
+    required_limitations: Sequence[str] = (),
 ) -> tuple[str, list[dict[str, Any]]]:
     """Derive bounded candidates only from trustworthy structured Learn output."""
     grade = "supported" if test_outcome == "supported" else "valid_negative" if test_outcome == "not_supported" else ""
@@ -1244,7 +1265,7 @@ def _learn_synthesis_payload(
             if summary:
                 summaries.append(summary)
             evidence = list(result.get("evidence_refs") or [])
-            limitations = list(result.get("limitations") or [])
+            limitations = list(dict.fromkeys([*list(result.get("limitations") or []), *required_limitations]))
             for value in list(result.get("claims") or []):
                 statement = str(value).strip()
                 if statement and evidence:
@@ -2885,6 +2906,160 @@ def _persist_deck(
     )
 
 
+def _write_evidence_exception_package(
+    *,
+    project_root: str,
+    cycle: Mapping[str, Any],
+    dossier: EvidenceExceptionDossier,
+) -> tuple[str, str, str]:
+    """Persist the canonical dossier bytes whose SHA-256 is its contract hash."""
+    payload = dossier.as_dict()
+    content_hash = str(payload.pop("content_hash"))
+    document = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+    if hashlib.sha256(document).hexdigest() != content_hash:
+        raise ValueError("Evidence exception serialization does not match its canonical hash.")
+    root = Path(project_root).expanduser().resolve()
+    ensure_project_dirs(root)
+    relative = stage_output_dir(
+        cycle_id=str(cycle["id"]),
+        cycle_title=str(cycle.get("title") or ""),
+        stage=dossier.stage,
+    ) / stage_file_name(
+        stage=dossier.stage,
+        kind="evidence-exception",
+        revision=cycle.get("db_revision"),
+        content_hash=content_hash,
+    )
+    _atomic_write(project_outputs_dir(root) / relative, document)
+    reasons = ", ".join(reason.value.replace("_", " ") for reason in dossier.reason_codes)
+    return (
+        f"/mnt/user-data/outputs/{relative.as_posix()}",
+        content_hash,
+        f"{dossier.condition.value.replace('_', ' ').title()} evidence exception: {reasons}.",
+    )
+
+
+def _read_evidence_exception_package(
+    *,
+    project_root: str,
+    artifact: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Read only a content-addressed dossier from the governed output tree."""
+    uri = str(artifact.get("uri") or "")
+    expected_hash = str(artifact.get("content_hash") or "")
+    prefix = "/mnt/user-data/outputs/"
+    if not uri.startswith(prefix) or len(expected_hash) != 64:
+        return None
+    root = project_outputs_dir(Path(project_root).expanduser().resolve())
+    candidate = (root / uri.removeprefix(prefix)).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+        document = candidate.read_bytes()
+        if hashlib.sha256(document).hexdigest() != expected_hash:
+            return None
+        payload = json.loads(document)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    payload["content_hash"] = expected_hash
+    return payload
+
+
+def _write_evidence_exception_deck(
+    *,
+    project_root: str,
+    cycle: Mapping[str, Any],
+    dossier: EvidenceExceptionDossier,
+    package_path: str,
+    surface_id: str,
+    transition_gate: Mapping[str, Any],
+) -> RenderedDeck | None:
+    """Render metadata only; quarantined artifact bytes are never embedded."""
+
+    def items(values: Sequence[object], empty: str) -> str:
+        rendered = "".join(f"<li>{html.escape(str(value))}</li>" for value in values)
+        return f"<ul>{rendered}</ul>" if rendered else f"<p>{html.escape(empty)}</p>"
+
+    payload = dossier.as_dict()
+    slides = [
+        render_design_deck_slide(
+            kind="title",
+            eyebrow="Evidence exception",
+            title=f"{dossier.stage.title()} cannot take the clean review path",
+            body=(
+                '<p class="lede"><strong>Red flag:</strong> this evidence remains failed or untrusted. '
+                "Continuing is not approval and cannot turn it into scientific support.</p>"
+                f'<p class="stamp">Dossier SHA-256: {html.escape(dossier.content_hash)}</p>'
+            ),
+            note_id="exception-summary",
+            note_label="Exception summary",
+        ),
+        render_design_deck_slide(
+            kind="evidence",
+            eyebrow="Server classification",
+            title=dossier.condition.value.replace("_", " ").title(),
+            body=(
+                f"<p><strong>Scientific effect:</strong> {html.escape(dossier.scientific_effect.value.replace('_', ' '))}</p>"
+                f"<p><strong>Reason codes:</strong> {html.escape(', '.join(reason.value for reason in dossier.reason_codes))}</p>"
+                f'<p><a href="{html.escape(package_path)}">Open the immutable dossier</a></p>'
+            ),
+            note_id="classification",
+            note_label="Classification",
+        ),
+        render_design_deck_slide(
+            kind="evidence",
+            eyebrow="Trusted record",
+            title="What the server verified",
+            body=items(dossier.verified_facts, "No positive execution fact was independently verified."),
+            note_id="verified-facts",
+            note_label="Verified facts",
+        ),
+        render_design_deck_slide(
+            kind="contested",
+            eyebrow="Quarantine",
+            title="What must not be relied on",
+            body=(
+                f"<p>{len(dossier.untrusted_claims)} worker/client claim(s) remain quarantined in the immutable dossier; their content is not rendered here.</p>"
+                + f"<p><strong>Affected deliverables:</strong> {html.escape(json.dumps(payload['affected_deliverables'], ensure_ascii=False, default=str))}</p>"
+                + f"<p><strong>Failed checks:</strong> {html.escape(json.dumps(payload['failed_checks'], ensure_ascii=False, default=str))}</p>"
+            ),
+            note_id="quarantine",
+            note_label="Quarantined evidence",
+        ),
+        render_design_deck_slide(
+            kind="review",
+            eyebrow="Human gate",
+            title=f"Review the {dossier.stage.title()} exception",
+            body=render_stage_review_controls(dossier.stage, transition_gate),
+            note_id="human-gate",
+            note_label="Human decision",
+        ),
+    ]
+    try:
+        deck_html = render_design_deck_shell(
+            title=html.escape(f"{cycle.get('title') or 'DBTL'} — evidence exception"),
+            slides=slides,
+            bridge=render_stage_feedback_bridge(surface_id, dossier.stage),
+        )
+    except Exception:  # noqa: BLE001 - the immutable dossier already exists
+        logger.warning("Could not render the evidence exception deck.", exc_info=True)
+        return None
+    return _persist_deck(
+        project_root=project_root,
+        cycle=cycle,
+        stage=dossier.stage,
+        document=deck_html.encode("utf-8"),
+        commentable_slides=extract_commentable_slides(deck_html),
+    )
+
+
 def _write_authored_design_deck(
     *,
     project_root: str,
@@ -3788,13 +3963,17 @@ class LiveStageAdapter:
         if cycle is None or cycle.get("state") != "learn":
             return None
         stages = {str(item.get("stage") or ""): str(item.get("status") or "") for item in cycle.get("stages", [])}
-        if stages.get("test") != "approved" or stages.get("learn") != "in_progress":
+        if stages.get("learn") != "in_progress":
             return None
         view = await self._repo.build_test_view(cycle_id, project_id=project_id)
         assessment = dict((view or {}).get("validity_assessment") or {})
-        if assessment.get("recommendation") != "advance_to_learn":
+        test_route = (stages.get("test"), assessment.get("recommendation"))
+        if test_route not in {
+            ("approved", "advance_to_learn"),
+            ("advanced_with_exception", "learn_from_invalidated_evidence"),
+        }:
             return None
-        return {
+        marker = {
             "version": 1,
             "cycle_id": cycle_id,
             "cycle_revision": int(cycle.get("db_revision") or 0),
@@ -3802,6 +3981,9 @@ class LiveStageAdapter:
             "next_stage": "learn",
             "surface_id": str(assessment.get("id") or cycle_id),
         }
+        if test_route == ("advanced_with_exception", "learn_from_invalidated_evidence"):
+            marker["advanced_with_exception"] = True
+        return marker
 
     async def recover_test_retry_control(
         self,
@@ -3835,6 +4017,35 @@ class LiveStageAdapter:
             "surface_id": (str(assessment.get("id") or cycle_id) if repeat_test else f"test-evidence:{stage_attempt_id}"),
             "repeat_stage": True,
         }
+
+    async def validate_evidence_retry(
+        self,
+        *,
+        project_id: str,
+        cycle_id: str,
+        request: Mapping[str, Any],
+    ) -> bool:
+        """Revalidate a delayed chat answer against the current dossier."""
+        cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
+        if cycle is None:
+            return False
+        expected_revision = request.get("cycle_revision")
+        if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision != int(cycle.get("db_revision") or 0):
+            return False
+        stage = str(request.get("stage") or "").strip().lower()
+        dossier_hash = str(request.get("dossier_hash") or "")
+        attempt = next(
+            (item for item in cycle.get("stages", []) if item.get("stage") == stage and item.get("status") in {"in_progress", "changes_requested", "awaiting_review"}),
+            None,
+        )
+        if attempt is None:
+            return False
+        dossier = max(
+            (item for item in cycle.get("artifacts", []) if item.get("stage_attempt_id") == attempt.get("id") and item.get("artifact_type") == "evidence_exception"),
+            key=lambda item: int(item.get("revision") or 0),
+            default=None,
+        )
+        return bool(dossier and len(dossier_hash) == 64 and dossier.get("content_hash") == dossier_hash)
 
     async def active_cycle_status(self, *, project_id: str) -> list[dict[str, Any]]:
         """The project's live cycles, as read-only orientation for ordinary work.
@@ -3917,6 +4128,7 @@ class LiveStageAdapter:
                 previous=latest,
                 cycle_revision=int(cycle.get("db_revision") or 0),
                 requested_action=requested_action,
+                changes_requested=(str(attempt.get("status") or "") == StageStatus.CHANGES_REQUESTED.value),
             )
         )
 
@@ -5061,6 +5273,15 @@ class LiveStageAdapter:
                 if raw_manifest is None:
                     server_verification = BuildPhaseVerification(False, raw_manifest_error, "")
                 else:
+                    raw_manifest = resolve_issued_input_tokens(raw_manifest, issued_inputs=granted_inputs)
+                    result = replace(
+                        result,
+                        provenance={
+                            **result.provenance,
+                            "phase_manifest": raw_manifest.as_dict(),
+                        },
+                    )
+                    phase_outcome = replace(phase_outcome, results=(result,))
                     grant_error = verify_granted_paths(
                         raw_manifest,
                         read_source=functools.partial(_published_source_text, project_root=project_root),
@@ -6213,6 +6434,7 @@ class LiveStageAdapter:
                 note=f"The {stage} stage is {status or 'unavailable'} and cannot accept worker evidence.",
             )
         dbtl_config = getattr(self._app_config, "dbtl", None)
+        degraded_evidence_enabled = bool(getattr(dbtl_config, "degraded_evidence_continuation", False))
         recorded_spec_key = str((attempt or {}).get("stage_spec_key") or "").strip()
         try:
             spec = resolve_spec_by_key(recorded_spec_key) if recorded_spec_key else _initial_stage_spec(stage)
@@ -6253,6 +6475,24 @@ class LiveStageAdapter:
         requires_reconciliation = reconciliation_required()
         reconciliation = await self._repo.reconciliation_view(cycle_id, project_id=project_id) if stage in {"design", "reconciliation", "build", "test", "learn"} else None
         build_test = await self._repo.build_test_view(cycle_id, project_id=project_id) if stage in {"build", "test", "learn"} else None
+        upstream_evidence_exception: dict[str, Any] | None = None
+        if stage == "test" and degraded_evidence_enabled:
+            build_attempt = next(
+                (item for item in cycle.get("stages", []) if item.get("stage") == "build" and item.get("status") == StageStatus.ADVANCED_WITH_EXCEPTION.value),
+                None,
+            )
+            if build_attempt is not None:
+                artifact = max(
+                    (item for item in cycle.get("artifacts", []) if item.get("stage_attempt_id") == build_attempt.get("id") and item.get("artifact_type") == "evidence_exception"),
+                    key=lambda item: int(item.get("revision") or 0),
+                    default=None,
+                )
+                if artifact is not None:
+                    upstream_evidence_exception = await asyncio.to_thread(
+                        _read_evidence_exception_package,
+                        project_root=project_root,
+                        artifact=artifact,
+                    )
         prior_design_runs = (
             await self._repo.list_worker_runs(
                 cycle_id,
@@ -7062,6 +7302,17 @@ class LiveStageAdapter:
                 thread_id=str(self._runtime(config).get("thread_id") or ""),
             )
             outcome = phase_run.outcome
+        elif stage == "test" and isinstance(upstream_evidence_exception, Mapping) and upstream_evidence_exception.get("condition") == "untrusted":
+            # The human chose to carry failed evidence forward for evaluation,
+            # not to spend another worker pretending the missing execution or
+            # quarantined bytes can now be tested.
+            preliminary = plan_stage(
+                spec,
+                self._candidates(),
+                attempt_id=attempt_id,
+                context=stage_context,
+            )
+            outcome = StageExecutionOutcome(plan=preliminary)
         elif stage == "test" and "server_verified_build_rerun" in spec.validity_gates:
             preliminary = plan_stage(spec, self._candidates(), attempt_id=attempt_id, context=stage_context)
             if not preliminary.dispatchable:
@@ -7542,7 +7793,7 @@ class LiveStageAdapter:
                     summary=summary_question,
                     human_input_request_id=str(summary_control.get("request_id") or ""),
                 )
-            elif no_slide_results:
+            elif no_slide_results and not degraded_evidence_enabled:
                 summary_control = await control_gate.raise_control(
                     no_presentable_results_request(
                         cycle_id=cycle_id,
@@ -7567,6 +7818,94 @@ class LiveStageAdapter:
                     summary_refusal or "; ".join(_failure_reasons(results)) or "No Build worker returned a result that satisfied the stage contract.",
                 )
 
+        evidence_exception: EvidenceExceptionDossier | None = None
+        evidence_exception_uri = ""
+        evidence_exception_hash = ""
+        test_exception_reasons, test_exception_checks = invalidated_test_exception_facts(test_assessment) if stage == "test" else ((), ())
+        if degraded_evidence_enabled and stage in {"build", "test"} and (not produced_usable_evidence or bool(test_exception_reasons) or isinstance(upstream_evidence_exception, Mapping)) and not summary_question:
+            reasons: list[EvidenceReason] = []
+            failed_checks: list[dict[str, object]] = []
+            affected_deliverables: list[dict[str, object]] = []
+            verified_facts: list[str] = []
+            available_artifacts = [
+                {
+                    "path": str(item.get("path") or item.get("source_path") or ""),
+                    "content_hash": str(item.get("content_hash") or ""),
+                }
+                for item in published_build_artifacts
+                if item.get("content_hash")
+            ]
+            if isinstance(upstream_evidence_exception, Mapping):
+                for value in upstream_evidence_exception.get("reason_codes", []):
+                    try:
+                        reasons.append(EvidenceReason(value))
+                    except ValueError:
+                        continue
+                upstream_hash = str(upstream_evidence_exception.get("content_hash") or "")
+                if upstream_hash:
+                    verified_facts.append(f"The Test decision is bound to upstream Build exception {upstream_hash}.")
+                    available_artifacts.append({"path": "upstream_build_evidence_exception", "content_hash": upstream_hash})
+            reasons.extend(test_exception_reasons)
+            failed_checks.extend(test_exception_checks)
+            if artifact_uri and artifact_hash:
+                available_artifacts.append({"path": artifact_uri, "content_hash": artifact_hash})
+            if build_fulfillment is not None:
+                affected_deliverables = [item.as_dict() for item in build_fulfillment.items if item.status.value != "delivered"]
+                statuses = {str(item.get("status") or "") for item in affected_deliverables}
+                if "not_attempted" in statuses:
+                    reasons.append(EvidenceReason.DELIVERABLE_NOT_ATTEMPTED)
+                if statuses - {"not_attempted", "not_applicable"}:
+                    reasons.append(EvidenceReason.DELIVERABLE_ATTEMPT_FAILED)
+            if missing_structured_rerun:
+                reasons.append(EvidenceReason.RERUN_UNAVAILABLE)
+                failed_checks.append({"check": "structured_rerun_spec", "status": "missing", "detail": stage_refusal})
+            if deliverable_audit_refusal:
+                reasons.append(EvidenceReason.AUDIT_INCOMPLETE)
+                failed_checks.append({"check": "deliverable_audit", "status": "failed", "detail": deliverable_audit_refusal})
+            if stage == "test" and test_assessment is None:
+                reasons.append(EvidenceReason.AUDIT_INCOMPLETE)
+                failed_checks.append({"check": "validity_pack", "status": "missing", "detail": stage_refusal})
+            if no_slide_results:
+                reasons.append(EvidenceReason.CORE_OUTPUT_MISSING)
+                failed_checks.append({"check": "presentable_core_result", "status": "missing", "detail": summary_refusal})
+            if outcome.produced_usable_evidence:
+                verified_facts.append("At least one worker returned server-readable evidence.")
+            if published_build_artifacts:
+                verified_facts.append(f"The server published and hashed {len(published_build_artifacts)} Build artifact(s).")
+            if not reasons:
+                reasons.append(EvidenceReason.EXECUTION_ABSENT)
+                failed_checks.append({"check": "stage_execution", "status": "missing", "detail": stage_refusal or "No trustworthy stage evidence was recorded."})
+            evidence_exception = build_evidence_exception_dossier(
+                stage=stage,
+                stage_attempt_id=str((attempt or {}).get("id") or ""),
+                reason_codes=reasons,
+                verified_facts=verified_facts,
+                untrusted_claims=[str(item.get("summary") or "") for item in results if str(item.get("summary") or "") and str(item.get("status") or "") not in {"completed", "needs_input"}],
+                affected_deliverables=affected_deliverables,
+                failed_checks=failed_checks,
+                available_artifacts=available_artifacts,
+                continuation_route=(
+                    "advance_to_learn" if stage == "test" and isinstance(upstream_evidence_exception, Mapping) and str(dict((test_assessment or {}).get("evaluation") or {}).get("outcome") or "") in {"supported", "not_supported"} else None
+                ),
+            )
+            if evidence_exception is not None:
+                evidence_exception_uri, evidence_exception_hash, exception_digest = await asyncio.to_thread(
+                    _write_evidence_exception_package,
+                    project_root=project_root,
+                    cycle=cycle,
+                    dossier=evidence_exception,
+                )
+                # With a complete typed Test assessment the validity report is
+                # still the core review evidence. The dossier sits beside it
+                # and supplies the permanent red flag. Only a stage with no
+                # trustworthy review package uses the dossier as its sole
+                # review artifact.
+                if not produced_usable_evidence:
+                    artifact_uri = evidence_exception_uri
+                    artifact_hash = evidence_exception_hash
+                    artifact_digest = exception_digest
+                    artifact_type = "evidence_exception"
+
         if stage_activity is not None:
             await stage_activity.update(state=ActivityState.RECORDING, operation="stage.record")
         recorded_worker_runs = await self._repo.record_worker_runs(
@@ -7582,6 +7921,21 @@ class LiveStageAdapter:
             artifact_uri=artifact_uri,
             artifact_content_hash=artifact_hash,
         )
+        if evidence_exception is not None and produced_usable_evidence and evidence_exception_uri and evidence_exception_hash:
+            current = await self._repo.get_cycle(cycle_id, project_id=project_id)
+            if current is None:  # pragma: no cover - scope was verified above
+                raise RuntimeError("Cycle disappeared before the evidence exception could be attached.")
+            await self._repo.attach_artifact(
+                cycle_id=cycle_id,
+                project_id=project_id,
+                stage=stage,
+                artifact_type="evidence_exception",
+                uri=evidence_exception_uri,
+                content_hash=evidence_exception_hash,
+                created_by=str(user_id),
+                expected_db_revision=int(current["db_revision"]),
+                idempotency_key=f"{execution_key}:evidence-exception",
+            )
         chair_worker_run_id = None
         if chair_result is not None:
             chair_unit_id = next(
@@ -7600,6 +7954,7 @@ class LiveStageAdapter:
                 results,
                 test_outcome=outcome_name,
                 fallback_summary=artifact_digest,
+                required_limitations=(list(assessment.get("limitations") or []) if assessment.get("evidence_exception_hash") else []),
             )
             current = await self._repo.get_cycle(cycle_id, project_id=project_id)
             if current is None:  # pragma: no cover - verified above
@@ -7614,7 +7969,7 @@ class LiveStageAdapter:
                 idempotency_key=f"{execution_key}:learn",
             )
 
-        if stage == "build" and artifact_uri and artifact_hash:
+        if stage == "build" and artifact_uri and artifact_hash and build_execution_record is not None:
             current = await self._repo.get_cycle(cycle_id, project_id=project_id)
             if current is None:  # pragma: no cover - scope was verified above
                 raise RuntimeError("Cycle disappeared after Build workers were recorded.")
@@ -7689,12 +8044,29 @@ class LiveStageAdapter:
         # and a menu rendered beforehand would pre-empt the decision it exists
         # to record. Design is the exception in the other direction: its deck
         # *is* a chair result, so it needs one to exist.
-        stage_has_reviewable_evidence = stage in REVIEW_MEETING_STAGES and produced_usable_evidence and bool(artifact_uri and artifact_hash)
+        stage_has_reviewable_evidence = stage in REVIEW_MEETING_STAGES and (produced_usable_evidence or evidence_exception is not None) and bool(artifact_uri and artifact_hash)
         review_meeting_requirement = None
         if (stage == "design" and chair_has_presentable_outcome) or stage_has_reviewable_evidence:
             transition_gate = None
             if stage_has_reviewable_evidence:
-                if bool(getattr(getattr(self._app_config, "dbtl", None), "progressive_gate", False)):
+                if evidence_exception is not None:
+                    exception_payload = evidence_exception.as_dict()
+                    if stage == "test" and str(dict((test_assessment or {}).get("evaluation") or {}).get("outcome") or "") == "invalidated":
+                        exception_payload = {
+                            **exception_payload,
+                            "scientific_effect": "invalidates_support",
+                        }
+                    transition_gate = {
+                        "stage": stage,
+                        "assessment": {
+                            "difficulty": "exception",
+                            "rationale": "The server could not establish the clean evidence contract.",
+                        },
+                        "routes": [],
+                        "evidence_exception": exception_payload,
+                    }
+                    review_meeting_requirement = MeetingRequirement.SKIPPED.value
+                elif bool(getattr(getattr(self._app_config, "dbtl", None), "progressive_gate", False)):
                     assessment = await self._assess_transition(
                         stage=stage,
                         cycle=cycle,
@@ -7746,6 +8118,7 @@ class LiveStageAdapter:
                 evaluation = dict(test_assessment.get("evaluation") or {})
                 labels = {
                     "advance_to_learn": "Accept outcome and advance to Learn",
+                    "learn_from_invalidated_evidence": "Learn from invalid evidence",
                     "repeat_test": "Repeat Test",
                     "return_to_build": "Return to Build",
                     "return_to_reconciliation": "Return to Data Reconciliation",
@@ -7766,6 +8139,34 @@ class LiveStageAdapter:
                     ),
                     "routes": test_routes,
                 }
+            if stage == "learn" and isinstance(build_test, Mapping):
+                upstream_assessment = build_test.get("validity_assessment")
+                upstream_assessment = dict(upstream_assessment) if isinstance(upstream_assessment, Mapping) else {}
+                exception_hash = str(upstream_assessment.get("evidence_exception_hash") or "").strip()
+                if exception_hash:
+                    invalidated_exception = upstream_assessment.get("recommendation") == "learn_from_invalidated_evidence"
+                    transition_gate = {
+                        **(
+                            transition_gate
+                            or {
+                                "stage": "learn",
+                                "assessment": {
+                                    "difficulty": "exception",
+                                    "rationale": (
+                                        "Learn is operating on invalidated evidence and may record process lessons only."
+                                        if invalidated_exception
+                                        else "Learn must preserve the upstream evidence exception as a limitation on every candidate."
+                                    ),
+                                },
+                                "routes": [],
+                            }
+                        ),
+                        "evidence_exception": {
+                            "condition": "untrusted" if invalidated_exception else "degraded_verified",
+                            "scientific_effect": "invalidates_support" if invalidated_exception else "limits_scope",
+                            "content_hash": exception_hash,
+                        },
+                    }
             surface_plan = await self._plan_feedback_surface(
                 stage=stage,
                 cycle_id=cycle_id,
@@ -7781,7 +8182,17 @@ class LiveStageAdapter:
                 review_issue_ids=(tuple(f"issue-{index + 1}" for index, _item in enumerate(chair_result.consensus.disagreements)) if chair_result is not None and chair_result.consensus is not None else ()),
                 transition_gate=transition_gate,
             )
-            if build_package is not None:
+            if evidence_exception is not None and not produced_usable_evidence:
+                deck = await asyncio.to_thread(
+                    _write_evidence_exception_deck,
+                    project_root=project_root,
+                    cycle=cycle,
+                    dossier=evidence_exception,
+                    package_path=artifact_uri or "",
+                    surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
+                    transition_gate=transition_gate or {},
+                )
+            elif build_package is not None:
                 # Build gets its own deck: figures embedded, numbers first. The
                 # meeting deck renders positions and a synthesis, which is the
                 # wrong shape for a result nobody argued about.
@@ -7823,7 +8234,7 @@ class LiveStageAdapter:
                         deck_registered = True
                     except Exception as exc:  # noqa: BLE001 - recorded below, then re-raised
                         registration_error = exc
-        if build_workflow_enabled and artifact_uri and artifact_hash:
+        if build_workflow_enabled and artifact_uri and artifact_hash and evidence_exception is None:
             # Opened here rather than around the render call: with the summary
             # missing there is nothing to render, and an attempt whose
             # predecessor never succeeded would be refused by the chain anyway.
@@ -7859,7 +8270,7 @@ class LiveStageAdapter:
         # ``awaiting_review``. Move the stage across that non-decision boundary
         # here so the deck's Human gate can record the server-computed outcome;
         # a person can never decide against a half-written pack.
-        if stage == "test" and produced_usable_evidence and artifact_uri and artifact_hash:
+        if stage == "test" and (produced_usable_evidence or evidence_exception is not None) and artifact_uri and artifact_hash:
             submitter = getattr(self._repo, "submit_stage_for_review", None)
             if callable(submitter):
                 current = await self._repo.get_cycle(cycle_id, project_id=project_id)

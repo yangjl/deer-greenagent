@@ -144,6 +144,15 @@ class DbtlConfig(BaseModel):
         ),
     )
 
+    degraded_evidence_continuation: bool = Field(
+        default=False,
+        description=(
+            "Allow an authenticated human to advance Build or Test evidence with a hash-bound red-flag dossier. "
+            "The source stage remains explicitly non-approved, invalidated evidence cannot create scientific candidates, "
+            "and retries remain human-triggered. Off keeps the existing hard-refusal path."
+        ),
+    )
+
     progressive_gate: bool = Field(
         default=False,
         description=(
@@ -162,10 +171,7 @@ class DbtlConfig(BaseModel):
     )
     setup_draft_model_name: str | None = Field(
         default=None,
-        description=(
-            "Model used by fail-soft DBTL one-shot helpers: setup questions, intent interpretation, meeting rosters, "
-            "and short meeting summaries. null keeps their deterministic fallbacks."
-        ),
+        description=("Model used by fail-soft DBTL one-shot helpers: setup questions, intent interpretation, meeting rosters, and short meeting summaries. null keeps their deterministic fallbacks."),
     )
 
     council_model_name: str | None = Field(

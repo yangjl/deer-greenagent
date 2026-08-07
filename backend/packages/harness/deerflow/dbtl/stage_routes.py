@@ -40,6 +40,7 @@ class RouteSlug(StrEnum):
 
     ADVANCE = "advance"
     LEARN_EXPLORATORY = "learn_exploratory"
+    LEARN_FROM_INVALIDATED_EVIDENCE = "learn_from_invalidated_evidence"
     REVISE_HERE = "revise_here"
     RETURN_TO_BUILD = "return_to_build"
     RETURN_TO_DESIGN = "return_to_design"
@@ -136,6 +137,15 @@ def _learn_exploratory() -> StageRoute:
     )
 
 
+def _learn_from_invalidated_evidence() -> StageRoute:
+    return StageRoute(
+        RouteSlug.LEARN_FROM_INVALIDATED_EVIDENCE,
+        "learn",
+        "Learn from invalidated evidence",
+        "Keep the Test outcome invalidated and synthesize limitations and process lessons. No scientific candidate can be created.",
+    )
+
+
 def _revise(stage: str) -> StageRoute:
     return StageRoute(RouteSlug.REVISE_HERE, stage, f"Revise {stage.capitalize()}", f"Run another {stage.capitalize()} attempt in this cycle.")
 
@@ -195,6 +205,7 @@ def compute_stage_routes(context: RouteContext) -> tuple[StageRoute, ...]:
             )
         return (
             _revise("test"),
+            *((_learn_from_invalidated_evidence(),) if outcome == "invalidated" else ()),
             _return_to_build(build_edge_open=context.build_edge_open),
             _return_to_design(),
             _close(),
@@ -226,7 +237,7 @@ def transition_target(stage: str, chosen_route: str) -> str:
     if stage not in GRAPH_STAGES:
         raise StageRoutesRefused(f"Unknown stage {stage!r}.")
     route = chosen_route.strip().lower()
-    if route in {"approve", "approved", "advance", "advance_to_learn"}:
+    if route in {"approve", "approved", "advance", "advance_to_learn", "advanced_with_exception"}:
         return COMPLETED if stage == "learn" else _NEXT_STAGE[stage]
     if route == "learn_exploratory":
         # Only Build asks whether the result is worth qualifying, so only Build
@@ -234,6 +245,10 @@ def transition_target(stage: str, chosen_route: str) -> str:
         # skipped Test on a path that never reached one.
         if stage != "build":
             raise StageRoutesRefused(f"Route 'learn_exploratory' is a Build decision; stage {stage!r} cannot take it.")
+        return "learn"
+    if route == "learn_from_invalidated_evidence":
+        if stage != "test":
+            raise StageRoutesRefused(f"Route 'learn_from_invalidated_evidence' is a Test decision; stage {stage!r} cannot take it.")
         return "learn"
     if route in {"request_changes", "changes_requested", "revise_here", "repeat_test"}:
         return stage

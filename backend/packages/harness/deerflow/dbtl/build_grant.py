@@ -47,7 +47,7 @@ _SYSTEM_PREFIXES = (
 # match) and `https://host/path` (preceded by a colon-slash). At least two
 # segments are required, because a lone `"/"` is a separator far more often
 # than it is a file.
-_PATH_PATTERN = re.compile(r"""(?<![:\w\\])(?<!:/)(/[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]*)+)""")
+_PATH_PATTERN = re.compile(r"""(?<![:\w\\])(?<!:/)(/[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]+)+)""")
 _ROUTE_REGISTRATION = re.compile(r"(?:@|\b)(?:app|router|server)\s*\.\s*(?:get|post|put|patch|delete|options|head|route|use)\s*\(", re.IGNORECASE)
 
 

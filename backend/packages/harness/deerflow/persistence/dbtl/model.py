@@ -565,11 +565,21 @@ class DbtlValidityAssessmentRow(Base):
         nullable=False,
         index=True,
     )
-    build_lineage_id: Mapped[str] = mapped_column(
+    build_lineage_id: Mapped[str | None] = mapped_column(
         String(96),
         ForeignKey("dbtl_build_lineage.id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
         index=True,
+    )
+    evidence_exception_artifact_id: Mapped[str | None] = mapped_column(
+        String(96),
+        ForeignKey("dbtl_artifacts.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    evidence_exception_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
     )
     assessment_revision: Mapped[int] = mapped_column(Integer, nullable=False)
     validity_pack_key: Mapped[str] = mapped_column(String(96), nullable=False)

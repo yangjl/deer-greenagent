@@ -85,8 +85,12 @@ class TestRouteLegalityMatrix:
     @pytest.mark.parametrize("settled", [True, False])
     def test_unresolved_test_offers_repeat_build_design_close(self, outcome: str, settled: bool) -> None:
         routes = compute_stage_routes(RouteContext("test", outcome, reconciliation_settled=settled))
-        assert _slugs(routes) == [RouteSlug.REVISE_HERE, RouteSlug.RETURN_TO_BUILD, RouteSlug.RETURN_TO_DESIGN, RouteSlug.CLOSE_CYCLE]
-        build_edge = routes[1]
+        expected = [RouteSlug.REVISE_HERE]
+        if outcome == "invalidated":
+            expected.append(RouteSlug.LEARN_FROM_INVALIDATED_EVIDENCE)
+        expected.extend([RouteSlug.RETURN_TO_BUILD, RouteSlug.RETURN_TO_DESIGN, RouteSlug.CLOSE_CYCLE])
+        assert _slugs(routes) == expected
+        build_edge = next(route for route in routes if route.slug == RouteSlug.RETURN_TO_BUILD)
         assert build_edge.blocked is (not settled)
         if not settled:
             assert build_edge.blocked_reason == UNRECONCILED_REASON
@@ -131,6 +135,7 @@ class TestPhase7GoldenMapping:
             WorkflowRecommendation.CLOSE_CYCLE,
         },
         ValidityOutcome.INVALIDATED: {
+            WorkflowRecommendation.LEARN_FROM_INVALIDATED_EVIDENCE,
             WorkflowRecommendation.REPEAT_TEST,
             WorkflowRecommendation.RETURN_TO_BUILD,
             WorkflowRecommendation.RETURN_TO_RECONCILIATION,
@@ -145,6 +150,7 @@ class TestPhase7GoldenMapping:
         WorkflowRecommendation.RETURN_TO_BUILD: RouteSlug.RETURN_TO_BUILD,
         WorkflowRecommendation.RETURN_TO_DESIGN: RouteSlug.RETURN_TO_DESIGN,
         WorkflowRecommendation.CLOSE_CYCLE: RouteSlug.CLOSE_CYCLE,
+        WorkflowRecommendation.LEARN_FROM_INVALIDATED_EVIDENCE: RouteSlug.LEARN_FROM_INVALIDATED_EVIDENCE,
     }
 
     @pytest.mark.parametrize("outcome", list(ValidityOutcome))
@@ -177,6 +183,7 @@ class TestTransitionTarget:
         assert transition_target("test", "return_to_build") == "build"
         assert transition_target("test", "return_to_design") == "design"
         assert transition_target("test", "close_cycle") == ABANDONED
+        assert transition_target("test", "learn_from_invalidated_evidence") == "learn"
 
     def test_unknown_route_is_refused(self) -> None:
         with pytest.raises(StageRoutesRefused):

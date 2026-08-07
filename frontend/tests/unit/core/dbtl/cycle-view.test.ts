@@ -77,6 +77,7 @@ describe("vocabulary", () => {
       "in_progress",
       "awaiting_review",
       "changes_requested",
+      "advanced_with_exception",
       "approved",
       "rejected",
     ];
@@ -113,6 +114,7 @@ describe("controls follow the durable status only", () => {
       "locked",
       "in_progress",
       "changes_requested",
+      "advanced_with_exception",
       "approved",
       "rejected",
     ] as StageStatus[]) {

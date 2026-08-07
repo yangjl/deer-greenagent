@@ -168,6 +168,25 @@ class TestEveryOptionSaysWhatChoosingItCosts:
             "hold",
         ]
 
+    def test_reopening_requested_changes_does_not_claim_the_build_is_still_held(self) -> None:
+        card = paused_build_recovery_request(
+            previous={
+                "id": "dbc-old",
+                "cycle_id": "cycle-1",
+                "stage_attempt_id": "sa-1",
+                "workflow_spec_key": "generic:build-workflow:v1",
+                "step_key": "execute_phases",
+                "plan_digest": "plan-1",
+            },
+            cycle_revision=9,
+            requested_action="replan",
+            changes_requested=True,
+        ).as_card()
+
+        assert card["question"] == "This Build has requested changes. What should happen next?"
+        assert "requested changes remain recorded" in card["rationale"]
+        assert "earlier Hold" not in card["rationale"]
+
     def test_replan_states_that_finished_phases_are_discarded(self) -> None:
         card = step_failure_request(
             step_key="execute_phases",

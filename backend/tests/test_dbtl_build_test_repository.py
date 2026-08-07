@@ -9,7 +9,7 @@ import pytest_asyncio
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK, ValidityRefused
-from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlWorkflowRefused
+from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlWorkflowRefused, DesignFeedbackConflict
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
 
@@ -197,6 +197,235 @@ async def _awaiting_test_review(repo: DbtlCycleRepository) -> None:
     )
 
 
+async def _advance_build_with_exception(repo: DbtlCycleRepository) -> None:
+    await _ready_for_build(repo)
+    await repo.attach_artifact(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="build",
+        artifact_type="evidence_exception",
+        uri="/mnt/user-data/outputs/build-exception.json",
+        content_hash=HASH_B,
+        created_by="server",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="build-exception-artifact",
+    )
+    await repo.submit_stage_for_review(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="build",
+        expected_db_revision=await _revision(repo),
+        actor_user_id="user-1",
+        idempotency_key="submit-build-exception",
+    )
+    await repo.review_stage(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="build",
+        decision="advanced_with_exception",
+        rationale="Continue only to record and evaluate the failed evidence.",
+        expected_db_revision=await _revision(repo),
+        reviewer_user_id="reviewer-1",
+        reviewer_project_role="owner",
+        idempotency_key="review-build-exception",
+        design_feedback_provenance={
+            "input_source": "stage_deck",
+            "evidence_exception": {"content_hash": HASH_B},
+        },
+    )
+
+
+async def test_exception_intent_refusals_do_not_consume_the_action_ledger(tmp_path: Path) -> None:
+    repo = await _repo(tmp_path)
+    await _ready_for_build(repo)
+    artifact = await repo.attach_artifact(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="build",
+        artifact_type="evidence_exception",
+        uri="/mnt/user-data/outputs/build-exception.json",
+        content_hash=HASH_B,
+        created_by="server",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="build-exception-for-surface",
+    )
+    cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+    assert cycle is not None
+    build_attempt = next(item for item in cycle["stages"] if item["stage"] == "build")
+    surface = await repo.register_stage_feedback_surface(
+        stage="build",
+        project_id="project-1",
+        cycle_id="cycle-1",
+        stage_attempt_id=build_attempt["id"],
+        design_round=1,
+        originating_thread_id="thread-1",
+        mode="stage_review",
+        deck_uri="/mnt/user-data/outputs/build-exception.html",
+        deck_content_hash=HASH_A,
+        decision_request={
+            "transition_gate": {
+                "stage": "build",
+                "evidence_exception": {
+                    "content_hash": HASH_B,
+                    "reason_codes": ["deliverable_attempt_failed"],
+                },
+            }
+        },
+        evidence_artifact_id=artifact["id"],
+        evidence_artifact_revision=artifact["revision"],
+        evidence_content_hash=HASH_B,
+    )
+    base = {
+        "project_id": "project-1",
+        "cycle_id": "cycle-1",
+        "surface_id": surface["surface_id"],
+        "originating_thread_id": "thread-1",
+        "action_kind": "continue_with_red_flag",
+        "selected_card_ids": [],
+        "expected_db_revision": int(cycle["db_revision"]),
+        "expected_evidence": {
+            "artifact_id": artifact["id"],
+            "revision": artifact["revision"],
+            "content_hash": HASH_B,
+        },
+        "expected_deck_hash": HASH_A,
+    }
+
+    with pytest.raises(DesignFeedbackConflict, match="disabled"):
+        await repo.reserve_stage_feedback_action(
+            **base,
+            human_comment="Continue with this limitation.",
+            client_submission_id="exception-disabled",
+            degraded_evidence_continuation=False,
+        )
+    assert await repo.stage_feedback_actions(surface["surface_id"], project_id="project-1") == []
+
+    with pytest.raises(DesignFeedbackConflict, match="written rationale"):
+        await repo.reserve_stage_feedback_action(
+            **base,
+            human_comment="",
+            client_submission_id="exception-no-rationale",
+            degraded_evidence_continuation=True,
+        )
+    assert await repo.stage_feedback_actions(surface["surface_id"], project_id="project-1") == []
+
+    legacy = await repo.register_stage_feedback_surface(
+        stage="build",
+        project_id="project-1",
+        cycle_id="cycle-1",
+        stage_attempt_id=build_attempt["id"],
+        design_round=2,
+        originating_thread_id="thread-1",
+        mode="stage_review",
+        deck_uri="/mnt/user-data/outputs/build-legacy.html",
+        deck_content_hash="d" * 64,
+        decision_request={"transition_gate": {"stage": "build"}},
+        evidence_artifact_id=artifact["id"],
+        evidence_artifact_revision=artifact["revision"],
+        evidence_content_hash=HASH_B,
+    )
+    with pytest.raises(DesignFeedbackConflict, match="active evidence exception"):
+        await repo.reserve_stage_feedback_action(
+            **{**base, "surface_id": legacy["surface_id"], "expected_deck_hash": "d" * 64},
+            human_comment="Continue with this limitation.",
+            client_submission_id="exception-legacy",
+            degraded_evidence_continuation=True,
+        )
+    assert await repo.stage_feedback_actions(legacy["surface_id"], project_id="project-1") == []
+
+
+async def test_supported_test_preserves_the_degraded_build_limitation_into_learn(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "deerflow.persistence.dbtl.cycles.degraded_evidence_continuation_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "deerflow.persistence.dbtl.build_test_ops.degraded_evidence_continuation_enabled",
+        lambda: True,
+    )
+    repo = await _repo(tmp_path)
+    await _ready_for_build(repo)
+    await _record_lineage(repo)
+    await repo.attach_artifact(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="build",
+        artifact_type="evidence_exception",
+        uri="/mnt/user-data/outputs/build-exception.json",
+        content_hash=HASH_B,
+        created_by="server",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="supported-build-exception",
+    )
+    await repo.submit_stage_for_review(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="build",
+        expected_db_revision=await _revision(repo),
+        actor_user_id="server",
+        idempotency_key="submit-supported-build-exception",
+    )
+    await repo.review_stage(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="build",
+        decision="advanced_with_exception",
+        rationale="The numeric result is trustworthy, but the notebook deliverable failed.",
+        expected_db_revision=await _revision(repo),
+        reviewer_user_id="reviewer-1",
+        reviewer_project_role="owner",
+        idempotency_key="review-supported-build-exception",
+        design_feedback_provenance={
+            "input_source": "stage_deck",
+            "evidence_exception": {"content_hash": HASH_B},
+        },
+    )
+    await _attach(repo, "test", "supported-test")
+    test_exception = await repo.attach_artifact(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="test",
+        artifact_type="evidence_exception",
+        uri="/mnt/user-data/outputs/test-inherited-exception.json",
+        content_hash=HASH_A,
+        created_by="server",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="supported-test-exception",
+    )
+    await repo.submit_stage_for_review(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="test",
+        expected_db_revision=await _revision(repo),
+        actor_user_id="server",
+        idempotency_key="submit-supported-test",
+    )
+
+    result = await repo.record_validity_assessment(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        metrics=[{"name": "accuracy", "value": 0.8, "threshold": 0.7, "criterion": "gte"}],
+        checks=_checks(),
+        recommendation="advance_to_learn",
+        limitations=[],
+        rationale="The human accepted the supported Test outcome with the inherited Build limitation.",
+        reviewer_user_id="reviewer-1",
+        reviewer_project_role="owner",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="supported-test-to-learn",
+    )
+
+    assessment = result["validity_assessment"]
+    assert assessment["outcome"] == "supported"
+    assert assessment["evidence_exception_artifact_id"] == test_exception["id"]
+    assert assessment["evidence_exception_hash"] == HASH_A
+    assert any(HASH_A in item and "limits" in item for item in assessment["limitations"])
+    assert result["cycle"]["state"] == "learn"
+
+
 def _checks(**overrides: str) -> list[dict]:
     statuses = {item.value: "passed" for item in DEFAULT_VALIDITY_PACK.required_checks}
     statuses.update(overrides)
@@ -260,6 +489,206 @@ async def test_build_cannot_be_submitted_without_lineage(tmp_path: Path) -> None
             actor_user_id="user-1",
             idempotency_key="submit-build",
         )
+
+
+async def test_exception_dossiers_advance_build_and_invalidated_test_without_lineage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "deerflow.persistence.dbtl.cycles.degraded_evidence_continuation_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "deerflow.persistence.dbtl.build_test_ops.degraded_evidence_continuation_enabled",
+        lambda: True,
+    )
+    repo = await _repo(tmp_path)
+    await _advance_build_with_exception(repo)
+
+    cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+    assert cycle is not None
+    statuses = {item["stage"]: item["status"] for item in cycle["stages"]}
+    assert statuses["build"] == "advanced_with_exception"
+    assert statuses["test"] == "in_progress"
+
+    await repo.attach_artifact(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="test",
+        artifact_type="evidence_exception",
+        uri="/mnt/user-data/outputs/test-exception.json",
+        content_hash=HASH_A,
+        created_by="server",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="test-exception-artifact",
+    )
+    await repo.submit_stage_for_review(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="test",
+        expected_db_revision=await _revision(repo),
+        actor_user_id="server",
+        idempotency_key="submit-test-exception",
+    )
+    result = await repo.record_validity_assessment(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        metrics=[
+            {
+                "name": "scientific_support",
+                "value": 0.0,
+                "threshold": 1.0,
+                "criterion": "gte",
+            }
+        ],
+        checks=_checks(reproducibility="failed"),
+        recommendation="learn_from_invalidated_evidence",
+        limitations=["No trusted Build execution exists."],
+        rationale="Record the invalidated result and carry only process lessons into Learn.",
+        reviewer_user_id="reviewer-1",
+        reviewer_project_role="owner",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="invalidated-exception-assessment",
+        review_provenance={
+            "input_source": "stage_deck",
+            "feedback_surface_id": "dfs-test-exception",
+            "selected_action": "continue_with_red_flag",
+        },
+    )
+
+    assessment = result["validity_assessment"]
+    assert assessment["outcome"] == "invalidated"
+    assert assessment["build_lineage_id"] is None
+    assert assessment["evidence_exception_hash"] == HASH_A
+    assert assessment["evidence_exception_artifact_id"]
+    assert result["cycle"]["state"] == "learn"
+    statuses = {item["stage"]: item["status"] for item in result["cycle"]["stages"]}
+    assert statuses["test"] == "advanced_with_exception"
+    assert statuses["learn"] == "in_progress"
+    transitions = await repo.list_stage_transitions(
+        cycle_id="cycle-1",
+        project_id="project-1",
+    )
+    assert transitions[-1]["decision_surface_id"] == "dfs-test-exception"
+
+
+async def test_invalidated_test_binds_a_supplemental_exception_beside_the_validity_report(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "deerflow.persistence.dbtl.build_test_ops.degraded_evidence_continuation_enabled",
+        lambda: True,
+    )
+    repo = await _repo(tmp_path)
+    await _ready_for_build(repo)
+    await _record_lineage(repo)
+    await _approve(repo, "build", "build")
+    await _attach(repo, "test", "test")
+    await repo.attach_artifact(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="test",
+        artifact_type="evidence_exception",
+        uri="/mnt/user-data/outputs/test-exception.json",
+        content_hash=HASH_A,
+        created_by="server",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="supplemental-test-exception",
+    )
+    await repo.submit_stage_for_review(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="test",
+        expected_db_revision=await _revision(repo),
+        actor_user_id="server",
+        idempotency_key="submit-supplemental-test-exception",
+    )
+
+    result = await repo.record_validity_assessment(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        metrics=[
+            {
+                "name": "holdout_mae",
+                "value": 0.0,
+                "threshold": 0.0,
+                "criterion": "lte",
+            }
+        ],
+        checks=_checks(reproducibility="failed"),
+        recommendation="learn_from_invalidated_evidence",
+        limitations=["The server-owned rerun path was unavailable."],
+        rationale="Keep the typed validity pack and its red-flag dossier together.",
+        reviewer_user_id="reviewer-1",
+        reviewer_project_role="owner",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="supplemental-invalidated-assessment",
+    )
+
+    assessment = result["validity_assessment"]
+    assert assessment["outcome"] == "invalidated"
+    assert assessment["build_lineage_id"]
+    assert assessment["evidence_exception_hash"] == HASH_A
+    assert assessment["evidence_exception_artifact_id"]
+
+
+async def test_invalidated_exception_can_request_a_human_guided_test_retry_without_lineage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "deerflow.persistence.dbtl.cycles.degraded_evidence_continuation_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "deerflow.persistence.dbtl.build_test_ops.degraded_evidence_continuation_enabled",
+        lambda: True,
+    )
+    repo = await _repo(tmp_path)
+    await _advance_build_with_exception(repo)
+    await repo.attach_artifact(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="test",
+        artifact_type="evidence_exception",
+        uri="/mnt/user-data/outputs/test-exception.json",
+        content_hash=HASH_A,
+        created_by="server",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="test-exception-artifact",
+    )
+    await repo.submit_stage_for_review(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="test",
+        expected_db_revision=await _revision(repo),
+        actor_user_id="server",
+        idempotency_key="submit-test-exception",
+    )
+
+    result = await repo.record_validity_assessment(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        metrics=[{"name": "scientific_support", "value": 0.0, "threshold": 1.0, "criterion": "gte"}],
+        checks=_checks(reproducibility="failed"),
+        recommendation="repeat_test",
+        limitations=["No trusted Build execution exists."],
+        rationale="Retry after the human supplies environment guidance.",
+        reviewer_user_id="reviewer-1",
+        reviewer_project_role="owner",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="invalidated-exception-retry",
+    )
+
+    assessment = result["validity_assessment"]
+    assert assessment["outcome"] == "invalidated"
+    assert assessment["build_lineage_id"] is None
+    assert assessment["evidence_exception_hash"] == HASH_A
+    assert result["cycle"]["state"] == "test"
+    statuses = {item["stage"]: item["status"] for item in result["cycle"]["stages"]}
+    assert statuses["test"] == "changes_requested"
 
 
 async def test_high_accuracy_and_leakage_routes_back_to_build(tmp_path: Path) -> None:

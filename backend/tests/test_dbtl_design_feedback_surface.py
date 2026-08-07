@@ -758,6 +758,82 @@ class TestPayloadBoundActions:
         assert previous["run_id"] == "run-rejected-1"
         assert previous["receipt"]["failure_detail"] == "Malformed artifact reference."
 
+    async def test_a_failed_stage_review_decision_can_be_edited_under_the_same_action_id(self, tmp_path: Path) -> None:
+        repo = await _repo(tmp_path)
+        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert cycle is not None
+        await repo.attach_artifact(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            stage="design",
+            artifact_type="design_brief.v2",
+            uri="/mnt/user-data/outputs/design-review.md",
+            content_hash=EVIDENCE_HASH,
+            created_by="user-1",
+            expected_db_revision=int(cycle["db_revision"]),
+            idempotency_key="editable-stage-review-artifact",
+        )
+        cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert cycle is not None
+        artifact = cycle["artifacts"][-1]
+        surface = await _register(
+            repo,
+            mode="stage_review",
+            evidence_artifact_id=artifact["id"],
+            evidence_artifact_revision=artifact["revision"],
+            evidence_content_hash=EVIDENCE_HASH,
+            decision_request={
+                "transition_gate": {
+                    "stage": "design",
+                    "assessment": {
+                        "difficulty": "standard",
+                        "rationale": "Review the design package.",
+                    },
+                    "routes": [],
+                }
+            },
+        )
+        common = {
+            "project_id": "project-1",
+            "cycle_id": "cycle-1",
+            "surface_id": surface["surface_id"],
+            "originating_thread_id": "thread-1",
+            "client_submission_id": "submission-editable-stage-review",
+            "expected_db_revision": int(cycle["db_revision"]),
+            "expected_evidence": {
+                "artifact_id": artifact["id"],
+                "revision": artifact["revision"],
+                "content_hash": EVIDENCE_HASH,
+            },
+            "expected_deck_hash": DECK_HASH,
+        }
+        _surface, first, replayed = await repo.reserve_stage_feedback_action(
+            **common,
+            action_kind="request_changes",
+            selected_card_ids=[],
+            human_comment="Revise the first draft.",
+        )
+        assert replayed is False
+        await repo.update_stage_feedback_action(
+            first["client_submission_id"],
+            project_id="project-1",
+            status="failed",
+            failure_code="invalid_review_payload",
+        )
+
+        _surface, retried, reused = await repo.reserve_stage_feedback_action(
+            **common,
+            action_kind="approve",
+            selected_card_ids=[],
+            human_comment="The corrected package is acceptable.",
+        )
+
+        assert reused is True
+        assert retried["status"] == "pending"
+        assert retried["action_kind"] == "approve"
+        assert retried["human_comment"] == "The corrected package is acceptable."
+        assert retried["receipt"]["failed_attempts"][-1]["action_kind"] == "request_changes"
+
     async def test_a_chair_option_must_come_from_the_recorded_result(self, tmp_path: Path) -> None:
         repo = await _repo(tmp_path)
         cycle = await repo.get_cycle("cycle-1", project_id="project-1")

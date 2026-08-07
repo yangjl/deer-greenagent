@@ -41,7 +41,12 @@ from deerflow.dbtl.cycle_state import (
     stage_for_state,
     validate_cycle_class,
 )
-from deerflow.dbtl.reconciliation_policy import build_workflow_steps_enabled, conditional_test_enabled, reconciliation_required
+from deerflow.dbtl.reconciliation_policy import (
+    build_workflow_steps_enabled,
+    conditional_test_enabled,
+    degraded_evidence_continuation_enabled,
+    reconciliation_required,
+)
 from deerflow.dbtl.stage_routes import GRAPH_STAGES, RouteSlug
 from deerflow.persistence.dbtl.build_test_ops import BuildTestOpsMixin
 from deerflow.persistence.dbtl.collaboration_ops import CollaborationOpsMixin
@@ -261,12 +266,28 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
         stage evidence.  Keep the generic latest-artifact helper for audit and
         presentation reads; gate writes use this narrower helper.
         """
-        meeting_artifact_type = f"{stage.strip().lower()}_review_meeting"
+        meeting_type = f"{stage.strip().lower()}_review_meeting"
+        core = await session.scalar(
+            select(DbtlArtifactRow)
+            .where(
+                DbtlArtifactRow.stage_attempt_id == stage_attempt_id,
+                DbtlArtifactRow.artifact_type != "evidence_exception",
+                DbtlArtifactRow.artifact_type != meeting_type,
+            )
+            .order_by(DbtlArtifactRow.revision.desc())
+            .limit(1)
+        )
+        if core is not None:
+            return core
+        # A stage whose execution evidence is fundamentally untrustworthy may
+        # have no core package at all. Its server-authored exception dossier is
+        # then the reviewable record; it is only a fallback, never a newer
+        # replacement for core evidence that does exist.
         return await session.scalar(
             select(DbtlArtifactRow)
             .where(
                 DbtlArtifactRow.stage_attempt_id == stage_attempt_id,
-                DbtlArtifactRow.artifact_type != meeting_artifact_type,
+                DbtlArtifactRow.artifact_type == "evidence_exception",
             )
             .order_by(DbtlArtifactRow.revision.desc())
             .limit(1)
@@ -743,8 +764,12 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
             # A review must have something to review. Without this a stage
             # could be approved on no evidence at all, which is precisely what
             # the durable review record exists to prevent.
-            if await self._latest_reviewable_artifact(session, row.id, stage) is None:
+            evidence = await self._latest_reviewable_artifact(session, row.id, stage)
+            if evidence is None:
                 raise DbtlWorkflowRefused(f"Stage {stage!r} has no artifact to review; attach evidence first.")
+            is_evidence_exception = evidence.artifact_type == "evidence_exception"
+            if is_evidence_exception and not degraded_evidence_continuation_enabled():
+                raise DbtlWorkflowRefused("Degraded-evidence continuation is disabled.")
             if stage == "reconciliation":
                 # The readiness gate is checked *before* a reviewer is asked, not
                 # only when they click approve. Sending an unresolved matrix to
@@ -754,16 +779,16 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
                 if not gate.ready:
                     reasons = "; ".join(gate.reasons) or "required rows are unresolved"
                     raise DbtlWorkflowRefused(f"Data reconciliation is not ready for review ({gate.outcome.value}): {reasons}")
-            if stage == "build" and await self._latest_build_lineage(session, cycle_id) is None:
+            if stage == "build" and not is_evidence_exception and await self._latest_build_lineage(session, cycle_id) is None:
                 raise DbtlWorkflowRefused("Build has no reproducibility lineage to review.")
-            if stage == "build" and build_workflow_steps_enabled():
+            if stage == "build" and not is_evidence_exception and build_workflow_steps_enabled():
                 workflow = await self.build_workflow_view(
                     project_id=project_id,
                     stage_attempt_id=row.id,
                 )
                 if not workflow.get("is_complete"):
                     raise DbtlWorkflowRefused("Build's durable workflow is incomplete; every selected step and the registered review deck must succeed before submission.")
-            if stage == "test" and await self._latest_build_lineage(session, cycle_id) is None:
+            if stage == "test" and not is_evidence_exception and await self._latest_build_lineage(session, cycle_id) is None:
                 raise DbtlWorkflowRefused("Test cannot be reviewed without Build lineage.")
             row.status = str(StageStatus.AWAITING_REVIEW)
             statuses[stage] = StageStatus.AWAITING_REVIEW
@@ -908,6 +933,15 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
             raise DbtlWorkflowRefused("Test requires a typed validity assessment; the generic review path is disabled.")
         verdict = ReviewDecision(decision)
         disposition = self._parse_build_disposition(build_disposition)
+        exception_provenance = dict((design_feedback_provenance or {}).get("evidence_exception") or {})
+        if verdict is ReviewDecision.ADVANCE_WITH_EXCEPTION:
+            if not degraded_evidence_continuation_enabled():
+                raise DbtlWorkflowRefused("Degraded-evidence continuation is disabled.")
+            if stage != "build":
+                raise DbtlWorkflowRefused("The generic exception review path is available only for Build.")
+            dossier_hash = str(exception_provenance.get("content_hash") or "")
+            if len(dossier_hash) != 64 or any(character not in "0123456789abcdef" for character in dossier_hash):
+                raise DbtlWorkflowRefused("The exception decision is not bound to a valid evidence dossier hash.")
 
         async with self._sf() as session:
             loaded = await self._load(session, cycle_id, project_id, for_update=True)
@@ -978,7 +1012,7 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
 
             # Advance only when the machine says so; an approval that leaves a
             # prerequisite outstanding must leave the cycle where it is.
-            if verdict is ReviewDecision.APPROVE and not is_terminal(cycle.state):
+            if verdict in {ReviewDecision.APPROVE, ReviewDecision.ADVANCE_WITH_EXCEPTION} and not is_terminal(cycle.state):
                 try:
                     cycle.state = next_cycle_state(cycle.state, updated, reconciliation_required=reconciliation_required())
                 except TransitionRefused:
@@ -1008,6 +1042,10 @@ class DbtlCycleRepository(KnowledgeOpsMixin, BuildTestOpsMixin, CollaborationOps
             )
             if evidence is None:
                 raise DbtlWorkflowRefused(f"Stage {stage!r} has no artifact to review.")
+            if verdict is ReviewDecision.ADVANCE_WITH_EXCEPTION and evidence.artifact_type != "evidence_exception":
+                raise DbtlWorkflowRefused("The exception decision is not bound to an evidence-exception artifact.")
+            if verdict is ReviewDecision.ADVANCE_WITH_EXCEPTION and evidence.content_hash != dossier_hash:
+                raise DbtlWorkflowRefused("The evidence dossier changed after this exception action was issued.")
             provenance = design_feedback_provenance or {}
             session.add(
                 DbtlReviewRow(

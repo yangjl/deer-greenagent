@@ -65,6 +65,8 @@ _ACTION_GROUP = {
     # single-use review group: a reviewer records one decision about a Build,
     # not an approval and then a second thought about what it was for.
     "learn_exploratory": "stage_review",
+    "continue_with_red_flag": "stage_review",
+    "retry_with_guidance": "stage_review",
     "request_changes": "stage_review",
     "reject": "stage_review",
     "advance": "stage_review",
@@ -520,6 +522,7 @@ class DesignFeedbackOpsMixin:
         difficulty_override: str | None = None,
         slide_comments: dict[str, str] | None = None,
         active_slide_id: str | None = None,
+        degraded_evidence_continuation: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any], bool]:
         """Validate and reserve one single-use stage-deck intent.
 
@@ -583,6 +586,19 @@ class DesignFeedbackOpsMixin:
             except ValueError as exc:
                 raise DbtlWorkflowRefused(str(exc)) from exc
             has_written_feedback = bool(comment or comments)
+
+            request_payload = surface.decision_request or {}
+            transition_gate = request_payload.get("transition_gate") if isinstance(request_payload, dict) else None
+            evidence_exception = transition_gate.get("evidence_exception") if isinstance(transition_gate, dict) else None
+            exception_action = action_kind in {"continue_with_red_flag", "retry_with_guidance"}
+            exception_route = action_kind == "choose_route" and isinstance(evidence_exception, dict)
+            if exception_action or exception_route:
+                if not degraded_evidence_continuation:
+                    raise DesignFeedbackConflict("Degraded-evidence continuation is disabled.")
+                if surface.stage not in {"build", "test"} or surface.mode != "stage_review" or not isinstance(evidence_exception, dict):
+                    raise DesignFeedbackConflict("This deck does not own an active evidence exception.")
+                if not has_written_feedback:
+                    raise DesignFeedbackConflict("An evidence-exception action requires the reviewer's written rationale.")
 
             normalized["slide_comments"] = comments
             normalized["active_slide_id"] = active_slide
@@ -690,8 +706,8 @@ class DesignFeedbackOpsMixin:
                     raise DesignFeedbackConflict("A progressive route action cannot select issue cards.")
 
             if existing is not None:
-                editable_failed_chair_retry = bool(action_group == "chair_response" and existing.status == "failed" and existing.id == submission_id and existing.expected_deck_hash == expected_deck_hash)
-                if editable_failed_chair_retry:
+                editable_failed_retry = bool(existing.status == "failed" and existing.id == submission_id and existing.expected_deck_hash == expected_deck_hash and action_group in {"chair_response", "stage_review"})
+                if editable_failed_retry:
                     # A resumed chair worker is itself durable audit work, so a
                     # failed attempt advances the cycle revision even though it
                     # produces no successor deck. A contract rejection is not
@@ -730,7 +746,11 @@ class DesignFeedbackOpsMixin:
                     existing.receipt = {
                         "kind": action_kind,
                         "failed_attempts": failed_attempts[-20:],
-                        "message": "The edited chair answer is being sent to a new attempt.",
+                        "message": (
+                            "The edited retry guidance is being sent to a new control."
+                            if action_kind == "retry_with_guidance"
+                            else ("The edited chair answer is being sent to a new attempt." if action_group == "chair_response" else "The edited review decision is being sent to a new attempt.")
+                        ),
                     }
                     await session.commit()
                     return self._surface_payload(surface), self._action_payload(existing), True

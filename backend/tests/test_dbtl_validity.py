@@ -135,3 +135,11 @@ def test_invalidated_result_cannot_be_recommended_for_learn() -> None:
     )
     with pytest.raises(ValidityRefused, match="not allowed"):
         validate_recommendation(result, WorkflowRecommendation.ADVANCE_TO_LEARN)
+
+    assert (
+        validate_recommendation(
+            result,
+            WorkflowRecommendation.LEARN_FROM_INVALIDATED_EVIDENCE,
+        )
+        is WorkflowRecommendation.LEARN_FROM_INVALIDATED_EVIDENCE
+    )

@@ -29,11 +29,17 @@ export type DesignFeedbackActionKind =
   | "advance"
   | "park"
   | "convene_review_meeting"
+  | "retry_with_guidance"
+  | "continue_with_red_flag"
   | "choose_route"
   | "recommend_promotion"
   | "close_without_candidate";
 
-export type TransitionDifficulty = "routine" | "standard" | "high_stakes";
+export type TransitionDifficulty =
+  | "routine"
+  | "standard"
+  | "high_stakes"
+  | "exception";
 
 export interface TransitionGate {
   stage: DbtlGraphStage;

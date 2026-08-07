@@ -19,9 +19,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from deerflow.agents.dbtl.live_stage.adapter import _write_evidence_exception_package
+from deerflow.agents.dbtl.live_stage.test_rerun import TestRerunRecord as RerunRecord
+from deerflow.agents.dbtl.live_stage.test_rerun import TestRerunStatus as RerunStatus
 from deerflow.agents.dbtl.stage_execution import LiveStageAdapter
 from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.capabilities import Capability
+from deerflow.dbtl.evidence_exception import EvidenceReason, build_evidence_exception_dossier
 from deerflow.dbtl.stage_runner import DispatchOutcome
 
 
@@ -87,9 +91,25 @@ class _Repo:
                     "uri": kwargs["artifact_uri"],
                     "content_hash": kwargs["artifact_content_hash"],
                     "stage": "test",
+                    "stage_attempt_id": "attempt-test",
+                    "artifact_type": kwargs["artifact_type"],
                 }
             ]
         return kwargs["results"]
+
+    async def attach_artifact(self, **kwargs):
+        self.cycle["db_revision"] += 1
+        artifact = {
+            "id": "artifact-test-exception",
+            "revision": 1,
+            "uri": kwargs["uri"],
+            "content_hash": kwargs["content_hash"],
+            "stage": "test",
+            "stage_attempt_id": "attempt-test",
+            "artifact_type": kwargs["artifact_type"],
+        }
+        self.cycle["artifacts"].append(artifact)
+        return {**artifact, "db_revision": self.cycle["db_revision"]}
 
     async def register_stage_feedback_surface(self, **kwargs):
         self.surfaces.append(kwargs)
@@ -103,6 +123,9 @@ class _Repo:
 
 
 class _Dispatcher:
+    def __init__(self, *, invalidated: bool = False) -> None:
+        self.invalidated = invalidated
+
     async def __call__(self, units, *, budget):
         payload = json.dumps(
             {
@@ -129,9 +152,9 @@ class _Dispatcher:
                         "checks": [
                             {
                                 "check": check,
-                                "status": "passed",
-                                "detail": f"{check} passed against the recorded Test evidence.",
-                                "evidence_refs": ["/mnt/user-data/outputs/validity.json"],
+                                "status": ("failed" if self.invalidated and check == "reproducibility" else "passed"),
+                                "detail": ("The authoritative rerun path was unavailable." if self.invalidated and check == "reproducibility" else f"{check} passed against the recorded Test evidence."),
+                                "evidence_refs": ([] if self.invalidated and check == "reproducibility" else ["/mnt/user-data/outputs/validity.json"]),
                             }
                             for check in (
                                 "fold_composition",
@@ -152,7 +175,13 @@ class _Dispatcher:
         return [DispatchOutcome(unit_id=unit.unit_id, text=payload) for unit in units]
 
 
-def _adapter(repo, *, progressive_gate: bool = True) -> LiveStageAdapter:
+def _adapter(
+    repo,
+    *,
+    progressive_gate: bool = True,
+    degraded_evidence_continuation: bool = False,
+    invalidated: bool = False,
+) -> LiveStageAdapter:
     async def assessor(_prompt: str) -> str:
         return json.dumps(
             {
@@ -163,15 +192,32 @@ def _adapter(repo, *, progressive_gate: bool = True) -> LiveStageAdapter:
 
     return LiveStageAdapter(
         repo=repo,
-        app_config=SimpleNamespace(dbtl=SimpleNamespace(progressive_gate=progressive_gate)),
+        app_config=SimpleNamespace(
+            dbtl=SimpleNamespace(
+                progressive_gate=progressive_gate,
+                degraded_evidence_continuation=degraded_evidence_continuation,
+            )
+        ),
         candidate_provider=lambda: (AgentCandidate(name="analyst", capabilities=frozenset({Capability.VALIDITY_ASSESSMENT, Capability.STATISTICAL_ANALYSIS})),),
-        dispatcher=_Dispatcher(),
+        dispatcher=_Dispatcher(invalidated=invalidated),
         transition_assessor=assessor,
     )
 
 
-async def _run(repo, tmp_path: Path, *, progressive_gate: bool = True):
-    return await _adapter(repo, progressive_gate=progressive_gate).execute(
+async def _run(
+    repo,
+    tmp_path: Path,
+    *,
+    progressive_gate: bool = True,
+    degraded_evidence_continuation: bool = False,
+    invalidated: bool = False,
+):
+    return await _adapter(
+        repo,
+        progressive_gate=progressive_gate,
+        degraded_evidence_continuation=degraded_evidence_continuation,
+        invalidated=invalidated,
+    ).execute(
         project_id="project-1",
         cycle_id="cycle-1",
         request_text="Run the validity checks.",
@@ -241,6 +287,112 @@ class TestTheTestStageGetsAReviewPage:
 
 
 class TestItCarriesTheComputedAssessmentAndRoutes:
+    @pytest.mark.asyncio
+    async def test_a_successful_test_preserves_the_upstream_build_exception(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        repo = _Repo()
+        monkeypatch.setattr(
+            "deerflow.agents.dbtl.live_stage.adapter._validated_test_assessment",
+            lambda *_args, **_kwargs: {
+                "metrics": [],
+                "checks": [],
+                "limitations": [],
+                "rationale": "The server-computed Test outcome is supported.",
+                "evaluation": {
+                    "outcome": "supported",
+                    "allowed_recommendations": ["advance_to_learn", "repeat_test", "close_cycle"],
+                },
+            },
+        )
+        build_attempt = next(item for item in repo.cycle["stages"] if item["stage"] == "build")
+        build_attempt["status"] = "advanced_with_exception"
+        dossier = build_evidence_exception_dossier(
+            stage="build",
+            stage_attempt_id="attempt-build",
+            reason_codes=[EvidenceReason.DELIVERABLE_ATTEMPT_FAILED],
+            verified_facts=["The numeric result and figure were server-readable."],
+        )
+        assert dossier is not None
+        uri, content_hash, _digest = _write_evidence_exception_package(
+            project_root=str(tmp_path),
+            cycle=repo.cycle,
+            dossier=dossier,
+        )
+        repo.cycle["artifacts"] = [
+            {
+                "id": "artifact-build-exception",
+                "revision": 1,
+                "uri": uri,
+                "content_hash": content_hash,
+                "stage": "build",
+                "stage_attempt_id": "attempt-build",
+                "artifact_type": "evidence_exception",
+            }
+        ]
+
+        result = await _run(
+            repo,
+            tmp_path,
+            degraded_evidence_continuation=True,
+        )
+
+        assert result.produced_usable_evidence
+        assert [item["artifact_type"] for item in repo.cycle["artifacts"]] == [
+            "validity_report",
+            "evidence_exception",
+        ]
+        propagated = repo.surfaces[0]["decision_request"]["transition_gate"]["evidence_exception"]
+        assert propagated["condition"] == "degraded_verified"
+        assert propagated["scientific_effect"] == "limits_scope"
+        assert propagated["reason_codes"] == ["deliverable_attempt_failed"]
+        assert "advance_to_learn" in propagated["recovery_options"]
+        assert "learn_from_invalidated_evidence" not in propagated["recovery_options"]
+        assert any(content_hash in fact for fact in propagated["verified_facts"])
+        relative = result.deck_uri.removeprefix("/mnt/user-data/outputs/")
+        html = (tmp_path / "outputs" / relative).read_text(encoding="utf-8")
+        assert "Red flag: this evidence remains scope-limited." in html
+
+    @pytest.mark.asyncio
+    async def test_invalidated_typed_test_keeps_its_report_and_adds_a_red_flag_dossier(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ):
+        repo = _Repo()
+        monkeypatch.setattr(
+            "deerflow.agents.dbtl.live_stage.adapter.prepare_test_rerun",
+            lambda *_args, **_kwargs: RerunRecord(
+                status=RerunStatus.FAILED,
+                command="python fit.py",
+                reason="The authoritative rerun path was unavailable.",
+                exit_status=2,
+                inputs_verified=True,
+            ),
+        )
+
+        result = await _run(
+            repo,
+            tmp_path,
+            degraded_evidence_continuation=True,
+            invalidated=True,
+        )
+
+        assert result.produced_usable_evidence
+        assert [item["artifact_type"] for item in repo.cycle["artifacts"]] == [
+            "validity_report",
+            "evidence_exception",
+        ]
+        gate = repo.surfaces[0]["decision_request"]["transition_gate"]
+        assert gate["evidence_exception"]["condition"] == "degraded_verified"
+        assert gate["evidence_exception"]["reason_codes"] == ["rerun_unavailable"]
+        assert [item["slug"] for item in gate["routes"]][0] == ("learn_from_invalidated_evidence")
+        relative = result.deck_uri.removeprefix("/mnt/user-data/outputs/")
+        html = (tmp_path / "outputs" / relative).read_text(encoding="utf-8")
+        assert "Red flag: this evidence remains failed or untrusted." in html
+
     @pytest.mark.asyncio
     async def test_the_assessment_travels_so_the_meeting_gate_can_read_it(self, tmp_path: Path):
         repo = _Repo()

@@ -38,6 +38,21 @@ function submitIntent(overrides: Record<string, unknown> = {}) {
 }
 
 describe("parseDeckIntent", () => {
+  it.each(["retry_with_guidance", "continue_with_red_flag"])(
+    "accepts the evidence exception action %s",
+    (kind) => {
+      const parsed = parseDeckIntent(
+        submitIntent({
+          action: { kind, optionIds: [] },
+          comment: "Human guidance and rationale.",
+        }),
+        { surfaceId: SURFACE_ID, channel: CHANNEL },
+      );
+
+      expect(parsed?.type).toBe("submit_intent");
+    },
+  );
+
   it("accepts a well-formed ready announcement", () => {
     const parsed = parseDeckIntent(readyIntent(), {
       surfaceId: SURFACE_ID,

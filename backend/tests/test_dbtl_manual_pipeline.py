@@ -120,6 +120,7 @@ def test_profile_is_isolated_and_disables_background_writers(tmp_path: Path) -> 
     assert generated["dbtl"]["discovery_global_memory"] is False
     assert generated["dbtl"]["discovery_classifier_entry"] is False
     assert generated["dbtl"]["discovery_auto_offer"] is False
+    assert generated["dbtl"]["degraded_evidence_continuation"] is True
     assert generated["memory"]["enabled"] is False
     assert generated["memory"]["injection_enabled"] is False
     assert generated["scheduler"]["enabled"] is False
@@ -140,6 +141,7 @@ def test_existing_manual_profile_is_upgraded_to_persistent_history_without_force
     generated = yaml.safe_load(profile.read_text(encoding="utf-8"))
     generated["run_events"] = {"backend": "memory", "track_token_usage": True}
     generated["sandbox"]["allow_host_bash"] = False
+    generated["dbtl"].pop("degraded_evidence_continuation")
     profile.write_text(yaml.safe_dump(generated), encoding="utf-8")
 
     same_profile = dbtl_manual.initialize_profile(source_config=source, manual_root=manual_root)
@@ -148,6 +150,37 @@ def test_existing_manual_profile_is_upgraded_to_persistent_history_without_force
     assert same_profile == profile
     assert upgraded["run_events"] == {"backend": "db", "track_token_usage": True}
     assert upgraded["sandbox"]["allow_host_bash"] is True
+    assert upgraded["dbtl"]["degraded_evidence_continuation"] is True
+
+
+def test_existing_profile_hot_adds_source_specialists_only_when_roster_is_empty(
+    tmp_path: Path,
+) -> None:
+    source = _source_config(tmp_path / "config.yaml")
+    source_config = yaml.safe_load(source.read_text(encoding="utf-8"))
+    source_config["subagents"] = {
+        "custom_agents": {
+            "build-engineer": {"description": "Build specialist"},
+            "statistician": {"description": "Statistics specialist"},
+        }
+    }
+    source.write_text(yaml.safe_dump(source_config), encoding="utf-8")
+    manual_root = tmp_path / ".deer-flow" / "manual-dbtl"
+    profile = dbtl_manual.initialize_profile(
+        source_config=source,
+        manual_root=manual_root,
+    )
+    generated = yaml.safe_load(profile.read_text(encoding="utf-8"))
+    generated["subagents"] = {"custom_agents": {}}
+    profile.write_text(yaml.safe_dump(generated), encoding="utf-8")
+
+    dbtl_manual.initialize_profile(source_config=source, manual_root=manual_root)
+
+    upgraded = yaml.safe_load(profile.read_text(encoding="utf-8"))
+    assert set(upgraded["subagents"]["custom_agents"]) == {
+        "build-engineer",
+        "statistician",
+    }
 
 
 def test_legacy_empty_event_feed_is_backfilled_once_from_latest_checkpoint(tmp_path: Path) -> None:

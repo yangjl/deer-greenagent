@@ -65,6 +65,16 @@ function walk(
 }
 
 describe("a loop reads as one cycle", () => {
+  it("keeps exception advancement visibly distinct from a pass", () => {
+    const timeline = deriveCycleTimeline(
+      walk(["build", "test", "advanced_with_exception"]),
+      "test",
+    );
+
+    expect(timeline.entries[0]?.status).toBe("exception");
+    expect(timeline.entries[0]?.chosenRoute).toBe("advanced_with_exception");
+  });
+
   it("keeps every attempt of a repeated stage as its own numbered entry", () => {
     const timeline = deriveCycleTimeline(
       walk(

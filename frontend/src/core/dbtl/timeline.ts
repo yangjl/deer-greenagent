@@ -18,6 +18,7 @@ export type TimelineStatus =
   | "passed"
   | "revised"
   | "invalidated"
+  | "exception"
   | "closed"
   | "current";
 
@@ -76,6 +77,11 @@ const PASSED_ROUTES: ReadonlySet<string> = new Set([
 
 function decidedStatus(chosenRoute: string): TimelineStatus {
   if (PASSED_ROUTES.has(chosenRoute)) return "passed";
+  if (
+    chosenRoute === "advanced_with_exception" ||
+    chosenRoute === "learn_from_invalidated_evidence"
+  )
+    return "exception";
   if (chosenRoute === "close_cycle") return "closed";
   return "revised";
 }

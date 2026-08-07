@@ -110,7 +110,7 @@ _START_VERB_TYPOS = r"strat|sttart|star|statr|creat|craete|crate|opne|oepn|begni
 # A typed request to start. Deliberately narrow: it must name a cycle or DBTL
 # explicitly, so "start the analysis" does not trip it.
 _EXPLICIT_START_PATTERN = re.compile(
-    r"\b(?:start|open|begin|create|" + _START_VERB_TYPOS + r")\s+(?:a\s+|the\s+|new\s+)*(?:dbtl\s+cycle|dbtl\s+workflow|research\s+cycle|learning\s+cycle|cycle|dbtl)\b",
+    r"\b(?:start|open|begin|create|" + _START_VERB_TYPOS + r")\s+(?:a\s+|the\s+|new\s+|governed\s+)*(?:dbtl\s+cycle|dbtl\s+workflow|research\s+cycle|learning\s+cycle|cycle|dbtl)\b",
     re.IGNORECASE,
 )
 _START_REQUEST_PREFIX = re.compile(

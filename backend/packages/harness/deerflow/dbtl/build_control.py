@@ -587,6 +587,7 @@ def paused_build_recovery_request(
     previous: Mapping[str, Any],
     cycle_revision: int,
     requested_action: str = "",
+    changes_requested: bool = False,
 ) -> BuildControlRequest:
     """Open a fresh control after a prior Hold released the conversation.
 
@@ -597,10 +598,16 @@ def paused_build_recovery_request(
     requested = _text(requested_action, limit=40).lower()
     recommended = "replan" if requested in {"replan", "restart"} else "retry"
     previous_id = _text(previous.get("id"), limit=120) or _text(previous.get("request_id"), limit=120)
+    question = "This Build has requested changes. What should happen next?" if changes_requested else "This Build was paused. What should happen next?"
+    rationale = (
+        "The review and its requested changes remain recorded. Choose a new governed action; nothing starts from these words alone."
+        if changes_requested
+        else "The earlier Hold remains recorded. Choose a new governed action; nothing starts from these words alone."
+    )
     return BuildControlRequest(
         kind=BuildControlKind.STEP_FAILURE,
-        question="This Build was paused. What should happen next?",
-        rationale="The earlier Hold remains recorded. Choose a new governed action; nothing starts from these words alone.",
+        question=question,
+        rationale=rationale,
         error_code="paused_build_reopened",
         cycle_id=_text(previous.get("cycle_id"), limit=160),
         stage_attempt_id=_text(previous.get("stage_attempt_id"), limit=160),

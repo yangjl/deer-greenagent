@@ -1324,6 +1324,10 @@ dbtl:
   # validity assessment; what is gained is that an exploratory pilot no longer
   # fails a predictive contract it never claimed to satisfy.
   conditional_test: false
+  # Permit a human to continue Build or Test from a hash-bound red-flag dossier
+  # without recording approval. Invalidated evidence remains ineligible for a
+  # scientific candidate, and every retry still requires a chat control.
+  degraded_evidence_continuation: false
   progressive_gate: false
   # One-shot model that assesses the remaining work as routine, standard, or
   # high_stakes after a Design meeting produces bound evidence. null, provider

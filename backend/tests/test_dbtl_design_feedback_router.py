@@ -46,6 +46,93 @@ EVIDENCE_HASH = "c" * 64
 DECK_URI = "/mnt/user-data/outputs/dbtl/cycle/design/design-slides-rev1-aaaaaa.html"
 
 
+def test_core_evidence_wins_over_a_supplemental_exception_dossier() -> None:
+    artifacts = [
+        {"artifact_type": "evidence_exception", "id": "dossier"},
+        {"artifact_type": "build_package", "id": "core"},
+    ]
+
+    assert dbtl_cycles._reviewable_attempt_artifacts("build", artifacts) == [artifacts[1]]
+
+
+def test_exception_dossier_is_reviewable_when_no_core_evidence_exists() -> None:
+    dossier = {"artifact_type": "evidence_exception", "id": "dossier"}
+
+    assert dbtl_cycles._reviewable_attempt_artifacts("test", [dossier]) == [dossier]
+
+
+def test_transition_gate_preserves_the_server_owned_evidence_exception() -> None:
+    evidence_exception = {
+        "version": 1,
+        "stage": "test",
+        "content_hash": "d" * 64,
+        "recovery_options": ["retry_with_guidance", "learn_from_invalidated_evidence"],
+    }
+
+    gate = dbtl_cycles._surface_transition_gate(
+        {
+            "decision_request": {
+                "transition_gate": {
+                    "stage": "test",
+                    "assessment": {
+                        "difficulty": "exception",
+                        "rationale": "The clean evidence contract could not be established.",
+                    },
+                    "routes": [],
+                    "evidence_exception": evidence_exception,
+                }
+            }
+        }
+    )
+
+    assert gate is not None
+    assert gate["evidence_exception"] == evidence_exception
+
+
+def test_handoff_marker_reports_exception_advance() -> None:
+    cycle = {
+        "stages": [
+            {"stage": "build", "status": "approved"},
+            {"stage": "test", "status": "advanced_with_exception"},
+        ]
+    }
+
+    assert dbtl_cycles._stage_advanced_with_exception(cycle, "test") is True
+    assert dbtl_cycles._stage_advanced_with_exception(cycle, "build") is False
+
+
+def test_downstream_learn_deck_reviews_its_own_evidence_normally() -> None:
+    dossier = {"condition": "untrusted", "content_hash": "d" * 64}
+
+    assert dbtl_cycles._evidence_exception_review_actions(
+        stage="test",
+        stage_status="in_progress",
+        evidence_exception=dossier,
+        enabled=True,
+        route_slugs={"learn_from_invalidated_evidence"},
+    ) == ["retry_with_guidance", "continue_with_red_flag"]
+    assert (
+        dbtl_cycles._evidence_exception_review_actions(
+            stage="test",
+            stage_status="awaiting_review",
+            evidence_exception=dossier,
+            enabled=True,
+            route_slugs={"advance_to_learn", "repeat_test", "close_cycle"},
+        )
+        is None
+    )
+    assert (
+        dbtl_cycles._evidence_exception_review_actions(
+            stage="learn",
+            stage_status="in_progress",
+            evidence_exception=dossier,
+            enabled=True,
+            route_slugs=set(),
+        )
+        is None
+    )
+
+
 @pytest.fixture(autouse=True)
 def _close_test_engine():
     yield

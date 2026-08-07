@@ -63,3 +63,15 @@ def build_workflow_steps_enabled() -> bool:
         logger.warning("Could not read the DBTL Build workflow rule; requiring a complete workflow chain.", exc_info=True)
         return True
     return bool(getattr(getattr(app_config, "dbtl", None), "build_workflow_steps", False))
+
+
+def degraded_evidence_continuation_enabled() -> bool:
+    """Whether a human may continue a red-flagged Build or Test exception."""
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        app_config = get_app_config()
+    except Exception:  # noqa: BLE001 - an unreadable switch keeps hard refusal
+        logger.warning("Could not read the degraded-evidence rule; keeping exception continuation disabled.", exc_info=True)
+        return False
+    return bool(getattr(getattr(app_config, "dbtl", None), "degraded_evidence_continuation", False))

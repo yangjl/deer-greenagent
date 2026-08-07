@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
 
@@ -12,7 +13,10 @@ from sqlalchemy import func, select
 from deerflow.dbtl.build_execution import parse_rerun_spec
 from deerflow.dbtl.cycle_state import StageStatus
 from deerflow.dbtl.reconciliation import dataset_fingerprint
-from deerflow.dbtl.reconciliation_policy import reconciliation_required
+from deerflow.dbtl.reconciliation_policy import (
+    degraded_evidence_continuation_enabled,
+    reconciliation_required,
+)
 from deerflow.dbtl.stage_routes import (
     UNRECONCILED_REASON,
     RouteContext,
@@ -33,6 +37,7 @@ from deerflow.dbtl.validity import (
     validate_recommendation,
 )
 from deerflow.persistence.dbtl.model import (
+    DbtlArtifactRow,
     DbtlBuildLineageRow,
     DbtlDatasetRow,
     DbtlReviewRow,
@@ -127,6 +132,8 @@ class BuildTestOpsMixin:
             "id": row.id,
             "test_stage_attempt_id": row.test_stage_attempt_id,
             "build_lineage_id": row.build_lineage_id,
+            "evidence_exception_artifact_id": row.evidence_exception_artifact_id,
+            "evidence_exception_hash": row.evidence_exception_hash,
             "assessment_revision": row.assessment_revision,
             "validity_pack_key": row.validity_pack_key,
             "headline_metrics": list(row.headline_metrics or []),
@@ -369,6 +376,7 @@ class BuildTestOpsMixin:
         reviewer_project_role: str,
         expected_db_revision: int,
         idempotency_key: str,
+        review_provenance: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Compute, record, and route one human Test assessment."""
         from deerflow.persistence.dbtl.cycles import DbtlWorkflowRefused
@@ -393,6 +401,7 @@ class BuildTestOpsMixin:
             checks=parsed_checks,
         )
         route = validate_recommendation(evaluation, recommendation)
+        provenance = dict(review_provenance or {})
         request_digest = _sha256(
             {
                 "metrics": [item.as_dict() for item in parsed_metrics],
@@ -400,6 +409,7 @@ class BuildTestOpsMixin:
                 "recommendation": route.value,
                 "limitations": limitations,
                 "rationale": rationale.strip(),
+                "review_provenance": provenance,
             }
         )
 
@@ -450,15 +460,43 @@ class BuildTestOpsMixin:
             # A review meeting annotates the validity pack; it never replaces
             # it.  Bind the human-owned outcome to Test's core evidence even
             # when a newer ``test_review_meeting`` artifact sits beside it.
-            evidence = await self._latest_reviewable_artifact(
-                session,
-                test.id,
-                "test",
+            evidence = await session.scalar(
+                select(DbtlArtifactRow)
+                .where(
+                    DbtlArtifactRow.stage_attempt_id == test.id,
+                    DbtlArtifactRow.artifact_type.in_({"validity_report", "test_report"}),
+                )
+                .order_by(
+                    DbtlArtifactRow.revision.desc(),
+                    DbtlArtifactRow.created_at.desc(),
+                )
+                .limit(1)
             )
+            if evidence is None:
+                evidence = await self._latest_reviewable_artifact(
+                    session,
+                    test.id,
+                    "test",
+                )
             if evidence is None:
                 raise DbtlWorkflowRefused("Test has no evidence artifact to assess.")
             lineage = await self._latest_build_lineage(session, cycle_id)
-            if lineage is None:
+            dossier = await session.scalar(
+                select(DbtlArtifactRow)
+                .where(
+                    DbtlArtifactRow.stage_attempt_id == test.id,
+                    DbtlArtifactRow.artifact_type == "evidence_exception",
+                )
+                .order_by(
+                    DbtlArtifactRow.revision.desc(),
+                    DbtlArtifactRow.created_at.desc(),
+                )
+                .limit(1)
+            )
+            exception_evidence = dossier
+            if exception_evidence and not degraded_evidence_continuation_enabled():
+                raise DbtlWorkflowRefused("Degraded-evidence continuation is disabled.")
+            if lineage is None and (not exception_evidence or evaluation.outcome is not ValidityOutcome.INVALIDATED):
                 raise DbtlWorkflowRefused("Test validity cannot be assessed without Build lineage.")
 
             # Phase 0 makes the stage graph the route authority. The legacy
@@ -492,12 +530,18 @@ class BuildTestOpsMixin:
             test.stage_spec_key = resolve_stage_spec("test").spec_key
 
             highest = await session.scalar(select(func.max(DbtlValidityAssessmentRow.assessment_revision)).where(DbtlValidityAssessmentRow.test_stage_attempt_id == test.id))
+            assessment_limitations = list(dict.fromkeys(item.strip() for item in limitations if item.strip()))
+            if exception_evidence is not None:
+                effect = "invalidates scientific support" if evaluation.outcome is ValidityOutcome.INVALIDATED else "limits the scope of any supported claim"
+                assessment_limitations.append(f"Evidence exception {exception_evidence.content_hash} {effect}.")
             assessment = DbtlValidityAssessmentRow(
                 id=f"validity-{uuid4()}",
                 project_id=project_id,
                 cycle_id=cycle_id,
                 test_stage_attempt_id=test.id,
-                build_lineage_id=lineage.id,
+                build_lineage_id=(lineage.id if lineage is not None else None),
+                evidence_exception_artifact_id=(exception_evidence.id if exception_evidence else None),
+                evidence_exception_hash=(exception_evidence.content_hash if exception_evidence else None),
                 assessment_revision=int(highest or 0) + 1,
                 validity_pack_key=evaluation.validity_pack_key,
                 headline_metrics=[item.as_dict() for item in parsed_metrics],
@@ -505,7 +549,7 @@ class BuildTestOpsMixin:
                 outcome=evaluation.outcome.value,
                 recommendation=route.value,
                 reason_codes=list(evaluation.reason_codes),
-                limitations=list(dict.fromkeys(item.strip() for item in limitations if item.strip())),
+                limitations=list(dict.fromkeys(assessment_limitations)),
                 rationale=rationale.strip(),
                 reviewer_user_id=reviewer_user_id,
                 reviewer_project_role=reviewer_project_role,
@@ -533,6 +577,14 @@ class BuildTestOpsMixin:
                     reviewer_user_id=reviewer_user_id,
                     reviewer_project_role=reviewer_project_role,
                     authorization_reference=(f"manual-validity:{project_id}:{reviewer_user_id}"),
+                    input_source=str(provenance.get("input_source") or "test_chat"),
+                    feedback_surface_id=provenance.get("feedback_surface_id"),
+                    deck_content_hash=provenance.get("deck_content_hash"),
+                    deck_schema_version=provenance.get("deck_schema_version"),
+                    selected_action=provenance.get("selected_action"),
+                    human_comment=provenance.get("human_comment"),
+                    rationale_projection=provenance.get("rationale_projection"),
+                    rationale_source=provenance.get("rationale_source"),
                 )
             )
             await self._append_stage_transition(
@@ -543,6 +595,10 @@ class BuildTestOpsMixin:
                 decided_by=reviewer_user_id,
                 stage_attempt=test,
                 evidence_hash=evidence.content_hash,
+                decision_surface_id=provenance.get("feedback_surface_id"),
+                assessed_difficulty=("exception" if exception_evidence else None),
+                assessment_rationale=(rationale.strip() if exception_evidence else None),
+                offered_routes=([item.value for item in evaluation.allowed_recommendations] if exception_evidence else None),
             )
             await self._record_event(
                 session,
@@ -602,6 +658,7 @@ class BuildTestOpsMixin:
         )
         route_slug = {
             WorkflowRecommendation.ADVANCE_TO_LEARN: RouteSlug.ADVANCE,
+            WorkflowRecommendation.LEARN_FROM_INVALIDATED_EVIDENCE: RouteSlug.LEARN_FROM_INVALIDATED_EVIDENCE,
             WorkflowRecommendation.REPEAT_TEST: RouteSlug.REVISE_HERE,
             WorkflowRecommendation.RETURN_TO_BUILD: RouteSlug.RETURN_TO_BUILD,
             WorkflowRecommendation.RETURN_TO_DESIGN: RouteSlug.RETURN_TO_DESIGN,
@@ -625,6 +682,8 @@ class BuildTestOpsMixin:
     ) -> str:
         if route is WorkflowRecommendation.ADVANCE_TO_LEARN:
             return "approve"
+        if route is WorkflowRecommendation.LEARN_FROM_INVALIDATED_EVIDENCE:
+            return "advanced_with_exception"
         if route is WorkflowRecommendation.CLOSE_CYCLE:
             return "approve" if outcome in {ValidityOutcome.SUPPORTED, ValidityOutcome.NOT_SUPPORTED} else "reject"
         return "request_changes"
@@ -638,6 +697,13 @@ class BuildTestOpsMixin:
     ) -> None:
         if route is WorkflowRecommendation.ADVANCE_TO_LEARN:
             attempts["test"].status = StageStatus.APPROVED.value
+            attempts["learn"].status = StageStatus.IN_PROGRESS.value
+            cycle.state = "learn"
+            return
+        if route is WorkflowRecommendation.LEARN_FROM_INVALIDATED_EVIDENCE:
+            if outcome is not ValidityOutcome.INVALIDATED:
+                raise AssertionError("Only invalidated Test evidence may take the exception Learn route.")
+            attempts["test"].status = StageStatus.ADVANCED_WITH_EXCEPTION.value
             attempts["learn"].status = StageStatus.IN_PROGRESS.value
             cycle.state = "learn"
             return

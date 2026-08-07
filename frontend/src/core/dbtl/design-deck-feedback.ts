@@ -48,6 +48,8 @@ export const DECK_ACTION_KINDS = [
   "advance",
   "park",
   "convene_review_meeting",
+  "retry_with_guidance",
+  "continue_with_red_flag",
   "choose_route",
   "recommend_promotion",
   "close_without_candidate",

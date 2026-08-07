@@ -71,6 +71,7 @@ class StageStatus(StrEnum):
     AWAITING_REVIEW = "awaiting_review"
     CHANGES_REQUESTED = "changes_requested"
     APPROVED = "approved"
+    ADVANCED_WITH_EXCEPTION = "advanced_with_exception"
     REJECTED = "rejected"
     SKIPPED = "skipped"
 
@@ -104,6 +105,7 @@ class ReviewDecision(StrEnum):
     """The three verdicts a reviewer may return, each requiring a rationale."""
 
     APPROVE = "approve"
+    ADVANCE_WITH_EXCEPTION = "advanced_with_exception"
     REQUEST_CHANGES = "request_changes"
     REJECT = "reject"
 
@@ -115,6 +117,7 @@ _REVIEWABLE_STATUSES: frozenset[StageStatus] = frozenset({StageStatus.AWAITING_R
 _REVIEW_RESULT: Mapping[ReviewDecision, StageStatus] = MappingProxyType(
     {
         ReviewDecision.APPROVE: StageStatus.APPROVED,
+        ReviewDecision.ADVANCE_WITH_EXCEPTION: StageStatus.ADVANCED_WITH_EXCEPTION,
         ReviewDecision.REQUEST_CHANGES: StageStatus.CHANGES_REQUESTED,
         ReviewDecision.REJECT: StageStatus.REJECTED,
     }
@@ -251,6 +254,15 @@ def _settled(statuses: Mapping[str, StageStatus], stages: tuple[str, ...]) -> bo
     return all(statuses.get(stage) is StageStatus.APPROVED or (stage in _SKIPPABLE_STAGES and statuses.get(stage) is StageStatus.SKIPPED) for stage in stages)
 
 
+def _settled_for_target(statuses: Mapping[str, StageStatus], stages: tuple[str, ...], target: str) -> bool:
+    """Allow an exception only on the exact Build→Test or Test→Learn edge."""
+    exception_source = {"test": "build", "learn": "test"}.get(target)
+    return all(
+        statuses.get(stage) is StageStatus.APPROVED or (stage in _SKIPPABLE_STAGES and statuses.get(stage) is StageStatus.SKIPPED) or (stage == exception_source and statuses.get(stage) is StageStatus.ADVANCED_WITH_EXCEPTION)
+        for stage in stages
+    )
+
+
 def can_enter_stage(
     stage: str,
     current_state: str,
@@ -270,7 +282,7 @@ def can_enter_stage(
         return False
     if statuses.get(stage) is StageStatus.SKIPPED:
         return False
-    if not _settled(statuses, stage_prerequisites):
+    if not _settled_for_target(statuses, stage_prerequisites, stage):
         return False
     if current_state in entry_states[stage]:
         return True
@@ -292,7 +304,7 @@ def next_cycle_state(
     if move is None:
         raise TransitionRefused(f"No forward transition exists from state {current_state!r}.")
     target, required = move
-    if not _settled(statuses, required):
+    if not _settled_for_target(statuses, required, target):
         missing = [stage for stage in required if statuses.get(stage) is not StageStatus.APPROVED]
         raise TransitionRefused(f"Cannot advance to {target!r}: awaiting approval of {', '.join(missing)}.")
     if target in _SKIPPABLE_STAGES and statuses.get(target) is StageStatus.SKIPPED:
@@ -336,6 +348,8 @@ def apply_review(
         raise TransitionRefused(f"Stage {stage!r} is {current} and is not awaiting review.")
     if build_disposition is not None and (stage != "build" or decision is not ReviewDecision.APPROVE):
         raise TransitionRefused(f"A Build disposition applies only to an approved Build, not to {decision.value!r} on {stage!r}.")
+    if decision is ReviewDecision.ADVANCE_WITH_EXCEPTION and stage not in {"build", "test"}:
+        raise TransitionRefused("Only Build or Test may advance with an evidence exception.")
 
     prerequisites, _entry_states, _forward = _tables(reconciliation_required)
     updated = dict(statuses)
@@ -349,9 +363,20 @@ def apply_review(
         updated["learn"] = StageStatus.IN_PROGRESS
         return updated
 
-    if decision is ReviewDecision.APPROVE:
+    if decision in {ReviewDecision.APPROVE, ReviewDecision.ADVANCE_WITH_EXCEPTION}:
         successor = _successor_stage(stage, reconciliation_required=reconciliation_required)
-        if successor is not None and _approved(updated, prerequisites[successor]) and updated[successor] is StageStatus.LOCKED:
+        prerequisites_ready = False
+        if successor is not None:
+            prerequisites_ready = (
+                _approved(updated, prerequisites[successor])
+                if decision is ReviewDecision.APPROVE
+                else _settled_for_target(
+                    updated,
+                    prerequisites[successor],
+                    successor,
+                )
+            )
+        if successor is not None and prerequisites_ready and updated[successor] is StageStatus.LOCKED:
             updated[successor] = StageStatus.IN_PROGRESS
     return updated
 

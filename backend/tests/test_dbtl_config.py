@@ -12,6 +12,7 @@ def test_dbtl_defaults_to_audit_only() -> None:
     assert config.mode == "audit_only"
     assert config.mutations_enabled is False
     assert config.graph_execution_enabled is False
+    assert config.degraded_evidence_continuation is False
 
 
 @pytest.mark.parametrize("mode", ["disabled", "audit_only", "manual", "graph_enabled"])

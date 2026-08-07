@@ -6,7 +6,7 @@ import uuid
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
@@ -376,7 +376,7 @@ async def get_project_file(
         raise HTTPException(status_code=503, detail="Project folder is unavailable")
 
     actual_path, virtual_path = await asyncio.to_thread(resolve_project_file, root, path)
-    kind, mime_type, payload = await asyncio.to_thread(
+    kind, mime_type = await asyncio.to_thread(
         _read_artifact_payload,
         actual_path,
         virtual_path,
@@ -395,6 +395,4 @@ async def get_project_file(
             media_type=mime_type,
             headers={"Content-Disposition": _build_content_disposition("inline", actual_path.name)},
         )
-    if kind == "text":
-        return PlainTextResponse(content=payload, media_type=mime_type)
     raise AssertionError(f"Unhandled project file response kind: {kind!r}")

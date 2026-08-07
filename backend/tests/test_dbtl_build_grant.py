@@ -97,6 +97,11 @@ class TestSourceMayNotNameAPathOutsideItsGrant:
 
         assert scan_foreign_paths(source, allowed_roots=("/mnt/user-data",)) == ()
 
+    def test_a_single_segment_prefix_used_as_a_negative_sentinel_is_not_reported(self) -> None:
+        source = "for bad in ('/mnt/', '/Users/'): assert bad not in rendered\n"
+
+        assert scan_foreign_paths(source, allowed_roots=("/mnt/user-data",)) == ()
+
     def test_a_hardcoded_temp_output_is_refused(self) -> None:
         source = 'REPORT = "/tmp/build-report.json"\n'
 

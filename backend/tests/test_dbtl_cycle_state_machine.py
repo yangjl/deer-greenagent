@@ -180,6 +180,32 @@ def test_approve_moves_a_stage_from_awaiting_review_to_approved() -> None:
     assert statuses["design"] is StageStatus.AWAITING_REVIEW
 
 
+def test_build_exception_opens_only_test_without_becoming_approval() -> None:
+    statuses = _statuses(
+        design=StageStatus.APPROVED,
+        reconciliation=StageStatus.APPROVED,
+        build=StageStatus.AWAITING_REVIEW,
+    )
+
+    updated = apply_review(statuses, "build", ReviewDecision.ADVANCE_WITH_EXCEPTION)
+
+    assert updated["build"] is StageStatus.ADVANCED_WITH_EXCEPTION
+    assert updated["build"] is not StageStatus.APPROVED
+    assert updated["test"] is StageStatus.IN_PROGRESS
+    assert updated["learn"] is StageStatus.LOCKED
+    assert can_enter_stage("test", "test", updated)
+    assert not can_enter_stage("learn", "test", updated)
+
+
+def test_only_build_and_test_accept_an_exception_transition() -> None:
+    with pytest.raises(TransitionRefused, match="Build or Test"):
+        apply_review(
+            _statuses(design=StageStatus.AWAITING_REVIEW),
+            "design",
+            ReviewDecision.ADVANCE_WITH_EXCEPTION,
+        )
+
+
 def test_request_changes_returns_the_stage_to_work() -> None:
     updated = apply_review(_statuses(design=StageStatus.AWAITING_REVIEW), "design", ReviewDecision.REQUEST_CHANGES)
 

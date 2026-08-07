@@ -131,6 +131,10 @@ const STATUS_MARK: Record<string, { icon: typeof Lock; tone: string }> = {
     icon: AlertTriangle,
     tone: "text-amber-700 dark:text-amber-400",
   },
+  advanced_with_exception: {
+    icon: AlertTriangle,
+    tone: "text-destructive",
+  },
   approved: {
     icon: CheckCircle2,
     tone: "text-emerald-700 dark:text-emerald-400",

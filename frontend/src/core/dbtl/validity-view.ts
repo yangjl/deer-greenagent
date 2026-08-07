@@ -11,6 +11,7 @@ export type ValidityTone = "positive" | "neutral" | "pending" | "critical";
 export type CheckStatus = "passed" | "failed" | "missing" | "not_applicable";
 export type WorkflowRecommendation =
   | "advance_to_learn"
+  | "learn_from_invalidated_evidence"
   | "repeat_test"
   | "return_to_build"
   | "return_to_reconciliation"
@@ -46,6 +47,7 @@ export const CHECK_STATUS_LABELS: Record<CheckStatus, string> = {
 
 export const RECOMMENDATION_LABELS: Record<WorkflowRecommendation, string> = {
   advance_to_learn: "Advance to Learn",
+  learn_from_invalidated_evidence: "Learn from invalid evidence",
   repeat_test: "Repeat Test",
   return_to_build: "Return to Build",
   return_to_reconciliation: "Return to Data reconciliation",
@@ -232,6 +234,15 @@ export function recommendationOptions(
   const ids: WorkflowRecommendation[] =
     result.outcome === "supported" || result.outcome === "not_supported"
       ? ["advance_to_learn", "repeat_test", "close_cycle"]
+      : result.outcome === "invalidated"
+        ? [
+            "learn_from_invalidated_evidence",
+            "repeat_test",
+            "return_to_build",
+            "return_to_reconciliation",
+            "return_to_design",
+            "close_cycle",
+          ]
       : [
           "repeat_test",
           "return_to_build",

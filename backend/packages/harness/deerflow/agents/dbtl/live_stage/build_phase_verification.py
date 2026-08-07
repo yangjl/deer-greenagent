@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -15,6 +15,35 @@ VERIFY_STDOUT = "logs/server-verification.stdout.log"
 VERIFY_STDERR = "logs/server-verification.stderr.log"
 VERIFY_STATUS = ".server-verification-exit-status"
 MAX_VERIFY_LOG_BYTES = 5 * 1024 * 1024
+
+
+def resolve_issued_input_tokens(
+    manifest: BuildPhaseManifest,
+    *,
+    issued_inputs: tuple[str, ...],
+) -> BuildPhaseManifest:
+    """Resolve exact ``DBTL_INPUT_n`` declarations against the server grant.
+
+    Workers read those environment variables at runtime and sometimes report
+    the variable name instead of its value. The server already owns the
+    one-based mapping, so accepting a known token is equivalent to accepting
+    its issued path; unknown tokens remain untouched and fail closed below.
+    """
+
+    def resolve(value: str) -> str:
+        if not value.startswith("DBTL_INPUT_"):
+            return value
+        position = value.removeprefix("DBTL_INPUT_")
+        if not position.isdigit():
+            return value
+        index = int(position) - 1
+        return issued_inputs[index] if 0 <= index < len(issued_inputs) else value
+
+    return replace(
+        manifest,
+        declared_inputs=tuple(resolve(value) for value in manifest.declared_inputs),
+        execution_inputs=tuple(resolve(value) for value in manifest.execution_inputs),
+    )
 
 
 def _quoted_path(value: str) -> str:

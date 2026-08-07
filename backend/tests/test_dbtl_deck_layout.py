@@ -195,7 +195,7 @@ class TestNotesReachTheRecordThroughTheDecision:
     def test_a_restored_comment_clears_the_boxes_so_notes_are_not_folded_twice(self) -> None:
         deck = _deck()
         assert "clearNotes()" in deck
-        assert "if (data.comment) { clearNotes(); }" in deck
+        assert "if (data.comment && (!data.slideComments || typeof data.slideComments !== 'object')) { clearNotes(); }" in deck
 
 
 class TestEveryOpenQuestionCanBeAnswered:
