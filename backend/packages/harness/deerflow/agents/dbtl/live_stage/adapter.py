@@ -1904,6 +1904,13 @@ def _execute_server_build_command(
         "JUPYTER_DATA_DIR": f"{writable_workspace}/.jupyter/data",
         "JUPYTER_RUNTIME_DIR": f"{writable_workspace}/.jupyter/runtime",
         "IPYTHONDIR": f"{writable_workspace}/.ipython",
+        # Matplotlib is the same class as the Jupyter dirs above: importing
+        # pyplot writes a font cache, and the home directory is outside the
+        # phase grant. Left unset it warns on every figure and silently caches
+        # in /tmp — an unmanaged write outside the workspace that is rebuilt on
+        # each run. Keeping it phase-local makes the write governed and the
+        # cache reusable within the phase.
+        "MPLCONFIGDIR": f"{writable_workspace}/.matplotlib",
     }
     unwrapped, _ = unwrap_sandbox(sandbox_state)
     sandbox_id = unwrapped.get("sandbox_id") if isinstance(unwrapped, dict) else None

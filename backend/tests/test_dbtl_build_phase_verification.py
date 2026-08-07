@@ -401,6 +401,10 @@ def test_build_verifier_keeps_jupyter_state_inside_the_phase_grant(
     assert env["JUPYTER_DATA_DIR"] == f"{workspace}/.jupyter/data"
     assert env["JUPYTER_RUNTIME_DIR"] == f"{workspace}/.jupyter/runtime"
     assert env["IPYTHONDIR"] == f"{workspace}/.ipython"
+    # Same class as the Jupyter dirs: a pilot Build that produced a figure
+    # warned that the home directory was unwritable and cached to /tmp — an
+    # unmanaged write outside the phase grant, rebuilt on every run.
+    assert env["MPLCONFIGDIR"] == f"{workspace}/.matplotlib"
 
 
 class _Result:
