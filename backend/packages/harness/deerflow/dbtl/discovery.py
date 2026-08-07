@@ -278,7 +278,8 @@ def normalize_model_discovery_package(
         return None
 
     objective = _clean_str(raw.get("objective"), limit=_MAX_TEXT_LEN)
-    if not objective:
+    assistant_response = _clean_str(raw.get("assistant_response"), limit=_MAX_TEXT_LEN)
+    if not objective or not assistant_response:
         return None
 
     outputs = [item for item in _clean_list(raw.get("intended_outputs"), limit_items=_MAX_INTENDED_OUTPUTS) if not item.lower().startswith(_GENERIC_OUTPUT_PREFIX)]
@@ -304,6 +305,7 @@ def normalize_model_discovery_package(
 
     prior = dict(previous or {})
     return {
+        "assistant_response": assistant_response,
         "proposed_title": title,
         "objective": objective,
         "rationale": rationale or str(prior.get("rationale") or "").strip(),
@@ -372,25 +374,6 @@ def discovery_card_request(draft: DiscoveryDraft, *, proposal_hash: str) -> dict
     if draft.revision < 1:
         raise ValueError("a discovery card must bind a positive revision")
 
-    objective = draft.objective.value.strip() if draft.objective is not None else ""
-    unresolved = [item for item in draft.open_questions if item]
-    context_lines = [DISCOVERY_NO_RECORD_NOTICE, f"Objective · current conversation: {objective or 'Still open'}"]
-    if draft.rationale is not None and draft.rationale.value.strip():
-        context_lines.append(f"Why DBTL · suggested by DeerFlow: {draft.rationale.value.strip()}")
-    inputs = [item.value.strip() for item in draft.known_inputs if item.value.strip()]
-    if inputs:
-        context_lines.append("Known inputs · current conversation: " + "; ".join(inputs[:6]))
-    outputs = [item.value.strip() for item in draft.intended_outputs if item.value.strip()]
-    if outputs:
-        context_lines.append("Intended outputs · suggested by DeerFlow: " + "; ".join(outputs[:6]))
-    criteria = [item.value.strip() for item in draft.success_criteria if item.value.strip()]
-    if criteria:
-        context_lines.append("Success criteria · current conversation: " + "; ".join(criteria[:6]))
-    rejection = [item.value.strip() for item in draft.rejection_criteria if item.value.strip()]
-    if rejection:
-        context_lines.append("Rejection criteria · current conversation: " + "; ".join(rejection[:6]))
-    if unresolved:
-        context_lines.append("Still open: " + ", ".join(unresolved[:6]))
     return {
         "version": 1,
         "kind": "human_input_request",
@@ -405,7 +388,7 @@ def discovery_card_request(draft: DiscoveryDraft, *, proposal_hash: str) -> dict
         "proposal_hash": normalized_hash,
         "title": "Ready to start a DBTL cycle",
         "question": "Start a durable DBTL cycle from this proposal?",
-        "context": "\n".join(context_lines),
+        "context": DISCOVERY_NO_RECORD_NOTICE,
         "input_mode": "single_choice",
         "notice": DISCOVERY_NO_RECORD_NOTICE,
         "options": [

@@ -17,7 +17,7 @@ from deerflow.agents.middlewares.dbtl_discovery_policy_middleware import (
     DbtlDiscoveryPolicyMiddleware,
 )
 from deerflow.dbtl.branches import SupervisorContext
-from deerflow.dbtl.discovery import DiscoveryStatus, DiscoveryTrigger
+from deerflow.dbtl.discovery import DISCOVERY_NO_RECORD_NOTICE, DiscoveryStatus, DiscoveryTrigger
 from deerflow.dbtl.routing import ExplicitChoice, RouteKind, RouteSource, RoutingRequest, route_request
 from deerflow.persistence.base import Base
 from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlDiscoveryConflict, DbtlDiscoveryRepository
@@ -323,6 +323,54 @@ class _Lead:
         return {"messages": [AIMessage(content="Which population should this use?", id="answer-1")]}
 
 
+class _StructuredDiscoveryLead:
+    prose = "This is a good fit for a DBTL cycle because the holdout check makes the result reproducible. I propose fitting the named linear rule and verifying it on the held-out rows."
+
+    async def ainvoke(self, _state, config, *, context=None):
+        return {
+            "messages": [
+                AIMessage(
+                    content="",
+                    id="discovery-tool-call",
+                    tool_calls=[{"name": "view_project_file", "args": {"path": "trial.csv"}, "id": "discovery-tool-1"}],
+                ),
+                ToolMessage(content="x,y\n0,1\n1,3", tool_call_id="discovery-tool-1", id="discovery-tool-result"),
+            ],
+            "structured_response": {
+                "assistant_response": self.prose,
+                "proposed_title": "Recover y = 2x + 1",
+                "objective": "Recover the linear rule from the training rows and verify it on holdout rows.",
+                "rationale": "A fixed train/holdout boundary makes the result reproducible.",
+                "intended_outputs": ["fit.py", "holdout_metrics.json"],
+                "known_inputs": ["trial.csv"],
+                "success_criteria": ["Every holdout prediction is exact."],
+                "rejection_criteria": ["Any holdout prediction differs from the observed value."],
+                "open_questions": [],
+                "accepted_fields": ["objective", "known_inputs"],
+            },
+        }
+
+
+class _NativeKeepDiscussingLead(_Lead):
+    async def ainvoke(self, _state, config, *, context=None):
+        self.contexts.append(config["context"])
+        self.runtime_contexts.append(context)
+        return {
+            "messages": [
+                AIMessage(
+                    content="",
+                    id="keep-tool-call",
+                    tool_calls=[{"name": "view_project_file", "args": {"path": "trial.csv"}, "id": "keep-tool-1"}],
+                ),
+                ToolMessage(content="6 training rows, 2 holdout rows", tool_call_id="keep-tool-1", id="keep-tool-result"),
+                AIMessage(
+                    content="Let’s keep shaping it. Should exact holdout recovery be the acceptance threshold?",
+                    id="keep-native-reply",
+                ),
+            ]
+        }
+
+
 class _NoopStageAdapter:
     def execute(self, *, cycle_id: str | None, **_values) -> LiveStageResult:
         return LiveStageResult(stage="design", cycle_id=cycle_id, note="Stage execution is unavailable.")
@@ -505,3 +553,84 @@ async def test_ready_discovery_emits_server_card_and_start_answer_creates_cycle(
     assert store.active["status"] == "confirmed"
     assert store.active["cycle_id"] == "cycle-1"
     assert "was created" in str(third["messages"][-1].content)
+
+
+@pytest.mark.asyncio
+async def test_ready_offer_uses_native_progress_then_model_prose_then_minimal_card() -> None:
+    store = _Store()
+    discovery_lead = _StructuredDiscoveryLead()
+    graph = build_supervisor_graph(
+        lead_agent=_Lead(),
+        discovery_lead_agent=discovery_lead,
+        context=SupervisorContext(project_id="project-1", discovery_enabled=True),
+        state_schema=MessagesState,
+        stage_adapter=_NoopStageAdapter(),
+        discovery_store=store,
+    ).compile()
+
+    final = await graph.ainvoke(
+        {"messages": [HumanMessage(content="Start a DBTL cycle for trial.csv", id="human-native-order")]},
+        config={"configurable": {"thread_id": "thread-1"}, "context": {"user_id": "user-1"}},
+    )
+
+    messages = final["messages"]
+    tool_call_index = next(index for index, message in enumerate(messages) if message.id == "discovery-tool-call")
+    tool_result_index = next(index for index, message in enumerate(messages) if message.id == "discovery-tool-result")
+    prose_index = next(index for index, message in enumerate(messages) if str(message.content) == discovery_lead.prose)
+    card_index, card_message = next(
+        (index, message) for index, message in enumerate(messages) if isinstance(message, ToolMessage) and isinstance(message.artifact, dict) and message.artifact.get("human_input", {}).get("clarification_type") == "dbtl_discovery_start"
+    )
+    request = card_message.artifact["human_input"]
+
+    assert tool_call_index < tool_result_index < prose_index < card_index
+    assert request["context"] == DISCOVERY_NO_RECORD_NOTICE
+    assert "Objective" not in request["context"]
+    assert request["request_id"]
+    assert request["proposal_hash"] == "a" * 64
+    assert request["discovery_revision"] == store.active["revision"]
+
+
+@pytest.mark.asyncio
+async def test_keep_discussing_returns_native_lead_progress_and_prose() -> None:
+    store = _Store()
+    ordinary_lead = _NativeKeepDiscussingLead()
+    graph = build_supervisor_graph(
+        lead_agent=ordinary_lead,
+        discovery_lead_agent=_StructuredDiscoveryLead(),
+        context=SupervisorContext(project_id="project-1", discovery_enabled=True),
+        state_schema=MessagesState,
+        stage_adapter=_NoopStageAdapter(),
+        discovery_store=store,
+    ).compile()
+    config = {"configurable": {"thread_id": "thread-1"}, "context": {"user_id": "user-1"}}
+    offered = await graph.ainvoke(
+        {"messages": [HumanMessage(content="Start a DBTL cycle for trial.csv", id="human-keep-start")]},
+        config=config,
+    )
+    card = next(message for message in offered["messages"] if isinstance(message, ToolMessage) and isinstance(message.artifact, dict) and message.artifact.get("human_input", {}).get("clarification_type") == "dbtl_discovery_start")
+    request = card.artifact["human_input"]
+    response = HumanMessage(
+        content="keep_discussing",
+        id="human-keep-answer",
+        additional_kwargs={
+            "hide_from_ui": True,
+            "human_input_response": {
+                "version": 1,
+                "kind": "human_input_response",
+                "source": "ask_clarification",
+                "request_id": request["request_id"],
+                "response_kind": "option",
+                "option_id": "keep_discussing",
+                "value": "keep_discussing",
+            },
+        },
+    )
+
+    final = await graph.ainvoke({"messages": [*offered["messages"], response]}, config=config)
+
+    assert store.active["status"] == "gathering"
+    assert [message.id for message in final["messages"][-3:]] == ["keep-tool-call", "keep-tool-result", "keep-native-reply"]
+    assert "Keeping this discovery open" not in str(final["messages"][-1].content)
+    discovery_context = ordinary_lead.contexts[-1][DBTL_DISCOVERY_CONTEXT_KEY]
+    assert discovery_context["decision"] == "keep_discussing"
+    assert discovery_context["no_cycle_exists"] is True

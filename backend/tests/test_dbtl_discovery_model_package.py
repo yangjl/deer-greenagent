@@ -18,6 +18,7 @@ from deerflow.dbtl.discovery import (
 
 def _valid_raw(**overrides: object) -> dict:
     raw = {
+        "assistant_response": ("This is a good fit for DBTL because the held-out check makes the result reproducible. I propose recovering the line and verifying it on the named holdout data."),
         "proposed_title": "Recover y = 2x + 1",
         "objective": "Fit a linear model and recover the slope/intercept on holdout data.",
         "rationale": "Explicit Build/Test boundaries make the fit reproducible and auditable.",
@@ -36,6 +37,7 @@ def _valid_raw(**overrides: object) -> dict:
 def test_valid_model_package_preserves_concrete_decisions() -> None:
     payload = normalize_model_discovery_package(_valid_raw())
     assert payload is not None
+    assert payload["assistant_response"].startswith("This is a good fit for DBTL")
     assert payload["objective"].startswith("Fit a linear model")
     assert payload["intended_outputs"] == ["fit.py", "model.json", "holdout_metrics.json"]
     assert payload["known_inputs"] == ["train.csv", "holdout.csv"]
@@ -94,6 +96,7 @@ def test_pydantic_model_instance_is_accepted() -> None:
     from deerflow.dbtl.discovery_schema import DbtlDiscoveryPackage
 
     model = DbtlDiscoveryPackage(
+        assistant_response="DBTL will make the holdout decision explicit and reproducible.",
         proposed_title="t",
         objective="Recover the slope of a line.",
         rationale="reproducibility",

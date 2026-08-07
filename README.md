@@ -1080,8 +1080,12 @@ durable, read-only project conversation before setup. The Lead Agent may inspect
 evidence and ask focused questions, but cannot write files, delegate work, call
 side-effecting connectors, or create a cycle. Expanded history/memory retrieval
 and automatic proposal cards remain independently disabled by their discovery
-switches during rollout. A ready proposal is shown as a revision/hash-bound
-Human Input Card. Confirming it creates exactly one cycle in the backend,
+switches during rollout. A ready proposal uses the ordinary chat presentation:
+native tool progress first, the Lead's conversational proposal next, and then a
+small revision/hash-bound Human Input Card containing only the governance notice
+and choices. Choosing **Keep discussing** returns to the ordinary Lead reply
+path under the same read-only discovery fence. Confirming the card creates
+exactly one cycle in the backend,
 queues replayable receipt/Design-kickoff effects, and starts the normal Design
 preflight from the immutable discovery package; the browser never recreates
 the accepted brief or owns cycle creation.

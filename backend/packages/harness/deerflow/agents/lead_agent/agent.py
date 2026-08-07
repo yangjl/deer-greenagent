@@ -708,8 +708,8 @@ def make_lead_agent(config: RunnableConfig):
 
 def make_discovery_lead_agent(config: RunnableConfig):
     """Lead agent for the read-only DBTL discovery turn, compiled with a
-    ``response_format`` bound to the closed package schema so the model emits a
-    validated ``structured_response`` alongside its conversational reply."""
+    ``response_format`` bound to the closed package schema. The package carries
+    the conversational reply that the Supervisor renders before the card."""
     from langchain.agents.structured_output import ToolStrategy
 
     from deerflow.dbtl.discovery_schema import DbtlDiscoveryPackage

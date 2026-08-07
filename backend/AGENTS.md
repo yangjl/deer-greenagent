@@ -105,6 +105,12 @@ card may atomically create the cycle, its five initial stage rows, provenance
 event, creation receipt, and Design-kickoff outbox item. Retries reuse the same
 discovery/card identities and cycle. The Supervisor publishes a deterministic
 receipt plus the existing Design preflight immediately after the transaction.
+Before confirmation, discovery presentation follows ordinary chat: the
+structured package carries the Lead's bounded `assistant_response`, native tool
+messages remain first, that prose is reconciled as a normal assistant message,
+and the following card contains only the no-cycle notice and bound choices.
+`Keep discussing` invokes the ordinary Lead under `dbtl_discovery_context` and
+the read-only policy instead of publishing a deterministic acknowledgement.
 The accepted package and hash live in the cycle projection, and
 `LiveStageAdapter` adds the same bounded `discovery_package` block to the
 shared Design stage context before any seat-specific prompt is built. Do not

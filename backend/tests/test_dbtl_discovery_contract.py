@@ -114,7 +114,7 @@ def test_start_card_is_revision_bound_and_has_no_default_answer() -> None:
     ]
 
 
-def test_start_card_displays_every_assumption_bound_into_the_package() -> None:
+def test_start_card_keeps_bound_assumptions_out_of_the_decision_control() -> None:
     draft = _draft(
         objective=_value("Rank drought-tolerant hybrids"),
         rationale=_value("Use governed iteration", DiscoveryProvenance.MODEL_SUGGESTION),
@@ -124,13 +124,11 @@ def test_start_card_displays_every_assumption_bound_into_the_package() -> None:
         rejection_criteria=(_value("Site leakage"),),
     )
 
-    context = discovery_card_request(draft, proposal_hash="b" * 64)["context"]
+    card = discovery_card_request(draft, proposal_hash="b" * 64)
 
-    assert "2025 site trials" in context
-    assert "Reviewed hybrid ranking" in context
-    assert "Held-out correlation above 0.4" in context
-    assert "Site leakage" in context
-    assert "suggested by DeerFlow" in context
+    assert card["context"] == DISCOVERY_NO_RECORD_NOTICE
+    assert card["proposal_hash"] == "b" * 64
+    assert card["discovery_revision"] == draft.revision
 
 
 @pytest.mark.parametrize("proposal_hash", ["", "not-a-hash", "a" * 63, "g" * 64])

@@ -245,7 +245,10 @@ Breeding-workspace note:
   never overrides a new explicit start. The composer indicator and admin
   evaluation outcomes are server-derived inspection surfaces only. Starting a
   cycle remains a revision/hash-bound Human Input Card transaction owned by the
-  backend. During the release-window rollback, disabling discovery restores the
+  backend. Discovery reuses ordinary chat rendering: native Lead tool progress,
+  then model prose, then a minimal governance card. `Keep discussing` returns a
+  native Lead turn under the read-only discovery fence instead of a fixed
+  receipt. During the release-window rollback, disabling discovery restores the
   immediate setup card, not browser authority: the Supervisor creates the
   cycle idempotently, binds its id to the Design questions, and opens the
   Design preflight from the answer. Settings → DBTL readiness reports which

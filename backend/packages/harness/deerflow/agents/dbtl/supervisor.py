@@ -1645,6 +1645,30 @@ def build_supervisor_graph(
 
         latest_text = _latest_user_text(state)
         active = await discovery_store.get_active(project_id=context.project_id, thread_id=thread_id, user_id=user_id)
+
+        async def invoke_discovery_lead(agent, record: dict, *, evidence: dict[str, Any] | None = None, decision: str | None = None) -> dict:
+            discovery_context = {
+                "active": True,
+                "discovery_id": str(record["id"]),
+                "revision": int(record["revision"]),
+                "status": str(record["status"]),
+                "project_id": context.project_id,
+                "thread_id": thread_id,
+                "no_cycle_exists": True,
+                **({"decision": decision} if decision else {}),
+                **({"evidence": evidence} if evidence else {}),
+            }
+            active_context = {**raw_context, DBTL_DISCOVERY_CONTEXT_KEY: discovery_context}
+            discovery_config = dict(config)
+            discovery_config["context"] = active_context
+            configurable = dict(discovery_config.get("configurable") or {})
+            configurable["context"] = active_context
+            discovery_config["configurable"] = configurable
+            run_id = run_id_from_config(config)
+            parent_id = supervisor_activity_id(run_id) if isinstance(run_id, str) and run_id else None
+            with activity_parent_context(parent_id):
+                return await agent.ainvoke(state, config=discovery_config, context=active_context)
+
         answered = _card_answer(state, DISCOVERY_START_PREFIX)
         if answered is not None:
             request = _emitted_card_request(state, answered[0])
@@ -1757,12 +1781,12 @@ def build_supervisor_graph(
                     "messages": messages,
                 }
             if action == DiscoveryAction.KEEP_DISCUSSING.value:
-                await discovery_store.transition(
+                active = await discovery_store.transition(
                     discovery_id=str(active["id"]),
                     expected_revision=int(active["revision"]),
                     target=DiscoveryStatus.GATHERING,
                 )
-                return {"messages": [receipt_message("Keeping this discovery open. Continue in the chatbox; no cycle has been created.")]}
+                return await invoke_discovery_lead(lead_agent, active, decision=DiscoveryAction.KEEP_DISCUSSING.value)
             if action == DiscoveryAction.CONTINUE_ORDINARY.value:
                 await discovery_store.transition(
                     discovery_id=str(active["id"]),
@@ -1820,26 +1844,7 @@ def build_supervisor_graph(
                 structured_draft=structured_draft,
             )
 
-        discovery_context = {
-            "active": True,
-            "discovery_id": str(active["id"]),
-            "revision": int(active["revision"]),
-            "status": str(active["status"]),
-            "project_id": context.project_id,
-            "thread_id": thread_id,
-            "no_cycle_exists": True,
-            **({"evidence": discovery_evidence} if discovery_evidence else {}),
-        }
-        active_context = {**raw_context, DBTL_DISCOVERY_CONTEXT_KEY: discovery_context}
-        discovery_config = dict(config)
-        discovery_config["context"] = active_context
-        configurable = dict(discovery_config.get("configurable") or {})
-        configurable["context"] = active_context
-        discovery_config["configurable"] = configurable
-        run_id = run_id_from_config(config)
-        parent_id = supervisor_activity_id(run_id) if isinstance(run_id, str) and run_id else None
-        with activity_parent_context(parent_id):
-            lead_result = await (discovery_lead_agent or lead_agent).ainvoke(state, config=discovery_config, context=active_context)
+        lead_result = await invoke_discovery_lead(discovery_lead_agent or lead_agent, active, evidence=discovery_evidence)
 
         # The discovery Lead turn ran with the full conversation and (when the
         # flag is on) a ``response_format`` bound to the closed package schema.
@@ -1901,6 +1906,21 @@ def build_supervisor_graph(
                 "discovery_event_id": str(outbox_event.get("id") or ""),
             }
         )
+        proposal_text = str(structured_draft.get("assistant_response") or "").strip()
+        proposal_messages = (
+            [
+                receipt_message(
+                    proposal_text,
+                    message_id=f"{request_id}__proposal",
+                    metadata={
+                        "dbtl_discovery_event_id": str(outbox_event.get("id") or ""),
+                        "dbtl_discovery_package_hash": str(offered["package_hash"]),
+                    },
+                )
+            ]
+            if proposal_text
+            else []
+        )
         card_messages = build_human_input_messages(
             request_id=request_id,
             tool_args={
@@ -1912,7 +1932,10 @@ def build_supervisor_graph(
             request=request,
             fallback_content=f"{request['context']}\n\n{request['question']}",
         )
-        return {**lead_result, "messages": [*list(lead_result.get("messages") or []), *card_messages]}
+        return {
+            **lead_result,
+            "messages": [*list(lead_result.get("messages") or []), *proposal_messages, *card_messages],
+        }
 
     async def clarification(state: dict, config: RunnableConfig) -> dict:
         decision = decide(state)
