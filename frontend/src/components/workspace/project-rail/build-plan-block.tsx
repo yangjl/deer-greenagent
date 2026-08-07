@@ -1,5 +1,3 @@
-"use client";
-
 import {
   AlertTriangle,
   CheckCircle2,
@@ -11,10 +9,8 @@ import {
 import {
   type BuildPlanProjection,
   type BuildPlanRow,
-  buildPlanProjection,
   movingRow,
   phaseAccessibleName,
-  useStageWorkflow,
 } from "@/core/dbtl";
 import { cn } from "@/lib/utils";
 
@@ -83,7 +79,8 @@ function PhaseRow({
   );
 }
 
-export function BuildTodos({
+/** The selected cycle's read-only phased Build to-dos. */
+export function BuildPlanBlock({
   projection,
   onOpenPhase,
   sectionId,
@@ -124,40 +121,5 @@ export function BuildTodos({
         )}
       </div>
     </>
-  );
-}
-
-/**
- * The selected cycle's phased Build to-dos, rendered from the same server view
- * the transcript's workflow block uses.
- *
- * **Read-only.** No retry, no hold, no answer, no confirm — selecting a phase
- * navigates to the conversation that ran it. That is the whole interaction, and
- * it is what keeps mutation in the chat card where the decision becomes durable.
- */
-export function BuildPlanBlock({
-  projectId,
-  cycleId,
-  live,
-  onOpenPhase,
-  sectionId,
-}: {
-  projectId: string | null | undefined;
-  cycleId: string | null | undefined;
-  live: boolean;
-  onOpenPhase: () => void;
-  sectionId?: string;
-}) {
-  const workflow = useStageWorkflow(projectId, cycleId, "build", { live });
-  const projection = buildPlanProjection(workflow.data);
-
-  if (!cycleId || workflow.isPending || workflow.error) return null;
-
-  return (
-    <BuildTodos
-      projection={projection}
-      onOpenPhase={onOpenPhase}
-      sectionId={sectionId}
-    />
   );
 }

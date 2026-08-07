@@ -1079,7 +1079,8 @@ DBTL modes:
 With `conversational_discovery: true`, an explicit new-cycle request enters a
 durable, read-only project conversation before setup. The Lead Agent may inspect
 evidence and ask focused questions, but cannot write files, delegate work, call
-side-effecting connectors, or create a cycle. Expanded history/memory retrieval
+side-effecting connectors, or create a cycle; its structured proposal stays in
+that same closed read-only allowlist. Expanded history/memory retrieval
 and automatic proposal cards remain independently disabled by their discovery
 switches during rollout. A ready proposal uses the ordinary chat presentation:
 native tool progress first, the Lead's conversational proposal next, and then a

@@ -280,17 +280,10 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
   // rather than deleted to make room. The full list stays in the stage sheet
   // that already renders it.
   const blockers = openWorkItems(detail.data);
-  // Only reconciliation rows name the stage they belong to, so only they can
-  // ride as a badge on it. The rest keep a collapsed line beneath the Build
-  // plan rather than being dropped: a work item nobody can see is a signal
-  // traded away, which is the one thing replacing this section must not do.
   const reconciliationBlockers = blockers.filter(
     (item) => item.payload?.kind === "reconciliation",
   ).length;
   const unattributedBlockers = blockers.length - reconciliationBlockers;
-  // The same query the block below reads, shared through the cache rather than
-  // fetched twice — a header count derived separately is a second source of
-  // truth about the same plan.
   const buildWorkflow = useStageWorkflow(project?.id, selected?.id, "build", {
     live: Boolean(selected && isLive(selected)),
   });
@@ -605,9 +598,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
       )}
 
       <BuildPlanBlock
-        projectId={project?.id}
-        cycleId={selected?.id ?? null}
-        live={Boolean(selected && isLive(selected))}
+        projection={buildProjection}
         onOpenPhase={() => setOpenStage("build")}
         sectionId={RAIL_SECTION_IDS.buildPlan}
       />

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "@rstest/core";
 import { cleanup, render, screen } from "@testing-library/react";
 
-import { BuildTodos } from "@/components/workspace/project-rail/build-plan-block";
+import { BuildPlanBlock } from "@/components/workspace/project-rail/build-plan-block";
 import type { BuildPlanProjection } from "@/core/dbtl";
 
 afterEach(cleanup);
@@ -17,7 +17,7 @@ const empty: BuildPlanProjection = {
 describe("Build plan to-dos in the project rail", () => {
   it("stays hidden until a phased plan has to-dos", () => {
     const { container } = render(
-      <BuildTodos projection={empty} onOpenPhase={() => undefined} />,
+      <BuildPlanBlock projection={empty} onOpenPhase={() => undefined} />,
     );
 
     expect(container.textContent).toBe("");
@@ -25,7 +25,7 @@ describe("Build plan to-dos in the project rail", () => {
 
   it("uses the fixed To-dos title and keeps phased progress", () => {
     render(
-      <BuildTodos
+      <BuildPlanBlock
         projection={{
           ...empty,
           progress: "0 of 1",

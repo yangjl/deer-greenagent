@@ -118,10 +118,7 @@ def test_schema_tool_name_matches_policy_constant() -> None:
 
 def test_discovery_middleware_allows_the_package_tool() -> None:
     from deerflow.agents.middlewares.dbtl_discovery_policy_middleware import (
-        _DISCOVERY_ALLOWED_TOOL_NAMES,
         DISCOVERY_READ_ONLY_TOOLS,
     )
 
-    assert DISCOVERY_PACKAGE_TOOL_NAME in _DISCOVERY_ALLOWED_TOOL_NAMES
-    # It is deliberately NOT an ordinary read-only inspection tool.
-    assert DISCOVERY_PACKAGE_TOOL_NAME not in DISCOVERY_READ_ONLY_TOOLS
+    assert DISCOVERY_PACKAGE_TOOL_NAME in DISCOVERY_READ_ONLY_TOOLS

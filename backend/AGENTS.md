@@ -93,8 +93,9 @@ lifecycle transitions. With `dbtl.conversational_discovery=true` and
 `mode=graph_enabled`, explicit new-cycle requests route to the Supervisor's
 terminal `discovery` branch; classifier entry remains off. The branch invokes
 the Lead Agent once with request-only `dbtl_discovery_context`.
-`DbtlDiscoveryPolicyMiddleware` is the execution fence: it uses a closed
-read/inspection allowlist for model schemas and independently rejects forged
+`DbtlDiscoveryPolicyMiddleware` is the execution fence: one closed
+read/inspection allowlist covers model schemas and the response-format package
+tool, and it independently rejects forged
 mutation, shell, connector-write, memory-write, and delegation calls. The
 ordinary path is unchanged when the flag is off.
 
