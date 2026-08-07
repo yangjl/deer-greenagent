@@ -46,6 +46,7 @@ import { CitationLink } from "../citations/citation-link";
 import { FlipDisplay } from "../flip-display";
 
 import { MarkdownContent } from "./markdown-content";
+import { ToolCall } from "./message-group";
 import { SubtaskToolStep } from "./subtask-tool-step";
 
 export function SubtaskCard({
@@ -54,15 +55,25 @@ export function SubtaskCard({
   threadId,
   runId,
   isLoading,
+  flat = false,
 }: {
   className?: string;
   taskId: string;
   threadId?: string;
   runId?: string;
   isLoading: boolean;
+  // Render as plain native progress (no ambilight glow, shine border, or
+  // description shimmer). Used for governed DBTL stage work so it reads like an
+  // ordinary tool-call / script-writing progress report rather than a
+  // decorated card. Ordinary chat subagents keep the default look.
+  flat?: boolean;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
+  // Flat stage work collapses its earlier steps under a native "N more steps"
+  // toggle, keeping only the current step visible until expanded — matching
+  // the Lead Agent's progress card.
+  const [showStageSteps, setShowStageSteps] = useState(false);
   const task = useSubtask(taskId)!;
   const { models, tokenUsageEnabled } = useModels();
   const updateSubtask = useUpdateSubtask();
@@ -148,19 +159,19 @@ export function SubtaskCard({
       className={cn("relative w-full gap-2 rounded-lg border py-0", className)}
       open={!collapsed}
     >
-      <div
-        className={cn(
-          "ambilight z-[-1]",
-          task.status === "in_progress" ? "enabled" : "",
-        )}
-      ></div>
-      {task.status === "in_progress" && (
-        <>
-          <ShineBorder
-            borderWidth={1.5}
-            shineColor={["#A07CFE", "#FE8FB5", "#FFBE7B"]}
-          />
-        </>
+      {!flat && (
+        <div
+          className={cn(
+            "ambilight z-[-1]",
+            task.status === "in_progress" ? "enabled" : "",
+          )}
+        ></div>
+      )}
+      {!flat && task.status === "in_progress" && (
+        <ShineBorder
+          borderWidth={1.5}
+          shineColor={["#A07CFE", "#FE8FB5", "#FFBE7B"]}
+        />
       )}
       <div className="bg-background/95 flex w-full flex-col rounded-lg">
         <div className="flex w-full items-center justify-between p-0.5">
@@ -173,7 +184,7 @@ export function SubtaskCard({
               <ChainOfThoughtStep
                 className="font-normal"
                 label={
-                  task.status === "in_progress" ? (
+                  task.status === "in_progress" && !flat ? (
                     <Shimmer duration={3} spread={3}>
                       {task.description}
                     </Shimmer>
@@ -262,9 +273,64 @@ export function SubtaskCard({
               }
             ></ChainOfThoughtStep>
           )}
+          {flat && entries.length > 1 && (
+            <Button
+              className="w-full items-start justify-start text-left"
+              variant="ghost"
+              onClick={() => setShowStageSteps(!showStageSteps)}
+            >
+              <ChainOfThoughtStep
+                label={
+                  <span className="opacity-60">
+                    {showStageSteps
+                      ? t.toolCalls.lessSteps
+                      : t.toolCalls.moreSteps(entries.length - 1)}
+                  </span>
+                }
+                icon={
+                  <ChevronUp
+                    className={cn(
+                      "size-4 opacity-60 transition-transform duration-200",
+                      showStageSteps ? "rotate-180" : "",
+                    )}
+                  />
+                }
+              ></ChainOfThoughtStep>
+            </Button>
+          )}
           {entries.map((entry, i) => {
             const isLastWhileRunning =
               task.status === "in_progress" && i === entries.length - 1;
+            // In flat stage work, keep only the current step visible and
+            // collapse everything above it under the native "N more steps"
+            // toggle above, matching how the Lead Agent's card collapses steps
+            // above its last tool call.
+            if (
+              flat &&
+              entries.length > 1 &&
+              !showStageSteps &&
+              i !== entries.length - 1
+            ) {
+              return null;
+            }
+            // Governed stage work renders its tool calls through the same
+            // native ToolCall component the Lead Agent uses, so a Build step
+            // reads like an ordinary tool-call progress row (friendly label,
+            // native icon, path/artifact chip) rather than the raw
+            // "read_file · path" transcript row.
+            if (flat && entry.kind === "tool") {
+              return (
+                <ToolCall
+                  key={entry.id}
+                  id={entry.id}
+                  name={entry.toolName ?? "tool"}
+                  args={(entry.args as Record<string, unknown> | undefined) ?? {}}
+                  result={entry.text}
+                  threadId={threadId}
+                  isLoading={isLastWhileRunning}
+                />
+              );
+            }
             const icon = isLastWhileRunning ? (
               <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
             ) : entry.kind === "tool" ? (

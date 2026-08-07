@@ -356,6 +356,31 @@ export default function ChatPage() {
     async (request: HumanInputRequest, response: HumanInputResponse) => {
       let sent = false;
       const cycleIdsBeforeSend = new Set(cycleList.map((cycle) => cycle.id));
+      // Cycle creation is server-owned and finishes asynchronously after this
+      // reply is sent, so a single immediate refetch races ahead of it. Poll
+      // briefly until the new cycle appears and select it, instead of asking
+      // the human to refresh the project by hand.
+      const pollForNewCycle = async (
+        finder: typeof findNewDiscoveryCycle,
+      ): Promise<ReturnType<typeof findNewDiscoveryCycle>> => {
+        for (let attempt = 0; attempt < 15; attempt++) {
+          try {
+            const refreshed = await refetchProjectCycles({
+              throwOnError: true,
+            });
+            const cycle = finder(
+              refreshed.data?.cycles ?? [],
+              cycleIdsBeforeSend,
+              threadId,
+            );
+            if (cycle) return cycle;
+          } catch {
+            // Transient fetch error; keep polling within the window.
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        return null;
+      };
       await sendMessage(
         threadId,
         {
@@ -377,20 +402,7 @@ export default function ChatPage() {
       );
       if (sent && request.clarification_type === "cycle_setup_confirmation") {
         if (response.value === "create_cycle") {
-          let refreshed: Awaited<ReturnType<typeof refetchProjectCycles>>;
-          try {
-            refreshed = await refetchProjectCycles({ throwOnError: true });
-          } catch {
-            toast.error(
-              "The cycle response arrived, but the project cycle list could not refresh. Refresh the project to select it.",
-            );
-            return sent;
-          }
-          const cycle = findNewSetupCycle(
-            refreshed.data?.cycles ?? [],
-            cycleIdsBeforeSend,
-            threadId,
-          );
+          const cycle = await pollForNewCycle(findNewSetupCycle);
           if (!cycle) {
             toast.error(
               "No new cycle was recorded. Review the server response, then start a new cycle request to retry.",
@@ -410,20 +422,7 @@ export default function ChatPage() {
         request.clarification_type === "dbtl_discovery_start" &&
         response.value === "start_cycle"
       ) {
-        let refreshed: Awaited<ReturnType<typeof refetchProjectCycles>>;
-        try {
-          refreshed = await refetchProjectCycles({ throwOnError: true });
-        } catch {
-          toast.error(
-            "The cycle was created, but the project cycle list could not refresh. Refresh the project to select it.",
-          );
-          return sent;
-        }
-        const cycle = findNewDiscoveryCycle(
-          refreshed.data?.cycles ?? [],
-          cycleIdsBeforeSend,
-          threadId,
-        );
+        const cycle = await pollForNewCycle(findNewDiscoveryCycle);
         if (!cycle) {
           toast.error(
             "The cycle was created, but the project cycle list could not refresh. Refresh the project to select it.",

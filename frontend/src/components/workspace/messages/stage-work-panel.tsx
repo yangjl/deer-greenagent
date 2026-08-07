@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchStageWorkers, StageWorkerFetchError } from "@/core/tasks/api";
 import { useReconcileSubtasks, useSubtaskContext } from "@/core/tasks/context";
 import {
+  latestStageWorkRunId,
   runningStageWorkRunId,
   stageLabel,
   stageWorkGroups,
@@ -70,10 +71,19 @@ export function StageWorkPanel({
   const visibleRunId = isLoading
     ? (runningRunId ?? streamRunId ?? runId)
     : runId;
-  const groups = useMemo(
-    () => stageWorkGroups(tasks, visibleRunId),
-    [tasks, visibleRunId],
-  );
+  const groups = useMemo(() => {
+    const scoped = stageWorkGroups(tasks, visibleRunId);
+    // While a run is streaming, stay strictly on it. Otherwise, if the visible
+    // run produced no stage work (e.g. the retry / "Need your help" turn after
+    // a Build failed became the latest run), fall back to the most recent run
+    // that did — so a failed or finished build's progress report is retained
+    // rather than vanishing.
+    if (scoped.length > 0 || isLoading) {
+      return scoped;
+    }
+    const fallbackRunId = latestStageWorkRunId(tasks);
+    return fallbackRunId ? stageWorkGroups(tasks, fallbackRunId) : scoped;
+  }, [tasks, visibleRunId, isLoading]);
 
   // Rebuild stage work for a page that missed the stream and reconcile a
   // partial live task against its durable terminal event. A stage worker has
@@ -185,6 +195,9 @@ export function StageWorkPanel({
                 // wrong run's events, and silently get nothing back.
                 runId={task.runId ?? runId}
                 isLoading={task.status === "in_progress"}
+                // Governed stage work reads as native tool-call / script-writing
+                // progress, not a decorated card with a shine border.
+                flat
               />
             ))}
           </section>

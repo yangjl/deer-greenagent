@@ -571,7 +571,7 @@ function browserToolLabel(
   }
 }
 
-function ToolCall({
+export function ToolCall({
   id,
   messageId,
   name,

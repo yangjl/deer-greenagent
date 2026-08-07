@@ -246,23 +246,32 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
     useState<ProjectConversation | null>(null);
   const abandonCycle = useAbandonCycle(project?.id);
   const deleteConversation = useDeleteThread();
+  const [showAllCycles, setShowAllCycles] = useState(false);
 
   const cycles = (cycleQuery.data?.cycles ?? []).filter(
     (cycle) => cycle.state !== "abandoned",
   );
-  // A cycle's originating conversation is already surfaced under that cycle as
-  // its "Origin ·" link, so drop it from the flat Conversations list to avoid
-  // showing the same thread twice.
-  const cycleOriginThreadIds = new Set(
-    cycles
-      .map((cycle) => cycle.originating_thread_id)
-      .filter((id): id is string => Boolean(id)),
+  // Newest cycles on top, matching the Conversations list. Show only the 5 most
+  // recent by default and fold older ones behind a toggle. `cycles` (raw server
+  // order) still drives selection/numbering; this is display-only.
+  const orderedCycles = [...cycles].sort((a, b) =>
+    b.created_at.localeCompare(a.created_at),
   );
-  const visibleConversations = conversations.data?.filter(
-    (conversation) => !cycleOriginThreadIds.has(conversation.threadId),
-  );
+  const visibleCycles = showAllCycles
+    ? orderedCycles
+    : orderedCycles.slice(0, 5);
+  const hiddenCycleCount = orderedCycles.length - visibleCycles.length;
+  // Bind the rail to the conversation being viewed: when this thread owns a
+  // cycle, highlight that cycle by default instead of the project-wide live
+  // one, so the rail (and its "Origin ·" link) matches the open chat rather
+  // than pointing at a different thread. An explicit human selection still
+  // wins; a thread with no cycle falls back to the project default.
+  const currentThreadId = pathname?.split("/").pop() ?? null;
   const selected =
     cycles.find((item) => item.id === selectedCycleId) ??
+    (currentThreadId
+      ? cycles.find((cycle) => cycle.originating_thread_id === currentThreadId)
+      : undefined) ??
     defaultSelectedCycle(cycles);
   const disclosedCycleId =
     expandedCycleId === undefined ? (selected?.id ?? null) : expandedCycleId;
@@ -286,7 +295,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
     live: Boolean(selected && isLive(selected)),
   });
   const buildProjection = buildPlanProjection(buildWorkflow.data);
-  const buildProgress = buildProjection.progress;
+  const hasBuildTodos = buildProjection.rows.length > 0;
   const buildStageStatusLabel = buildProjection.stageStatusLabel;
 
   // Cycles minimize themselves once nothing is running; an explicit click
@@ -356,11 +365,15 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           icon: CircleDashed,
           onSelect: () => scrollToRailSection(RAIL_SECTION_IDS.cycles),
         },
-        {
-          label: "Build plan",
-          icon: ListChecks,
-          onSelect: () => scrollToRailSection(RAIL_SECTION_IDS.buildPlan),
-        },
+        ...(hasBuildTodos
+          ? [
+              {
+                label: "To-dos",
+                icon: ListChecks,
+                onSelect: () => scrollToRailSection(RAIL_SECTION_IDS.buildPlan),
+              },
+            ]
+          : []),
         {
           label: activityFeature.enabled ? activityCollapsed.label : "Agents",
           icon: activityFeature.enabled ? activityCollapsed.icon : Bot,
@@ -438,7 +451,7 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
               No cycles yet. Starting one creates a durable research record.
             </div>
           ) : (
-            cycles.map((entry) => {
+            visibleCycles.map((entry) => {
               const active = disclosedCycleId === entry.id;
               const originConversation = entry.originating_thread_id
                 ? conversations.data?.find(
@@ -520,28 +533,33 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
                   </div>
                   {active && (
                     <div className="border-border/70 ml-3 border-l pl-1.5">
-                      {DBTL_STAGES.map((stage) => (
-                        <StageRow
-                          key={stage}
-                          cycle={entry}
-                          stage={stage}
-                          onOpen={setOpenStage}
-                          designDeckFeedback={
-                            dbtl.feature?.design_deck_feedback === true
+                      {DBTL_STAGES.map((stage) => {
+                        let openWorkCount = 0;
+                        if (entry.id === selected?.id) {
+                          if (stage === "reconciliation") {
+                            openWorkCount = reconciliationBlockers;
+                          } else if (stage === "build") {
+                            openWorkCount = unattributedBlockers;
                           }
-                          openWorkCount={
-                            entry.id === selected?.id &&
-                            stage === "reconciliation"
-                              ? reconciliationBlockers
-                              : 0
-                          }
-                          attentionLabel={
-                            entry.id === selected?.id && stage === "build"
-                              ? buildStageStatusLabel
-                              : ""
-                          }
-                        />
-                      ))}
+                        }
+                        return (
+                          <StageRow
+                            key={stage}
+                            cycle={entry}
+                            stage={stage}
+                            onOpen={setOpenStage}
+                            designDeckFeedback={
+                              dbtl.feature?.design_deck_feedback === true
+                            }
+                            openWorkCount={openWorkCount}
+                            attentionLabel={
+                              entry.id === selected?.id && stage === "build"
+                                ? buildStageStatusLabel
+                                : ""
+                            }
+                          />
+                        );
+                      })}
                       {entry.originating_thread_id &&
                         (originConversation ? (
                           <Link
@@ -572,42 +590,27 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
               );
             })
           )}
+          {hiddenCycleCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowAllCycles(!showAllCycles)}
+              className="text-muted-foreground hover:text-foreground w-full rounded px-2 py-1.5 text-left text-[11px] transition-colors"
+            >
+              {showAllCycles
+                ? "Show fewer cycles"
+                : `Show ${hiddenCycleCount} older cycle${hiddenCycleCount === 1 ? "" : "s"}`}
+            </button>
+          )}
         </div>
       )}
 
-      <SectionLabel
-        id={RAIL_SECTION_IDS.buildPlan}
-        action={
-          buildProgress ? (
-            <span className="text-muted-foreground/70 text-[11px]">
-              {buildProgress}
-            </span>
-          ) : undefined
-        }
-      >
-        Build plan{selected ? ` · ${selected.title}` : ""}
-      </SectionLabel>
-      <div className="px-2">
-        <BuildPlanBlock
-          projectId={project?.id}
-          cycleId={selected?.id ?? null}
-          live={Boolean(selected && isLive(selected))}
-          onOpenPhase={() => setOpenStage("build")}
-        />
-        {unattributedBlockers > 0 && (
-          <button
-            type="button"
-            onClick={() => setOpenStage(DBTL_STAGES[0])}
-            className="hover:bg-muted/60 flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-colors"
-          >
-            <AlertTriangle className="size-3.5 shrink-0 text-amber-700 dark:text-amber-400" />
-            <span className="text-muted-foreground min-w-0 flex-1 truncate text-xs">
-              {unattributedBlockers} open work item
-              {unattributedBlockers === 1 ? "" : "s"}
-            </span>
-          </button>
-        )}
-      </div>
+      <BuildPlanBlock
+        projectId={project?.id}
+        cycleId={selected?.id ?? null}
+        live={Boolean(selected && isLive(selected))}
+        onOpenPhase={() => setOpenStage("build")}
+        sectionId={RAIL_SECTION_IDS.buildPlan}
+      />
 
       <SectionLabel
         id={RAIL_SECTION_IDS.agents}
@@ -666,8 +669,8 @@ export function ProjectRail({ projectSlug }: { projectSlug: string }) {
           <div className="text-muted-foreground px-2 py-1.5 text-xs">
             Loading…
           </div>
-        ) : visibleConversations?.length ? (
-          visibleConversations.map((conversation) => {
+        ) : conversations.data?.length ? (
+          conversations.data.map((conversation) => {
             const href = pathOfProjectThread(
               projectSlug,
               conversation.threadId,

@@ -98,3 +98,24 @@ export function runningStageWorkRunId(
   }
   return runId;
 }
+
+/**
+ * The most recent governed-work run that produced any stage work — running,
+ * finished, or failed.
+ *
+ * Used to retain that work when the current run produced none of its own: after
+ * a Build fails, the retry / "Need your help" turn becomes the latest run but
+ * has no stage work, and scoping strictly to it would drop the failed build's
+ * progress report. Falling back to this keeps it visible.
+ */
+export function latestStageWorkRunId(
+  subtasks: readonly Subtask[],
+): string | undefined {
+  let runId: string | undefined;
+  for (const task of subtasks) {
+    if (task.dbtlStage && !task.councilSeat && task.runId) {
+      runId = task.runId;
+    }
+  }
+  return runId;
+}
