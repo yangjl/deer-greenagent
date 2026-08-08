@@ -2293,6 +2293,41 @@ def _input_artifacts_intact(input_artifacts: Sequence[str], *, project_root: str
     return True
 
 
+#: The design-council chair's result contract: the rules the server actually
+#: validates, plus the JSON shape it validates them against. Chairing a fresh
+#: meeting and resuming one the human answered are different prompts, but these
+#: rules are identical -- and two copies is how one caller ends up stating a
+#: rule the other has already dropped.
+CHAIR_RESULT_CONTRACT_LINES: tuple[str, ...] = (
+    "",
+    "Result rules (these are validated, not stylistic):",
+    "- Every entry in claims must be traceable to an entry in evidence_refs. A claim with no evidence rejects the whole result, so cite the meeting position it came from or move it to summary.",
+    "- An evidence_refs entry needs a kind of artifact, workspace_file, dataset, or external, plus a non-empty reference. A meeting position is kind 'external' with the position's unit id as its reference.",
+    '- quality_checks[].passed must be a JSON boolean, not the string "true".',
+    "- needs_input requires a non-empty clarification_question; every other status requires it to be omitted or null.",
+    "",
+    "Return one JSON object and nothing else. The arrays below are shown empty only to give the shape; fill them in:",
+    """{
+  "status": "completed" | "needs_input" | "blocked" | "failed",
+  "summary": "the meeting synthesis",
+  "artifact_refs": [],
+  "claims": [],
+  "evidence_refs": [],
+  "limitations": [],
+  "quality_checks": [{"name": "check", "passed": true, "detail": ""}],
+  "recommended_next_actions": [],
+  "clarification_question": "required only for needs_input",
+  "provenance": {"inputs_examined": [], "tools_used": []}
+}""",
+    "",
+    CONSENSUS_CONTRACT,
+    "",
+    DECISION_REQUEST_CONTRACT,
+    "",
+    DELIVERABLE_MANIFEST_CONTRACT,
+)
+
+
 def _design_chair_unit(
     outcome: StageExecutionOutcome,
     *,
@@ -2333,32 +2368,7 @@ def _design_chair_unit(
             "- Otherwise return status completed with an operational design synthesis, explicit success and rejection criteria, and a recommendation to present it for human review.",
             "- You may recommend readiness, but you cannot submit, approve, or advance the stage.",
             *owner_instruction_lines(chair_seat.instructions if chair_seat is not None else ""),
-            "",
-            "Result rules (these are validated, not stylistic):",
-            "- Every entry in claims must be traceable to an entry in evidence_refs. A claim with no evidence rejects the whole result, so cite the meeting position it came from or move it to summary.",
-            "- An evidence_refs entry needs a kind of artifact, workspace_file, dataset, or external, plus a non-empty reference. A meeting position is kind 'external' with the position's unit id as its reference.",
-            '- quality_checks[].passed must be a JSON boolean, not the string "true".',
-            "- needs_input requires a non-empty clarification_question; every other status requires it to be omitted or null.",
-            "",
-            "Return one JSON object and nothing else. The arrays below are shown empty only to give the shape; fill them in:",
-            """{
-  "status": "completed" | "needs_input" | "blocked" | "failed",
-  "summary": "the meeting synthesis",
-  "artifact_refs": [],
-  "claims": [],
-  "evidence_refs": [],
-  "limitations": [],
-  "quality_checks": [{"name": "check", "passed": true, "detail": ""}],
-  "recommended_next_actions": [],
-  "clarification_question": "required only for needs_input",
-  "provenance": {"inputs_examined": [], "tools_used": []}
-}""",
-            "",
-            CONSENSUS_CONTRACT,
-            "",
-            DECISION_REQUEST_CONTRACT,
-            "",
-            DELIVERABLE_MANIFEST_CONTRACT,
+            *CHAIR_RESULT_CONTRACT_LINES,
         ]
     )
     unit = WorkUnit(
@@ -2472,32 +2482,7 @@ def _resumed_chair_unit(
             "- Return status completed with an operational design synthesis, explicit success and rejection criteria, and a recommendation to present it for human review.",
             "- Return needs_input only if their answer created a genuinely new decision that only they can make. Repeating the answered question is not that.",
             "- You may recommend readiness, but you cannot submit, approve, or advance the stage.",
-            "",
-            "Result rules (these are validated, not stylistic):",
-            "- Every entry in claims must be traceable to an entry in evidence_refs. A claim with no evidence rejects the whole result, so cite the meeting position it came from or move it to summary.",
-            "- An evidence_refs entry needs a kind of artifact, workspace_file, dataset, or external, plus a non-empty reference. A meeting position is kind 'external' with the position's unit id as its reference.",
-            '- quality_checks[].passed must be a JSON boolean, not the string "true".',
-            "- needs_input requires a non-empty clarification_question; every other status requires it to be omitted or null.",
-            "",
-            "Return one JSON object and nothing else. The arrays below are shown empty only to give the shape; fill them in:",
-            """{
-  "status": "completed" | "needs_input" | "blocked" | "failed",
-  "summary": "the meeting synthesis",
-  "artifact_refs": [],
-  "claims": [],
-  "evidence_refs": [],
-  "limitations": [],
-  "quality_checks": [{"name": "check", "passed": true, "detail": ""}],
-  "recommended_next_actions": [],
-  "clarification_question": "required only for needs_input",
-  "provenance": {"inputs_examined": [], "tools_used": []}
-}""",
-            "",
-            CONSENSUS_CONTRACT,
-            "",
-            DECISION_REQUEST_CONTRACT,
-            "",
-            DELIVERABLE_MANIFEST_CONTRACT,
+            *CHAIR_RESULT_CONTRACT_LINES,
         ]
     )
     return _unit_with_settings(
