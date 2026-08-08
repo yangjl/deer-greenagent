@@ -240,3 +240,66 @@ class TestThePlannerContractNamesWhatItAllows:
         assert Capability.SOFTWARE_ENGINEERING.value in PLANNER_CONTRACT
         assert "never quietly replaced by a generalist" in PLANNER_CONTRACT
         assert str(MAX_BUILD_PHASES) in PLANNER_CONTRACT
+
+
+class TestCorrectionUnitCanActuallyFinish:
+    """Regression for the dominant retry-failure mode: every correction of a
+    reporting/packaging phase token_capped just above the old 40K ceiling
+    (48–55K observed), so retries burned budget and produced nothing. The
+    correction budget must leave real headroom, and the correction prompt must
+    carry the same hard-rules discipline as the first attempt — corrections
+    repeated exactly the mistakes those rules name, including returning a
+    diagnosis with no implementation.
+    """
+
+    def _correction(self):
+        from deerflow.agents.dbtl.live_stage.build_phases import (
+            phase_correction_unit,
+        )
+
+        phase = BuildPhase(
+            phase_key="replay",
+            title="Package Replay",
+            objective="Package the replay and final report.",
+            capability=Capability.SCIENTIFIC_REPORTING,
+            skills=(),
+        )
+        return phase_correction_unit(
+            PhaseAssignment(phase=phase, agent_name="general-purpose", via_generalist=True),
+            index=3,
+            attempt_id="attempt",
+            attempt_token="token",
+            spec=resolve_stage_spec("build"),
+            previous_workspace="/mnt/user-data/outputs/.dbtl-stage-work/x/build/y",
+            failure="declared output missing",
+            result_contract="contract",
+        )
+
+    def test_the_correction_budget_has_headroom_past_the_observed_cap(self) -> None:
+        from deerflow.agents.dbtl.live_stage.build_phases import (
+            CORRECTION_MAX_TOKENS,
+        )
+
+        unit = self._correction()
+
+        assert unit.max_tokens == CORRECTION_MAX_TOKENS
+        # 40K provably capped every reporting correction; anything at or below
+        # the observed 48-55K usage band re-introduces the failure mode.
+        assert unit.max_tokens >= 200_000
+
+    def test_the_correction_prompt_carries_the_hard_rules(self) -> None:
+        prompt = self._correction().prompt
+
+        assert "A diagnosis alone is a failed correction" in prompt
+        assert "never build a venv or pip install" in prompt
+        assert "importlib.metadata.version" in prompt
+        assert "exactly ONE JSON object" in prompt
+        assert "No absolute path literal" in prompt
+        # Self-verification mechanics sank two live corrections: a reproduce
+        # script invoked from the wrong cwd, then audit globs missing real files.
+        assert "cd into DBTL_WORKSPACE" in prompt
+        assert "exact relative path" in prompt
+        # Four of five post-fix correction failures came from copying the prior
+        # broken entry point and patching one symptom, inheriting the rest.
+        assert "REWRITE that file cleanly" in prompt
+        assert "py_compile" in prompt

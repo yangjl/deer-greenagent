@@ -1728,6 +1728,10 @@ subagents:
         Report honestly: a check you ran that failed is a recorded failed check, not something to hide. You implement and report; you never approve or advance the cycle - a person does that.
       dbtl_capabilities:
       - software_and_workflow_engineering
+      # Packaging/replay/report phases are code-discipline work; without this
+      # they fall back to the general-purpose stand-in, historically the
+      # highest-failure Build phase class.
+      - scientific_reporting
       skills:
       - data-analysis
       - chart-visualization

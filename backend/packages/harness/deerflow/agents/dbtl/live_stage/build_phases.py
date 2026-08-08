@@ -68,6 +68,13 @@ Build rerun declaration (required in provenance.rerun_spec):
 """.strip()
 
 GENERALIST = "general-purpose"
+
+#: Token ceiling for a fresh correction attempt. 40K proved systematically too
+#: small: every correction of a reporting/packaging phase token_capped at
+#: 48–55K observed usage — the worker must re-read the failure evidence, write
+#: the fixed implementation, run it, and emit the structured result. Corrections
+#: stay cheaper than a full phase (500K) but need real headroom.
+CORRECTION_MAX_TOKENS = 200_000
 SERVER_NON_EXECUTABLE_SUFFIXES = frozenset({".ipynb", ".md", ".json", ".csv", ".html", ".txt"})
 
 
@@ -574,6 +581,10 @@ def phase_unit(
                 "- The server gives Jupyter and IPython writable state directories inside this phase",
                 "  workspace. For notebook structure only, prefer `python -m json.tool file.ipynb`;",
                 "  use `python -m jupyter nbconvert --execute ...` only when executed-cell evidence is required.",
+                "- Run every reproduction or audit command from the workspace root (cd into",
+                "  DBTL_WORKSPACE first) and verify outputs by exact relative path, never by glob —",
+                "  a verification that fails on its own mechanics costs the phase exactly like a",
+                "  real failure.",
                 "- Record package versions with importlib.metadata.version('numpy'), etc. NEVER read",
                 "  pkg.__version__: the jupyter meta-package has no __version__ and raises AttributeError,",
                 "  which has sunk whole phases here. Wrap each lookup in try/except and record 'unknown'",
@@ -702,7 +713,18 @@ def phase_correction_unit(
         f"Its staged files are read-only at {previous_workspace}.",
         f"Write the corrected implementation under {STAGE_UNIT_WORKSPACE_PLACEHOLDER}; do not modify the previous workspace.",
         "Inspect only the files needed to fix the named failure. Do not repeat discovery or restate the Design.",
+        "When the named failure is inside a generated source file, REWRITE that file cleanly from the phase objective — never copy the previous file and patch the named line.",
+        "Copied files have repeatedly resurrected their other latent defects here: a hardcoded '/test/...' output path, stale audit globs, an unbalanced nested quote.",
+        "After writing it, run a syntax check (python -m py_compile) and scan it yourself for absolute path literals before executing.",
         f"Read data paths from {INPUT_ENV_PREFIX}1, {INPUT_ENV_PREFIX}2, ... and write beneath {WORKSPACE_ENV}; never hardcode a host or mount path.",
+        "A diagnosis alone is a failed correction: produce the corrected implementation, run it, and return the structured result.",
+        "Hard rules the server enforces — the same ones that cost whole phases here:",
+        "- No absolute path literal in generated source ('/src/...', '/mnt/...', '/Users/...'); a static scan refuses the file and names the line.",
+        "- Use the one provisioned interpreter (numpy, scipy, pandas, matplotlib, statsmodels, scikit-learn, seaborn, jupyter are available); never build a venv or pip install.",
+        "- Record versions with importlib.metadata.version('pkg') wrapped in try/except -> 'unknown'; never pkg.__version__.",
+        "- Return exactly ONE JSON object as the structured result; no prose before or after it.",
+        "- Verify from the workspace root: cd into DBTL_WORKSPACE before running any reproduction or audit command, and check outputs by exact relative path (no globs).",
+        "  Corrections here have died on a reproduce script invoked from the wrong directory and on audit globs that missed the real files.",
         "Server-issued input order for this correction:",
         *(f"  {INPUT_ENV_PREFIX}{position}={path}" for position, path in enumerate(granted_inputs, start=1)),
         f"In provenance.phase_manifest return version={required_phase_manifest_version(spec)}, the executable entry_point path,",
@@ -729,7 +751,7 @@ def phase_correction_unit(
         prompt="\n".join(lines),
         via_generalist=assignment.via_generalist,
         role=PHASE_ROLE,
-        max_tokens=40_000,
+        max_tokens=CORRECTION_MAX_TOKENS,
         completion_check=PHASE_DONE_CHECK,
         skills=phase.skills,
         tool_contract={"fresh_correction": True, "correction_attempt": True, "granted_inputs": tuple(granted_inputs)},
