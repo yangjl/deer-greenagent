@@ -200,6 +200,53 @@ function UnanchoredMeetings({
   );
 }
 
+/** Governed stage work no transcript group has claimed yet, at the tail.
+ *
+ * A resumed Build/Test/Learn run streams its worker before — or without — an
+ * assistant message, so no group carries its run id and the anchored path never
+ * renders the card. Like {@link UnanchoredMeetings}, render it at the tail so
+ * the in-progress stage card and its live progress report are visible while it
+ * runs; once the run's result turn arrives, the same run id anchors it above
+ * that turn instead (and this excludes it, so it never double-renders).
+ */
+function UnanchoredStageWork({
+  anchoredRunIds,
+  threadId,
+}: {
+  anchoredRunIds: ReadonlySet<string>;
+  threadId?: string;
+}) {
+  const { tasks: taskMap } = useSubtaskContext();
+  const runIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const task of Object.values(taskMap)) {
+      // Same selection as stageWorkTasks: governed stage work, not a meeting
+      // seat (those render in DebatePanel). A stage worker always carries a run
+      // id via subagent.start, so skip the empty bucket rather than render all.
+      if (!task.dbtlStage || task.councilSeat) continue;
+      const runId = task.runId;
+      if (!runId || anchoredRunIds.has(runId)) continue;
+      ids.add(runId);
+    }
+    return [...ids];
+  }, [taskMap, anchoredRunIds]);
+  if (runIds.length === 0) {
+    return null;
+  }
+  return (
+    <>
+      {runIds.map((runId) => (
+        <StageWorkCards
+          key={runId}
+          className="w-full"
+          runId={runId}
+          threadId={threadId}
+        />
+      ))}
+    </>
+  );
+}
+
 function LoadMoreHistoryIndicator({
   isLoading,
   hasMore,
@@ -1440,6 +1487,10 @@ export function MessageList({
             }}
           />
           <UnanchoredMeetings
+            anchoredRunIds={anchoredRunIds}
+            threadId={threadId}
+          />
+          <UnanchoredStageWork
             anchoredRunIds={anchoredRunIds}
             threadId={threadId}
           />

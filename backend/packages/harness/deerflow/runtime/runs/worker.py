@@ -502,8 +502,9 @@ class _SubagentEventBuffer:
 
     Best-effort: a missing store (run_events not configured) or an unrecognized
     chunk is a no-op, flush failures are logged but never propagate into the
-    stream loop, and terminal ``subagent.end`` events flush eagerly so a completed
-    subagent's step history is durable promptly rather than only at run end.
+    stream loop, and ``subagent.start``/``subagent.end`` events flush eagerly so a
+    subagent's in-progress and completed state is durable promptly (the
+    in-progress stage-work card survives a reload) rather than only at run end.
     """
 
     #: Flush once this many events are buffered, bounding memory and reload lag on
@@ -530,7 +531,17 @@ class _SubagentEventBuffer:
         if record is None:
             return
         self._pending.append({"thread_id": self._thread_id, "run_id": self._run_id, **record})
-        if record["event_type"] == "subagent.end" or len(self._pending) >= self.FLUSH_THRESHOLD:
+        # Flush eagerly on subagent.start as well as subagent.end. A governed
+        # stage worker's start is the only durable signal that it is running, so
+        # buffering it until the 25-event threshold (or the end) left a reload —
+        # or a tab that joined mid-run — with no in-progress worker to render:
+        # the card, and its live progress report, only appeared once the phase
+        # terminated. Both start and end are once-per-subagent, so flushing them
+        # eagerly adds no per-step lock contention on the hot stream loop.
+        if (
+            record["event_type"] in ("subagent.start", "subagent.end")
+            or len(self._pending) >= self.FLUSH_THRESHOLD
+        ):
             await self.flush()
 
     async def flush(self) -> None:

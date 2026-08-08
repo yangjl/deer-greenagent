@@ -45,7 +45,14 @@ export function StageWorkHydrator({
   const retryAttemptRef = useRef(0);
   const [retryToken, setRetryToken] = useState(0);
   useEffect(() => {
-    if (!threadId || isLoading) {
+    // Hydrate even while the thread is still loading. A mid-run reload — or a
+    // tab opened onto a thread whose Build/Test/Learn phase is already running —
+    // gets no SSE replay of the worker's subagent.start, so gating hydration on
+    // `!isLoading` left the in-progress stage card (and its live progress
+    // report) invisible until the run ended. reconcileSubtasks merges by id and
+    // this hydrate omits `steps`, so it cannot clobber live-streamed steps; the
+    // once-per-thread guard keeps it to a single fetch.
+    if (!threadId) {
       return;
     }
     const epoch = threadId;

@@ -115,6 +115,15 @@ export function SubtaskCard({
     });
   }, [task.dbtlStage, task.steps, task.status]);
 
+  // While a governed stage phase is still running, surface its latest streamed
+  // prose as an inline progress report so a collapsed flat card is not blank
+  // during "Working…" — previously an inline report rendered only for terminal
+  // (completed/failed) states.
+  const liveProgressReport =
+    task.dbtlStage && task.status === "in_progress"
+      ? [...entries].reverse().find((entry) => entry.kind !== "tool")?.text
+      : undefined;
+
   // Backfill step history on expand for historical runs (#3779). Live runs
   // already have steps from SSE, so the `steps.length` guard skips the fetch.
   const stepsCount = task.steps?.length ?? 0;
@@ -158,7 +167,14 @@ export function SubtaskCard({
   }, [task.status]);
   return (
     <ChainOfThought
-      className={cn("relative w-full gap-2 rounded-lg border py-0", className)}
+      className={cn(
+        "relative w-full gap-2 py-0",
+        // Flat governed stage work reads as plain inline progress, so it drops
+        // the decorated card's outer border/rounded wrapper; ordinary chat
+        // subagents keep it.
+        !flat && "rounded-lg border",
+        className,
+      )}
       open={!collapsed}
     >
       {!flat && (
@@ -240,7 +256,8 @@ export function SubtaskCard({
             </div>
           </Button>
         </div>
-        {showTerminalReport && collapsed && terminalStageReport ? (
+        {collapsed &&
+        (liveProgressReport || (showTerminalReport && terminalStageReport)) ? (
           <div className="border-border/60 border-t px-4 py-3">
             <div className="text-muted-foreground mb-1 text-[11px] font-medium tracking-wide uppercase">
               {task.status === "failed"
@@ -254,8 +271,12 @@ export function SubtaskCard({
               )}
             >
               <MarkdownContent
-                content={terminalStageReport}
-                isLoading={false}
+                content={
+                  (showTerminalReport ? terminalStageReport : undefined) ??
+                  liveProgressReport ??
+                  ""
+                }
+                isLoading={task.status === "in_progress"}
               />
             </div>
           </div>

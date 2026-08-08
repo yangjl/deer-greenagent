@@ -115,6 +115,22 @@ async def test_terminal_event_flushes_eagerly():
 
 
 @pytest.mark.asyncio
+async def test_start_event_flushes_eagerly():
+    # A governed stage worker's start must be durable the moment it begins, not
+    # buffered until the 25-event threshold or its end. Otherwise a reload — or a
+    # tab that joined mid-run — finds no in-progress worker, and the live
+    # stage-work card with its progress report only appears once the phase
+    # terminates (the "Working…" indicator shows but no inline progress).
+    store = _FakeStore()
+    buffer = _SubagentEventBuffer(store, "thread_1", "run_1")
+
+    await buffer.add({"type": "task_started", "task_id": "call_1"})
+
+    assert len(store.batches) == 1
+    assert [e["event_type"] for e in store.batches[0]] == ["subagent.start"]
+
+
+@pytest.mark.asyncio
 async def test_size_threshold_triggers_flush():
     store = _FakeStore()
     buffer = _SubagentEventBuffer(store, "thread_1", "run_1")
