@@ -73,3 +73,9 @@ config.yaml.bak
 # LLM Space thread exports (scripts/export_llm_space_thread.py). Reproducible
 # from the run database, and they carry conversation content.
 /exports/
+# Added by code-review-graph
+.code-review-graph/
+
+# Local per-branch dev runtime for upstream main (carries copied secrets / sqlite data)
+config.main.yaml
+backend/.deer-flow-main/
