@@ -185,3 +185,36 @@ class TestTheServerIssuesTheInputPaths:
 
         assert grant[f"{INPUT_ENV_PREFIX}1"] == "/mnt/user-data/b.csv"
         assert grant[f"{INPUT_ENV_PREFIX}2"] == "/mnt/user-data/a.csv"
+
+
+class TestFigureOutputsMustLiveUnderTheWorkspace:
+    """Regression for a Build reporting-phase failure: the generalist wrote a
+    plot to a hardcoded, out-of-workspace path (``/test/model_fit_comparison.png``)
+    on line 91, which the containment scan refused, sinking the phase. The scan
+    must keep refusing such a path (security stays hard), and the shared Build
+    contract must show figures being saved under ``DBTL_WORKSPACE`` so the
+    generalist copies that discipline for plots as well as data files.
+    """
+
+    def test_a_hardcoded_figure_path_is_still_refused(self) -> None:
+        source = "fig.savefig('/test/model_fit_comparison.png')\n"
+
+        found = scan_foreign_paths(source, allowed_roots=("/mnt/user-data",))
+
+        assert [item.literal for item in found] == ["/test/model_fit_comparison.png"]
+
+    def test_a_figure_written_under_the_workspace_is_allowed(self) -> None:
+        source = "fig.savefig(os.path.join(os.environ['DBTL_WORKSPACE'], 'artifacts', 'plot.png'))\n"
+
+        assert scan_foreign_paths(source, allowed_roots=("/mnt/user-data",)) == ()
+
+    def test_the_contract_shows_figures_saved_under_the_workspace(self) -> None:
+        from deerflow.agents.dbtl.live_stage.build_phases import (
+            BUILD_PRESENTATION_RESULT_NOTE,
+        )
+
+        note = BUILD_PRESENTATION_RESULT_NOTE
+        assert "savefig" in note
+        assert "DBTL_WORKSPACE" in note
+        # It must explicitly warn against hardcoding a figure location.
+        assert "never hardcode a figure location" in note

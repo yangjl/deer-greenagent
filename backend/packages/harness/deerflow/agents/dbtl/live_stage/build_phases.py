@@ -45,8 +45,12 @@ BUILD_PRESENTATION_RESULT_NOTE = """
 Build result declarations (required in addition to the shared result):
 - Return `key_outcomes` as a list of every verified numeric result this phase
   produced: [{"name": "metric or result", "value": 0.0, "unit": "optional"}].
-- Return `figures` as a list of every figure this phase produced:
-  [{"path": "/mnt/user-data/...", "caption": "what it is", "shows": "what it demonstrates"}].
+- Return `figures` as a list of every figure this phase produced. Save each
+  figure beneath DBTL_WORKSPACE — e.g.
+  `fig.savefig(os.path.join(os.environ['DBTL_WORKSPACE'], 'artifacts', 'name.png'))`
+  — and never hardcode a figure location (no '/test/...', no bare '/mnt/...', no
+  '/plot.png'); a hardcoded path is refused before the phase runs:
+  [{"path": "<the DBTL_WORKSPACE-relative file you saved>", "caption": "what it is", "shows": "what it demonstrates"}].
 - Use an empty list only when this phase genuinely produced none. A numeric
   result mentioned in summary, claims, evidence, or an output file must also
   appear in `key_outcomes`; otherwise the verified Build cannot be presented
@@ -553,7 +557,8 @@ def phase_unit(
                 "n = int(os.environ.get('DBTL_INPUT_COUNT', '0'))",
                 "inputs = [os.environ[f'DBTL_INPUT_{i}'] for i in range(1, n + 1)]",
                 "out_csv = os.path.join(ws, 'artifacts', 'result.csv')  # write only under ws",
-                "# ... do the work; write every output beneath ws ...",
+                "fig_png = os.path.join(ws, 'artifacts', 'plot.png')    # figures too: fig.savefig(fig_png)",
+                "# ... do the work; write every output (data AND figures) beneath ws ...",
                 "print(json.dumps({'ok': True}))",
                 "```",
                 "Hard rules the server enforces — each one costs the ENTIRE phase when broken:",
