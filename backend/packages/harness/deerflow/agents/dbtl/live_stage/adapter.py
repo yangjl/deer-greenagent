@@ -97,6 +97,7 @@ from deerflow.agents.dbtl.live_stage.workspace import (
     SHELL_WORKSPACE_IDIOM,
     STAGE_UNIT_WORKSPACE_PLACEHOLDER,
     WORKSPACE_VIRTUAL_ROOT,
+    atomic_write,
     prepare_stage_workspace,
     project_file_snapshot,
     project_manifest,
@@ -2805,7 +2806,7 @@ def _write_stage_package(
 
     outputs = project_outputs_dir(root)
     for relative, content in ((data_relative, encoded), (document_relative, document)):
-        _atomic_write(outputs / relative, content)
+        atomic_write(outputs / relative, content)
 
     uri = f"/mnt/user-data/outputs/{document_relative.as_posix()}"
     digest = render_stage_digest(payload, document_path=f"outputs/{document_relative.as_posix()}")
@@ -2907,7 +2908,7 @@ def _write_build_driver(
             cycle_title=str(cycle.get("title") or ""),
             stage="build",
         ) / stage_file_name(stage="build", kind="rerun", revision=cycle.get("db_revision"), content_hash=content_hash)
-        _atomic_write(project_outputs_dir(root) / relative, document)
+        atomic_write(project_outputs_dir(root) / relative, document)
     except Exception:  # noqa: BLE001 - a Build with no rerun record refuses at the gate
         logger.warning("Could not write the Build rerun driver.", exc_info=True)
         return None
@@ -3012,7 +3013,7 @@ def _persist_deck(
             revision=cycle.get("db_revision"),
             content_hash=content_hash,
         )
-        _atomic_write(project_outputs_dir(root) / relative, document)
+        atomic_write(project_outputs_dir(root) / relative, document)
     except Exception:  # noqa: BLE001 - same reason
         logger.warning("Could not write the design meeting slide deck.", exc_info=True)
         return None
@@ -3053,7 +3054,7 @@ def _write_evidence_exception_package(
         revision=cycle.get("db_revision"),
         content_hash=content_hash,
     )
-    _atomic_write(project_outputs_dir(root) / relative, document)
+    atomic_write(project_outputs_dir(root) / relative, document)
     reasons = ", ".join(reason.value.replace("_", " ") for reason in dossier.reason_codes)
     return (
         f"/mnt/user-data/outputs/{relative.as_posix()}",
@@ -3238,28 +3239,6 @@ def _bound_evidence(cycle: Mapping[str, Any], *, artifact_uri: str, content_hash
         if str(item.get("content_hash") or "") == content_hash and str(item.get("uri") or "") == artifact_uri:
             return item
     return None
-
-
-def _atomic_write(destination: Path, content: bytes) -> None:
-    """Write via a temp file in the same directory, then rename."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: str | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=destination.parent,
-            prefix=f".{destination.name}.",
-            delete=False,
-        ) as handle:
-            temp_path = handle.name
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, destination)
-        temp_path = None
-    finally:
-        if temp_path is not None:
-            Path(temp_path).unlink(missing_ok=True)
 
 
 def _atomic_copy(source: Path, destination: Path, *, expected_hash: str) -> None:

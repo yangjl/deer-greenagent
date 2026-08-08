@@ -14,6 +14,8 @@ reference is refused outright.
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -371,3 +373,32 @@ def manifest_entries(manifest: object) -> tuple[Mapping[str, Any], ...]:
     if not isinstance(manifest, (list, tuple)):
         return ()
     return tuple(dict(entry) for entry in manifest if isinstance(entry, Mapping))
+
+
+def atomic_write(destination: Path, content: bytes) -> None:
+    """Write via a temp file in the same directory, then rename.
+
+    One implementation for every stage artifact. Two copies had drifted: the
+    Build-review one wrote to a fixed ``.name.tmp`` sibling and skipped fsync,
+    so two writers raced on the same temp path and a crash could leave a
+    reader-visible partial file — exactly what write-then-rename exists to
+    prevent.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            delete=False,
+        ) as handle:
+            temp_path = handle.name
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, destination)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            Path(temp_path).unlink(missing_ok=True)

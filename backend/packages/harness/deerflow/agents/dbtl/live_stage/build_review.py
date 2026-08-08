@@ -28,7 +28,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from deerflow.agents.dbtl.live_stage.workspace import WORKSPACE_VIRTUAL_ROOT, workspace_relative_path
+from deerflow.agents.dbtl.live_stage.workspace import WORKSPACE_VIRTUAL_ROOT, atomic_write, workspace_relative_path
 from deerflow.dbtl.build_deck import render_build_deck
 from deerflow.dbtl.build_execution import MAX_FIGURES, BuildExecutionBundle, BuildFigure, parse_execution_bundle
 from deerflow.dbtl.build_input import BuildInputBundle
@@ -216,7 +216,7 @@ def write_build_review(
 
         outputs = project_outputs_dir(root)
         for relative, content in ((data_relative, encoded), (document_relative, document)):
-            _atomic_write(outputs / relative, content)
+            atomic_write(outputs / relative, content)
     except (OSError, ValueError, KeyError):
         logger.warning("Could not write the Build review package.", exc_info=True)
         return None
@@ -273,7 +273,7 @@ def write_build_deck(
         ensure_project_dirs(root)
         stage_dir = stage_output_dir(cycle_id=str(cycle["id"]), cycle_title=str(cycle.get("title") or ""), stage="build")
         relative = stage_dir / stage_file_name(stage="build", kind="slides", revision=cycle.get("db_revision"), content_hash=content_hash)
-        _atomic_write(project_outputs_dir(root) / relative, document)
+        atomic_write(project_outputs_dir(root) / relative, document)
     except (OSError, ValueError, KeyError):
         logger.warning("Could not write the Build review deck.", exc_info=True)
         return None
@@ -282,11 +282,3 @@ def write_build_deck(
         content_hash,
         extract_commentable_slides(document.decode("utf-8")),
     )
-
-
-def _atomic_write(destination: Path, content: bytes) -> None:
-    """Write-then-rename, so a reader never sees a half-written review."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.tmp")
-    temporary.write_bytes(content)
-    temporary.replace(destination)
