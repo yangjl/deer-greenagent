@@ -428,6 +428,16 @@ def _render_stage_control_guidance(
     )
 
 
+def _stage_control_guidance_reply(decision: Any, *, intent: Any, cycles: Any) -> dict[str, Any]:
+    """The one shaped reply for "you named a stage, but not which cycle".
+
+    Both callers in ``cycle_continuation`` built this dict inline and had to
+    stay in step; the guidance a person reads should not depend on which of the
+    two ambiguity checks happened to fire.
+    """
+    return {"messages": [receipt_message(_render_stage_control_guidance(decision, intent=intent, cycles=cycles))]}
+
+
 def _render_review_intent_guidance(
     decision: BranchDecision,
     *,
@@ -2345,17 +2355,7 @@ def build_supervisor_graph(
         # cycle, but the person's words did not select it; re-presenting it here
         # would turn thread history into a hidden cycle selector.
         if unscoped_stage_intent is not None and len(active_cycles) > 1:
-            return {
-                "messages": [
-                    receipt_message(
-                        _render_stage_control_guidance(
-                            decision,
-                            intent=unscoped_stage_intent,
-                            cycles=active_cycles,
-                        )
-                    )
-                ]
-            }
+            return _stage_control_guidance_reply(decision, intent=unscoped_stage_intent, cycles=active_cycles)
 
         # Nothing above claimed this request, and a Start/Hold control is still
         # waiting. Re-present it rather than dispatching stage work or falling
@@ -2455,17 +2455,7 @@ def build_supervisor_graph(
         if unscoped_stage_intent is not None:
             if not active_cycles:
                 active_cycles = [item for item in await _active_cycles(stage_adapter, project_id=context.project_id) if not item.get("parked")]
-            return {
-                "messages": [
-                    receipt_message(
-                        _render_stage_control_guidance(
-                            decision,
-                            intent=unscoped_stage_intent,
-                            cycles=active_cycles,
-                        )
-                    )
-                ]
-            }
+            return _stage_control_guidance_reply(decision, intent=unscoped_stage_intent, cycles=active_cycles)
         raw_context = request_context(config)
         # Server-owned, set only by the authenticated convening route. Read here
         # so the Design preflight below is skipped entirely: a review meeting
