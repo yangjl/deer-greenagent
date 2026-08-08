@@ -479,7 +479,12 @@ designNotes` and are handed to the council as the owner's decisions rather
   Test's authenticated Human Input Cards live in the originating conversation:
   the first offers or requires the configured review meeting, and the second
   offers only routes allowed by the server-computed outcome. Status always has
-  a text label and never depends on colour alone.
+  a text label and never depends on colour alone. Every DBTL meeting uses the
+  same inline participant footprint before its conclusion or presented deck.
+  Exact run ids own the normal path; when a failed meeting's durable participants
+  are reused by a later recovery run, `meetingAnchorRunIds` places that footprint
+  on the first matching stage result after the hidden meeting start instead of
+  leaving it at the transcript tail.
   Build uses its registered result deck as its only review channel. The deck
   reuses the Design deck's exact shell and its final slide carries
   Submit/Approve/Revise/Reject controls; no parallel review card is mounted in

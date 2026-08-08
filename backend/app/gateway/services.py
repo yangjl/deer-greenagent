@@ -394,7 +394,12 @@ _CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset(
     }
 )
 
-_SERVER_RUN_CONTEXT_KEYS: frozenset[str] = frozenset({"dbtl_evidence_retry"})
+_SERVER_RUN_CONTEXT_KEYS: frozenset[str] = frozenset(
+    {
+        "dbtl_evidence_retry",
+        "dbtl_review_meeting_stage",
+    }
+)
 
 
 async def file_thread_into_requested_project(

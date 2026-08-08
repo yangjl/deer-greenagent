@@ -186,7 +186,14 @@ Design–Build–Test–Learn (DBTL) governance.
   restores the same action for retry after a terminal failure or a successful
   parent run that produces no successor), while every
   successor remains bound to the original Build record, Test validity pack, or
-  Learn synthesis—not to the meeting's newer chair-summary attachment.
+  Learn synthesis—not to the meeting's newer chair-summary attachment. A
+  failed meeting action remains retryable under the same deck action id, with
+  each failed attempt retained in its audit receipt. Meeting workers may append
+  only their evidence-bound review artifact while the core stage is
+  `awaiting_review`; this never reopens or reruns the submitted stage. Design,
+  Build, Test, and Learn meetings all use the same inline transcript footprint:
+  the participant lanes precede that meeting's conclusion and review deck,
+  including when a failed meeting is recovered in a later run.
   Test's actual human path is chat-first: a typed, server-evaluated Test package
   automatically crosses the non-decision submission boundary into human review
   and produces a Human Input Card that offers the configured review meeting,

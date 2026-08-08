@@ -260,6 +260,79 @@ async def _post_design_meeting_turn(
         )
 
 
+def _review_meeting_anchor_run_id(receipt: dict[str, Any], execution_run_id: str) -> str:
+    """Keep a retried meeting attached to the run that owns its participants."""
+    attempts = receipt.get("failed_attempts")
+    if isinstance(attempts, list):
+        for attempt in attempts:
+            if not isinstance(attempt, dict) or attempt.get("action_kind") != "convene_review_meeting":
+                continue
+            run_id = str(attempt.get("run_id") or "").strip()
+            if run_id:
+                return run_id
+    return execution_run_id
+
+
+def _review_meeting_started_receipt(
+    prior: dict[str, Any],
+    *,
+    run_id: str,
+    thread_id: str,
+    stage: str,
+) -> dict[str, Any]:
+    failed_attempts = prior.get("failed_attempts")
+    return {
+        "kind": "convene_review_meeting",
+        "run_id": run_id,
+        "originating_thread_id": thread_id,
+        "message": f"The {stage.title()} review meeting is starting in the originating conversation.",
+        **({"failed_attempts": failed_attempts} if isinstance(failed_attempts, list) else {}),
+    }
+
+
+async def _post_review_meeting_turn(
+    request: Request,
+    *,
+    thread_id: str,
+    meeting_run_id: str,
+    execution_run_id: str,
+    surface_id: str,
+    stage: str,
+    comment: str,
+) -> None:
+    """Give every deck-started review meeting one durable transcript anchor."""
+    title = f"{stage.title()} review meeting"
+    recorded = f"Reviewer brief: {comment}" if comment else "The meeting was convened from the recorded stage evidence."
+    message = AIMessage(
+        id=f"dbtl-review-meeting-turn__{surface_id}__{execution_run_id}",
+        content=(f"**{title}**\n\n{recorded}\n\nThe participants are reviewing the evidence and will place the follow-up slide deck below this meeting."),
+        additional_kwargs={
+            "design_feedback_surface_id": surface_id,
+            "run_id": meeting_run_id,
+            "dbtl_meeting_execution_run_id": execution_run_id,
+        },
+    )
+    try:
+        await get_run_event_store(request).put_if_absent(
+            thread_id=thread_id,
+            run_id=meeting_run_id,
+            event_type="llm.ai.response",
+            category="message",
+            content=message.model_dump(),
+            metadata={
+                "caller": "lead_agent",
+                "dbtl_meeting_turn": True,
+            },
+        )
+    except Exception:  # noqa: BLE001 - an admitted meeting must not be rolled back
+        logger.exception(
+            "Failed to publish %s turn to thread %s for run %s",
+            title,
+            thread_id,
+            execution_run_id,
+        )
+
+
 def _latest_worker_failure_detail(
     workers: list[dict[str, Any]],
     *,
@@ -1746,16 +1819,25 @@ async def apply_design_feedback_action(
                         "dbtl_supervisor_enabled": True,
                         "dbtl_explicit_choice": "continue_cycle",
                         "dbtl_selected_cycle_id": cycle_id,
-                        # The stage is server-owned, taken from the surface the
-                        # server registered rather than from the request: a deck
-                        # that could name its own stage could convene a meeting
-                        # over evidence it was never rendered from.
-                        "dbtl_review_meeting_stage": surface_stage,
                     },
                     on_disconnect="continue",
                 ),
                 body.originating_thread_id,
                 request,
+                # The stage is server-owned, taken from the surface the server
+                # registered rather than from client run context: a caller
+                # that could name its own stage could convene a meeting over
+                # evidence its deck was never rendered from.
+                server_context={"dbtl_review_meeting_stage": surface_stage},
+            )
+            await _post_review_meeting_turn(
+                request,
+                thread_id=body.originating_thread_id,
+                meeting_run_id=_review_meeting_anchor_run_id(receipt, record.run_id),
+                execution_run_id=record.run_id,
+                surface_id=surface_id,
+                stage=surface_stage,
+                comment=written_feedback,
             )
             # Same silence gap as the revision round: the meeting reports
             # through its own reply, so a run that dies must be announced.
@@ -1768,12 +1850,12 @@ async def apply_design_feedback_action(
                 explanation=(f"The {surface_stage.title()} review meeting stopped before it could report. No meeting was recorded — you can convene it again from the stage's review page."),
                 success_has_follow_up=round_has_follow_up,
             )
-            receipt = {
-                "kind": "convene_review_meeting",
-                "run_id": record.run_id,
-                "originating_thread_id": body.originating_thread_id,
-                "message": f"The {surface_stage.title()} review meeting is starting in the originating conversation.",
-            }
+            receipt = _review_meeting_started_receipt(
+                receipt,
+                run_id=record.run_id,
+                thread_id=body.originating_thread_id,
+                stage=surface_stage,
+            )
             updated = await repo.update_stage_feedback_action(
                 action_id,
                 project_id=project_id,

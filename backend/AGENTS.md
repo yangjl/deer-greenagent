@@ -2913,7 +2913,22 @@ events; actual review meetings carry their stage in that identity so the
 frontend uses Design, Build, Test, or Learn meeting copy correctly. A meeting
 artifact also binds the exact core evidence artifact id, revision, and content
 hash it reviewed; a newer evidence revision on the same attempt reopens the
-meeting gate instead of inheriting a stale completion. It records the explicit
+meeting gate instead of inheriting a stale completion. The persistence write
+accepts an `awaiting_review` stage only for a review-variant spec carrying that
+exact binding and a matching `<stage>_review_meeting` artifact; ordinary stage
+workers remain refused after submission, and the meeting spec never replaces
+the core stage attempt's pinned spec. A failed `review_meeting` feedback
+action may retry under its original action id and deck hash, preserving the
+failed payload and run in bounded attempt history before reserving the new
+attempt. The deck route admits the selected stage through
+`server_context.dbtl_review_meeting_stage`; it is intentionally absent from the
+client run-context allowlist, so a caller cannot convene a meeting for a stage
+its authenticated surface did not bind. Convening also writes one ordinary,
+run-bound assistant turn into the originating transcript. A retry keeps that
+turn bound to the failed attempt's participant run while recording the new
+execution run separately, so the shared frontend can keep the participant
+footprint inline with its eventual conclusion instead of hanging it at the
+tail. It records the explicit
 Build checkpoint inside a one-click approval before advancing to Test. For
 checkpoints created before that repair, the adapter treats a single
 `in_progress` or `changes_requested` stage row as more specific than the cycle

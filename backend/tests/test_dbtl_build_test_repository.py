@@ -6,10 +6,12 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK, ValidityRefused
 from deerflow.persistence.dbtl import DbtlCycleRepository, DbtlWorkflowRefused, DesignFeedbackConflict
+from deerflow.persistence.dbtl.model import DbtlStageAttemptRow
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.workspaces import WorkspaceRepository
 
@@ -823,3 +825,151 @@ async def test_generic_test_review_is_refused(tmp_path: Path) -> None:
             reviewer_project_role="owner",
             idempotency_key="generic-test-review",
         )
+
+
+async def test_test_review_meeting_evidence_can_be_recorded_while_awaiting_review(tmp_path: Path) -> None:
+    repo = await _repo(tmp_path)
+    await _ready_for_build(repo)
+    await _record_lineage(repo)
+    await _approve(repo, "build", "build")
+    await repo.record_worker_runs(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="test",
+        stage_spec_key="generic:test:v4",
+        results=[],
+        actor_user_id="user-1",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="core-test-workers",
+        artifact_type="test_package",
+        artifact_uri="/mnt/user-data/outputs/test-package.json",
+        artifact_content_hash=HASH_B,
+    )
+    await repo.submit_stage_for_review(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="test",
+        expected_db_revision=await _revision(repo),
+        actor_user_id="user-1",
+        idempotency_key="submit-recorded-test",
+    )
+    cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+    assert cycle is not None
+    attempt = next(item for item in cycle["stages"] if item["stage"] == "test")
+    evidence = next(item for item in cycle["artifacts"] if item["stage_attempt_id"] == attempt["id"] and item["artifact_type"] == "test_package")
+
+    await repo.record_worker_runs(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="test",
+        stage_spec_key="generic:test-review:v1",
+        results=[],
+        actor_user_id="user-1",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="test-review-meeting",
+        artifact_type="test_review_meeting",
+        artifact_uri="/mnt/user-data/outputs/test-review-meeting.json",
+        artifact_content_hash=HASH_A,
+        reviewed_artifact_id=evidence["id"],
+        reviewed_artifact_revision=evidence["revision"],
+        reviewed_artifact_content_hash=evidence["content_hash"],
+    )
+
+    refreshed = await repo.get_cycle("cycle-1", project_id="project-1")
+    assert refreshed is not None
+    refreshed_attempt = next(item for item in refreshed["stages"] if item["stage"] == "test")
+    assert refreshed_attempt["status"] == "awaiting_review"
+    sf = get_session_factory()
+    assert sf is not None
+    async with sf() as session:
+        recorded_attempt = await session.scalar(select(DbtlStageAttemptRow).where(DbtlStageAttemptRow.id == refreshed_attempt["id"]))
+    assert recorded_attempt is not None
+    assert recorded_attempt.stage_spec_key == "generic:test:v4"
+    meeting = next(item for item in refreshed["artifacts"] if item["artifact_type"] == "test_review_meeting")
+    assert meeting["reviewed_artifact_id"] == evidence["id"]
+
+
+async def test_ordinary_test_workers_remain_blocked_while_awaiting_review(tmp_path: Path) -> None:
+    repo = await _repo(tmp_path)
+    await _awaiting_test_review(repo)
+
+    with pytest.raises(DbtlWorkflowRefused, match="awaiting_review"):
+        await repo.record_worker_runs(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            stage="test",
+            stage_spec_key="generic:test:v4",
+            results=[],
+            actor_user_id="user-1",
+            expected_db_revision=await _revision(repo),
+            idempotency_key="ordinary-test-workers-after-submit",
+        )
+
+
+async def test_failed_review_meeting_can_retry_under_the_same_action_id(tmp_path: Path) -> None:
+    repo = await _repo(tmp_path)
+    await _awaiting_test_review(repo)
+    cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+    assert cycle is not None
+    attempt = next(item for item in cycle["stages"] if item["stage"] == "test")
+    evidence = next(item for item in cycle["artifacts"] if item["stage_attempt_id"] == attempt["id"] and item["artifact_type"] == "test_package")
+    surface = await repo.register_stage_feedback_surface(
+        stage="test",
+        project_id="project-1",
+        cycle_id="cycle-1",
+        stage_attempt_id=attempt["id"],
+        design_round=1,
+        originating_thread_id="thread-1",
+        mode="stage_review",
+        deck_uri="/mnt/user-data/outputs/test-slides.html",
+        deck_content_hash=HASH_A,
+        evidence_artifact_id=evidence["id"],
+        evidence_artifact_revision=evidence["revision"],
+        evidence_content_hash=evidence["content_hash"],
+        decision_request={
+            "transition_gate": {
+                "stage": "test",
+                "assessment": {"difficulty": "high_stakes"},
+                "routes": [],
+            }
+        },
+    )
+    common = {
+        "project_id": "project-1",
+        "cycle_id": "cycle-1",
+        "surface_id": surface["surface_id"],
+        "originating_thread_id": "thread-1",
+        "action_kind": "convene_review_meeting",
+        "selected_card_ids": [],
+        "client_submission_id": "review-meeting-retry",
+        "expected_db_revision": int(cycle["db_revision"]),
+        "expected_evidence": {
+            "artifact_id": evidence["id"],
+            "revision": evidence["revision"],
+            "content_hash": evidence["content_hash"],
+        },
+        "expected_deck_hash": HASH_A,
+    }
+    _surface, first, replayed = await repo.reserve_stage_feedback_action(
+        **common,
+        human_comment="Check the holdout evidence.",
+    )
+    assert replayed is False
+    await repo.update_stage_feedback_action(
+        first["client_submission_id"],
+        project_id="project-1",
+        status="failed",
+        run_id="run-failed-meeting",
+        failure_code="resume_no_feedback_surface",
+    )
+
+    _surface, retried, reused = await repo.reserve_stage_feedback_action(
+        **common,
+        human_comment="Check the holdout and fold evidence.",
+    )
+
+    assert reused is True
+    assert retried["status"] == "pending"
+    assert retried["run_id"] is None
+    assert retried["human_comment"] == "Check the holdout and fold evidence."
+    assert retried["receipt"]["failed_attempts"][-1]["run_id"] == "run-failed-meeting"

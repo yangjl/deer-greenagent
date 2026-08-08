@@ -488,6 +488,66 @@ def test_a_recorded_chair_option_starts_one_originating_thread_run_and_watcher(
     assert background_watches[0]["success_has_follow_up"] is not None
 
 
+def test_a_test_review_meeting_gets_a_run_bound_inline_turn() -> None:
+    store = MemoryRunEventStore()
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_event_store=store)))
+
+    anyio.run(
+        partial(
+            dbtl_cycles._post_review_meeting_turn,
+            request,
+            thread_id="thread-1",
+            meeting_run_id="run-test-meeting",
+            execution_run_id="run-test-retry",
+            surface_id="surface-test",
+            stage="test",
+            comment="Check the irreproducible baseline.",
+        )
+    )
+
+    messages = anyio.run(partial(store.list_messages, "thread-1", user_id=str(_USER_ID)))
+    meeting_turn = messages[-1]["content"]
+    assert "Test review meeting" in meeting_turn["content"]
+    assert "Check the irreproducible baseline." in meeting_turn["content"]
+    assert meeting_turn["additional_kwargs"]["run_id"] == "run-test-meeting"
+    assert meeting_turn["additional_kwargs"]["dbtl_meeting_execution_run_id"] == "run-test-retry"
+
+
+def test_a_review_meeting_retry_keeps_the_original_participant_run_anchor() -> None:
+    assert (
+        dbtl_cycles._review_meeting_anchor_run_id(
+            {
+                "failed_attempts": [
+                    {
+                        "action_kind": "convene_review_meeting",
+                        "run_id": "run-original-meeting",
+                    },
+                    {
+                        "action_kind": "convene_review_meeting",
+                        "run_id": "run-later-retry",
+                    },
+                ]
+            },
+            "run-retry",
+        )
+        == "run-original-meeting"
+    )
+
+
+def test_a_review_meeting_retry_receipt_keeps_failed_attempt_history() -> None:
+    failed_attempts = [{"run_id": "run-original-meeting"}]
+
+    assert (
+        dbtl_cycles._review_meeting_started_receipt(
+            {"failed_attempts": failed_attempts},
+            run_id="run-retry",
+            thread_id="thread-1",
+            stage="test",
+        )["failed_attempts"]
+        == failed_attempts
+    )
+
+
 def test_a_terminal_chair_resume_without_a_followup_surface_reopens_the_same_answer(
     tmp_path: Path,
     monkeypatch,

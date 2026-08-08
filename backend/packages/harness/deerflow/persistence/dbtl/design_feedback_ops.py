@@ -706,7 +706,7 @@ class DesignFeedbackOpsMixin:
                     raise DesignFeedbackConflict("A progressive route action cannot select issue cards.")
 
             if existing is not None:
-                editable_failed_retry = bool(existing.status == "failed" and existing.id == submission_id and existing.expected_deck_hash == expected_deck_hash and action_group in {"chair_response", "stage_review"})
+                editable_failed_retry = bool(existing.status == "failed" and existing.id == submission_id and existing.expected_deck_hash == expected_deck_hash and action_group in {"chair_response", "review_meeting", "stage_review"})
                 if editable_failed_retry:
                     # A resumed chair worker is itself durable audit work, so a
                     # failed attempt advances the cycle revision even though it
@@ -749,7 +749,11 @@ class DesignFeedbackOpsMixin:
                         "message": (
                             "The edited retry guidance is being sent to a new control."
                             if action_kind == "retry_with_guidance"
-                            else ("The edited chair answer is being sent to a new attempt." if action_group == "chair_response" else "The edited review decision is being sent to a new attempt.")
+                            else (
+                                "The edited chair answer is being sent to a new attempt."
+                                if action_group == "chair_response"
+                                else ("The review meeting is being sent to a new attempt." if action_group == "review_meeting" else "The edited review decision is being sent to a new attempt.")
+                            )
                         ),
                     }
                     await session.commit()

@@ -19,6 +19,7 @@ import { describe, expect, it } from "@rstest/core";
 
 import {
   meetingAnchorIndices,
+  meetingAnchorRunIds,
   meetingsByRun,
 } from "@/core/tasks/meeting-timeline";
 import type { Subtask } from "@/core/tasks/types";
@@ -69,6 +70,92 @@ describe("meetingAnchorIndices", () => {
     expect([
       ...meetingAnchorIndices([{ runId: "run-1", type: "human" }]),
     ]).toEqual([]);
+  });
+});
+
+describe("meetingAnchorRunIds", () => {
+  it("places a recovered Test meeting above the first Test result after its hidden start", () => {
+    const meetings = meetingsByRun([
+      councilSeat("reviewer", "meeting-run", "position", 1, {
+        status: "completed",
+      }),
+      councilSeat("chair", "meeting-run", "chair", 1, {
+        status: "completed",
+      }),
+    ]).map((meeting) => ({ ...meeting, stage: "test" }));
+
+    expect(
+      meetingAnchorRunIds(
+        [
+          {
+            runId: "test-stage-run",
+            type: "assistant:present-files",
+            stage: "test",
+            firstMessageIndex: 4,
+          },
+          {
+            runId: "meeting-retry-run",
+            type: "assistant:present-files",
+            stage: "test",
+            firstMessageIndex: 9,
+          },
+        ],
+        meetings,
+        new Map([["meeting-run", 6]]),
+      ),
+    ).toEqual(new Map([[1, "meeting-run"]]));
+  });
+
+  it("does not move a live meeting onto a later stage result", () => {
+    const meetings = meetingsByRun([
+      councilSeat("reviewer", "meeting-run", "position", 1, {
+        status: "completed",
+      }),
+      councilSeat("chair", "meeting-run", "chair", 1, {
+        status: "in_progress",
+      }),
+    ]).map((meeting) => ({ ...meeting, stage: "test" }));
+
+    expect(
+      meetingAnchorRunIds(
+        [
+          {
+            runId: "other-run",
+            type: "assistant:present-files",
+            stage: "test",
+            firstMessageIndex: 9,
+          },
+        ],
+        meetings,
+        new Map([["meeting-run", 6]]),
+      ),
+    ).toEqual(new Map());
+  });
+
+  it("does not attach a meeting with no completed chair to an unrelated later deck", () => {
+    const meetings = meetingsByRun([
+      councilSeat("reviewer", "meeting-run", "position", 1, {
+        status: "completed",
+      }),
+      councilSeat("chair", "meeting-run", "chair", 1, {
+        status: "failed",
+      }),
+    ]).map((meeting) => ({ ...meeting, stage: "test" }));
+
+    expect(
+      meetingAnchorRunIds(
+        [
+          {
+            runId: "later-run",
+            type: "assistant:present-files",
+            stage: "test",
+            firstMessageIndex: 9,
+          },
+        ],
+        meetings,
+        new Map([["meeting-run", 6]]),
+      ),
+    ).toEqual(new Map());
   });
 });
 

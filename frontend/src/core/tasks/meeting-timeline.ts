@@ -36,6 +36,10 @@ export interface Meeting {
 export interface MeetingTranscriptGroup {
   runId?: string;
   type: string;
+  /** Stage named by a presented DBTL result, when this is one. */
+  stage?: string;
+  /** Position of the group's first message in the unfiltered thread. */
+  firstMessageIndex?: number;
 }
 
 /** Pick one transcript group to own each run-scoped meeting card. */
@@ -59,6 +63,58 @@ export function meetingAnchorIndices(
     }
   });
   return new Set([...anchors.values()].map(({ index }) => index));
+}
+
+/** Bind each meeting to the transcript group that should render it. */
+export function meetingAnchorRunIds(
+  groups: readonly MeetingTranscriptGroup[],
+  meetings: readonly Meeting[],
+  meetingStartMessageIndices: ReadonlyMap<string, number>,
+): Map<number, string> {
+  const anchors = new Map<number, string>();
+  const meetingsByRunId = new Map(
+    meetings.map((meeting) => [meeting.runId, meeting]),
+  );
+
+  for (const index of meetingAnchorIndices(groups)) {
+    const runId = groups[index]?.runId;
+    if (runId && meetingsByRunId.has(runId)) {
+      anchors.set(index, runId);
+    }
+  }
+
+  const anchoredRunIds = new Set(anchors.values());
+  for (const meeting of meetings) {
+    const hasCompletedChair = meeting.seats.some(
+      (seat) =>
+        seat.councilSeat?.role === "chair" && seat.status === "completed",
+    );
+    if (
+      meeting.isRunning ||
+      !hasCompletedChair ||
+      anchoredRunIds.has(meeting.runId)
+    ) {
+      continue;
+    }
+    const startIndex = meetingStartMessageIndices.get(meeting.runId);
+    if (startIndex === undefined || !meeting.stage) {
+      continue;
+    }
+    const resultIndex = groups.findIndex(
+      (group, index) =>
+        !anchors.has(index) &&
+        group.type === "assistant:present-files" &&
+        group.stage === meeting.stage &&
+        group.firstMessageIndex !== undefined &&
+        group.firstMessageIndex > startIndex,
+    );
+    if (resultIndex >= 0) {
+      anchors.set(resultIndex, meeting.runId);
+      anchoredRunIds.add(meeting.runId);
+    }
+  }
+
+  return anchors;
 }
 
 /**

@@ -70,6 +70,7 @@ import type { Subtask } from "@/core/tasks";
 import { useSubtaskContext, useUpdateSubtask } from "@/core/tasks/context";
 import {
   meetingAnchorIndices,
+  meetingAnchorRunIds,
   meetingsByRun,
   unanchoredMeetings,
 } from "@/core/tasks/meeting-timeline";
@@ -145,6 +146,19 @@ function useStableMessageGroups(
     previousIsLoadingRef.current = isLoading;
     return stableGroups;
   }, [isLoading, messages]);
+}
+
+function presentedDbtlStage(messages: readonly Message[]) {
+  const stages = new Set(
+    messages
+      .flatMap(extractPresentFilesFromMessage)
+      .map(
+        (path) =>
+          /\/(design|build|test|learn|reconciliation)\//.exec(path)?.[1],
+      )
+      .filter((stage): stage is string => Boolean(stage)),
+  );
+  return stages.size === 1 ? [...stages][0] : undefined;
 }
 
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 24;
@@ -413,6 +427,7 @@ export function MessageList({
     useState<SelectionToolbarState | null>(null);
   const messages = thread.messages;
   const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
+  const { tasks: meetingTaskMap } = useSubtaskContext();
   const browserView = useMaybeBrowserView();
   const pushBrowserFrame = browserView?.pushFrame;
   const messageCount = messages.length;
@@ -540,7 +555,7 @@ export function MessageList({
       ),
     [groupRunIds, groupedMessages],
   );
-  const anchoredRunIds = useMemo(
+  const stageWorkAnchoredRunIds = useMemo(
     () =>
       new Set(
         [...meetingAnchorGroupIndices]
@@ -548,6 +563,54 @@ export function MessageList({
           .filter((runId): runId is string => !!runId),
       ),
     [groupRunIds, meetingAnchorGroupIndices],
+  );
+  const meetings = useMemo(
+    () => meetingsByRun(Object.values(meetingTaskMap)),
+    [meetingTaskMap],
+  );
+  const meetingStartMessageIndices = useMemo(() => {
+    const meetingRunIds = new Set(meetings.map((meeting) => meeting.runId));
+    const indices = new Map<string, number>();
+    messages.forEach((message, index) => {
+      const runId = (message as { run_id?: string }).run_id;
+      if (runId && meetingRunIds.has(runId) && !indices.has(runId)) {
+        indices.set(runId, index);
+      }
+    });
+    return indices;
+  }, [meetings, messages]);
+  const meetingAnchorRunIdsByGroupIndex = useMemo(() => {
+    const messageIndicesById = new Map(
+      messages.flatMap((message, index) =>
+        message.id ? [[message.id, index] as const] : [],
+      ),
+    );
+    return meetingAnchorRunIds(
+      groupedMessages.map((group, index) => ({
+        runId: groupRunIds[index],
+        type: group.type,
+        stage: presentedDbtlStage(group.messages),
+        firstMessageIndex: Math.min(
+          ...group.messages.map((message) =>
+            message.id
+              ? (messageIndicesById.get(message.id) ?? Number.MAX_SAFE_INTEGER)
+              : messages.indexOf(message),
+          ),
+        ),
+      })),
+      meetings,
+      meetingStartMessageIndices,
+    );
+  }, [
+    groupRunIds,
+    groupedMessages,
+    meetingStartMessageIndices,
+    meetings,
+    messages,
+  ]);
+  const meetingAnchoredRunIds = useMemo(
+    () => new Set(meetingAnchorRunIdsByGroupIndex.values()),
+    [meetingAnchorRunIdsByGroupIndex],
   );
   const previousTurnUsageStateRef = useRef<AssistantTurnUsageState | undefined>(
     undefined,
@@ -1112,10 +1175,12 @@ export function MessageList({
                 turnUsageMessagesByGroupIndex[groupIndex];
               const groupIsLoading =
                 thread.isLoading && groupIndex === lastGroupIndex;
-              const meetingCard = meetingAnchorGroupIndices.has(groupIndex) ? (
+              const meetingRunId =
+                meetingAnchorRunIdsByGroupIndex.get(groupIndex);
+              const meetingCard = meetingRunId ? (
                 <DebatePanel
                   className="mb-4 w-full"
-                  runId={groupRunIds[groupIndex]}
+                  runId={meetingRunId}
                   threadId={threadId}
                 />
               ) : null;
@@ -1252,7 +1317,10 @@ export function MessageList({
                       group,
                       groupIndex,
                       meetingCard ? (
-                        <div className="w-full">{meetingCard}{stageWorkCards}</div>
+                        <div className="w-full">
+                          {meetingCard}
+                          {stageWorkCards}
+                        </div>
                       ) : null,
                     );
                   }
@@ -1487,11 +1555,11 @@ export function MessageList({
             }}
           />
           <UnanchoredMeetings
-            anchoredRunIds={anchoredRunIds}
+            anchoredRunIds={meetingAnchoredRunIds}
             threadId={threadId}
           />
           <UnanchoredStageWork
-            anchoredRunIds={anchoredRunIds}
+            anchoredRunIds={stageWorkAnchoredRunIds}
             threadId={threadId}
           />
           <StageWorkHydrator isLoading={thread.isLoading} threadId={threadId} />

@@ -262,7 +262,11 @@ Breeding-workspace note:
   message shape and thread artifact inspector; it only creates review evidence
   and never submits or approves the human gate. Chat renders one durable,
   run-scoped meeting footprint followed by the round's assistant conclusion or
-  `present_files` output, keeping the Design slide deck below the meeting. The
+  `present_files` output, keeping the Design slide deck below the meeting. Build,
+  Test, and Learn review meetings use the same inline footprint; a recovered
+  result may belong to a later execution run, so the frontend binds it to the
+  original participant run using the hidden meeting start as its ordering
+  boundary. The
   Design review sheet renders a structured decision map from the package
   referenced by the bound Markdown. Automatic kickoff plumbing is hidden from
   the user-authored transcript. The

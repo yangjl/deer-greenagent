@@ -1681,6 +1681,17 @@ def test_server_run_context_carries_evidence_retry_marker_without_making_it_clie
     assert "dbtl_evidence_retry" not in config["configurable"]
 
 
+def test_server_run_context_carries_review_meeting_stage_without_exposing_it_to_clients():
+    from app.gateway.services import build_run_config, merge_server_run_context_overrides
+
+    config = build_run_config("thread-1", None, None)
+
+    merge_server_run_context_overrides(config, {"dbtl_review_meeting_stage": "test"})
+
+    assert config["context"]["dbtl_review_meeting_stage"] == "test"
+    assert "dbtl_review_meeting_stage" not in config["configurable"]
+
+
 def test_merge_run_context_overrides_context_only_keys_do_not_override_existing():
     """A token already in ``config['context']`` must not be clobbered by a
     client-supplied one (defense in depth — the manager is the only legitimate

@@ -2771,6 +2771,81 @@ class TestLiveStageBranch:
         ]
 
     @pytest.mark.asyncio
+    async def test_authenticated_deck_meeting_outranks_an_older_test_review_card(self):
+        executed: list[dict] = []
+
+        class Adapter:
+            async def test_review_snapshot(self, **kwargs):
+                return {
+                    "evaluation": {
+                        "outcome": "supported",
+                        "validity_pack_key": "generic-predictive:v2",
+                        "allowed_recommendations": ["advance_to_learn", "repeat_test"],
+                    },
+                    "evidence_uri": "/mnt/user-data/outputs/dbtl/test-review.md",
+                    "evidence_hash": "a" * 64,
+                    "meeting": {"requirement": "optional"},
+                }
+
+            async def execute(self, **kwargs):
+                if kwargs.get("review_meeting_stage") != "test":
+                    return LiveStageResult(
+                        stage="test",
+                        cycle_id="cyc-1",
+                        note="The Test stage is awaiting human review, so it was not run again.",
+                    )
+                executed.append(kwargs)
+                return LiveStageResult(
+                    stage="test",
+                    cycle_id="cyc-1",
+                    note="The Test review meeting was recorded.",
+                    artifact_uri="/mnt/user-data/outputs/dbtl/test-meeting.json",
+                    deck_uri="/mnt/user-data/outputs/dbtl/test-meeting.html",
+                )
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id="cyc-1",
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+        thread = {"configurable": {"thread_id": "deck-test-review"}}
+
+        await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [HumanMessage(content="review the submitted test", id="human-review")],
+            },
+            config={**thread, "context": {"run_id": "run-card"}},
+        )
+        final = await graph.ainvoke(
+            {
+                "messages": [
+                    HumanMessage(
+                        content="Convene the Test review meeting for the recorded evidence.",
+                        id="deck-meeting",
+                        additional_kwargs={"hide_from_ui": True},
+                    )
+                ]
+            },
+            config={
+                **thread,
+                "context": {
+                    "run_id": "run-meeting",
+                    "dbtl_review_meeting_stage": "test",
+                },
+            },
+        )
+
+        assert len(executed) == 1
+        assert executed[0]["review_meeting_stage"] == "test"
+        assert final["messages"][-1].name == "present_files"
+
+    @pytest.mark.asyncio
     async def test_recorded_test_outcome_recovers_start_learn_without_dispatching(self):
         executed: list[dict] = []
 

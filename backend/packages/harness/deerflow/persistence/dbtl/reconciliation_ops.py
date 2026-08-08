@@ -654,10 +654,18 @@ class ReconciliationOpsMixin:
             attempt = next((item for item in stages if item.stage == stage), None)
             if attempt is None:
                 raise DbtlWorkflowRefused(f"Unknown stage {stage!r}.")
-            if attempt.status not in {
+            records_bound_review = bool(spec.variant == "review" and reviewed_artifact_id is not None and artifact_type == f"{stage}_review_meeting")
+            allowed_statuses = {
                 StageStatus.IN_PROGRESS.value,
                 StageStatus.CHANGES_REQUESTED.value,
-            }:
+            }
+            if records_bound_review:
+                # A review meeting annotates evidence only after the core stage
+                # has been submitted. Its exact reviewed-artifact binding and
+                # review-variant spec keep this exception from reopening normal
+                # stage execution while the human gate is waiting.
+                allowed_statuses.add(StageStatus.AWAITING_REVIEW.value)
+            if attempt.status not in allowed_statuses:
                 raise DbtlWorkflowRefused(f"Worker evidence cannot be recorded while {stage!r} is {attempt.status!r}.")
 
             if reviewed_artifact_id is not None:
@@ -672,7 +680,8 @@ class ReconciliationOpsMixin:
                 if reviewed is None or reviewed.revision != reviewed_artifact_revision or reviewed.content_hash != reviewed_artifact_content_hash:
                     raise DbtlWorkflowRefused("The review meeting's evidence binding no longer matches this stage attempt.")
 
-            attempt.stage_spec_key = stage_spec_key
+            if not records_bound_review:
+                attempt.stage_spec_key = stage_spec_key
             # A unit is recorded once per stage attempt — that is what the unique
             # index says, and the Build workflow made it reachable: a run whose
             # phases all replayed from the durable chain arrives here with the
