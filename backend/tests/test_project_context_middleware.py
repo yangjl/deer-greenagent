@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deerflow.agents.middlewares.project_context_middleware import (
     ProjectContextMiddleware,
+    build_dbtl_status_reminder,
     build_mounts_reminder,
     build_parked_design_reminder,
     build_project_reminder,
@@ -76,7 +77,6 @@ class TestBuildParkedDesignReminder:
                 },
             }
         )
-
         assert reminder is not None
         assert "UNAPPROVED" in reminder
         assert "/mnt/user-data/outputs/design.md" in reminder
@@ -97,6 +97,33 @@ class TestBuildParkedDesignReminder:
             )
             is None
         )
+
+
+def test_dbtl_status_reminder_names_completed_cycle_evidence() -> None:
+    reminder = build_dbtl_status_reminder(
+        {
+            "cycles": [
+                {
+                    "cycle_id": "cycle-1",
+                    "title": "Deterministic regression",
+                    "state": "completed",
+                    "stages": {"learn": "approved"},
+                    "artifacts": [
+                        {
+                            "stage": "learn",
+                            "artifact_type": "learn_synthesis",
+                            "uri": "/mnt/user-data/outputs/learn-current.md",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert reminder is not None
+    assert "completed" in reminder
+    assert "learn/learn synthesis" in reminder
+    assert "/mnt/user-data/outputs/learn-current.md" in reminder
 
 
 class TestMiddleware:

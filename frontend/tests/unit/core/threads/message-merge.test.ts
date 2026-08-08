@@ -75,6 +75,74 @@ test("mergeMessages does not collapse an unloaded gap before the first shared an
   ).toEqual([latestHuman, latestAi]);
 });
 
+test("mergeMessages drops an unanchored stale checkpoint prefix before the current user turn", () => {
+  const learnDeck = {
+    id: "learn-deck",
+    type: "ai",
+    content: "Learn review deck",
+    run_id: "run-learn",
+  } as Message;
+  const staleDesignResult = {
+    id: "old-design-result",
+    type: "ai",
+    content: "Design meeting · Round 1",
+    run_id: "run-design",
+  } as Message;
+  const currentHuman = {
+    id: "cycle-followup",
+    type: "human",
+    content: "what do we learned from this cycle?",
+    run_id: "run-followup",
+  } as Message;
+  const currentStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Reading the Learn evidence",
+    run_id: "run-followup",
+  } as Message;
+
+  expect(
+    mergeMessages(
+      [learnDeck],
+      [staleDesignResult, currentHuman, currentStep],
+      [],
+    ).map((message) => message.id),
+  ).toEqual(["learn-deck", "cycle-followup", "current-step"]);
+});
+
+test("mergeMessages retains unanchored current-run steps that streamed before the user turn", () => {
+  const canonical = {
+    id: "learn-deck",
+    type: "ai",
+    content: "Learn review deck",
+    run_id: "run-learn",
+  } as Message;
+  const stale = {
+    id: "old-design-result",
+    type: "ai",
+    content: "Design meeting · Round 1",
+    run_id: "run-design",
+  } as Message;
+  const earlyStep = {
+    id: "early-current-step",
+    type: "ai",
+    content: "Reading the Learn evidence",
+    run_id: "run-followup",
+  } as Message;
+  const currentHuman = {
+    id: "cycle-followup",
+    type: "human",
+    content: "what do we learned from this cycle?",
+    run_id: "run-followup",
+  } as Message;
+
+  expect(
+    mergeMessages([canonical], [stale, earlyStep, currentHuman], []).map(
+      (message) => message.id,
+    ),
+  ).toEqual(["learn-deck", "early-current-step", "cycle-followup"]);
+});
+
 test("mergeMessages lets live thread messages replace overlapping history", () => {
   const oldHuman = {
     id: "human-1",

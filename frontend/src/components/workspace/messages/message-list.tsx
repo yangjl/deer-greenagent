@@ -178,11 +178,13 @@ type SelectionToolbarState = {
   placement: "top" | "bottom";
 };
 
-/** Meetings no transcript group has claimed yet, rendered at the tail.
+/** Live meetings no transcript group has claimed yet, rendered at the tail.
  *
  * Participant events arrive before the run's first assistant message. Keeping
  * that meeting at the tail makes it visible while it runs; as soon as the
  * result turn arrives, the same run id anchors it above that turn instead.
+ * Completed historical meetings wait for their paginated transcript anchor;
+ * otherwise a reload would append them below newer turns as duplicate results.
  */
 function UnanchoredMeetings({
   anchoredRunIds,

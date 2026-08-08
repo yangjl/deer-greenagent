@@ -21,6 +21,7 @@ import {
   meetingAnchorIndices,
   meetingAnchorRunIds,
   meetingsByRun,
+  unanchoredMeetings,
 } from "@/core/tasks/meeting-timeline";
 import type { Subtask } from "@/core/tasks/types";
 
@@ -261,5 +262,33 @@ describe("meetingsByRun", () => {
     expect(JSON.stringify(meetingsByRun(tasks))).toBe(
       JSON.stringify(meetingsByRun(tasks)),
     );
+  });
+});
+
+describe("unanchoredMeetings", () => {
+  it("does not append completed historical meetings below a newer turn", () => {
+    const meetings = meetingsByRun([
+      councilSeat("position", "historical-run", "position", 1, {
+        status: "completed",
+      }),
+      councilSeat("chair", "historical-run", "chair", 1, {
+        status: "completed",
+      }),
+    ]);
+
+    expect(unanchoredMeetings(meetings, new Set())).toEqual([]);
+  });
+
+  it("keeps a currently running meeting visible before its message anchor arrives", () => {
+    const meetings = meetingsByRun([
+      councilSeat("position", "live-run", "position", 1, {
+        status: "completed",
+      }),
+      councilSeat("chair", "live-run", "chair", 1, {
+        status: "in_progress",
+      }),
+    ]);
+
+    expect(unanchoredMeetings(meetings, new Set())).toEqual(meetings);
   });
 });

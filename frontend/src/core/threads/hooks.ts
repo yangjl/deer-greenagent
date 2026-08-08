@@ -556,7 +556,30 @@ export function mergeMessages(
 
   let canonicalAndLive: Message[];
   if (!lastAnchorIdentity) {
-    canonicalAndLive = [...canonical, ...live];
+    let unanchoredLive = live;
+    if (canonical.length > 0) {
+      let latestVisibleHumanIndex = -1;
+      for (let index = live.length - 1; index >= 0; index--) {
+        const message = live[index];
+        if (message?.type === "human" && !isHiddenFromUIMessage(message)) {
+          latestVisibleHumanIndex = index;
+          break;
+        }
+      }
+      if (latestVisibleHumanIndex > 0) {
+        const currentRunId = getMessageRunId(live[latestVisibleHumanIndex]!);
+        const currentRunPrefix = currentRunId
+          ? live
+              .slice(0, latestVisibleHumanIndex)
+              .filter((message) => getMessageRunId(message) === currentRunId)
+          : EMPTY_MESSAGES;
+        unanchoredLive = [
+          ...currentRunPrefix,
+          ...live.slice(latestVisibleHumanIndex),
+        ];
+      }
+    }
+    canonicalAndLive = [...canonical, ...unanchoredLive];
   } else {
     canonicalAndLive = [];
     for (const message of canonical) {

@@ -1045,6 +1045,80 @@ class TestOrdinaryIsIndistinguishable:
         # banner, no supervisor commentary.
         assert [m.id for m in final["messages"]] == ["human-1", "ai-1"]
 
+    @pytest.mark.asyncio
+    async def test_completed_cycle_followup_is_read_only_and_carries_learn_evidence(self):
+        captured: dict = {}
+
+        class CompletedCycleAdapter(NoopStageAdapter):
+            async def active_cycle_status(self, *, project_id):
+                assert project_id == "proj-1"
+                return []
+
+            async def conversation_cycle_status(self, *, project_id, thread_id):
+                assert (project_id, thread_id) == ("proj-1", "cycle-thread")
+                return {
+                    "cycle_id": "cycle-1",
+                    "title": "Deterministic regression",
+                    "state": "completed",
+                    "parked": False,
+                    "stages": {
+                        "design": "approved",
+                        "build": "approved",
+                        "test": "approved",
+                        "learn": "approved",
+                    },
+                    "artifacts": [
+                        {
+                            "stage": "learn",
+                            "artifact_type": "learn_synthesis",
+                            "uri": "/mnt/user-data/outputs/learn-review.md",
+                            "content_hash": "abc123",
+                        }
+                    ],
+                }
+
+        def capturing_lead_agent():
+            builder = StateGraph(SCHEMA)
+
+            def node(_state, config):
+                captured.update(request_context(config))
+                return {"messages": [AIMessage(content="cycle summary", id="ai-cycle-summary")]}
+
+            builder.add_node("lead", node)
+            builder.add_edge(START, "lead")
+            builder.add_edge("lead", END)
+            return builder.compile(checkpointer=False)
+
+        graph = build_supervisor_graph(
+            lead_agent=capturing_lead_agent(),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F"),
+            stage_adapter=CompletedCycleAdapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    HumanMessage(
+                        content="what do we learned from this cycle?",
+                        id="human-cycle-followup",
+                    )
+                ],
+            },
+            config={"configurable": {"thread_id": "cycle-thread"}},
+        )
+
+        assert final["messages"][-1].content == "cycle summary"
+        assert captured["dbtl_read_only_context"] == {
+            "active": True,
+            "reason": "completed_cycle_followup",
+        }
+        cycle = captured["dbtl_status_snapshot"]["cycles"][0]
+        assert cycle["cycle_id"] == "cycle-1"
+        assert cycle["state"] == "completed"
+        assert cycle["artifacts"][0]["uri"] == "/mnt/user-data/outputs/learn-review.md"
+
 
 class TestPostApprovalStageHandoff:
     """A deck verdict opens the next stage, but a person still starts it."""

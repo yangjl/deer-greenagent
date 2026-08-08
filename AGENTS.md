@@ -236,6 +236,12 @@ Breeding-workspace note:
   projections, and bounded retrieval pointers. Supersession and retraction
   retain the old claim and event history while removing its active publication
   pointers. No agent, stage approval, or promotion call can implicitly publish.
+- A completed-cycle follow-up in the conversation that opened the cycle remains
+  an ordinary Lead reply, but the Supervisor attaches that cycle's bounded
+  artifact references and activates the shared DBTL read-only tool fence. The
+  Lead may inspect and explain the recorded Learn evidence, but cannot write,
+  execute, delegate, or create an ungoverned replacement result. This history
+  lookup never feeds terminal cycles back into continuation or meeting reruns.
 - Conversational discovery is the durable, read-only pre-cycle path. Explicit
   starts are gated by `dbtl.conversational_discovery`; classifier entry and its
   automatic ready-card offer have separate default-off switches. A declined

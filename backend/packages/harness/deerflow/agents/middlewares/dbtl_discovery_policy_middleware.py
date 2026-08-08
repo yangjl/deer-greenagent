@@ -1,4 +1,4 @@
-"""Fail-closed read-only tool policy for pre-cycle DBTL discovery."""
+"""Fail-closed read-only tool policy for DBTL inspection turns."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result
 from deerflow.dbtl.discovery import DISCOVERY_PACKAGE_TOOL_NAME
 
 DBTL_DISCOVERY_CONTEXT_KEY = "dbtl_discovery_context"
+DBTL_READ_ONLY_CONTEXT_KEY = "dbtl_read_only_context"
 
 DISCOVERY_READ_ONLY_TOOLS = frozenset(
     {
@@ -38,10 +39,11 @@ def _runtime_context(request: ModelRequest | ToolCallRequest) -> dict | None:
     return context if isinstance(context, dict) else None
 
 
-def _discovery_active(request: ModelRequest | ToolCallRequest) -> bool:
+def _read_only_active(request: ModelRequest | ToolCallRequest) -> bool:
     context = _runtime_context(request)
     discovery = context.get(DBTL_DISCOVERY_CONTEXT_KEY) if context is not None else None
-    return isinstance(discovery, dict) and discovery.get("active") is True
+    read_only = context.get(DBTL_READ_ONLY_CONTEXT_KEY) if context is not None else None
+    return (isinstance(discovery, dict) and discovery.get("active") is True) or (isinstance(read_only, dict) and read_only.get("active") is True)
 
 
 class DbtlDiscoveryPolicyMiddleware(AgentMiddleware):
@@ -49,20 +51,24 @@ class DbtlDiscoveryPolicyMiddleware(AgentMiddleware):
 
     @staticmethod
     def _filter(request: ModelRequest) -> ModelRequest:
-        if not _discovery_active(request):
+        if not _read_only_active(request):
             return request
         return request.override(tools=[tool for tool in request.tools if str(getattr(tool, "name", "")) in DISCOVERY_READ_ONLY_TOOLS])
 
     @staticmethod
     def _blocked(request: ToolCallRequest) -> ToolMessage | None:
-        if not _discovery_active(request):
+        if not _read_only_active(request):
             return None
         name = str(request.tool_call.get("name") or "")
         if name in DISCOVERY_READ_ONLY_TOOLS:
             return None
         return normalize_tool_result(
             ToolMessage(
-                content=(f"Error: {name or 'tool'} blocked — DBTL discovery is read-only. Start the cycle or continue as ordinary work before using mutation, execution, connector-write, or delegation tools."),
+                content=(
+                    f"Error: {name or 'tool'} blocked — this DBTL inspection turn is read-only. "
+                    "Use a governed workflow control or start a separate ordinary-work request before "
+                    "using mutation, execution, connector-write, or delegation tools."
+                ),
                 tool_call_id=str(request.tool_call.get("id") or "missing_tool_call_id"),
                 name=name or None,
                 status="error",

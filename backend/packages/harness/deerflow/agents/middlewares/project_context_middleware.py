@@ -122,7 +122,25 @@ def _status_cycle_line(cycle: object) -> str | None:
     if isinstance(stages, dict) and stages:
         detail = "; stages: " + ", ".join(f"{escape(str(stage), quote=False)}={escape(str(status).replace('_', ' '), quote=False)}" for stage, status in stages.items())
     parked = " (parked for ordinary work)" if cycle.get("parked") else ""
-    return f"- {title} [{escape(cycle_id, quote=False)}] is at {state}{parked}{detail}."
+    artifacts = cycle.get("artifacts")
+    evidence = ""
+    if isinstance(artifacts, list):
+        refs = []
+        for artifact in artifacts[:20]:
+            if not isinstance(artifact, dict):
+                continue
+            uri = str(artifact.get("uri") or "").strip()
+            if not uri:
+                continue
+            stage = escape(str(artifact.get("stage") or "evidence"), quote=False)
+            artifact_type = escape(
+                str(artifact.get("artifact_type") or "artifact").replace("_", " "),
+                quote=False,
+            )
+            refs.append(f"{stage}/{artifact_type}: {escape(uri, quote=False)}")
+        if refs:
+            evidence = "; evidence: " + ", ".join(refs)
+    return f"- {title} [{escape(cycle_id, quote=False)}] is at {state}{parked}{detail}{evidence}."
 
 
 def build_dbtl_status_reminder(value: object) -> str | None:

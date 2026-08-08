@@ -4202,6 +4202,59 @@ class LiveStageAdapter:
             )
         return live
 
+    async def conversation_cycle_status(self, *, project_id: str, thread_id: str) -> dict[str, Any] | None:
+        """Latest cycle opened by this conversation, with bounded evidence refs."""
+        if not project_id or not thread_id:
+            return None
+        cycles = await self._repo.list_cycles(project_id)
+        owned = [cycle for cycle in cycles or [] if isinstance(cycle, dict) and str(cycle.get("originating_thread_id") or "") == thread_id]
+        if not owned:
+            return None
+        newest = max(
+            owned,
+            key=lambda cycle: (
+                str(cycle.get("created_at") or ""),
+                str(cycle.get("id") or ""),
+            ),
+        )
+        cycle_id = str(newest.get("id") or "")
+        cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
+        if not isinstance(cycle, dict):
+            return None
+        attempts = {str(item.get("id") or ""): str(item.get("stage") or "") for item in cycle.get("stages", []) if isinstance(item, dict)}
+        latest_artifacts: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in cycle.get("artifacts", []):
+            if not isinstance(item, dict):
+                continue
+            stage = attempts.get(str(item.get("stage_attempt_id") or ""), "")
+            artifact_type = str(item.get("artifact_type") or "")
+            uri = str(item.get("uri") or "")
+            if not stage or not artifact_type or not uri:
+                continue
+            key = (stage, artifact_type)
+            candidate = {
+                "stage": stage,
+                "artifact_type": artifact_type,
+                "revision": int(item.get("revision") or 0),
+                "uri": uri,
+                "content_hash": str(item.get("content_hash") or ""),
+            }
+            current = latest_artifacts.get(key)
+            if current is None or candidate["revision"] >= current["revision"]:
+                latest_artifacts[key] = candidate
+        artifacts = sorted(
+            latest_artifacts.values(),
+            key=lambda item: (item["stage"], item["artifact_type"]),
+        )[:20]
+        return {
+            "cycle_id": cycle_id,
+            "title": str(cycle.get("title") or ""),
+            "state": str(cycle.get("state") or ""),
+            "parked": bool(cycle.get("parked")),
+            "stages": {str(item.get("stage") or ""): str(item.get("status") or "") for item in cycle.get("stages", []) if isinstance(item, dict)},
+            "artifacts": artifacts,
+        }
+
     async def recover_paused_build_control(
         self,
         *,

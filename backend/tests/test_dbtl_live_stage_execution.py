@@ -106,6 +106,11 @@ class FakeRepo:
             return None
         return dict(self.cycle)
 
+    async def list_cycles(self, project_id: str):
+        if self.cycle is None or project_id != self.cycle["project_id"]:
+            return []
+        return [dict(self.cycle)]
+
     async def list_datasets(self, cycle_id: str, *, project_id: str):
         return [
             {
@@ -173,6 +178,53 @@ class FakeRepo:
             "publications": [],
             "events": [],
         }
+
+
+@pytest.mark.asyncio
+async def test_conversation_cycle_status_returns_the_latest_stage_evidence() -> None:
+    cycle = _cycle(state="learn", status="approved")
+    cycle.update(
+        {
+            "state": "completed",
+            "title": "Deterministic regression",
+            "originating_thread_id": "thread-1",
+            "artifacts": [
+                {
+                    "stage_attempt_id": "attempt-learn",
+                    "artifact_type": "learn_synthesis",
+                    "revision": 1,
+                    "uri": "/mnt/user-data/outputs/learn-old.md",
+                    "content_hash": "a" * 64,
+                },
+                {
+                    "stage_attempt_id": "attempt-learn",
+                    "artifact_type": "learn_synthesis",
+                    "revision": 2,
+                    "uri": "/mnt/user-data/outputs/learn-current.md",
+                    "content_hash": "b" * 64,
+                },
+            ],
+        }
+    )
+    adapter = LiveStageAdapter(repo=FakeRepo(cycle), app_config=SimpleNamespace())
+
+    status = await adapter.conversation_cycle_status(
+        project_id="project-1",
+        thread_id="thread-1",
+    )
+
+    assert status is not None
+    assert status["cycle_id"] == "cycle-1"
+    assert status["state"] == "completed"
+    assert status["artifacts"] == [
+        {
+            "stage": "learn",
+            "artifact_type": "learn_synthesis",
+            "revision": 2,
+            "uri": "/mnt/user-data/outputs/learn-current.md",
+            "content_hash": "b" * 64,
+        }
+    ]
 
 
 @pytest.mark.asyncio

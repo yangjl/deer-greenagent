@@ -133,6 +133,12 @@ Design–Build–Test–Learn (DBTL) governance.
   profiles keep their own sandbox policy.
   Direct callbacks and subagent usage reports share
   one model-call identity, so the run ledger cannot count the same tokens twice.
+- **Scoped cycle follow-ups** — after a cycle completes, questions such as
+  “what did we learn from this cycle?” remain bound to that conversation's
+  durable cycle record. DeerFlow supplies the Lead with the recorded stage and
+  artifact references under a read-only tool fence, so it can explain the Learn
+  evidence without launching new code, writing replacement outputs, or
+  delegating ungoverned work.
 - **Human-controlled automation** — AI may recommend or route DBTL work, but it
   cannot satisfy scientific gates or create authoritative results by itself.
   Starting a cycle launches a project-grounded Design council: independent

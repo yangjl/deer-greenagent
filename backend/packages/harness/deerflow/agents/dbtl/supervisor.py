@@ -146,7 +146,10 @@ from deerflow.agents.dbtl.supervisor_support.human_input_protocol import (
     MAX_CARD_REQUEST_ID_CHARS as _MAX_CARD_REQUEST_ID_CHARS,
 )
 from deerflow.agents.dbtl.supervisor_support.ports import StageExecutionPort
-from deerflow.agents.middlewares.dbtl_discovery_policy_middleware import DBTL_DISCOVERY_CONTEXT_KEY
+from deerflow.agents.middlewares.dbtl_discovery_policy_middleware import (
+    DBTL_DISCOVERY_CONTEXT_KEY,
+    DBTL_READ_ONLY_CONTEXT_KEY,
+)
 from deerflow.dbtl.branches import (
     BranchDecision,
     SupervisorBranch,
@@ -294,6 +297,8 @@ async def _dbtl_status_snapshot(
     stage_adapter: Any,
     context: SupervisorContext,
     state: dict,
+    *,
+    conversation_cycle: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Assemble what the lead agent must know before it answers in a project.
 
@@ -320,6 +325,10 @@ async def _dbtl_status_snapshot(
                 cycles = [item for item in read if isinstance(item, dict)][:_MAX_STATUS_CYCLES]
         except Exception:  # noqa: BLE001 - orientation must never fail a reply
             logger.warning("Could not read DBTL status for project %s.", context.project_id, exc_info=True)
+    if conversation_cycle is not None:
+        cycle_id = str(conversation_cycle.get("cycle_id") or "")
+        cycles = [item for item in cycles if str(item.get("cycle_id") or "") != cycle_id]
+        cycles.insert(0, conversation_cycle)
     handoff = _latest_stage_handoff_state(state)
     pending_control = None
     if handoff is not None:
@@ -352,6 +361,44 @@ async def _dbtl_status_snapshot(
         "cycles": cycles,
         "pending_control": pending_control,
     }
+
+
+_CYCLE_FOLLOWUP_RE = re.compile(
+    r"\b(?:this|the|our|current|completed|last|latest)\s+(?:dbtl\s+)?cycle\b"
+    r"|\bcycle(?:'s)?\s+(?:result|results|outcome|outcomes|learning|learnings|lesson|lessons|summary|evidence)\b",
+    re.IGNORECASE,
+)
+
+
+def _references_conversation_cycle(text: str) -> bool:
+    """Recognize a narrow deictic reference to this conversation's cycle."""
+    return _CYCLE_FOLLOWUP_RE.search(text or "") is not None
+
+
+async def _conversation_cycle_status(
+    stage_adapter: Any,
+    context: SupervisorContext,
+    config: RunnableConfig,
+) -> dict[str, Any] | None:
+    if not context.project_id:
+        return None
+    thread_id = str((config.get("configurable", {}) or {}).get("thread_id") or "")
+    reader = getattr(stage_adapter, "conversation_cycle_status", None)
+    if not thread_id or not callable(reader):
+        return None
+    try:
+        status = reader(project_id=context.project_id, thread_id=thread_id)
+        if isawaitable(status):
+            status = await status
+        return status if isinstance(status, dict) else None
+    except Exception:  # noqa: BLE001 - inspection stays read-only if evidence is unavailable
+        logger.warning(
+            "Could not read DBTL cycle history for project %s thread %s.",
+            context.project_id,
+            thread_id,
+            exc_info=True,
+        )
+        return None
 
 
 def _bullets(items: tuple[str, ...] | list[str]) -> str:
@@ -2837,6 +2884,18 @@ def build_supervisor_graph(
                 except Exception:  # noqa: BLE001 - ordinary work must remain available
                     logger.warning("DBTL discovery: could not record ordinary opt-out", exc_info=True)
         extra: dict[str, Any] = {}
+        cycle_followup = _references_conversation_cycle(_latest_user_text(state))
+        conversation_cycle = None
+        if cycle_followup:
+            conversation_cycle = await _conversation_cycle_status(
+                stage_adapter,
+                context,
+                config,
+            )
+            extra[DBTL_READ_ONLY_CONTEXT_KEY] = {
+                "active": True,
+                "reason": "completed_cycle_followup",
+            }
         if decision.cycle_id:
             reader = getattr(stage_adapter, "parked_design_context", None)
             if callable(reader):
@@ -2848,7 +2907,12 @@ def build_supervisor_graph(
                     parked = await parked
                 if parked is not None:
                     extra["dbtl_parked_design_brief"] = parked
-        status = await _dbtl_status_snapshot(stage_adapter, context, state)
+        status = await _dbtl_status_snapshot(
+            stage_adapter,
+            context,
+            state,
+            conversation_cycle=conversation_cycle,
+        )
         if status is not None:
             extra[DBTL_STATUS_CONTEXT_KEY] = status
         run_id = run_id_from_config(config)

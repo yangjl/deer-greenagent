@@ -72,10 +72,10 @@ def test_active_discovery_recovers_after_the_one_shot_selector_resets() -> None:
     assert decision.source is RouteSource.ACTIVE_DISCOVERY
 
 
-def _tool_request(name: str, *, active: bool = True):
+def _tool_request(name: str, *, active: bool = True, context: dict | None = None):
     return SimpleNamespace(
         tool_call={"name": name, "id": "call-1", "args": {}},
-        runtime=SimpleNamespace(context={DBTL_DISCOVERY_CONTEXT_KEY: {"active": active}}),
+        runtime=SimpleNamespace(context=context or {DBTL_DISCOVERY_CONTEXT_KEY: {"active": active}}),
     )
 
 
@@ -101,6 +101,33 @@ def test_reviewed_read_only_tools_remain_available(name: str) -> None:
         lambda _request: ToolMessage(content="read", tool_call_id="call-1"),
     )
     assert result.content == "read"
+
+
+@pytest.mark.parametrize("name", ["write_file", "bash", "task"])
+def test_completed_cycle_followups_reuse_the_read_only_execution_fence(name: str) -> None:
+    called = False
+
+    def handler(_request):
+        nonlocal called
+        called = True
+        return ToolMessage(content="ran", tool_call_id="call-1")
+
+    result = DbtlDiscoveryPolicyMiddleware().wrap_tool_call(
+        _tool_request(
+            name,
+            context={
+                "dbtl_read_only_context": {
+                    "active": True,
+                    "reason": "completed_cycle_followup",
+                }
+            },
+        ),
+        handler,
+    )
+
+    assert called is False
+    assert result.status == "error"
+    assert "read-only" in str(result.content)
 
 
 @pytest.mark.asyncio

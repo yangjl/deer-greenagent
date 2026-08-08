@@ -78,6 +78,14 @@ deer-flow/
 
 ### Conversational DBTL discovery contracts
 
+Completed-cycle follow-up questions in the conversation that opened the cycle
+remain ordinary Lead replies, but the Supervisor attaches the latest durable
+cycle status and bounded artifact references and activates the same fail-closed
+read-only inspection fence used by discovery. This lets the Lead summarize the
+Learn record without writing files, running shell commands, delegating work, or
+silently producing an ungoverned replacement result. Terminal cycles remain
+excluded from continuation and meeting-rerun recovery.
+
 `deerflow.dbtl.discovery` owns the dependency-free pre-cycle vocabulary:
 discovery lifecycle, provenance, deterministic readiness, and the
 revision-bound start-card payload. A discovery draft is not a cycle and the

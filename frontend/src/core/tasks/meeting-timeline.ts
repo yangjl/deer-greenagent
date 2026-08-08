@@ -186,15 +186,23 @@ export function meetingsForRun(
 }
 
 /**
- * Meetings no message group will claim, so nothing is lost off the end.
+ * Live meetings no message group has claimed yet.
  *
  * A meeting whose run has no group yet is the live case: the seats stream
  * before the run's first message lands. Rendering those at the tail is what
- * keeps a meeting visible while it argues.
+ * keeps a meeting visible while it argues. A completed historical meeting with
+ * an unloaded transcript anchor must stay hidden until that history page is
+ * loaded; appending it after a newer turn presents old evidence as new work.
+ * Seats with no run id remain visible because no history page can ever anchor
+ * them.
  */
 export function unanchoredMeetings(
   meetings: readonly Meeting[],
   anchoredRunIds: ReadonlySet<string>,
 ): Meeting[] {
-  return meetings.filter((meeting) => !anchoredRunIds.has(meeting.runId));
+  return meetings.filter(
+    (meeting) =>
+      !anchoredRunIds.has(meeting.runId) &&
+      (meeting.isRunning || meeting.runId === ""),
+  );
 }
