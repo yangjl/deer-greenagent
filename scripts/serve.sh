@@ -193,6 +193,31 @@ _kill_repo_port() {
     fi
 }
 
+# Wait until repo service ports are actually released after a stop. `nginx -s
+# quit` drains long-lived connections (e.g. the DBTL build-workflow long-poll),
+# so a worker can keep :2026 bound for a moment after stop_all's first reap.
+# Without this, a --restart's start phase races that drain and aborts on a
+# false "port in use". Re-reap our own survivors each round; bounded so a port
+# genuinely held by another worktree still surfaces to the caller.
+_wait_ports_free() {
+    local timeout="$1"; shift
+    local waited=0 port busy
+    while [ "$waited" -lt "$timeout" ]; do
+        busy=""
+        for port in "$@"; do
+            if _is_port_listening "$port"; then
+                busy=1
+                _kill_repo_nginx
+                _kill_repo_port "$port"
+            fi
+        done
+        [ -n "$busy" ] || return 0
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 0
+}
+
 _is_port_listening() {
     local port=$1
 
@@ -239,6 +264,22 @@ _is_repo_nginx_pid() {
         esac
     done <<< "$DEERFLOW_ROOTS"
 
+    # nginx workers rewrite argv to "nginx: worker process" with no config
+    # path, so the args match above misses them. Claim a worker whose master
+    # parent is a known repo nginx — this is what lets the port reaps release
+    # :2026 when a worker outlives the master's shutdown signal by a moment.
+    local ppid pargs
+    ppid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ')
+    if [ -n "$ppid" ] && [ "$ppid" != "1" ]; then
+        pargs=$(ps -p "$ppid" -o args= 2>/dev/null)
+        while IFS= read -r root; do
+            [ -n "$root" ] || continue
+            case "$pargs" in
+                *"$root"/docker/nginx/nginx.local.conf*) return 0 ;;
+            esac
+        done <<< "$DEERFLOW_ROOTS"
+    fi
+
     _is_deerflow_pid "$pid"
 }
 
@@ -274,8 +315,17 @@ stop_all() {
     _kill_repo_processes "next dev"
     _kill_repo_processes "next start"
     _kill_repo_processes "next-server"
-    nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
-    sleep 1
+    # Kill nginx master+workers directly, up front, while the master is still
+    # alive: a worker is only attributable (parent-walk to the master's argv)
+    # before the master exits. A graceful -s stop/-s quit exits the master
+    # first and can leave a briefly-orphaned worker (ppid=1, argv carries no
+    # path, pidfile already gone) that no reap can safely claim — it keeps
+    # :2026 bound and makes the next start race a false "port in use". A direct
+    # kill collects master and workers in one pass, so there is no orphan
+    # window. The graceful stop still runs afterward to clear any stragglers
+    # and the pidfile.
+    _kill_repo_nginx
+    nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s stop 2>/dev/null || true
     _kill_repo_nginx
     # Force-kill any survivors still holding the service ports. 2026 is included
     # so a lingering nginx (or any deer-flow process) that _kill_repo_nginx did
@@ -284,6 +334,10 @@ stop_all() {
     _kill_repo_port 8001
     _kill_repo_port 3000
     _kill_repo_port 2026
+    # Graceful nginx shutdown can drain long-lived connections past the reaps
+    # above; confirm the sockets are actually free before returning so a
+    # follow-on start (e.g. --restart) does not race the drain.
+    _wait_ports_free 8 8001 3000 2026
     ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
 }
@@ -457,6 +511,16 @@ trap 'cleanup 0' TERM
 # In daemon mode, wraps with nohup. Waits for port to be ready.
 run_service() {
     local name="$1" cmd="$2" port="$3" timeout="$4"
+
+    if _is_port_listening "$port"; then
+        # A service we just stopped can keep its socket bound for a moment
+        # while nginx drains long-lived connections. Reclaim our own port
+        # before giving up, so a --restart does not abort — and roll back the
+        # gateway/frontend it already started — over a transient lingering
+        # socket. A port held by a *different* worktree is never force-killed
+        # by the guarded reaps, so it still reaches the manual-fix message.
+        _wait_ports_free 5 "$port"
+    fi
 
     if _is_port_listening "$port"; then
         echo "✗ $name cannot start because port $port is already in use."
