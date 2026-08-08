@@ -1,20 +1,12 @@
 "use client";
 
-import { Loader2Icon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useI18n } from "@/core/i18n/hooks";
 import { fetchStageWorkers, StageWorkerFetchError } from "@/core/tasks/api";
 import { useReconcileSubtasks, useSubtaskContext } from "@/core/tasks/context";
 import { terminalStageReportForDisplay } from "@/core/tasks/presentation";
-import {
-  latestStageWorkRunId,
-  runningStageWorkRunId,
-  stageLabel,
-  stageWorkGroups,
-  stageWorkIsRunning,
-} from "@/core/tasks/stage-work";
-import { cn } from "@/lib/utils";
+import { stageWorkTasks } from "@/core/tasks/stage-work";
 
 import { MarkdownContent } from "./markdown-content";
 import { SubtaskCard } from "./subtask-card";
@@ -32,66 +24,22 @@ function shouldRetryHydration(error: unknown): boolean {
 }
 
 /**
- * Governed stage work, in the conversation where it was started.
+ * Rebuild governed stage work for a page that missed the stream.
  *
- * A Build worker is dispatched by the stage adapter rather than by an assistant
- * turn, so it has no `task` tool call to hang from and — until this existed —
- * ran entirely invisibly: the run appeared idle, and the only evidence it had
- * happened was a package appearing at the end, or a stage failing with nothing
- * to look at.
- *
- * Deliberately composition around the existing `SubtaskCard` rather than a
- * second step renderer: the same expansion, the same tool disclosure, the same
- * backfill on reload. Design meeting seats are excluded here because the
- * run-scoped Meeting card renders them in transcript order; activity remains
- * the deeper audit surface.
+ * A stage worker is dispatched by the stage adapter rather than by an assistant
+ * turn, so unlike an ordinary delegated subtask it has no `task` tool call in
+ * the transcript to rebuild from. This fills the subtask store instead and
+ * renders nothing itself: mounted once per thread, so a reload costs one read
+ * rather than one per run.
  */
-export function StageWorkPanel({
-  className,
+export function StageWorkHydrator({
   threadId,
-  runId,
   isLoading,
 }: {
-  className?: string;
   threadId?: string;
-  runId?: string;
   isLoading: boolean;
 }) {
-  const { t } = useI18n();
-  const { tasks: taskMap } = useSubtaskContext();
   const reconcileSubtasks = useReconcileSubtasks();
-  const tasks = useMemo(() => Object.values(taskMap), [taskMap]);
-  const runningRunId = useMemo(() => runningStageWorkRunId(tasks), [tasks]);
-  const [streamRunId, setStreamRunId] = useState<string>();
-  useEffect(() => {
-    if (!isLoading) {
-      setStreamRunId(undefined);
-    } else if (runningRunId) {
-      // Keep the streamed run selected after its last worker becomes terminal
-      // but before the run's first transcript message has landed.
-      setStreamRunId(runningRunId);
-    }
-  }, [isLoading, runningRunId]);
-  const visibleRunId = isLoading
-    ? (runningRunId ?? streamRunId ?? runId)
-    : runId;
-  const groups = useMemo(() => {
-    const scoped = stageWorkGroups(tasks, visibleRunId);
-    // While a run is streaming, stay strictly on it. Otherwise, if the visible
-    // run produced no stage work (e.g. the retry / "Need your help" turn after
-    // a Build failed became the latest run), fall back to the most recent run
-    // that did — so a failed or finished build's progress report is retained
-    // rather than vanishing.
-    if (scoped.length > 0 || isLoading) {
-      return scoped;
-    }
-    const fallbackRunId = latestStageWorkRunId(tasks);
-    return fallbackRunId ? stageWorkGroups(tasks, fallbackRunId) : scoped;
-  }, [tasks, visibleRunId, isLoading]);
-
-  // Rebuild stage work for a page that missed the stream and reconcile a
-  // partial live task against its durable terminal event. A stage worker has
-  // no `task` tool call in the transcript to rebuild from.
   const hydratedRef = useRef<string | null>(null);
   const retryEpochRef = useRef<string | null>(null);
   const retryAttemptRef = useRef(0);
@@ -100,7 +48,7 @@ export function StageWorkPanel({
     if (!threadId || isLoading) {
       return;
     }
-    const epoch = `${threadId}:${runId ?? "history"}`;
+    const epoch = threadId;
     if (retryEpochRef.current !== epoch) {
       retryEpochRef.current = epoch;
       retryAttemptRef.current = 0;
@@ -120,8 +68,8 @@ export function StageWorkPanel({
             description: worker.description,
             dbtlStage: worker.dbtlStage,
             // Carried so a reloaded page can rebuild the *meeting* too, not
-            // just the stage lane. `stageWorkGroups` filters seats out of this
-            // panel, so nothing is drawn twice.
+            // just the stage lane. `stageWorkTasks` filters seats out of the
+            // stage cards, so nothing is drawn twice.
             councilSeat: worker.councilSeat,
             subagent_type: "subagent",
             prompt: "",
@@ -158,9 +106,38 @@ export function StageWorkPanel({
       if (retryTimer) clearTimeout(retryTimer);
       if (hydratedRef.current === epoch) hydratedRef.current = null;
     };
-  }, [threadId, runId, isLoading, retryToken, reconcileSubtasks]);
+  }, [threadId, isLoading, retryToken, reconcileSubtasks]);
 
-  if (groups.length === 0) {
+  return null;
+}
+
+/**
+ * One run's governed stage workers, rendered where that run sits.
+ *
+ * The same native card an ordinary delegated subtask uses, anchored in its own
+ * message group instead of collected into a labelled panel at the end of the
+ * transcript. That panel had to guess which run to show, so a run that produced
+ * no stage work of its own made the previous run's cards disappear, and
+ * whatever survived was pinned below every later turn. Anchoring removes the
+ * guess: a run renders its own workers, in transcript order, or nothing.
+ */
+export function StageWorkCards({
+  className,
+  threadId,
+  runId,
+}: {
+  className?: string;
+  threadId?: string;
+  runId?: string;
+}) {
+  const { t } = useI18n();
+  const { tasks: taskMap } = useSubtaskContext();
+  const tasks = useMemo(
+    () => (runId ? stageWorkTasks(Object.values(taskMap), runId) : []),
+    [taskMap, runId],
+  );
+
+  if (tasks.length === 0) {
     return null;
   }
 
@@ -171,59 +148,30 @@ export function StageWorkPanel({
   };
 
   return (
-    <div className={cn("flex w-full flex-col gap-4", className)}>
-      {groups.map((group) => {
-        const running = stageWorkIsRunning(group.tasks);
-        const label = stageLabel(group.stage);
+    <div className={className}>
+      {tasks.map((task) => {
+        const report = terminalStageReportForDisplay(
+          task,
+          cappedFailureMessages,
+        );
         return (
-          <section
-            key={group.stage}
-            aria-label={`${label} stage work`}
-            className="flex w-full flex-col gap-2"
-          >
-            <div className="text-muted-foreground flex items-center gap-2 text-[11px] font-medium tracking-wide uppercase">
-              <span>{label} stage</span>
-              {running ? (
-                <Loader2Icon
-                  aria-hidden
-                  className="size-3 animate-spin motion-reduce:animate-none"
-                />
-              ) : null}
-              <span className="sr-only">
-                {running
-                  ? `${label} stage work in progress`
-                  : `${label} stage work finished`}
-              </span>
-            </div>
-            {group.tasks.map((task) => {
-              const report = terminalStageReportForDisplay(
-                task,
-                cappedFailureMessages,
-              );
-              return (
-                <div key={task.id} className="flex w-full flex-col gap-3">
-                  <SubtaskCard
-                    taskId={task.id}
-                    threadId={threadId}
-                    // The run this task was actually observed in. Passing the
-                    // thread's latest run would backfill every older task from the
-                    // wrong run's events, and silently get nothing back.
-                    runId={task.runId ?? runId}
-                    isLoading={task.status === "in_progress"}
-                    // Governed stage work reads as native tool-call / script-writing
-                    // progress, not a decorated card with a shine border.
-                    flat
-                    showTerminalReport={false}
-                  />
-                  {report ? (
-                    <div className="text-foreground text-sm leading-6">
-                      <MarkdownContent content={report} isLoading={false} />
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
-          </section>
+          <div key={task.id} className="mb-4 flex w-full flex-col gap-3">
+            <SubtaskCard
+              taskId={task.id}
+              threadId={threadId}
+              runId={task.runId ?? runId}
+              isLoading={task.status === "in_progress"}
+              // Governed stage work reads as native tool-call / script-writing
+              // progress, not a decorated card with a shine border.
+              flat
+              showTerminalReport={false}
+            />
+            {report ? (
+              <div className="text-foreground text-sm leading-6">
+                <MarkdownContent content={report} isLoading={false} />
+              </div>
+            ) : null}
+          </div>
         );
       })}
     </div>

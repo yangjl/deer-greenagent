@@ -21,11 +21,6 @@
 
 import type { Subtask } from "./types";
 
-export interface StageWorkGroup {
-  stage: string;
-  tasks: Subtask[];
-}
-
 /** DBTL stage workers with no transcript anchor of their own, oldest first. */
 export function stageWorkTasks(
   subtasks: readonly Subtask[],
@@ -35,87 +30,8 @@ export function stageWorkTasks(
     (task) =>
       Boolean(task.dbtlStage) &&
       !task.councilSeat &&
-      // The panel is mounted under the latest conversation turn. Historical
-      // workers belong to their own run and must not reappear beneath a later
-      // Lead Agent reply, which made unrelated chat look like an active Build.
+      // Each run renders its own workers in its own message group, so a
+      // historical worker must not reappear under a later Lead Agent reply.
       (!runId || task.runId === runId),
   );
-}
-
-/**
- * Stage work grouped by its stage, in the order each stage first appeared.
- *
- * One run can legitimately touch more than one stage — a Build that finished
- * and a Test that began — and a flat list would present them as one stretch of
- * work.
- */
-export function stageWorkGroups(
-  subtasks: readonly Subtask[],
-  runId?: string,
-): StageWorkGroup[] {
-  const byStage = new Map<string, Subtask[]>();
-  for (const task of stageWorkTasks(subtasks, runId)) {
-    const stage = task.dbtlStage!;
-    const group = byStage.get(stage) ?? [];
-    group.push(task);
-    byStage.set(stage, group);
-  }
-  return [...byStage.entries()].map(([stage, tasks]) => ({ stage, tasks }));
-}
-
-/** How the stage reads in a heading: `build` → `Build`. */
-export function stageLabel(stage: string): string {
-  const trimmed = (stage ?? "").trim();
-  if (!trimmed) {
-    return "Stage";
-  }
-  return trimmed
-    .split(/[_\s]+/)
-    .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-}
-
-/** True while any of this group's workers is still running. */
-export function stageWorkIsRunning(tasks: readonly Subtask[]): boolean {
-  return tasks.some((task) => task.status === "in_progress");
-}
-
-/** The newest streamed governed-work run, if one is actively reporting. */
-export function runningStageWorkRunId(
-  subtasks: readonly Subtask[],
-): string | undefined {
-  let runId: string | undefined;
-  for (const task of subtasks) {
-    if (
-      task.status === "in_progress" &&
-      task.dbtlStage &&
-      !task.councilSeat &&
-      task.runId
-    ) {
-      runId = task.runId;
-    }
-  }
-  return runId;
-}
-
-/**
- * The most recent governed-work run that produced any stage work — running,
- * finished, or failed.
- *
- * Used to retain that work when the current run produced none of its own: after
- * a Build fails, the retry / "Need your help" turn becomes the latest run but
- * has no stage work, and scoping strictly to it would drop the failed build's
- * progress report. Falling back to this keeps it visible.
- */
-export function latestStageWorkRunId(
-  subtasks: readonly Subtask[],
-): string | undefined {
-  let runId: string | undefined;
-  for (const task of subtasks) {
-    if (task.dbtlStage && !task.councilSeat && task.runId) {
-      runId = task.runId;
-    }
-  }
-  return runId;
 }

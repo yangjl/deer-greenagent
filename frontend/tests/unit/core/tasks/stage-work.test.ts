@@ -10,13 +10,7 @@
 
 import { describe, expect, it } from "@rstest/core";
 
-import {
-  runningStageWorkRunId,
-  stageLabel,
-  stageWorkGroups,
-  stageWorkIsRunning,
-  stageWorkTasks,
-} from "@/core/tasks/stage-work";
+import { stageWorkTasks } from "@/core/tasks/stage-work";
 import type { Subtask } from "@/core/tasks/types";
 
 function task(overrides: Partial<Subtask> & { id: string }): Subtask {
@@ -64,51 +58,6 @@ describe("stage work is what the server labelled with a stage", () => {
   });
 });
 
-describe("one run can touch more than one stage", () => {
-  const tasks = [
-    task({ id: "b1", dbtlStage: "build", status: "completed" }),
-    task({ id: "t1", dbtlStage: "test" }),
-    task({ id: "b2", dbtlStage: "build", status: "completed" }),
-  ];
-
-  it("groups workers by their stage", () => {
-    const groups = stageWorkGroups(tasks);
-    expect(groups.map((group) => group.stage)).toEqual(["build", "test"]);
-    expect(groups[0]?.tasks.map((entry) => entry.id)).toEqual(["b1", "b2"]);
-  });
-
-  it("keeps the order each stage first appeared", () => {
-    const groups = stageWorkGroups([...tasks].reverse());
-    expect(groups.map((group) => group.stage)).toEqual(["build", "test"]);
-  });
-
-  it("reports a group as running only while one of its workers is", () => {
-    const groups = stageWorkGroups(tasks);
-    expect(stageWorkIsRunning(groups[0]!.tasks)).toBe(false);
-    expect(stageWorkIsRunning(groups[1]!.tasks)).toBe(true);
-  });
-
-  it("has nothing to show for a chat with no stage work", () => {
-    expect(stageWorkGroups([task({ id: "call-1" })])).toEqual([]);
-  });
-});
-
-describe("the stage reads as a name, not an identifier", () => {
-  it.each([
-    ["build", "Build"],
-    ["test", "Test"],
-    ["reconciliation", "Reconciliation"],
-    ["ready_for_build", "Ready For Build"],
-  ])("renders %s as %s", (stage, expected) => {
-    expect(stageLabel(stage)).toBe(expected);
-  });
-
-  it("falls back rather than rendering an empty heading", () => {
-    expect(stageLabel("")).toBe("Stage");
-    expect(stageLabel("   ")).toBe("Stage");
-  });
-});
-
 describe("a task belongs to the run it was observed in", () => {
   it("keeps the run id it was stamped with", () => {
     const adopted = stageWorkTasks([
@@ -119,48 +68,6 @@ describe("a task belongs to the run it was observed in", () => {
     expect(adopted[0]?.runId).toBe("run-7");
   });
 
-  it("selects the newest actively reporting governed-work run", () => {
-    expect(
-      runningStageWorkRunId([
-        task({
-          id: "old-build",
-          dbtlStage: "build",
-          runId: "run-old",
-          status: "completed",
-        }),
-        task({
-          id: "live-build",
-          dbtlStage: "build",
-          runId: "run-live",
-        }),
-      ]),
-    ).toBe("run-live");
-  });
-
-  it("does not treat a meeting seat as the active stage-work lane", () => {
-    expect(
-      runningStageWorkRunId([
-        task({
-          id: "seat",
-          dbtlStage: "design",
-          runId: "run-meeting",
-          councilSeat: {
-            stage: "design",
-            role: "chair",
-            roleLabel: "Chair",
-            focus: "",
-            capability: "experimental_design",
-            agentName: "general-purpose",
-            viaGeneralist: true,
-            model: "m",
-            round: 1,
-            countsTowardStageOutput: true,
-          },
-        }),
-      ]),
-    ).toBeUndefined();
-  });
-
   it("tolerates a task recorded before the run was known", () => {
     const adopted = stageWorkTasks([
       task({ id: "unit-1", dbtlStage: "build" }),
@@ -169,7 +76,7 @@ describe("a task belongs to the run it was observed in", () => {
   });
 
   it("does not render historical Build workers under a later run", () => {
-    const groups = stageWorkGroups(
+    const adopted = stageWorkTasks(
       [
         task({ id: "old-build", dbtlStage: "build", runId: "run-old" }),
         task({ id: "current-build", dbtlStage: "build", runId: "run-current" }),
@@ -177,14 +84,12 @@ describe("a task belongs to the run it was observed in", () => {
       "run-current",
     );
 
-    expect(groups[0]?.tasks.map((entry) => entry.id)).toEqual([
-      "current-build",
-    ]);
+    expect(adopted.map((entry) => entry.id)).toEqual(["current-build"]);
   });
 
-  it("shows no stage panel when the latest run was ordinary Lead Agent work", () => {
+  it("shows nothing for a run that was ordinary Lead Agent work", () => {
     expect(
-      stageWorkGroups(
+      stageWorkTasks(
         [task({ id: "old-build", dbtlStage: "build", runId: "run-old" })],
         "run-lead",
       ),

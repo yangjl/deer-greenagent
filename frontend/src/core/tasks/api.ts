@@ -162,7 +162,7 @@ export async function fetchStageWorkers(
       // grounds that the live-only debate panel would draw them left a reload
       // — or any run the browser never watched — with nothing to render.
       // Drawing one participant twice is still prevented, one layer down:
-      // `stageWorkGroups` excludes every task carrying a `councilSeat`.
+      // `stageWorkTasks` excludes every task carrying a `councilSeat`.
       const councilSeat = readCouncilSeat(content.council_seat) ?? undefined;
       started.set(key, {
         councilSeat,

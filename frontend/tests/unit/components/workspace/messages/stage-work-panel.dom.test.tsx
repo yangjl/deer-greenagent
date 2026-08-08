@@ -26,10 +26,9 @@ rs.mock("@/core/i18n/hooks", () => ({
   }),
 }));
 
-import { StageWorkPanel } from "@/components/workspace/messages/stage-work-panel";
+import { StageWorkHydrator } from "@/components/workspace/messages/stage-work-panel";
 import { fetchStageWorkers, StageWorkerFetchError } from "@/core/tasks/api";
-import { SubtaskContext, SubtasksProvider } from "@/core/tasks/context";
-import type { Subtask } from "@/core/tasks/types";
+import { SubtasksProvider, useSubtaskContext } from "@/core/tasks/context";
 
 const mockedFetchStageWorkers = rs.mocked(fetchStageWorkers);
 
@@ -51,25 +50,22 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function SeededTasks({
-  tasks,
-  children,
-}: {
-  tasks: Record<string, Subtask>;
-  children: React.ReactNode;
-}) {
+
+/**
+ * What the hydrator actually produces: task ids in the store.
+ *
+ * The hydrator renders nothing itself, so these cases assert on the store
+ * rather than on card markup — the guarantee under test is that a reload
+ * rebuilds the workers, not how they are drawn.
+ */
+function HydratedTaskIds() {
+  const { tasks } = useSubtaskContext();
   return (
-    <SubtaskContext.Provider
-      value={{
-        tasks,
-        tasksRef: { current: tasks },
-        setTasks: () => {
-          /* static test fixture */
-        },
-      }}
-    >
-      {children}
-    </SubtaskContext.Provider>
+    <>
+      {Object.keys(tasks).map((id) => (
+        <span key={id}>{id}</span>
+      ))}
+    </>
   );
 }
 
@@ -79,7 +75,7 @@ afterEach(() => {
   rs.useRealTimers();
 });
 
-describe("StageWorkPanel durable hydration", () => {
+describe("StageWorkHydrator durable hydration", () => {
   it("retries a failed hydration without waiting for unrelated state", async () => {
     mockedFetchStageWorkers
       .mockRejectedValueOnce(new Error("temporary"))
@@ -87,7 +83,8 @@ describe("StageWorkPanel durable hydration", () => {
 
     render(
       <SubtasksProvider>
-        <StageWorkPanel threadId="thread-1" runId="run-1" isLoading={false} />
+        <StageWorkHydrator threadId="thread-1" isLoading={false} />
+        <HydratedTaskIds />
       </SubtasksProvider>,
     );
     await waitFor(() =>
@@ -106,7 +103,8 @@ describe("StageWorkPanel durable hydration", () => {
 
     render(
       <SubtasksProvider>
-        <StageWorkPanel threadId="thread-1" runId="run-1" isLoading={false} />
+        <StageWorkHydrator threadId="thread-1" isLoading={false} />
+        <HydratedTaskIds />
       </SubtasksProvider>,
     );
     await waitFor(() =>
@@ -125,7 +123,8 @@ describe("StageWorkPanel durable hydration", () => {
 
     render(
       <SubtasksProvider>
-        <StageWorkPanel threadId="thread-1" runId="run-1" isLoading={false} />
+        <StageWorkHydrator threadId="thread-1" isLoading={false} />
+        <HydratedTaskIds />
       </SubtasksProvider>,
     );
 
@@ -148,11 +147,8 @@ describe("StageWorkPanel durable hydration", () => {
 
     const view = render(
       <SubtasksProvider>
-        <StageWorkPanel
-          threadId="thread-old"
-          runId="run-old"
-          isLoading={false}
-        />
+        <StageWorkHydrator threadId="thread-old" isLoading={false} />
+        <HydratedTaskIds />
       </SubtasksProvider>,
     );
     await waitFor(() =>
@@ -161,11 +157,8 @@ describe("StageWorkPanel durable hydration", () => {
 
     view.rerender(
       <SubtasksProvider>
-        <StageWorkPanel
-          threadId="thread-new"
-          runId="run-new"
-          isLoading={false}
-        />
+        <StageWorkHydrator threadId="thread-new" isLoading={false} />
+        <HydratedTaskIds />
       </SubtasksProvider>,
     );
     await waitFor(() =>
@@ -189,7 +182,8 @@ describe("StageWorkPanel durable hydration", () => {
 
     const view = render(
       <SubtasksProvider>
-        <StageWorkPanel threadId="thread-1" runId="run-1" isLoading={false} />
+        <StageWorkHydrator threadId="thread-1" isLoading={false} />
+        <HydratedTaskIds />
       </SubtasksProvider>,
     );
     await waitFor(() =>
@@ -198,152 +192,21 @@ describe("StageWorkPanel durable hydration", () => {
 
     view.rerender(
       <SubtasksProvider>
-        <StageWorkPanel threadId="thread-1" runId="run-1" isLoading />
+        <StageWorkHydrator threadId="thread-1" isLoading  />
+        <HydratedTaskIds />
       </SubtasksProvider>,
     );
     staleRequest.resolve([worker("worker-stale", "run-1")]);
 
     view.rerender(
       <SubtasksProvider>
-        <StageWorkPanel threadId="thread-1" runId="run-1" isLoading={false} />
+        <StageWorkHydrator threadId="thread-1" isLoading={false} />
+        <HydratedTaskIds />
       </SubtasksProvider>,
     );
 
     expect(await screen.findByText("worker-settled")).toBeTruthy();
     expect(screen.queryByText("worker-stale")).toBeNull();
     expect(mockedFetchStageWorkers).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe("StageWorkPanel live run selection", () => {
-  it("places each worker's model prose directly after its own card", () => {
-    mockedFetchStageWorkers.mockResolvedValue([]);
-    const implementation: Subtask = {
-      id: "implementation",
-      status: "completed",
-      subagent_type: "subagent",
-      description: "Implementation specialist",
-      prompt: "",
-      dbtlStage: "build",
-      runId: "run-1",
-      displaySummary: "Implemented the exact fixture.",
-    };
-    const audit: Subtask = {
-      id: "audit",
-      status: "completed",
-      subagent_type: "subagent",
-      description: "Independent audit specialist",
-      prompt: "",
-      dbtlStage: "build",
-      runId: "run-1",
-      displaySummary: "The independent rerun passed.",
-    };
-
-    const { container } = render(
-      <SeededTasks tasks={{ implementation, audit }}>
-        <StageWorkPanel threadId="thread-1" runId="run-1" isLoading={false} />
-      </SeededTasks>,
-    );
-
-    expect(container.textContent).toMatch(
-      /implementation.*Implemented the exact fixture\..*audit.*The independent rerun passed\./s,
-    );
-  });
-
-  it("does not narrate a worker before it finishes", () => {
-    const running: Subtask = {
-      id: "running-phase",
-      status: "in_progress",
-      subagent_type: "subagent",
-      description: "Implementation specialist",
-      prompt: "",
-      dbtlStage: "build",
-      runId: "run-1",
-      displaySummary: "Partial output must not read as a result.",
-    };
-
-    render(
-      <SeededTasks tasks={{ running }}>
-        <StageWorkPanel threadId="thread-1" runId="run-1" isLoading />
-      </SeededTasks>,
-    );
-
-    expect(
-      screen.queryByText("Partial output must not read as a result."),
-    ).toBeNull();
-  });
-
-  it("narrates the bounded stop reason instead of partial-success prose", () => {
-    mockedFetchStageWorkers.mockResolvedValue([]);
-    const capped: Subtask = {
-      id: "capped-phase",
-      status: "failed",
-      subagent_type: "subagent",
-      description: "Implementation specialist",
-      prompt: "",
-      dbtlStage: "build",
-      runId: "run-1",
-      stopReason: "token_capped",
-      error: "Implemented every requested output.",
-    };
-
-    render(
-      <SeededTasks tasks={{ capped }}>
-        <StageWorkPanel threadId="thread-1" runId="run-1" isLoading={false} />
-      </SeededTasks>,
-    );
-
-    expect(screen.getByText("Stopped at the token budget.")).toBeTruthy();
-    expect(
-      screen.queryByText("Implemented every requested output."),
-    ).toBeNull();
-  });
-
-  it("follows the streamed worker instead of the previous transcript run", async () => {
-    const oldTask: Subtask = {
-      id: "old-planner",
-      status: "completed",
-      subagent_type: "subagent",
-      description: "Build planner",
-      prompt: "",
-      dbtlStage: "build",
-      runId: "run-old",
-    };
-    const liveTask: Subtask = {
-      id: "live-phase",
-      status: "in_progress",
-      subagent_type: "subagent",
-      description: "Run phase",
-      prompt: "",
-      dbtlStage: "build",
-      runId: "run-live",
-    };
-    const view = render(
-      <SeededTasks tasks={{ old: oldTask, live: liveTask }}>
-        <StageWorkPanel threadId="thread-1" runId="run-old" isLoading />
-      </SeededTasks>,
-    );
-
-    expect(screen.getByText("live-phase")).toBeTruthy();
-    expect(screen.queryByText("old-planner")).toBeNull();
-    await waitFor(() => expect(screen.getByText("live-phase")).toBeTruthy());
-
-    view.rerender(
-      <SeededTasks
-        tasks={{
-          old: oldTask,
-          live: {
-            ...liveTask,
-            status: "failed",
-            error: "Stopped",
-          },
-        }}
-      >
-        <StageWorkPanel threadId="thread-1" runId="run-old" isLoading />
-      </SeededTasks>,
-    );
-
-    expect(screen.getByText("live-phase")).toBeTruthy();
-    expect(screen.queryByText("old-planner")).toBeNull();
   });
 });

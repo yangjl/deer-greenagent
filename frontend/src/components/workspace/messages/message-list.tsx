@@ -100,7 +100,7 @@ import {
 } from "./message-token-usage";
 import { RunActivity, RunDuration } from "./run-duration";
 import { MessageListSkeleton } from "./skeleton";
-import { StageWorkPanel } from "./stage-work-panel";
+import { StageWorkCards, StageWorkHydrator } from "./stage-work-panel";
 import { SubtaskCard } from "./subtask-card";
 import { VirtualMessageList } from "./virtual-message-list";
 
@@ -502,16 +502,6 @@ export function MessageList({
       ),
     [groupRunIds, meetingAnchorGroupIndices],
   );
-  const latestRunId = useMemo(() => {
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-      const runId = (messages[index] as { run_id?: string } | undefined)
-        ?.run_id;
-      if (typeof runId === "string" && runId) {
-        return runId;
-      }
-    }
-    return undefined;
-  }, [messages]);
   const previousTurnUsageStateRef = useRef<AssistantTurnUsageState | undefined>(
     undefined,
   );
@@ -1082,6 +1072,18 @@ export function MessageList({
                   threadId={threadId}
                 />
               ) : null;
+              // Governed stage work anchors exactly like the meeting card: in
+              // its own run's group, so it keeps transcript order and cannot be
+              // displaced by a later run.
+              const stageWorkCards = meetingAnchorGroupIndices.has(
+                groupIndex,
+              ) ? (
+                <StageWorkCards
+                  className="w-full"
+                  runId={groupRunIds[groupIndex]}
+                  threadId={threadId}
+                />
+              ) : null;
 
               if (group.type === "human" || group.type === "assistant") {
                 return withRunDuration(
@@ -1097,6 +1099,7 @@ export function MessageList({
                     )}
                   >
                     {meetingCard}
+                    {stageWorkCards}
                     {group.messages.map((msg) => {
                       const item = (
                         <MessageListItem
@@ -1202,7 +1205,7 @@ export function MessageList({
                       group,
                       groupIndex,
                       meetingCard ? (
-                        <div className="w-full">{meetingCard}</div>
+                        <div className="w-full">{meetingCard}{stageWorkCards}</div>
                       ) : null,
                     );
                   }
@@ -1228,6 +1231,7 @@ export function MessageList({
                     groupIndex,
                     <div className="w-full">
                       {meetingCard}
+                      {stageWorkCards}
                       <HumanInputCard
                         answeredResponse={answeredResponse}
                         disabled={
@@ -1264,6 +1268,7 @@ export function MessageList({
                     groupIndex,
                     <div className="w-full">
                       {meetingCard}
+                      {stageWorkCards}
                       <MarkdownContent
                         content={extractContentFromMessage(message)}
                         isLoading={thread.isLoading}
@@ -1290,6 +1295,7 @@ export function MessageList({
                   groupIndex,
                   <div className="w-full">
                     {meetingCard}
+                    {stageWorkCards}
                     {group.messages[0] && hasContent(group.messages[0]) && (
                       <MarkdownContent
                         content={extractContentFromMessage(group.messages[0])}
@@ -1398,6 +1404,7 @@ export function MessageList({
                   groupIndex,
                   <div className="relative z-1 flex flex-col gap-2">
                     {meetingCard}
+                    {stageWorkCards}
                     {results}
                     {renderTokenUsage({
                       messages: group.messages,
@@ -1412,6 +1419,7 @@ export function MessageList({
                 groupIndex,
                 <div className="w-full">
                   {meetingCard}
+                  {stageWorkCards}
                   <MessageGroup
                     messages={group.messages}
                     isLoading={groupIsLoading}
@@ -1435,12 +1443,7 @@ export function MessageList({
             anchoredRunIds={anchoredRunIds}
             threadId={threadId}
           />
-          <StageWorkPanel
-            className="w-full"
-            isLoading={thread.isLoading}
-            runId={latestRunId}
-            threadId={threadId}
-          />
+          <StageWorkHydrator isLoading={thread.isLoading} threadId={threadId} />
           {thread.isLoading && !hasActiveAssistantText && (
             <div className="w-full">
               <RunActivity startTime={turnStartTime} />
