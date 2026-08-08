@@ -191,7 +191,16 @@ export function SubtaskCard({
           shineColor={["#A07CFE", "#FE8FB5", "#FFBE7B"]}
         />
       )}
-      <div className="bg-background/95 flex w-full flex-col rounded-lg">
+      <div
+        className={cn(
+          "flex w-full flex-col",
+          // The filled rounded surface is part of the decorated card. Flat
+          // governed stage work renders on the page background with no box at
+          // all — removing only the outer border still left this inner fill
+          // reading as a wrapper.
+          !flat && "bg-background/95 rounded-lg",
+        )}
+      >
         <div className="flex w-full items-center justify-between p-0.5">
           <Button
             className="w-full items-start justify-start text-left"
