@@ -126,6 +126,22 @@ def test_downstream_learn_deck_reviews_its_own_evidence_normally() -> None:
     )
 
 
+def test_test_exception_without_a_reviewable_route_only_offers_retry() -> None:
+    dossier = {
+        "condition": "degraded_verified",
+        "content_hash": "d" * 64,
+        "recovery_options": ["retry_with_guidance", "hold", "close_cycle"],
+    }
+
+    assert dbtl_cycles._evidence_exception_review_actions(
+        stage="test",
+        stage_status="awaiting_review",
+        evidence_exception=dossier,
+        enabled=True,
+        route_slugs={"advance_to_learn", "repeat_test", "close_cycle"},
+    ) == ["retry_with_guidance"]
+
+
 @pytest.fixture(autouse=True)
 def _close_test_engine():
     yield

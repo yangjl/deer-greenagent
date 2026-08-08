@@ -126,7 +126,13 @@ class TestReviewService:
     app_config: Any
     runtime_reader: Callable[[RunnableConfig], dict[str, Any]]
 
-    async def snapshot(self, *, project_id: str, cycle_id: str) -> dict[str, Any] | None:
+    async def snapshot(
+        self,
+        *,
+        project_id: str,
+        cycle_id: str,
+        allow_degraded_retry: bool = False,
+    ) -> dict[str, Any] | None:
         cycle = await self.repo.get_cycle(cycle_id, project_id=project_id)
         if cycle is None:
             return None
@@ -252,7 +258,15 @@ class TestReviewService:
             key=lambda item: int(item.get("revision") or 0),
             default=None,
         )
-        if evidence is None and exception_evidence is not None and exception_dossier.get("condition") == "degraded_verified" and str(dict(assessment.get("evaluation") or {}).get("outcome") or "") == "invalidated":
+        if (
+            evidence is None
+            and exception_evidence is not None
+            and exception_dossier.get("condition") == "degraded_verified"
+            and (
+                allow_degraded_retry
+                or str(dict(assessment.get("evaluation") or {}).get("outcome") or "") == "invalidated"
+            )
+        ):
             evidence = exception_evidence
         if evidence is None:
             return None
@@ -307,13 +321,23 @@ class TestReviewService:
         idempotency_key: str,
         human_rationale: str | None = None,
         review_provenance: Mapping[str, Any] | None = None,
+        allow_degraded_retry: bool = False,
     ) -> dict[str, Any]:
         runtime = self.runtime_reader(config)
         user_id = str(runtime.get("user_id") or "")
         project_role = str(runtime.get("project_role") or "")
         if not user_id or project_role not in {"owner", "admin", "member"}:
             raise RuntimeError("Authenticated human project membership is required to record a Test decision.")
-        fresh = await self.snapshot(project_id=project_id, cycle_id=cycle_id)
+        if allow_degraded_retry and recommendation != "repeat_test":
+            raise RuntimeError("A degraded-evidence retry port can only repeat Test.")
+        if allow_degraded_retry:
+            fresh = await self.snapshot(
+                project_id=project_id,
+                cycle_id=cycle_id,
+                allow_degraded_retry=True,
+            )
+        else:
+            fresh = await self.snapshot(project_id=project_id, cycle_id=cycle_id)
         if fresh is None:
             raise RuntimeError("Test is no longer awaiting a decision with complete typed evidence.")
         if str(fresh.get("stage_attempt_id") or "") != str(snapshot.get("stage_attempt_id") or "") or str(fresh.get("evidence_hash") or "") != str(snapshot.get("evidence_hash") or ""):

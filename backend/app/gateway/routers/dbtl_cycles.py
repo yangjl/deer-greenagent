@@ -205,11 +205,12 @@ def _evidence_exception_review_actions(
     as a second Build/Test exception leaves Learn's human gate permanently
     read-only because Learn deliberately cannot record either exception intent.
     """
-    if stage == "test" and "learn_from_invalidated_evidence" not in route_slugs:
+    if stage not in {"build", "test"} or not evidence_exception or not enabled or stage_status not in {"in_progress", "changes_requested", "awaiting_review"}:
         return None
-    if stage in {"build", "test"} and evidence_exception and enabled and stage_status in {"in_progress", "changes_requested", "awaiting_review"}:
-        return ["retry_with_guidance", "continue_with_red_flag"]
-    return None
+    if stage == "test" and "learn_from_invalidated_evidence" not in route_slugs:
+        incomplete_degraded_pack = evidence_exception.get("condition") == "degraded_verified" and not evidence_exception.get("available_artifacts")
+        return ["retry_with_guidance"] if not route_slugs or incomplete_degraded_pack else None
+    return ["retry_with_guidance", "continue_with_red_flag"]
 
 
 async def _post_design_meeting_turn(

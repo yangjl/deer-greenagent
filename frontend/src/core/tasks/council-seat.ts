@@ -123,6 +123,7 @@ export function consensusSnapshot(
 }
 
 export function councilSeatSummary(task: Subtask): string {
+  if (task.displaySummary) return task.displaySummary;
   if (task.result) {
     const summary = str(parseObject(task.result)?.summary);
     if (summary) {

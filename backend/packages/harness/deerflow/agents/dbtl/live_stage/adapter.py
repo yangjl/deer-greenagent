@@ -2006,10 +2006,18 @@ def _validated_deliverable_audit(
     *,
     manifest: Any,
     build_test: Mapping[str, Any],
+    stage_artifacts: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[DeliverableAudit | None, str]:
     lineage = build_test.get("build_lineage")
     outputs = lineage.get("output_artifacts") if isinstance(lineage, Mapping) else []
-    output_rows = [item for item in (outputs if isinstance(outputs, Sequence) else []) if isinstance(item, Mapping)]
+    output_rows = [
+        item
+        for item in [
+            *(outputs if isinstance(outputs, Sequence) else []),
+            *stage_artifacts,
+        ]
+        if isinstance(item, Mapping)
+    ]
     expected_by_basename: dict[str, list[str]] = {}
     for deliverable in manifest.deliverables:
         for expected_path in deliverable.expected_paths:
@@ -2029,7 +2037,13 @@ def _validated_deliverable_audit(
         return source_path
 
     published = {canonical_path(item): str(item.get("content_hash") or "") for item in output_rows}
-    published_by_uri = {str(item.get("uri") or ""): (canonical_path(item), str(item.get("content_hash") or "")) for item in output_rows if str(item.get("uri") or "")}
+    published_by_uri: dict[str, tuple[str, str]] = {}
+    for item in output_rows:
+        bound = (canonical_path(item), str(item.get("content_hash") or ""))
+        for uri_field in ("uri", "source_uri"):
+            uri = str(item.get(uri_field) or "")
+            if uri:
+                published_by_uri[uri] = bound
     _hash_to_paths: dict[str, set[str]] = {}
     for item in output_rows:
         _h = str(item.get("content_hash") or "").lower()
@@ -2085,6 +2099,87 @@ def _validated_deliverable_audit(
         return audit, ""
     detail = f" ({'; '.join(refusals[:3])})" if refusals else ""
     return None, f"Test did not return a valid independent audit for every approved Design deliverable{detail}."
+
+
+def _test_owned_deliverable_candidates(
+    *,
+    project_root: str,
+    stage_workspace: str,
+    outcome: StageExecutionOutcome,
+    manifest: Any,
+) -> list[dict[str, Any]]:
+    """Verify Test-created manifest products before the audit can cite them."""
+    candidates: list[dict[str, Any]] = []
+    claimed_paths: set[str] = set()
+    specs = {item.id: item for item in manifest.deliverables}
+    outputs_root = project_outputs_dir(Path(project_root).expanduser().resolve())
+    for unit, result in zip(outcome.plan.units, outcome.results, strict=True):
+        if not result.is_trustworthy:
+            continue
+        raw = result.provenance.get("deliverable_audit")
+        items = raw.get("items") if isinstance(raw, Mapping) else None
+        if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
+            continue
+        unit_workspace = _unit_stage_workspace(stage_workspace, unit.unit_id)
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            spec = specs.get(str(item.get("deliverable_id") or item.get("id") or ""))
+            if spec is None:
+                continue
+            expected = [path for path in spec.expected_paths if "/test/" in f"/{path}"]
+            if len(expected) != 1 or expected[0] in claimed_paths:
+                continue
+            artifacts = item.get("observed_artifacts")
+            if not isinstance(artifacts, Sequence) or isinstance(artifacts, (str, bytes)):
+                continue
+            for artifact in artifacts:
+                if not isinstance(artifact, Mapping):
+                    continue
+                source_uri = str(artifact.get("path") or "")
+                content_hash = str(artifact.get("content_hash") or artifact.get("sha256") or "").lower()
+                if PurePosixPath(source_uri).name != PurePosixPath(expected[0]).name or re.fullmatch(r"[0-9a-f]{64}", content_hash) is None:
+                    continue
+                try:
+                    verified = verified_workspace_files(
+                        source_uri,
+                        project_root=project_root,
+                        containment_reference=unit_workspace,
+                        relative_to_containment=True,
+                        max_files=1,
+                    )
+                except (FileNotFoundError, OSError, ValueError):
+                    continue
+                if len(verified) != 1 or _sha256_file(verified[0][1]) != content_hash:
+                    continue
+                relative = PurePosixPath(expected[0])
+                if not relative.parts or relative.parts[0] != "outputs":
+                    continue
+                destination = outputs_root.joinpath(*relative.parts[1:])
+                candidates.append(
+                    {
+                        "source_uri": source_uri,
+                        "source_path": expected[0],
+                        "uri": f"{WORKSPACE_VIRTUAL_ROOT}/{relative.as_posix()}",
+                        "content_hash": content_hash,
+                        "unit_id": unit.unit_id,
+                        "_source": verified[0][1],
+                        "_destination": destination,
+                    }
+                )
+                claimed_paths.add(expected[0])
+                break
+    return candidates
+
+
+def _publish_test_owned_deliverables(candidates: Sequence[Mapping[str, Any]]) -> None:
+    """Publish only candidates already accepted by the complete typed audit."""
+    for item in candidates:
+        source = item.get("_source")
+        destination = item.get("_destination")
+        if not isinstance(source, Path) or not isinstance(destination, Path):
+            raise ValueError("A verified Test deliverable lost its publication path.")
+        _atomic_copy(source, destination, expected_hash=str(item.get("content_hash") or ""))
 
 
 def _reusable_test_worker_results(
@@ -4068,6 +4163,69 @@ class LiveStageAdapter:
             default=None,
         )
         return bool(dossier and len(dossier_hash) == 64 and dossier.get("content_hash") == dossier_hash)
+
+    async def recover_evidence_retry(
+        self,
+        *,
+        project_id: str,
+        cycle_id: str,
+        stage: str,
+    ) -> dict[str, Any] | None:
+        """Recreate a consumed guidance card from the current exception dossier."""
+        normalized = stage.strip().lower()
+        if normalized not in {"build", "test"}:
+            return None
+        cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
+        if cycle is None:
+            return None
+        attempt = next(
+            (
+                item
+                for item in cycle.get("stages", [])
+                if item.get("stage") == normalized
+                and item.get("status")
+                in {"in_progress", "changes_requested", "awaiting_review"}
+            ),
+            None,
+        )
+        if attempt is None:
+            return None
+        dossier = max(
+            (
+                item
+                for item in cycle.get("artifacts", [])
+                if item.get("stage_attempt_id") == attempt.get("id")
+                and item.get("artifact_type") == "evidence_exception"
+            ),
+            key=lambda item: int(item.get("revision") or 0),
+            default=None,
+        )
+        if dossier is None or len(str(dossier.get("content_hash") or "")) != 64:
+            return None
+        surface = await self._repo.latest_stage_feedback_surface(
+            project_id=project_id,
+            cycle_id=cycle_id,
+            stage=normalized,
+            stage_attempt_id=str(attempt.get("id") or ""),
+            mode="stage_review",
+        )
+        exception = dict(
+            dict(dict((surface or {}).get("decision_request") or {}).get("transition_gate") or {}).get(
+                "evidence_exception"
+            )
+            or {}
+        )
+        if exception.get("content_hash") != dossier.get("content_hash"):
+            return None
+        return {
+            "version": 1,
+            "cycle_id": cycle_id,
+            "cycle_revision": int(cycle.get("db_revision") or 0),
+            "stage": normalized,
+            "dossier_hash": str(dossier["content_hash"]),
+            "reason_codes": list(exception.get("reason_codes") or []),
+            "available_artifacts": list(exception.get("available_artifacts") or []),
+        }
 
     async def active_cycle_status(self, *, project_id: str) -> list[dict[str, Any]]:
         """The project's live cycles, as read-only orientation for ordinary work.
@@ -6250,6 +6408,47 @@ class LiveStageAdapter:
             idempotency_key=idempotency_key,
         )
 
+    async def test_evidence_retry_snapshot(
+        self,
+        *,
+        project_id: str,
+        cycle_id: str,
+    ) -> dict[str, Any] | None:
+        """Read a degraded Test dossier only for the repeat-Test decision."""
+        return await TestReviewService(
+            repo=self._repo,
+            app_config=self._app_config,
+            runtime_reader=self._runtime,
+        ).snapshot(
+            project_id=project_id,
+            cycle_id=cycle_id,
+            allow_degraded_retry=True,
+        )
+
+    async def record_test_evidence_retry(
+        self,
+        *,
+        project_id: str,
+        cycle_id: str,
+        snapshot: Mapping[str, Any],
+        config: RunnableConfig,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Reopen Test from its hash-bound exception without exposing outcome routes."""
+        return await TestReviewService(
+            repo=self._repo,
+            app_config=self._app_config,
+            runtime_reader=self._runtime,
+        ).record_outcome(
+            project_id=project_id,
+            cycle_id=cycle_id,
+            snapshot=snapshot,
+            recommendation="repeat_test",
+            config=config,
+            idempotency_key=idempotency_key,
+            allow_degraded_retry=True,
+        )
+
     async def execute(
         self,
         *,
@@ -7651,14 +7850,29 @@ class LiveStageAdapter:
             stage_refusal = build_fulfillment_refusal
         _deliverable_audit = None
         deliverable_audit_refusal = ""
+        test_owned_artifacts: list[dict[str, Any]] = []
         if stage == "test" and build_inputs is not None and build_inputs.deliverable_manifest is not None:
+            if stage_workspace:
+                test_owned_artifacts = await asyncio.to_thread(
+                    _test_owned_deliverable_candidates,
+                    project_root=project_root,
+                    stage_workspace=stage_workspace,
+                    outcome=outcome,
+                    manifest=build_inputs.deliverable_manifest,
+                )
             _deliverable_audit, deliverable_audit_refusal = _validated_deliverable_audit(
                 outcome.trustworthy_results,
                 manifest=build_inputs.deliverable_manifest,
                 build_test=build_test,
+                stage_artifacts=test_owned_artifacts,
             )
             if deliverable_audit_refusal:
                 stage_refusal = deliverable_audit_refusal
+            elif test_owned_artifacts:
+                await asyncio.to_thread(
+                    _publish_test_owned_deliverables,
+                    test_owned_artifacts,
+                )
         test_assessment = _validated_test_assessment(outcome.trustworthy_results, build_test=build_test, rerun=test_rerun_record) if stage == "test" else None
         if stage == "test" and outcome.produced_usable_evidence and test_assessment is None:
             stage_refusal = (

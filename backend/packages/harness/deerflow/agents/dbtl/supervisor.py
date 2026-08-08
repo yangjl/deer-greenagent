@@ -1579,8 +1579,11 @@ def build_supervisor_graph(
         # approval stays in the thread's history forever, so without it every
         # later turn — including the answer to the questions themselves — would
         # re-raise the same card.
-        if _confirmation_answer(state) == "create_cycle" and not _has_emitted_card(state, SETUP_CLARIFICATION_PREFIX):
+        confirmation = _confirmation_answer(state)
+        if confirmation == "create_cycle" and not _has_emitted_card(state, SETUP_CLARIFICATION_PREFIX):
             return SupervisorBranch.CLARIFICATION.value
+        if confirmation in {"keep_ordinary", "not_sure"}:
+            return SupervisorBranch.CYCLE_SETUP.value
 
         # These answers belong to the cycle created by the preceding confirmed
         # setup; conversational discovery must not offer another one.
@@ -2148,6 +2151,30 @@ def build_supervisor_graph(
                     retry_request or {},
                 )
                 unscoped_stage_intent = None
+        explicit_retry = _stage_control_intent(latest_text)
+        if evidence_retry is None and explicit_retry is not None and explicit_retry[0] == "retry":
+            retry_stage = explicit_retry[1]
+            recover_retry = getattr(stage_adapter, "recover_evidence_retry", None)
+            if callable(recover_retry) and decision.cycle_id:
+                recovered = recover_retry(
+                    project_id=str(context.project_id or ""),
+                    cycle_id=str(decision.cycle_id),
+                    stage=retry_stage,
+                )
+                if isawaitable(recovered):
+                    recovered = await recovered
+                if isinstance(recovered, Mapping):
+                    marker = dict(recovered)
+                    marker["initial_hint"] = latest_text
+                    return {
+                        "messages": list(
+                            _evidence_retry_message(
+                                decision,
+                                marker,
+                                request_nonce=request_nonce,
+                            )
+                        )
+                    }
         preflight_answer = _card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
         if preflight_answer is not None and discovery_store is not None and context.project_id:
             preflight_request = _emitted_card_request(state, preflight_answer[0])
@@ -2279,10 +2306,10 @@ def build_supervisor_graph(
                 return {"messages": [receipt_message("The evidence or cycle revision changed before this retry was confirmed. No worker ran; reopen the current exception deck.")]}
             request_text = f"Retry the governed {retry_stage.title()} stage with human guidance: {retry_guidance}"
             if retry_stage == "test":
-                snapshot_reader = getattr(stage_adapter, "test_review_snapshot", None)
-                recorder = getattr(stage_adapter, "record_test_outcome", None)
+                snapshot_reader = getattr(stage_adapter, "test_evidence_retry_snapshot", None)
+                recorder = getattr(stage_adapter, "record_test_evidence_retry", None)
                 if not callable(snapshot_reader) or not callable(recorder):
-                    return {"messages": [receipt_message("The Test retry is still held because its server-owned review port is unavailable. No worker ran.")]}
+                    return {"messages": [receipt_message("The Test retry is still held because its server-owned exception-retry port is unavailable. No worker ran.")]}
                 snapshot = snapshot_reader(
                     project_id=str(context.project_id or ""),
                     cycle_id=str(decision.cycle_id or ""),
@@ -2295,7 +2322,6 @@ def build_supervisor_graph(
                     project_id=str(context.project_id or ""),
                     cycle_id=str(decision.cycle_id or ""),
                     snapshot=snapshot,
-                    recommendation="repeat_test",
                     config=config,
                     idempotency_key=f"{retry_answer[0]}:repeat-test",
                 )

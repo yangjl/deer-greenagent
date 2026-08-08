@@ -234,4 +234,22 @@ describe("consensusSnapshot", () => {
       "The holdout must be separated by family.",
     );
   });
+
+  it("uses the server-authored display summary instead of a raw terminal contract", () => {
+    const chair = task("chair", "completed", seatEvent({ role: "chair" }));
+    chair.displaySummary = "The input source still needs an owner decision.";
+    chair.result = '{"status":"needs_input"';
+    chair.steps = [
+      {
+        message_index: 4,
+        kind: "ai",
+        text: '{"status":"needs_input","summary":"raw contract"}',
+        truncated: false,
+      },
+    ];
+
+    expect(councilSeatSummary(chair)).toBe(
+      "The input source still needs an owner decision.",
+    );
+  });
 });

@@ -119,6 +119,58 @@ def test_server_maps_governed_artifact_uris_back_to_manifest_paths() -> None:
     assert audit.items[0].observed_artifacts[0].path == "outputs/report.md"
 
 
+def test_server_accepts_a_hash_bound_test_owned_deliverable() -> None:
+    manifest = parse_deliverable_manifest(
+        {
+            "deliverables": [
+                {
+                    "id": "test-results",
+                    "title": "Test results",
+                    "kind": "report",
+                    "required": True,
+                    "expected_paths": ["outputs/dbtl/cycle/test/test_results.json"],
+                    "acceptance_criteria": ["Records the clean replay"],
+                    "validation": "Read the server-published JSON.",
+                    "capabilities": ["statistical-analysis"],
+                }
+            ]
+        },
+        cycle_class="other",
+    )
+    staged_uri = "/mnt/user-data/outputs/.dbtl-stage-work/attempt/unit/test_results.json"
+    item = {
+        "deliverable_id": "test-results",
+        "verdict": "pass",
+        "observed_artifacts": [{"path": staged_uri, "content_hash": SHA}],
+        "criteria": [
+            {
+                "criterion": "Records the clean replay",
+                "verdict": "pass",
+                "detail": "The clean replay and metrics were independently checked.",
+            }
+        ],
+        "notes": "Published by the server after Test completed.",
+    }
+
+    audit, refusal = _validated_deliverable_audit(
+        [SimpleNamespace(provenance={"deliverable_audit": {"version": 1, "items": [item]}})],
+        manifest=manifest,
+        build_test={"build_lineage": {"output_artifacts": []}},
+        stage_artifacts=[
+            {
+                "source_uri": staged_uri,
+                "source_path": "outputs/dbtl/cycle/test/test_results.json",
+                "uri": "/mnt/user-data/outputs/dbtl/cycle/test/test_results.json",
+                "content_hash": SHA,
+            }
+        ],
+    )
+
+    assert refusal == ""
+    assert audit is not None
+    assert audit.items[0].observed_artifacts[0].path == "outputs/dbtl/cycle/test/test_results.json"
+
+
 @pytest.mark.parametrize(
     ("verdict", "expected"),
     [

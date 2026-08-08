@@ -692,6 +692,30 @@ class TestSetupClarificationIsACard:
         assert final["artifacts"] == FULL_STATE["artifacts"]
 
     @pytest.mark.asyncio
+    async def test_declining_confirmation_stays_ordinary_when_discovery_is_enabled(self):
+        asked = await self.ask("setup-decline-with-discovery")
+        request_id = asked[-1].artifact["human_input"]["request_id"]
+        graph = compile_supervisor(
+            SupervisorContext(
+                project_id="proj-1",
+                project_name="test2",
+                discovery_enabled=True,
+            )
+        )
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [*asked, self.card_reply(request_id, "keep_ordinary")],
+            },
+            config={"configurable": {"thread_id": "setup-decline-with-discovery-2"}},
+        )
+
+        answer = final["messages"][-1]
+        assert isinstance(answer, AIMessage)
+        assert answer.content == "Kept as ordinary chat. No DBTL cycle was created."
+
+    @pytest.mark.asyncio
     async def test_declining_the_confirmation_suppresses_later_classifier_cards(self):
         asked = await self.ask("setup-decline-suppression")
         request_id = asked[-1].artifact["human_input"]["request_id"]
@@ -2020,6 +2044,156 @@ class TestCouncilPreflight:
 
 
 class TestLiveStageBranch:
+    @pytest.mark.asyncio
+    async def test_explicit_degraded_test_retry_recovers_a_fresh_guidance_card(self):
+        executed: list[dict] = []
+
+        class Adapter:
+            async def recover_evidence_retry(self, **_kwargs):
+                return {
+                    "cycle_id": "cyc-1",
+                    "cycle_revision": 11,
+                    "stage": "test",
+                    "dossier_hash": "a" * 64,
+                    "reason_codes": ["audit_incomplete"],
+                    "available_artifacts": [],
+                    "initial_hint": "Publish the result at the bound path.",
+                }
+
+            async def execute(self, **kwargs):
+                executed.append(kwargs)
+                return LiveStageResult(
+                    stage="test",
+                    cycle_id="cyc-1",
+                    note="This must not run before guidance.",
+                )
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [HumanMessage(id="retry-test", content="Retry Test with the recorded guidance.")],
+            },
+            config={
+                "configurable": {"thread_id": "recover-degraded-test-retry"},
+                "context": {"run_id": "run-recover-degraded-test-retry"},
+            },
+        )
+
+        assert executed == []
+        request = final["messages"][-1].artifact["human_input"]
+        assert request["clarification_type"] == "dbtl_evidence_retry"
+        assert request["dossier_hash"] == "a" * 64
+        assert request["cycle_revision"] == 11
+
+    @pytest.mark.asyncio
+    async def test_degraded_test_retry_uses_the_exception_bound_retry_port(self):
+        request_id = "dbtl-evidence-retry__cyc-1__test__dossier"
+        request = {
+            "version": 1,
+            "kind": "human_input_request",
+            "source": "ask_clarification",
+            "request_id": request_id,
+            "clarification_type": "dbtl_evidence_retry",
+            "title": "Guide the Test retry",
+            "question": "What should change when Test is retried?",
+            "context": "The immutable exception dossier remains bound.",
+            "input_mode": "free_text",
+            "dbtl_cycle_id": "cyc-1",
+            "cycle_revision": 11,
+            "stage": "test",
+            "dossier_hash": "a" * 64,
+        }
+        recorded: list[dict] = []
+        executed: list[dict] = []
+
+        class Adapter:
+            async def validate_evidence_retry(self, **_kwargs):
+                return True
+
+            async def test_evidence_retry_snapshot(self, **_kwargs):
+                return {
+                    "stage_attempt_id": "attempt-test",
+                    "evidence_hash": "a" * 64,
+                    "evidence_exception": {"content_hash": "a" * 64},
+                }
+
+            async def record_test_evidence_retry(self, **kwargs):
+                recorded.append(kwargs)
+
+            async def execute(self, **kwargs):
+                executed.append(kwargs)
+                return LiveStageResult(
+                    stage="test",
+                    cycle_id="cyc-1",
+                    note="The guided Test retry ran.",
+                )
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent([]),
+            context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    AIMessage(
+                        id=f"{request_id}:call",
+                        content="",
+                        tool_calls=[
+                            {
+                                "id": request_id,
+                                "name": "ask_clarification",
+                                "args": {"question": request["question"]},
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                    ToolMessage(
+                        id=request_id,
+                        content=request["context"],
+                        name="ask_clarification",
+                        tool_call_id=request_id,
+                        artifact={"human_input": request},
+                    ),
+                    HumanMessage(
+                        id="retry-guidance",
+                        content="Publish the hash-bound test result.",
+                        additional_kwargs={
+                            "hide_from_ui": True,
+                            "human_input_response": {
+                                "version": 1,
+                                "kind": "human_input_response",
+                                "source": "ask_clarification",
+                                "request_id": request_id,
+                                "response_kind": "text",
+                                "value": "Publish the hash-bound test result.",
+                            },
+                        },
+                    ),
+                ],
+            },
+            config={
+                "configurable": {"thread_id": "degraded-test-retry"},
+                "context": {"run_id": "run-degraded-test-retry"},
+            },
+        )
+
+        assert len(recorded) == 1
+        assert recorded[0]["snapshot"]["evidence_hash"] == "a" * 64
+        assert len(executed) == 1
+        assert executed[0]["request_text"] == "Retry the governed Test stage with human guidance: Publish the hash-bound test result."
+        assert "The guided Test retry ran." in final["messages"][-1].content
+
     @pytest.mark.asyncio
     async def test_unscoped_review_intent_returns_immediately_without_the_lead_or_workers(
         self,
