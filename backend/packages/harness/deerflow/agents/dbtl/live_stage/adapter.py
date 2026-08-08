@@ -4179,24 +4179,13 @@ class LiveStageAdapter:
         if cycle is None:
             return None
         attempt = next(
-            (
-                item
-                for item in cycle.get("stages", [])
-                if item.get("stage") == normalized
-                and item.get("status")
-                in {"in_progress", "changes_requested", "awaiting_review"}
-            ),
+            (item for item in cycle.get("stages", []) if item.get("stage") == normalized and item.get("status") in {"in_progress", "changes_requested", "awaiting_review"}),
             None,
         )
         if attempt is None:
             return None
         dossier = max(
-            (
-                item
-                for item in cycle.get("artifacts", [])
-                if item.get("stage_attempt_id") == attempt.get("id")
-                and item.get("artifact_type") == "evidence_exception"
-            ),
+            (item for item in cycle.get("artifacts", []) if item.get("stage_attempt_id") == attempt.get("id") and item.get("artifact_type") == "evidence_exception"),
             key=lambda item: int(item.get("revision") or 0),
             default=None,
         )
@@ -4209,12 +4198,7 @@ class LiveStageAdapter:
             stage_attempt_id=str(attempt.get("id") or ""),
             mode="stage_review",
         )
-        exception = dict(
-            dict(dict((surface or {}).get("decision_request") or {}).get("transition_gate") or {}).get(
-                "evidence_exception"
-            )
-            or {}
-        )
+        exception = dict(dict(dict((surface or {}).get("decision_request") or {}).get("transition_gate") or {}).get("evidence_exception") or {})
         if exception.get("content_hash") != dossier.get("content_hash"):
             return None
         return {

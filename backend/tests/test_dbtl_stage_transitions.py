@@ -380,7 +380,7 @@ async def test_test_assessment_appends_a_test_edge_with_the_recommended_route(tm
             "configuration": [],
             "expected_outputs": ["/mnt/user-data/outputs/model.bin"],
         },
-            input_artifacts=[f"workspace_file:reconciliation.json:sha256:{HASH_A}"],
+        input_artifacts=[f"workspace_file:reconciliation.json:sha256:{HASH_A}"],
         output_artifacts=[{"uri": "/mnt/user-data/outputs/model.bin", "content_hash": HASH_B, "revision": 1}],
         deviations=[],
         logs_uri="/mnt/user-data/outputs/build.log",
@@ -440,7 +440,7 @@ async def test_return_to_design_records_revisit_and_invalidates_forward_stage_st
             "configuration": [],
             "expected_outputs": ["/mnt/user-data/outputs/model.bin"],
         },
-            input_artifacts=[f"workspace_file:reconciliation.json:sha256:{HASH_A}"],
+        input_artifacts=[f"workspace_file:reconciliation.json:sha256:{HASH_A}"],
         output_artifacts=[
             {
                 "uri": "/mnt/user-data/outputs/model.bin",

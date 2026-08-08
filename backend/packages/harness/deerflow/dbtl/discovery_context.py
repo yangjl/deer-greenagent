@@ -113,10 +113,7 @@ def detect_summary_conflicts(summaries: Sequence[Mapping[str, Any]]) -> list[dic
         conflicts.append(
             {
                 "field": key,
-                "values": [
-                    {"value": value, "source_refs": sorted(refs)}
-                    for value, refs in sorted(values.items())
-                ],
+                "values": [{"value": value, "source_refs": sorted(refs)} for value, refs in sorted(values.items())],
             }
         )
     return conflicts[:8]
@@ -297,10 +294,7 @@ async def build_project_discovery_context(
         {
             "provenance": "project_artifact",
             "reference": str(item.get("path") or ""),
-            "revision": (
-                f"size:{int(item.get('size_bytes') or 0)}:"
-                f"mtime_ns:{int(item.get('modified_ns') or 0)}"
-            ),
+            "revision": (f"size:{int(item.get('size_bytes') or 0)}:mtime_ns:{int(item.get('modified_ns') or 0)}"),
             "scope": project_id,
         }
         for item in manifest
@@ -351,31 +345,20 @@ def render_project_discovery_evidence(value: object) -> str | None:
         for item in manifest[:MAX_MANIFEST_ENTRIES]:
             if not isinstance(item, Mapping):
                 continue
-            lines.append(
-                f"- {escape(str(item.get('path') or ''), quote=False)} [{escape(str(item.get('kind') or ''), quote=False)}; {int(item.get('size_bytes') or 0)} bytes]"
-            )
+            lines.append(f"- {escape(str(item.get('path') or ''), quote=False)} [{escape(str(item.get('kind') or ''), quote=False)}; {int(item.get('size_bytes') or 0)} bytes]")
     for summary in summaries[:MAX_HISTORY_THREADS]:
         if not isinstance(summary, Mapping):
             continue
-        lines.append(
-            f"Prior conversation: {escape(str(summary.get('title') or ''), quote=False)} ({escape(str(summary.get('source_ref') or ''), quote=False)})"
-        )
+        lines.append(f"Prior conversation: {escape(str(summary.get('title') or ''), quote=False)} ({escape(str(summary.get('source_ref') or ''), quote=False)})")
         for message in summary.get("messages") or []:
             if isinstance(message, Mapping):
-                lines.append(
-                    f"- {escape(str(message.get('role') or ''), quote=False)}: {escape(str(message.get('text') or ''), quote=False)}"
-                )
+                lines.append(f"- {escape(str(message.get('role') or ''), quote=False)}: {escape(str(message.get('text') or ''), quote=False)}")
     if memory_items:
         lines.append("Retrieved memory (may be stale; current owner statements win):")
         for item in memory_items[:MAX_MEMORY_ITEMS]:
             if not isinstance(item, Mapping):
                 continue
-            lines.append(
-                "- "
-                f"[{escape(str(item.get('provenance') or ''), quote=False)}; "
-                f"{escape(str(item.get('reference') or ''), quote=False)}] "
-                f"{escape(str(item.get('content') or ''), quote=False)}"
-            )
+            lines.append(f"- [{escape(str(item.get('provenance') or ''), quote=False)}; {escape(str(item.get('reference') or ''), quote=False)}] {escape(str(item.get('content') or ''), quote=False)}")
     if conflicts:
         lines.append("Explicit key/value conflicts detected; ask the owner rather than choosing silently:")
         for conflict in conflicts[:8]:

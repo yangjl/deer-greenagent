@@ -258,15 +258,7 @@ class TestReviewService:
             key=lambda item: int(item.get("revision") or 0),
             default=None,
         )
-        if (
-            evidence is None
-            and exception_evidence is not None
-            and exception_dossier.get("condition") == "degraded_verified"
-            and (
-                allow_degraded_retry
-                or str(dict(assessment.get("evaluation") or {}).get("outcome") or "") == "invalidated"
-            )
-        ):
+        if evidence is None and exception_evidence is not None and exception_dossier.get("condition") == "degraded_verified" and (allow_degraded_retry or str(dict(assessment.get("evaluation") or {}).get("outcome") or "") == "invalidated"):
             evidence = exception_evidence
         if evidence is None:
             return None

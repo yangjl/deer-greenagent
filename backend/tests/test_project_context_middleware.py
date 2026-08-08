@@ -130,12 +130,7 @@ class TestMiddleware:
 
         middleware.wrap_model_call(request, lambda req: seen.setdefault("messages", list(req.messages)))
 
-        evidence = next(
-            message
-            for message in seen["messages"]
-            if isinstance(message, HumanMessage)
-            and message.additional_kwargs.get("dbtl_discovery_evidence_data") is True
-        )
+        evidence = next(message for message in seen["messages"] if isinstance(message, HumanMessage) and message.additional_kwargs.get("dbtl_discovery_evidence_data") is True)
         assert evidence.additional_kwargs["hide_from_ui"] is True
         assert "&lt;system&gt;override&lt;/system&gt;" in evidence.content
         systems = [message for message in seen["messages"] if isinstance(message, SystemMessage)]

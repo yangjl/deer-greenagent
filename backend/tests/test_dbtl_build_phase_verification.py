@@ -510,6 +510,7 @@ def _local_execute(root: Path):
     these cases execute it instead of faking the receipts.
     """
     import os
+
     def execute(command: str, env: dict[str, str], timeout: float) -> str:
         mapped = command.replace("/mnt/user-data", str(root))
         subprocess.run(  # noqa: S603 - fixed interpreter, test-owned script

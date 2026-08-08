@@ -64,7 +64,7 @@ def test_unquoted_command_path_with_spaces_is_shell_quoted(tmp_path):
         path_mappings=[PathMapping(container_path="/mnt/user-data/workspace", local_path=str(workspace))],
     )
 
-    resolved = sb._resolve_paths_in_command("STAGE=/mnt/user-data/workspace/outputs python \"$STAGE/fit.py\"")
+    resolved = sb._resolve_paths_in_command('STAGE=/mnt/user-data/workspace/outputs python "$STAGE/fit.py"')
 
     assert resolved.startswith(f"STAGE='{workspace}/outputs' python")
 

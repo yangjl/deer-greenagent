@@ -112,6 +112,7 @@ class TestDesignApprovalOpensBuild:
         # Skipped, not worked and not deleted.
         assert statuses["reconciliation"] == "locked"
 
+
 class TestBuildOwnsInputBinding:
     async def _record_lineage(self, repo: DbtlCycleRepository, *, input_artifacts: list[str] | None = None, rerun_spec: object = "__default__"):
         default_rerun = {

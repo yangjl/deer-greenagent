@@ -579,9 +579,7 @@ def extract_result_payload(text: str) -> Mapping[str, Any]:
         index = offset
     if not objects:
         if last_error is not None:
-            raise WorkerResultRejected(
-                f"The worker's structured result is not valid JSON: {last_error.msg}"
-            ) from last_error
+            raise WorkerResultRejected(f"The worker's structured result is not valid JSON: {last_error.msg}") from last_error
         raise WorkerResultRejected("The worker returned prose instead of a structured result.")
     for candidate in reversed(objects):
         if "status" in candidate:

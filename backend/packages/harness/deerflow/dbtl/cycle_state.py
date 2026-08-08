@@ -156,6 +156,7 @@ _FORWARD_TRANSITIONS: Mapping[str, tuple[str, tuple[str, ...]]] = MappingProxyTy
     }
 )
 
+
 def validate_cycle_class(value: str) -> CycleClass:
     """Return the :class:`CycleClass` for *value*, or raise ``ValueError``."""
     try:

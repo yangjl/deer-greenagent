@@ -22,6 +22,7 @@ _NEXT_STAGE: dict[str, str] = {"design": "build", "build": "test", "test": "lear
 COMPLETED = "completed"
 ABANDONED = "abandoned"
 
+
 class StageRoutesRefused(ValueError):
     """The supplied stage or outcome is not part of the stage graph."""
 
@@ -78,6 +79,7 @@ class RouteContext:
     #: offered the skip to a deployment which never enabled it would be
     #: offering an edge nobody vetted.
     conditional_test: bool = False
+
 
 def _advance(stage: str) -> StageRoute:
     target = _NEXT_STAGE.get(stage, COMPLETED)

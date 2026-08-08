@@ -170,13 +170,7 @@ async def test_worker_journal_reconciles_graph_authored_human_input_card():
     )
 
     messages = await store.list_messages("thread-handoff")
-    card_rows = [
-        row
-        for row in messages
-        if isinstance(row.get("content"), dict)
-        and isinstance(row["content"].get("artifact"), dict)
-        and row["content"]["artifact"].get("human_input", {}).get("request_id") == request_id
-    ]
+    card_rows = [row for row in messages if isinstance(row.get("content"), dict) and isinstance(row["content"].get("artifact"), dict) and row["content"]["artifact"].get("human_input", {}).get("request_id") == request_id]
     assert len(card_rows) == 1
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.success
@@ -242,11 +236,7 @@ async def test_first_checkpointed_run_records_an_empty_journal_boundary(monkeypa
     )
 
     messages = await store.list_messages("thread-first-card")
-    assert any(
-        isinstance(row.get("content"), dict)
-        and row["content"].get("artifact", {}).get("human_input", {}).get("request_id") == request_id
-        for row in messages
-    )
+    assert any(isinstance(row.get("content"), dict) and row["content"].get("artifact", {}).get("human_input", {}).get("request_id") == request_id for row in messages)
 
 
 @pytest.mark.anyio
