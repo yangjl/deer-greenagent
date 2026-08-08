@@ -1700,6 +1700,15 @@ async def apply_design_feedback_action(
                 action_kind=body.action.kind,
                 revision=body.expected_db_revision,
             )
+            _watch_round_if_possible(
+                request,
+                user_id=user_id,
+                thread_id=body.originating_thread_id,
+                run_id=record.run_id,
+                surface_id=surface_id,
+                explanation=("The Design chair stopped before it could produce a follow-up deck. Reopen the existing deck to edit your answer and try again."),
+                success_has_follow_up=round_has_follow_up,
+            )
             return {**updated, "replayed": replayed}
 
         if body.action.kind == "convene_review_meeting":

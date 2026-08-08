@@ -190,8 +190,26 @@ async def test_stage_worker_events_page_across_runs_and_redacts_metadata():
             )
             return pages[before_seq]
 
+    class FakeRunStore:
+        async def get_many_by_thread(self, thread_id, run_ids, *, user_id=None):
+            assert thread_id == "thread-1"
+            records = {
+                "run-1": {"run_id": "run-1", "status": "interrupted"},
+                "run-2": {"run_id": "run-2", "status": "success"},
+            }
+            return {run_id: records[run_id] for run_id in run_ids}
+
     request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(run_event_store=FakeStore())),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                run_event_store=FakeStore(),
+                run_store=FakeRunStore(),
+            )
+        ),
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="user-1"),
+            auth_source="auth_disabled",
+        ),
         _deerflow_test_bypass_auth=True,
     )
 
@@ -216,4 +234,6 @@ async def test_stage_worker_events_page_across_runs_and_redacts_metadata():
         "run-2",
     ]
     assert newest["events"][0]["metadata"] == {"task_id": "worker-2"}
+    assert newest["run_statuses"] == {"run-2": "success"}
+    assert older["run_statuses"] == {"run-1": "interrupted"}
     assert calls[0]["event_types"] == ["subagent.start", "subagent.end"]

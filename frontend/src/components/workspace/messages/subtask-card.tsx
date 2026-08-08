@@ -56,6 +56,7 @@ export function SubtaskCard({
   runId,
   isLoading,
   flat = false,
+  headerless = false,
   showTerminalReport = true,
 }: {
   className?: string;
@@ -68,10 +69,12 @@ export function SubtaskCard({
   // ordinary tool-call / script-writing progress report rather than a
   // decorated card. Ordinary chat subagents keep the default look.
   flat?: boolean;
+  headerless?: boolean;
   showTerminalReport?: boolean;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
+  const expanded = headerless || !collapsed;
   // Flat stage work collapses its earlier steps under a native "N more steps"
   // toggle, keeping only the current step visible until expanded — matching
   // the Lead Agent's progress card.
@@ -130,7 +133,7 @@ export function SubtaskCard({
   const backfilledRef = useRef<string | null>(null);
   useEffect(() => {
     const backfillKey = `${runId ?? ""}\u0000${taskId}`;
-    if (collapsed || backfilledRef.current === backfillKey || stepsCount > 0) {
+    if (!expanded || backfilledRef.current === backfillKey || stepsCount > 0) {
       return;
     }
     if (!threadId || !runId) {
@@ -155,7 +158,7 @@ export function SubtaskCard({
     return () => {
       cancelled = true;
     };
-  }, [collapsed, stepsCount, threadId, runId, taskId, updateSubtask]);
+  }, [expanded, stepsCount, threadId, runId, taskId, updateSubtask]);
   const icon = useMemo(() => {
     if (task.status === "completed") {
       return <CheckCircleIcon className="size-3" />;
@@ -175,7 +178,7 @@ export function SubtaskCard({
         !flat && "rounded-lg border",
         className,
       )}
-      open={!collapsed}
+      open={expanded}
     >
       {!flat && (
         <div
@@ -201,71 +204,75 @@ export function SubtaskCard({
           !flat && "bg-background/95 rounded-lg",
         )}
       >
-        <div className="flex w-full items-center justify-between p-0.5">
-          <Button
-            className="w-full items-start justify-start text-left"
-            variant="ghost"
-            onClick={() => setCollapsed(!collapsed)}
-          >
-            <div className="flex w-full items-center justify-between">
-              <ChainOfThoughtStep
-                className="font-normal"
-                label={
-                  task.status === "in_progress" && !flat ? (
-                    <Shimmer duration={3} spread={3}>
-                      {task.description}
-                    </Shimmer>
-                  ) : (
-                    task.description
-                  )
-                }
-                icon={<ClipboardListIcon />}
-              ></ChainOfThoughtStep>
-              <div className="flex items-center gap-1">
-                {collapsed && (
-                  <div
-                    className={cn(
-                      "text-muted-foreground flex items-center gap-1 text-xs font-normal",
-                      task.status === "failed" ? "text-red-500 opacity-67" : "",
-                    )}
-                  >
-                    {modelLabel && (
-                      <span className="max-w-32 truncate" title={modelLabel}>
-                        {modelLabel}
-                      </span>
-                    )}
-                    {runtimeUsageLabel && (
-                      <span
-                        className="max-w-28 truncate"
-                        title={runtimeUsageLabel}
-                      >
-                        {runtimeUsageLabel}
-                      </span>
-                    )}
-                    {icon}
-                    <FlipDisplay
-                      className="max-w-[420px] truncate pb-1"
-                      uniqueKey={task.latestMessage?.id ?? ""}
+        {!headerless && (
+          <div className="flex w-full items-center justify-between p-0.5">
+            <Button
+              className="w-full items-start justify-start text-left"
+              variant="ghost"
+              onClick={() => setCollapsed(!collapsed)}
+            >
+              <div className="flex w-full items-center justify-between">
+                <ChainOfThoughtStep
+                  className="font-normal"
+                  label={
+                    task.status === "in_progress" && !flat ? (
+                      <Shimmer duration={3} spread={3}>
+                        {task.description}
+                      </Shimmer>
+                    ) : (
+                      task.description
+                    )
+                  }
+                  icon={<ClipboardListIcon />}
+                ></ChainOfThoughtStep>
+                <div className="flex items-center gap-1">
+                  {collapsed && (
+                    <div
+                      className={cn(
+                        "text-muted-foreground flex items-center gap-1 text-xs font-normal",
+                        task.status === "failed"
+                          ? "text-red-500 opacity-67"
+                          : "",
+                      )}
                     >
-                      {task.status === "in_progress" &&
-                      task.latestMessage &&
-                      hasToolCalls(task.latestMessage)
-                        ? explainLastToolCall(task.latestMessage, t)
-                        : t.subtasks[task.status]}
-                    </FlipDisplay>
-                  </div>
-                )}
-                <ChevronUp
-                  className={cn(
-                    "text-muted-foreground size-4",
-                    !collapsed ? "" : "rotate-180",
+                      {modelLabel && (
+                        <span className="max-w-32 truncate" title={modelLabel}>
+                          {modelLabel}
+                        </span>
+                      )}
+                      {runtimeUsageLabel && (
+                        <span
+                          className="max-w-28 truncate"
+                          title={runtimeUsageLabel}
+                        >
+                          {runtimeUsageLabel}
+                        </span>
+                      )}
+                      {icon}
+                      <FlipDisplay
+                        className="max-w-[420px] truncate pb-1"
+                        uniqueKey={task.latestMessage?.id ?? ""}
+                      >
+                        {task.status === "in_progress" &&
+                        task.latestMessage &&
+                        hasToolCalls(task.latestMessage)
+                          ? explainLastToolCall(task.latestMessage, t)
+                          : t.subtasks[task.status]}
+                      </FlipDisplay>
+                    </div>
                   )}
-                />
+                  <ChevronUp
+                    className={cn(
+                      "text-muted-foreground size-4",
+                      !collapsed ? "" : "rotate-180",
+                    )}
+                  />
+                </div>
               </div>
-            </div>
-          </Button>
-        </div>
-        {collapsed &&
+            </Button>
+          </div>
+        )}
+        {!expanded &&
         (liveProgressReport || (showTerminalReport && terminalStageReport)) ? (
           <div className="border-border/60 border-t px-4 py-3">
             <div className="text-muted-foreground mb-1 text-[11px] font-medium tracking-wide uppercase">

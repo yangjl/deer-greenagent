@@ -402,11 +402,12 @@ def test_an_internal_principal_may_read_but_gains_no_actions(tmp_path: Path) -> 
     assert body["allowed_actions"] == []
 
 
-def test_a_recorded_chair_option_starts_one_originating_thread_run(
+def test_a_recorded_chair_option_starts_one_originating_thread_run_and_watcher(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     workspace_repo, cycle_repo = anyio.run(_make_repos, tmp_path)
+    background_watches: list[dict] = []
 
     async def fake_start_run(body, thread_id, request):
         assert thread_id == "thread-1"
@@ -416,6 +417,11 @@ def test_a_recorded_chair_option_starts_one_originating_thread_run(
         return SimpleNamespace(run_id="run-resume-1")
 
     monkeypatch.setattr(dbtl_cycles, "start_run", fake_start_run)
+    monkeypatch.setattr(
+        dbtl_cycles,
+        "_watch_round_if_possible",
+        lambda _request, **kwargs: background_watches.append(kwargs),
+    )
     with TestClient(_make_app(workspace_repo, cycle_repo)) as client:
         project_id = _seed_project(client)
         client.app.state.thread_store.get = AsyncMock(return_value={"thread_id": "thread-1", "project_id": project_id})
@@ -476,6 +482,10 @@ def test_a_recorded_chair_option_starts_one_originating_thread_run(
     assert "follow-up slide deck below this meeting" in meeting_turn["content"]
     assert meeting_turn["additional_kwargs"]["run_id"] == "run-resume-1"
     assert "dbtl_meeting_progress" not in meeting_turn["additional_kwargs"]
+    assert len(background_watches) == 1
+    assert background_watches[0]["run_id"] == "run-resume-1"
+    assert background_watches[0]["surface_id"] == surface["surface_id"]
+    assert background_watches[0]["success_has_follow_up"] is not None
 
 
 def test_a_terminal_chair_resume_without_a_followup_surface_reopens_the_same_answer(

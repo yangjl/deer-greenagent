@@ -326,4 +326,35 @@ describe("fetchStageWorkers", () => {
       }),
     ]);
   });
+
+  test("settles an orphaned worker when its owning run is terminal", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        events: [
+          {
+            seq: 730,
+            run_id: "run-interrupted",
+            event_type: "subagent.start",
+            content: {
+              task_id: "reporting-phase",
+              description: "Build work: scientific reporting",
+              dbtl_stage: "build",
+            },
+          },
+        ],
+        run_statuses: { "run-interrupted": "interrupted" },
+        next_before_seq: null,
+      }),
+    );
+
+    await expect(fetchStageWorkers("thread-1")).resolves.toEqual([
+      expect.objectContaining({
+        taskId: "reporting-phase",
+        runId: "run-interrupted",
+        status: "failed",
+        error: "The owning run ended before this worker reported a result.",
+        stopReason: "interrupted",
+      }),
+    ]);
+  });
 });

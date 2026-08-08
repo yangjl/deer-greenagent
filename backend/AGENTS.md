@@ -2854,7 +2854,10 @@ Artifact publication distinguishes a reference that is missing, unreadable,
 or outside its isolated worker grant. When server verification rejects a
 worker after its JSON contract passed, it emits a correcting `task_failed`
 event under the same task id; the transcript cannot keep showing “Subtask
-completed” for bytes the server never found.
+completed” for bytes the server never found. Current Build gives that
+deterministic server refusal the same single fresh-correction opportunity as a
+failed implementation check, then runs the corrected manifest through the
+server verifier once more; a correction cannot recursively correct itself.
 The Design chair has one separate, equally narrow compatibility case: an
 `artifact_refs` entry shaped as
 `{"kind":"workspace_file","reference":"/mnt/user-data/..."}` is normalized
@@ -3914,7 +3917,8 @@ same switch:
   `test_dbtl_live_stage_execution.py`.
 
   Current Build is `generic:build:v12`, with a 500,000-token worker ceiling. A
-  failed implementation check receives one fresh 40,000-token correction
+  failed implementation check or deterministic server-verification refusal
+  receives one fresh 200,000-token correction
   worker carrying only the refusal and previous staged workspace; it does not
   inherit the first worker's growing ReAct transcript.
 
@@ -4537,7 +4541,10 @@ id-less run inputs.
 `GET /api/threads/{thread_id}/stage-worker-events` is the narrow all-run read
 model for durable DBTL `subagent.start`/`subagent.end` convergence. Detailed
 steps remain run-and-task scoped. Terminal events may carry bounded
-`display_summary`; raw typed results remain persisted for audit.
+`display_summary`; raw typed results remain persisted for audit. Each page also
+returns the statuses of the owning runs represented on that page, so a missing
+`subagent.end` from an interrupted or otherwise terminal run is settled as a
+failed worker instead of remaining “Running” forever after reload.
 
 ### Context Summarization
 

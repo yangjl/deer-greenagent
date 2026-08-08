@@ -2,13 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { useI18n } from "@/core/i18n/hooks";
 import { fetchStageWorkers, StageWorkerFetchError } from "@/core/tasks/api";
 import { useReconcileSubtasks, useSubtaskContext } from "@/core/tasks/context";
-import { terminalStageReportForDisplay } from "@/core/tasks/presentation";
 import { stageWorkTasks } from "@/core/tasks/stage-work";
+import { cn } from "@/lib/utils";
 
-import { MarkdownContent } from "./markdown-content";
 import { SubtaskCard } from "./subtask-card";
 
 const MAX_HYDRATION_RETRIES = 3;
@@ -137,7 +135,6 @@ export function StageWorkCards({
   threadId?: string;
   runId?: string;
 }) {
-  const { t } = useI18n();
   const { tasks: taskMap } = useSubtaskContext();
   const tasks = useMemo(
     () => (runId ? stageWorkTasks(Object.values(taskMap), runId) : []),
@@ -148,39 +145,21 @@ export function StageWorkCards({
     return null;
   }
 
-  const cappedFailureMessages = {
-    token_capped: t.subtasks.stageTokenCapped,
-    turn_capped: t.subtasks.stageTurnCapped,
-    loop_capped: t.subtasks.stageLoopCapped,
-  };
-
   return (
-    <div className={className}>
-      {tasks.map((task) => {
-        const report = terminalStageReportForDisplay(
-          task,
-          cappedFailureMessages,
-        );
-        return (
-          <div key={task.id} className="mb-4 flex w-full flex-col gap-3">
-            <SubtaskCard
-              taskId={task.id}
-              threadId={threadId}
-              runId={task.runId ?? runId}
-              isLoading={task.status === "in_progress"}
-              // Governed stage work reads as native tool-call / script-writing
-              // progress, not a decorated card with a shine border.
-              flat
-              showTerminalReport={false}
-            />
-            {report ? (
-              <div className="text-foreground text-sm leading-6">
-                <MarkdownContent content={report} isLoading={false} />
-              </div>
-            ) : null}
-          </div>
-        );
-      })}
-    </div>
+    <>
+      {tasks.map((task) => (
+        <SubtaskCard
+          key={task.id}
+          className={cn("mb-4", className)}
+          taskId={task.id}
+          threadId={threadId}
+          runId={task.runId ?? runId}
+          isLoading={task.status === "in_progress"}
+          flat
+          headerless
+          showTerminalReport={false}
+        />
+      ))}
+    </>
   );
 }

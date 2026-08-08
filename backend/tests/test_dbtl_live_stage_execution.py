@@ -378,6 +378,27 @@ async def test_computational_design_without_deliverables_records_no_reviewable_p
 
 
 @pytest.mark.asyncio
+async def test_rejected_design_chair_keeps_the_primary_contract_error(tmp_path: Path) -> None:
+    cycle = _cycle()
+    cycle["cycle_class"] = "computational"
+    payload = json.loads(_structured_result())
+    payload["artifact_refs"] = [{"name": "design-notes"}]
+    repo = FakeRepo(cycle)
+
+    result = await _design_adapter(repo, FakeDispatcher(text=json.dumps(payload))).execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Draft the Design package.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert result.produced_usable_evidence is False
+    assert "non-empty string 'path'" in result.note
+    assert "deliverable manifest" not in result.note.lower()
+
+
+@pytest.mark.asyncio
 async def test_validated_design_deliverables_are_written_into_the_machine_package(tmp_path: Path) -> None:
     cycle = _cycle()
     cycle["cycle_class"] = "computational"

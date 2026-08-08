@@ -103,9 +103,9 @@ type FoldedStageWorkerRecord = StageWorkerRecord & { lastSeq: number };
  * this: it is the only durable signal that separates a stage worker from an
  * ordinary delegated subtask.
  *
- * Terminal state comes from the matching `subagent.end`; a worker with no end
- * event is still running (or its run died), and is reported as in progress
- * rather than being invented as complete.
+ * Terminal state normally comes from the matching `subagent.end`. If that
+ * event was lost because the owning run ended abruptly, the run status settles
+ * the orphaned worker as failed instead of leaving a permanent running card.
  */
 export async function fetchStageWorkers(
   threadId: string,
@@ -115,6 +115,7 @@ export async function fetchStageWorkers(
     threadId,
   )}/stage-worker-events`;
   const events: FetchedEvent[] = [];
+  const runStatuses = new Map<string, string>();
   let beforeSeq: number | undefined;
   for (let page = 0; page < SUBTASK_STEPS_MAX_PAGES; page++) {
     const params = new URLSearchParams({ limit: String(pageSize) });
@@ -127,9 +128,13 @@ export async function fetchStageWorkers(
     }
     const payload = (await response.json()) as {
       events?: FetchedEvent[];
+      run_statuses?: Record<string, string>;
       next_before_seq?: number | null;
     };
     events.push(...(payload.events ?? []));
+    for (const [runId, status] of Object.entries(payload.run_statuses ?? {})) {
+      runStatuses.set(runId, status);
+    }
     if (payload.next_before_seq == null) break;
     if (payload.next_before_seq === beforeSeq) break;
     beforeSeq = payload.next_before_seq;
@@ -211,6 +216,23 @@ export async function fetchStageWorkers(
     const previous = latestByTask.get(record.taskId);
     if (!previous || record.lastSeq > previous.lastSeq) {
       latestByTask.set(record.taskId, record);
+    }
+  }
+
+  for (const [taskId, record] of latestByTask) {
+    const runStatus = runStatuses.get(record.runId);
+    if (
+      record.status === "in_progress" &&
+      runStatus &&
+      runStatus !== "pending" &&
+      runStatus !== "running"
+    ) {
+      latestByTask.set(taskId, {
+        ...record,
+        status: "failed",
+        error: "The owning run ended before this worker reported a result.",
+        stopReason: runStatus,
+      });
     }
   }
   return [...latestByTask.values()]

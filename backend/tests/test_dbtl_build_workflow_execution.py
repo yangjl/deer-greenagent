@@ -1605,6 +1605,41 @@ class _FailedStatusFreshCorrectionDispatcher(_FreshCorrectionDispatcher):
         return revised
 
 
+class _GrantedPathFreshCorrectionDispatcher(_WritingDispatcher):
+    """Return a completed phase with a forbidden path, then a clean correction."""
+
+    async def __call__(self, units, *, budget):
+        if any(unit.role != "phase" for unit in units):
+            return await super().__call__(units, budget=budget)
+        self.calls.append((tuple(units), budget))
+        outcomes = []
+        for unit in units:
+            self.phase_units.append(unit)
+            grant = _grant_from_prompt(unit.prompt)
+            grant.mkdir(parents=True, exist_ok=True)
+            entry_point = grant / "run.py"
+            output = grant / "model.bin"
+            plot = grant / "model_fit_comparison.png"
+            forbidden_line = "forbidden = '/test/model_fit_comparison.png'\n" if not unit.tool_contract.get("correction_attempt") else ""
+            entry_point.write_text(
+                f"import os\nfrom pathlib import Path\nworkspace = Path(os.environ['DBTL_WORKSPACE'])\n{forbidden_line}(workspace / 'model.bin').write_text('fitted', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            output.write_text("fitted", encoding="utf-8")
+            plot.write_bytes(PNG)
+            payload = json.loads(_build_result(artifact=_virtual(output), figure=_virtual(plot)))
+            payload["artifact_refs"] = [_virtual(entry_point), _virtual(output), _virtual(plot)]
+            payload["evidence_refs"] = [{"kind": "workspace_file", "reference": _virtual(output), "description": "Fitted model."}]
+            _with_phase_manifest(
+                payload,
+                unit=unit,
+                entry_point=_virtual(entry_point),
+                declared_outputs=[_virtual(entry_point), _virtual(output), _virtual(plot)],
+            )
+            outcomes.append(DispatchOutcome(unit_id=unit.unit_id, text=json.dumps(payload)))
+        return outcomes
+
+
 class TestAPhaseMayBuildOnThePhaseBeforeIt:
     """The pre-run snapshot cannot contain what the run itself published.
 
@@ -1882,7 +1917,49 @@ class TestTheServerOwnsThePhaseManifestVerdict:
 
 
 class TestAPartialPhaseCannotAdvanceThePlan:
-    async def test_v12_uses_one_fresh_40k_correction_and_keeps_the_first_usage(self, project, monkeypatch) -> None:
+    async def test_server_path_rejection_gets_one_fresh_correction(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        dispatcher = _GrantedPathFreshCorrectionDispatcher(plan=SINGLE_PHASE_PLAN, presentable_results=False)
+        adapter = _adapter(repo, workflow=True, dispatcher=dispatcher)
+        adapter._dispatcher = None
+        corrected_terminals: list[tuple[str, str]] = []
+
+        async def record_corrected_terminal(unit, error):
+            corrected_terminals.append((unit.unit_id, error))
+
+        monkeypatch.setattr(adapter, "_build_execution_preflight_error", lambda **_kwargs: "")
+        monkeypatch.setattr(adapter, "_production_dispatcher", lambda **_kwargs: dispatcher)
+        monkeypatch.setattr(adapter_module, "_emit_build_verification_failure", record_corrected_terminal)
+        monkeypatch.setattr(
+            adapter_module,
+            "execute_and_verify_phase",
+            lambda *_args, **_kwargs: adapter_module.BuildPhaseVerification(
+                True,
+                "The server executed the corrected entry point successfully.",
+                "python run.py",
+            ),
+        )
+
+        result = await adapter.execute(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            request_text="Build the approved design.",
+            state={},
+            config=_runtime(root),
+        )
+
+        assert result.produced_usable_evidence, result.note
+        assert len(dispatcher.phase_units) == 2
+        first, correction = dispatcher.phase_units
+        assert not first.tool_contract.get("correction_attempt")
+        assert correction.tool_contract["correction_attempt"] is True
+        assert "/test/model_fit_comparison.png" in correction.prompt
+        assert len(corrected_terminals) == 1
+        assert corrected_terminals[0][0] == first.unit_id
+        assert "/test/model_fit_comparison.png" in corrected_terminals[0][1]
+
+    async def test_v12_uses_one_fresh_correction_and_keeps_the_first_usage(self, project, monkeypatch) -> None:
         repo, root = project
         await _ready_for_build(repo)
         dispatcher = _FreshCorrectionDispatcher(plan=SINGLE_PHASE_PLAN)
@@ -1908,7 +1985,7 @@ class TestAPartialPhaseCannotAdvanceThePlan:
         assert not first.tool_contract.get("correction_attempt")
         assert correction.tool_contract["correction_attempt"] is True
         assert correction.tool_contract["fresh_correction"] is True
-        assert correction.max_tokens == 40_000
+        assert correction.max_tokens >= 200_000
         assert "The generated implementation test failed" in correction.prompt
         assert "read-only" in correction.prompt
         assert {"input_tokens": 120, "output_tokens": 15, "total_tokens": 135} in merged_usage

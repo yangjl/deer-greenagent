@@ -149,6 +149,7 @@ class ThreadMessagesPageResponse(BaseModel):
 
 class StageWorkerEventsResponse(BaseModel):
     events: list[dict[str, Any]]
+    run_statuses: dict[str, str] = Field(default_factory=dict)
     next_before_seq: int | None = None
 
 
@@ -1456,6 +1457,16 @@ async def list_stage_worker_events(
         limit=limit,
         before_seq=before_seq,
     )
+    run_ids = {str(event.get("run_id") or "") for event in events if event.get("run_id")}
+    run_statuses: dict[str, str] = {}
+    if run_ids:
+        user_id = await get_current_user(request)
+        runs = await get_run_store(request).get_many_by_thread(
+            thread_id,
+            run_ids,
+            user_id=user_id,
+        )
+        run_statuses = {run_id: str(record.get("status") or "") for run_id, record in runs.items() if record.get("status")}
     return {
         "events": [
             {
@@ -1466,6 +1477,7 @@ async def list_stage_worker_events(
             else event
             for event in events
         ],
+        "run_statuses": run_statuses,
         "next_before_seq": (events[0].get("seq") if events and len(events) >= limit else None),
     }
 

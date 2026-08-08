@@ -5355,18 +5355,19 @@ class LiveStageAdapter:
                 stopped = question
                 paused, paused_title = True, assignment.phase.title
                 break
-            completion_error = phase_completion_error(result, unit.completion_check) if result is not None else ""
-            correction_eligible = bool(result is not None and completion_error and spec.version >= 12 and not unit.tool_contract.get("correction_attempt") and not result.was_capped)
-            if result is None or (not result.is_trustworthy and not correction_eligible):
-                results.extend(phase_outcome.results)
-                stopped = "; ".join(phase_outcome.rejected) or (str(result.summary).strip() if result is not None else "") or f"Phase {assignment.phase.title!r} returned no usable result."
-                failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
-                await recorder.fail(handle, failure_code, stopped)
-                break
 
-            if correction_eligible:
+            async def dispatch_fresh_correction(
+                failure: str,
+                *,
+                correct_live_terminal: bool = False,
+            ) -> bool:
+                nonlocal unit, result, phase_outcome
+                if result is None or spec.version < 12 or unit.tool_contract.get("correction_attempt") or result.was_capped:
+                    return False
                 first_unit = unit
                 first_result = result
+                if correct_live_terminal:
+                    await _emit_build_verification_failure(first_unit, failure)
                 first_workspace = _unit_stage_workspace(stage_workspace, first_unit.unit_id)
                 correction = phase_correction_unit(
                     assignment,
@@ -5375,7 +5376,7 @@ class LiveStageAdapter:
                     attempt_token=safe_token(handle.step_run_id or f"{attempt_id}:{plan.digest}:{index}"),
                     spec=spec,
                     previous_workspace=first_workspace,
-                    failure=completion_error,
+                    failure=failure,
                     result_contract=f"{RESULT_CONTRACT}\n\n{BUILD_FULFILLMENT_CONTRACT}",
                     granted_inputs=granted_inputs,
                 )
@@ -5407,9 +5408,22 @@ class LiveStageAdapter:
                 unit = correction
                 result = corrected
                 phase_outcome = correction_outcome
+                return True
+
+            completion_error = phase_completion_error(result, unit.completion_check) if result is not None else ""
+            correction_eligible = bool(result is not None and completion_error and spec.version >= 12 and not unit.tool_contract.get("correction_attempt") and not result.was_capped)
+            if result is None or (not result.is_trustworthy and not correction_eligible):
+                results.extend(phase_outcome.results)
+                stopped = "; ".join(phase_outcome.rejected) or (str(result.summary).strip() if result is not None else "") or f"Phase {assignment.phase.title!r} returned no usable result."
+                failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
+                await recorder.fail(handle, failure_code, stopped)
+                break
+
+            if correction_eligible:
+                await dispatch_fresh_correction(completion_error)
                 if result is None or not result.is_trustworthy:
-                    results.extend(correction_outcome.results)
-                    stopped = "; ".join(correction_outcome.rejected) or (str(result.summary).strip() if result is not None else "") or f"The fresh correction for phase {assignment.phase.title!r} returned no usable result."
+                    results.extend(phase_outcome.results)
+                    stopped = "; ".join(phase_outcome.rejected) or (str(result.summary).strip() if result is not None else "") or f"The fresh correction for phase {assignment.phase.title!r} returned no usable result."
                     failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
                     await recorder.fail(handle, failure_code, stopped)
                     break
@@ -5433,49 +5447,84 @@ class LiveStageAdapter:
 
             server_verification: BuildPhaseVerification | None = None
             if "server_executed_entry_point" in spec.validity_gates and enforce_server_execution:
-                raw_manifest, raw_manifest_error = verify_unpublished_phase_manifest(
-                    result,
-                    completion_condition=assignment.phase.done_condition,
-                    required_version=required_phase_manifest_version(spec),
-                )
-                unit_workspace = _unit_stage_workspace(stage_workspace, unit.unit_id)
-                if raw_manifest is None:
-                    server_verification = BuildPhaseVerification(False, raw_manifest_error, "")
-                else:
+
+                async def verify_server_result(
+                    current_result: StageWorkerResult,
+                    current_unit: WorkUnit,
+                ) -> tuple[StageWorkerResult, BuildPhaseVerification]:
+                    raw_manifest, raw_manifest_error = verify_unpublished_phase_manifest(
+                        current_result,
+                        completion_condition=assignment.phase.done_condition,
+                        required_version=required_phase_manifest_version(spec),
+                    )
+                    unit_workspace = _unit_stage_workspace(stage_workspace, current_unit.unit_id)
+                    if raw_manifest is None:
+                        return current_result, BuildPhaseVerification(False, raw_manifest_error, "")
                     raw_manifest = resolve_issued_input_tokens(raw_manifest, issued_inputs=granted_inputs)
-                    result = replace(
-                        result,
+                    current_result = replace(
+                        current_result,
                         provenance={
-                            **result.provenance,
+                            **current_result.provenance,
                             "phase_manifest": raw_manifest.as_dict(),
                         },
                     )
-                    phase_outcome = replace(phase_outcome, results=(result,))
                     grant_error = verify_granted_paths(
                         raw_manifest,
                         read_source=functools.partial(_published_source_text, project_root=project_root),
                         allowed_roots=(),
                     )
                     if grant_error:
-                        server_verification = BuildPhaseVerification(False, grant_error, "")
-                    else:
-                        server_verification = await asyncio.to_thread(
-                            execute_and_verify_phase,
-                            raw_manifest,
+                        return current_result, BuildPhaseVerification(False, grant_error, "")
+                    verification = await asyncio.to_thread(
+                        execute_and_verify_phase,
+                        raw_manifest,
+                        project_root=project_root,
+                        unit_workspace=unit_workspace,
+                        execute=functools.partial(
+                            _execute_server_build_command,
+                            sandbox_state=sandbox_state,
+                            writable_workspace=unit_workspace,
+                            thread_id=thread_id,
+                            user_id=user_id,
+                            project_id=str(cycle.get("project_id") or ""),
                             project_root=project_root,
-                            unit_workspace=unit_workspace,
-                            execute=functools.partial(
-                                _execute_server_build_command,
-                                sandbox_state=sandbox_state,
-                                writable_workspace=unit_workspace,
-                                thread_id=thread_id,
-                                user_id=user_id,
-                                project_id=str(cycle.get("project_id") or ""),
-                                project_root=project_root,
-                            ),
-                            timeout_seconds=min(float(spec.budget.timeout_seconds), 300.0),
-                            issued_inputs=granted_inputs,
+                        ),
+                        timeout_seconds=min(float(spec.budget.timeout_seconds), 300.0),
+                        issued_inputs=granted_inputs,
+                    )
+                    return current_result, verification
+
+                result, server_verification = await verify_server_result(result, unit)
+                phase_outcome = replace(phase_outcome, results=(result,))
+                if not server_verification.passed and await dispatch_fresh_correction(
+                    server_verification.reason,
+                    correct_live_terminal=True,
+                ):
+                    if result is None or not result.is_trustworthy:
+                        results.extend(phase_outcome.results)
+                        stopped = "; ".join(phase_outcome.rejected) or (str(result.summary).strip() if result is not None else "") or f"The fresh correction for phase {assignment.phase.title!r} returned no usable result."
+                        failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
+                        await recorder.fail(handle, failure_code, stopped)
+                        break
+                    completion_error = phase_completion_error(result, unit.completion_check)
+                    if completion_error:
+                        results.append(
+                            replace(
+                                failed_result(
+                                    capability=result.capability,
+                                    agent_name=result.agent_name,
+                                    reason=completion_error,
+                                ),
+                                token_usage=result.token_usage,
+                            )
                         )
+                        rejected.append(completion_error)
+                        stopped = completion_error
+                        failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
+                        await recorder.fail(handle, failure_code, stopped)
+                        break
+                    result, server_verification = await verify_server_result(result, unit)
+                    phase_outcome = replace(phase_outcome, results=(result,))
                 if not server_verification.passed:
                     stopped = server_verification.reason
                     rejected.append(stopped)
@@ -7820,7 +7869,7 @@ class LiveStageAdapter:
         )
         design_manifest = None
         design_contract_refusal = ""
-        if stage == "design" and chair_result is not None and cycle.get("cycle_class"):
+        if stage == "design" and chair_result is not None and chair_result.is_trustworthy and cycle.get("cycle_class"):
             design_manifest, design_contract_refusal = _design_deliverable_manifest(
                 chair_result,
                 cycle_class=str(cycle["cycle_class"]),

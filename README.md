@@ -84,9 +84,10 @@ Design–Build–Test–Learn (DBTL) governance.
   live progress event and durable worker status; worker prose cannot commit it.
   Build reuses the native subagent read-before-write, normalized tool-error,
   progress, sandbox, context, summarization, token, and loop middleware. A
-  phase that honestly reports a failed implementation check gets one bounded
-  fresh correction over its staged files, after native guardrails have settled; a
-  cap, timeout, safety stop, loop stop, or forced deadline remains an explicit
+  phase that honestly reports a failed implementation check—or whose completed
+  result is rejected by server execution or path containment—gets one bounded
+  fresh correction over its staged files and one new server verification pass.
+  A cap, timeout, safety stop, loop stop, or forced deadline remains an explicit
   failed phase and cannot be retried around by that correction.
   Current Build makes each phase's declared skills its complete allowlist.
   DeerFlow resolves those names through the enabled per-user registry, binds
