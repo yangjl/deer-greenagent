@@ -362,6 +362,7 @@ class TestAgentConstruction:
             "user_id": "default",
             "authorization_provider": provider,
             "dbtl_writable_paths": ("/mnt/user-data/outputs/.dbtl-stage-work/attempt-1/build",),
+            "token_budget_max_tokens": 123_456,
         }
         assert captured["agent"]["model"] is model
         assert captured["agent"]["middleware"] is middlewares
@@ -534,6 +535,65 @@ class TestAgentConstruction:
         assert isinstance(messages[0], SystemMessage)
         assert base_config.system_prompt in messages[0].content
         assert isinstance(messages[1], HumanMessage)
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_injects_project_scoped_craft_memory_for_opted_in_specialist(
+        self,
+        classes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        manager = MagicMock()
+        manager.get_context.return_value = "- Prefer one conclusion per slide.\n- Check label leakage before fitting."
+        app_config = _default_app_config()
+        app_config.memory = SimpleNamespace(enabled=True, injection_enabled=True)
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.memory.manager",
+            _module("deerflow.agents.memory.manager", get_memory_manager=lambda: manager),
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.memory.scope",
+            _module(
+                "deerflow.agents.memory.scope",
+                scoped_memory_user_id=lambda user_id, context: f"{user_id}--project--test-digest",
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="statistician",
+                description="Statistics specialist",
+                system_prompt="Analyze the evidence.",
+                craft_memory=True,
+            ),
+            tools=[],
+            app_config=app_config,
+            parent_model="test-model",
+            thread_id="thread-1",
+            user_id="user-1",
+            project_id="project-1",
+            project_root="/projects/one",
+        )
+
+        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
+
+        system_prompt = state["messages"][0].content
+        assert "<craft_memory>" in system_prompt
+        assert "Prefer one conclusion per slide" in system_prompt
+        assert "must not be treated as scientific or domain evidence" in system_prompt
+        manager.get_context.assert_called_once()
+        call = manager.get_context.call_args.kwargs
+        assert call["agent_name"] == "statistician"
+        assert call["user_id"].startswith("user-1--project--")
 
     @pytest.mark.anyio
     async def test_build_initial_state_no_system_prompt_with_skills(

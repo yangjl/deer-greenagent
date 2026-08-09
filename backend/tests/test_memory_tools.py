@@ -300,6 +300,32 @@ class TestMemoryAddTool:
             runtime.context,
         )
 
+    def test_named_subagents_do_not_share_facts_across_agents_or_projects(self, tmp_path, monkeypatch):
+        """The real backend keeps craft facts inside both scope dimensions."""
+        from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
+
+        manager = DeerMem(backend_config={"storage_path": str(tmp_path), "token_counting": "char"})
+        monkeypatch.setattr("deerflow.agents.memory.tools.get_memory_manager", lambda: manager)
+        monkeypatch.setattr("deerflow.agents.memory.tools.resolve_runtime_user_id", lambda _runtime: "alice")
+
+        def runtime(agent_name: str, project_id: str):
+            return SimpleNamespace(context={"agent_name": agent_name, "project_id": project_id})
+
+        build_a = runtime("build-engineer", "project-a")
+        stats_a = runtime("statistician", "project-a")
+        build_b = runtime("build-engineer", "project-b")
+
+        assert json.loads(memory_add_tool.func(build_a, "Use importlib.metadata for versions", category="failure-mode"))["status"] == "added"
+        assert json.loads(memory_add_tool.func(stats_a, "Keep interval readings to one line", category="style"))["status"] == "added"
+        assert json.loads(memory_add_tool.func(build_b, "Use ordinal encoding for this project", category="craft"))["status"] == "added"
+
+        assert json.loads(memory_search_tool.func(build_a, "importlib"))["count"] == 1
+        assert json.loads(memory_search_tool.func(stats_a, "importlib"))["count"] == 0
+        assert json.loads(memory_search_tool.func(build_b, "importlib"))["count"] == 0
+        assert json.loads(memory_search_tool.func(stats_a, "interval"))["count"] == 1
+        assert json.loads(memory_search_tool.func(build_a, "ordinal"))["count"] == 0
+        assert json.loads(memory_search_tool.func(build_b, "ordinal"))["count"] == 1
+
     def test_rejects_existing_duplicate_content(self, monkeypatch):
         """Should not create a fact whose normalized content already exists."""
         existing = [{"id": "fact_existing", "content": "User prefers dark mode"}]

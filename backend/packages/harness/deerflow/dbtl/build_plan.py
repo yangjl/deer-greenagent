@@ -45,6 +45,8 @@ MAX_LIST_ITEMS = 12
 
 _SLUG = re.compile(r"[^a-z0-9]+")
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(?P<body>.*?)\s*```\s*$", re.DOTALL)
+_FIGURE_OUTPUT = re.compile(r"(?:\.(?:png|jpe?g|gif|webp|svg|pdf)\b|\b(?:figure|plot|chart|visualization)\b)", re.IGNORECASE)
+_PLOT_STYLE_SKILL = "dbtl-plot-style"
 
 
 class PlanFeasibility(StrEnum):
@@ -81,6 +83,13 @@ def _lines(value: Any, *, limit: int = MAX_LIST_ITEMS) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return ()
     return tuple(text for text in (_text(item, limit=400) for item in value) if text)[:limit]
+
+
+def _skills_for_outputs(skills: Sequence[str], outputs: Sequence[str]) -> tuple[str, ...]:
+    names = list(dict.fromkeys(str(skill) for skill in skills if str(skill).strip()))
+    if any(_FIGURE_OUTPUT.search(output) for output in outputs) and _PLOT_STYLE_SKILL not in names:
+        names = names[:7] + [_PLOT_STYLE_SKILL]
+    return tuple(names[:8])
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,21 +248,25 @@ def restore_build_plan(payload: Any) -> BuildPhasePlan | None:
             not isinstance(entry.get("skills", []), Sequence) or isinstance(entry.get("skills", []), (str, bytes)) or any(not isinstance(item, str) for item in entry.get("skills", [])) for entry in raw_phases if isinstance(entry, Mapping)
         ):
             return None
-        phases = tuple(
-            BuildPhase(
-                phase_key=str(entry["phase_key"]),
-                title=str(entry["title"]),
-                objective=str(entry["objective"]),
-                capability=Capability(str(entry["capability"])),
-                inputs=tuple(str(item) for item in entry.get("inputs") or ()),
-                outputs=tuple(str(item) for item in entry.get("outputs") or ()),
-                skills=tuple(dict.fromkeys(str(item) for item in entry.get("skills") or ()))[:8],
-                done_condition=str(entry.get("done_condition") or ""),
-                pause_after=entry.get("pause_after") is True,
+        phases_list: list[BuildPhase] = []
+        for entry in raw_phases:
+            if not isinstance(entry, Mapping):
+                continue
+            outputs = tuple(str(item) for item in entry.get("outputs") or ())
+            phases_list.append(
+                BuildPhase(
+                    phase_key=str(entry["phase_key"]),
+                    title=str(entry["title"]),
+                    objective=str(entry["objective"]),
+                    capability=Capability(str(entry["capability"])),
+                    inputs=tuple(str(item) for item in entry.get("inputs") or ()),
+                    outputs=outputs,
+                    skills=_skills_for_outputs(entry.get("skills") or (), outputs),
+                    done_condition=str(entry.get("done_condition") or ""),
+                    pause_after=entry.get("pause_after") is True,
+                )
             )
-            for entry in raw_phases
-            if isinstance(entry, Mapping)
-        )
+        phases = tuple(phases_list)
         if len(phases) != len(list(raw_phases)):
             return None
         return BuildPhasePlan(
@@ -378,6 +391,7 @@ def parse_build_plan(raw: str, *, objective: str) -> PlanParse:
         while key in seen:
             key = f"{key}-{index}"
         seen.add(key)
+        outputs = _lines(entry.get("outputs"))
         phases.append(
             BuildPhase(
                 phase_key=key,
@@ -385,8 +399,8 @@ def parse_build_plan(raw: str, *, objective: str) -> PlanParse:
                 objective=objective_text,
                 capability=capability,
                 inputs=_lines(entry.get("inputs")),
-                outputs=_lines(entry.get("outputs")),
-                skills=tuple(dict.fromkeys(_lines(entry.get("skills"), limit=8))),
+                outputs=outputs,
+                skills=_skills_for_outputs(_lines(entry.get("skills"), limit=8), outputs),
                 done_condition=_text(entry.get("done_condition"), limit=600),
                 pause_after=entry.get("pause_after") is True,
             )

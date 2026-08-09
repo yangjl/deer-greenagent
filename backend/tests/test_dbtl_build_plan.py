@@ -84,6 +84,18 @@ class TestAPlanIsData:
         assert one.digest != two.digest
         assert len(parse_build_plan(_plan(_phase(1, skills=[f"s{i}" for i in range(20)]), _phase(2)), objective="x").plan.phases[0].skills) == 8
 
+    def test_a_drawing_phase_is_bound_to_the_house_plot_style_but_a_non_drawing_phase_is_not(self) -> None:
+        parsed = parse_build_plan(
+            _plan(
+                _phase(1, outputs=["artifacts/holdout.png"], skills=["data-analysis"]),
+                _phase(2, outputs=["artifacts/metrics.csv"], skills=["data-analysis"]),
+            ),
+            objective="x",
+        ).plan
+
+        assert parsed.phases[0].skills == ("data-analysis", "dbtl-plot-style")
+        assert parsed.phases[1].skills == ("data-analysis",)
+
     def test_phase_unit_carries_the_complete_skill_allowlist(self) -> None:
         phase = BuildPhase(
             phase_key="fit",

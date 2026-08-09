@@ -21,7 +21,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from deerflow.dbtl.build_summary import BuildReviewPackage, SelectedFigure
+from deerflow.dbtl.build_summary import MAX_SUMMARY_SLIDES, BuildReviewPackage, BuildSlide, SelectedFigure
 from deerflow.dbtl.council_deck import (
     render_design_deck_shell,
     render_design_deck_slide,
@@ -38,6 +38,7 @@ MAX_DECK_FIGURE_BYTES = 6_000_000
 BUILD_DECK_SURFACE_VERSION = "build-review-surface-v4-exploratory-closeout"
 
 FigureReader = Callable[[str], tuple[bytes, str] | None]
+_PLANNED_SLIDE_KINDS = frozenset({"summary", "outcomes", "figure", "phases", "deliverables", "limitations", "rerun"})
 
 _MIME = {
     ".png": "image/png",
@@ -163,6 +164,60 @@ def _figure_slide(embedded: EmbeddedFigure) -> str:
     )
 
 
+def _planned_slide(slide: BuildSlide, *, package: BuildReviewPackage, embedded: EmbeddedFigure | None, index: int) -> str:
+    """Render one validated plan item without granting it styling authority."""
+    body = f'<p class="lede">{_e(slide.body)}</p>' if slide.body else ""
+    if slide.kind == "figure" and embedded is not None:
+        figure = embedded.figure.figure
+        caption = figure.caption or figure.shows or readable_artifact_name(figure.path)
+        visual = f'<img alt="{_e(caption)}" src="{embedded.data_uri}" style="display:block;max-width:100%;max-height:58vh;margin:auto">' if embedded.embedded else f'<p class="empty">{_e(embedded.skipped_reason)}</p>'
+        reading = slide.figure_reading or embedded.figure.reading
+        body = f'<div class="contested">{visual}</div>' + (f'<p class="lede">{_e(reading)}</p>' if reading else "") + f'<p class="stamp">{_e(readable_artifact_name(figure.path))}</p>'
+    elif slide.kind == "outcomes":
+        body += _outcomes_body(package)
+    elif slide.kind == "rerun":
+        body += f'<pre style="white-space:pre-wrap;word-break:break-word;border:1px solid var(--line);border-radius:8px;padding:.9rem;background:var(--card)">{_e(package.rerun_procedure)}</pre>' if package.rerun_procedure else ""
+    return render_design_deck_slide(
+        kind=slide.kind,
+        eyebrow={
+            "summary": "What we got",
+            "outcomes": "Recorded outcomes",
+            "figure": "Figure",
+            "phases": "How it got there",
+            "deliverables": "Design contract",
+            "limitations": "What remains uncertain",
+            "rerun": "Reproducing it",
+        }.get(slide.kind, "Build review"),
+        title=slide.title,
+        body=body,
+        note_id=f"build-plan-{index + 1}",
+        note_label=slide.title,
+    )
+
+
+def _validated_planned_figures(package: BuildReviewPackage) -> tuple[SelectedFigure, ...] | None:
+    """Revalidate the public package boundary; ``None`` selects fallback."""
+    if not package.slide_plan or len(package.slide_plan) > MAX_SUMMARY_SLIDES:
+        return None
+    figures_by_path = {figure.path: figure for figure in package.all_figures}
+    selected: list[SelectedFigure] = []
+    seen: set[str] = set()
+    for slide in package.slide_plan:
+        if not isinstance(slide, BuildSlide) or slide.kind not in _PLANNED_SLIDE_KINDS or not slide.title.strip():
+            return None
+        if slide.figure_path:
+            figure = figures_by_path.get(slide.figure_path)
+            if slide.kind != "figure" or not slide.figure_reading.strip() or figure is None or slide.figure_path in seen:
+                return None
+            seen.add(slide.figure_path)
+            selected.append(SelectedFigure(figure=figure, reading=slide.figure_reading))
+        elif slide.kind == "figure" or not slide.body.strip():
+            return None
+    if (package.deviations or package.limitations) and not any(slide.kind == "limitations" for slide in package.slide_plan):
+        return None
+    return tuple(selected)
+
+
 def _list_slide(
     title: str,
     eyebrow: str,
@@ -201,6 +256,41 @@ def render_build_deck(
     """Render Build evidence in Design's canonical deck and gate slide."""
     if not package.has_slide_results:
         raise ValueError("A Build result deck requires a verified numeric outcome or figure.")
+    planned_figures = _validated_planned_figures(package)
+    if planned_figures is not None:
+        embedded_by_path = {item.figure.figure.path: item for item in embed_figures(planned_figures, read=read_figure)}
+        slides = [
+            render_design_deck_slide(
+                kind="title",
+                eyebrow="Build review",
+                title=title,
+                body=f'<p class="lede">{_e(package.headline)}</p>' + (f'<p class="stamp">{_e(subtitle)}</p>' if subtitle else ""),
+            )
+        ]
+        slides.extend(
+            _planned_slide(
+                slide,
+                package=package,
+                embedded=embedded_by_path.get(slide.figure_path),
+                index=index,
+            )
+            for index, slide in enumerate(package.slide_plan)
+        )
+        if surface_id:
+            slides.append(
+                render_design_deck_slide(
+                    kind="review",
+                    eyebrow="Human gate",
+                    title="Review the Build",
+                    body=render_stage_review_controls("build", transition_gate),
+                )
+            )
+        return render_design_deck_shell(
+            title=_e(title),
+            slides=slides,
+            bridge=render_stage_feedback_bridge(surface_id, "build") if surface_id else "",
+        )
+
     embedded = embed_figures(package.selected_figures, read=read_figure)
     slides: list[str] = [
         render_design_deck_slide(

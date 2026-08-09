@@ -225,6 +225,25 @@ def _summary_for(prompt: str) -> str:
     """A summary that cites exactly the figures the bundle actually offered."""
     bundle = json.loads(prompt.split("Bundle:", 1)[1].strip())
     figures = bundle["execution_bundle"]["figures"]
+    slide_plan = [
+        {"kind": "summary", "title": "Build result", "body": "The model was fitted and evaluated on the held-out site."},
+        {"kind": "outcomes", "title": "Key outcomes", "body": "The server-recorded metric is shown below."},
+    ]
+    if figures:
+        slide_plan.append(
+            {
+                "kind": "figure",
+                "title": "Held-out accuracy",
+                "figure_path": figures[0]["path"],
+                "figure_reading": "Predictions track observations across the range.",
+            }
+        )
+    slide_plan.extend(
+        [
+            {"kind": "limitations", "title": "Deviations and limitations", "body": "Review the recorded caveats before accepting the result."},
+            {"kind": "rerun", "title": "How to re-run it", "body": "Use the recorded command below."},
+        ]
+    )
     return json.dumps(
         {
             "headline": "The model fits and generalizes to the held-out site.",
@@ -234,6 +253,7 @@ def _summary_for(prompt: str) -> str:
             "deviations": [],
             "limitations": [],
             "rerun_procedure": "uv run python fit.py --seed 7",
+            "slide_plan": slide_plan,
         }
     )
 
@@ -683,8 +703,44 @@ class TestTheSummarizerWritesTheReviewedDocument:
 
         assert unit.role in _READ_ONLY_ROLES
         assert unit.output_contract == BUILD_SUMMARY_OUTPUT
-        tools = [SimpleNamespace(name=name) for name in ("read_file", "bash", "write_file", "str_replace", "grep")]
-        assert {tool.name for tool in _tools_for_unit(tools, unit)} == {"read_file", "grep"} <= _READ_ONLY_TOOL_NAMES
+        tools = [SimpleNamespace(name=name) for name in ("read_file", "bash", "write_file", "str_replace", "grep", "memory_search", "memory_add")]
+        assert {tool.name for tool in _tools_for_unit(tools, unit)} == {
+            "read_file",
+            "grep",
+            "memory_search",
+            "memory_add",
+        }
+        assert (
+            {tool.name for tool in _tools_for_unit(tools, SimpleNamespace(role="planner"))}
+            == {
+                "read_file",
+                "grep",
+            }
+            <= _READ_ONLY_TOOL_NAMES
+        )
+
+    async def test_craft_memory_tools_are_added_only_for_opted_in_specialists(self, monkeypatch) -> None:
+        from deerflow.agents.dbtl.live_stage.adapter import _with_craft_memory_tools
+        from deerflow.subagents.config import SubagentConfig
+
+        memory_tools = [SimpleNamespace(name="memory_search"), SimpleNamespace(name="memory_add")]
+        monkeypatch.setattr("deerflow.agents.memory.tools.get_memory_tools", lambda: memory_tools)
+        monkeypatch.setattr(
+            "deerflow.agents.memory.manager.backend_requires_passive_writes_in_tool_mode",
+            lambda manager_class: False,
+        )
+        app_config = SimpleNamespace(memory=SimpleNamespace(enabled=True, manager_class="test.Manager"))
+        base_tools = [SimpleNamespace(name="read_file")]
+
+        opted_in = SubagentConfig(name="statistician", description="statistics", craft_memory=True)
+        ordinary = SubagentConfig(name="general-purpose", description="general")
+
+        assert [tool.name for tool in _with_craft_memory_tools(base_tools, opted_in, app_config=app_config)] == [
+            "read_file",
+            "memory_search",
+            "memory_add",
+        ]
+        assert _with_craft_memory_tools(base_tools, ordinary, app_config=app_config) == base_tools
 
     async def test_a_summarizer_that_invents_a_figure_fails_only_its_own_step(self, project) -> None:
         repo, root = project
@@ -2169,6 +2225,8 @@ class TestADeckRetryDoesNotReRunTheSummarizer:
         assert len(summary["attempts"]) == 1, "the write-up was recorded twice for one execution"
         # The deck descends from the write-up that is actually on disk.
         assert deck["attempts"][-1]["predecessor_step_run_ids"] == [summary["selected_step_run_id"]]
+        rendered = (root / second.deck_uri[len("/mnt/user-data/") :]).read_text(encoding="utf-8")
+        assert "Build result" in rendered, "the retry lost the slide plan stored with the summarizer output"
 
     async def test_an_unreadable_write_up_is_re_run_and_recorded(self, project, monkeypatch) -> None:
         repo, root = project

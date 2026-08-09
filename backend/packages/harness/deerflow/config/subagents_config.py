@@ -104,6 +104,10 @@ class CustomSubagentConfig(BaseModel):
         default=None,
         description="Skill names whitelist (None = inherit all enabled skills, [] = no skills)",
     )
+    craft_memory: bool = Field(
+        default=False,
+        description="Allow this specialist to load and explicitly maintain project-scoped craft memory",
+    )
     model: str = Field(
         default="inherit",
         description="Model to use - 'inherit' uses parent's model",

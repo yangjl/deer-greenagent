@@ -60,6 +60,18 @@ class TestSubagentConfigSkills:
         )
         assert config.skills == []
 
+    def test_craft_memory_is_opt_in(self):
+        default = SubagentConfig(name="default", description="default", system_prompt="default")
+        specialist = SubagentConfig(
+            name="specialist",
+            description="specialist",
+            system_prompt="specialist",
+            craft_memory=True,
+        )
+
+        assert default.craft_memory is False
+        assert specialist.craft_memory is True
+
 
 # ---------------------------------------------------------------------------
 # SubagentOverrideConfig.skills field
@@ -109,6 +121,7 @@ class TestCustomSubagentConfig:
         assert config.model == "inherit"
         assert config.max_turns == 50
         assert config.timeout_seconds == 900
+        assert config.craft_memory is False
 
     def test_full_configuration(self):
         config = CustomSubagentConfig(
@@ -120,6 +133,7 @@ class TestCustomSubagentConfig:
             model="qwen3:32b",
             max_turns=80,
             timeout_seconds=600,
+            craft_memory=True,
             dbtl_capabilities=[
                 "statistical_analysis",
                 "data_reconciliation_and_lineage",
@@ -130,6 +144,7 @@ class TestCustomSubagentConfig:
         assert config.model == "qwen3:32b"
         assert config.max_turns == 80
         assert config.timeout_seconds == 600
+        assert config.craft_memory is True
         assert config.dbtl_capabilities == [
             "statistical_analysis",
             "data_reconciliation_and_lineage",
@@ -293,6 +308,7 @@ class TestLoadSubagentsConfigWithSkills:
                         "tools": ["bash", "read_file"],
                         "max_turns": 80,
                         "timeout_seconds": 600,
+                        "craft_memory": True,
                         "dbtl_capabilities": [
                             "statistical_analysis",
                             "data_reconciliation_and_lineage",
@@ -308,6 +324,7 @@ class TestLoadSubagentsConfigWithSkills:
         assert custom.tools == ["bash", "read_file"]
         assert custom.max_turns == 80
         assert custom.timeout_seconds == 600
+        assert custom.craft_memory is True
         assert custom.dbtl_capabilities == [
             "statistical_analysis",
             "data_reconciliation_and_lineage",
@@ -356,6 +373,7 @@ class TestRegistryCustomAgentLookup:
                         "tools": ["bash", "read_file"],
                         "max_turns": 80,
                         "timeout_seconds": 600,
+                        "craft_memory": True,
                         "dbtl_capabilities": [
                             "statistical_analysis",
                             "data_reconciliation_and_lineage",
@@ -371,6 +389,7 @@ class TestRegistryCustomAgentLookup:
         assert config.tools == ["bash", "read_file"]
         assert config.max_turns == 80
         assert config.timeout_seconds == 600
+        assert config.craft_memory is True
         assert config.model == "inherit"
         assert config.dbtl_capabilities == [
             "statistical_analysis",

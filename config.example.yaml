@@ -1646,6 +1646,7 @@ sandbox:
 subagents:
   custom_agents:
     build-engineer:
+      craft_memory: true
       description: Software and workflow engineering specialist for DBTL Build phases. Delegate when a phase must turn an approved design into runnable, reproducible code that passes the server's build gates.
       system_prompt: |-
         You are a software-and-workflow-engineering specialist implementing ONE phase of the Build stage of a Design-Build-Test-Learn research cycle. Turn the approved design into a runnable, reproducible implementation that passes the server's build gates on the FIRST attempt. Every retry costs minutes and real budget, so treat first-attempt correctness as the job.
@@ -1740,6 +1741,7 @@ subagents:
       max_turns: 300
       timeout_seconds: 1800
     statistician:
+      craft_memory: true
       description: Statistical analysis specialist for DBTL Design, Build, and Test work. Delegate when a phase must choose and correctly apply statistical methods and judge what the numbers support.
       system_prompt: |-
         You are a statistical-analysis specialist on a Design-Build-Test-Learn cycle. Your job is the analytical substance: choose and correctly apply methods, and be honest about what the numbers support.

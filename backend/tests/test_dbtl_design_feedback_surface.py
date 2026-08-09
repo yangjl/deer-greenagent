@@ -562,6 +562,117 @@ class TestPayloadBoundActions:
         }
         assert action["active_slide_id"] == "limitations"
 
+
+class TestRecentProjectStageFeedback:
+    async def test_feedback_is_project_scoped_newest_first_bounded_and_uses_registered_titles(self, tmp_path: Path) -> None:
+        repo = await _repo(tmp_path, projects=("project-1", "project-2"))
+
+        async def record(
+            *,
+            project_id: str,
+            cycle_id: str,
+            submission_id: str,
+            deck_hash: str,
+            slide_id: str,
+            title: str,
+            comment: str,
+        ) -> None:
+            surface = await _register(
+                repo,
+                project_id=project_id,
+                cycle_id=cycle_id,
+                deck_content_hash=deck_hash,
+                human_input_request_id=f"request-{submission_id}",
+                decision_request={
+                    "question": "What should change?",
+                    "options": [],
+                    "commentable_slides": [{"id": slide_id, "title": title}],
+                },
+            )
+            cycle = await repo.get_cycle(cycle_id, project_id=project_id)
+            assert cycle is not None
+            await repo.reserve_stage_feedback_action(
+                project_id=project_id,
+                cycle_id=cycle_id,
+                surface_id=surface["surface_id"],
+                originating_thread_id="thread-1",
+                action_kind="chair_text",
+                selected_card_ids=[],
+                human_comment=f"General {comment}",
+                slide_comments={slide_id: comment},
+                active_slide_id=slide_id,
+                client_submission_id=submission_id,
+                expected_db_revision=int(cycle["db_revision"]),
+                expected_evidence=None,
+                expected_deck_hash=deck_hash,
+            )
+
+        await record(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            submission_id="feedback-1",
+            deck_hash="1" * 64,
+            slide_id="objectives",
+            title="Objectives",
+            comment="Make the threshold explicit.",
+        )
+        await record(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            submission_id="feedback-2",
+            deck_hash="2" * 64,
+            slide_id="limitations",
+            title="Limitations",
+            comment="Lead with the holdout caveat.",
+        )
+        decision_surface = await _register(
+            repo,
+            project_id="project-1",
+            cycle_id="cycle-1",
+            deck_content_hash="4" * 64,
+            human_input_request_id="request-commentless-decision",
+            decision_request={
+                "question": "Continue?",
+                "options": [{"id": "continue", "label": "Continue", "value": "Continue."}],
+            },
+        )
+        decision_cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+        assert decision_cycle is not None
+        await repo.reserve_stage_feedback_action(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            surface_id=decision_surface["surface_id"],
+            originating_thread_id="thread-1",
+            action_kind="chair_option",
+            selected_card_ids=["continue"],
+            human_comment="",
+            client_submission_id="feedback-commentless-decision",
+            expected_db_revision=int(decision_cycle["db_revision"]),
+            expected_evidence=None,
+            expected_deck_hash="4" * 64,
+        )
+        await record(
+            project_id="project-2",
+            cycle_id="cycle-2",
+            submission_id="feedback-other-project",
+            deck_hash="3" * 64,
+            slide_id="private",
+            title="Private",
+            comment="Must never leak.",
+        )
+
+        feedback = await repo.recent_project_stage_feedback(project_id="project-1", limit=1)
+
+        assert [item["client_submission_id"] for item in feedback] == ["feedback-2"]
+        assert feedback[0]["slide_comments"] == [
+            {
+                "slide_id": "limitations",
+                "slide_title": "Limitations",
+                "comment": "Lead with the holdout caveat.",
+            }
+        ]
+        assert "Private" not in str(feedback)
+
     async def test_an_unknown_slide_comment_is_refused_without_consuming_the_surface(self, tmp_path: Path) -> None:
         repo = await _repo(tmp_path)
         cycle = await repo.get_cycle("cycle-1", project_id="project-1")

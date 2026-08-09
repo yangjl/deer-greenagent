@@ -21,6 +21,8 @@ class SubagentConfig:
                 If None, all enabled skills are available. If empty, skills are
                 disabled for this subagent. Skill bodies and their allowed-tools
                 policies take effect only after activation/loading at runtime.
+        craft_memory: Whether this named specialist may load and explicitly
+            maintain project-scoped, per-agent ways-of-working memory.
         model: Model to use - 'inherit' uses parent's model.
         max_turns: Maximum agent turns before stopping. Built-in agents use the
             value set here (general-purpose=150, bash=60) unless the global
@@ -37,6 +39,7 @@ class SubagentConfig:
     tools: list[str] | None = None
     disallowed_tools: list[str] | None = field(default_factory=lambda: ["task"])
     skills: list[str] | None = None
+    craft_memory: bool = False
     model: str = "inherit"
     max_turns: int = 50
     timeout_seconds: int = 900

@@ -49,6 +49,50 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _get_craft_memory_context(
+    config: SubagentConfig,
+    *,
+    app_config: AppConfig,
+    user_id: str,
+    project_id: str | None,
+    project_root: str | None,
+) -> str:
+    """Load the specialist's bounded project/agent craft memory, fail-soft."""
+    memory_config = getattr(app_config, "memory", None)
+    if not config.craft_memory or memory_config is None or not memory_config.enabled or not memory_config.injection_enabled:
+        return ""
+
+    try:
+        from deerflow.agents.memory.manager import get_memory_manager
+        from deerflow.agents.memory.scope import scoped_memory_user_id
+
+        scoped_user_id = scoped_memory_user_id(
+            user_id,
+            {"project_id": project_id, "project_root": project_root},
+        )
+        content = (
+            get_memory_manager()
+            .get_context(
+                user_id=scoped_user_id,
+                agent_name=config.name,
+            )
+            .strip()
+        )
+    except Exception:
+        logger.exception("Failed to load craft memory for specialist %s", config.name)
+        return ""
+
+    if not content:
+        return ""
+    return (
+        "<craft_memory>\n"
+        "This is reusable specialist craft: ways of working, presentation style, reviewer preferences, and failure modes. "
+        "It must not be treated as scientific or domain evidence. Verify all project claims from current governed artifacts.\n"
+        f"{content}\n"
+        "</craft_memory>"
+    )
+
+
 _previous_shutdown_isolated_subagent_loop = globals().get("_shutdown_isolated_subagent_loop")
 if callable(_previous_shutdown_isolated_subagent_loop):
     atexit.unregister(_previous_shutdown_isolated_subagent_loop)
@@ -768,6 +812,16 @@ class SubagentExecutor:
         system_parts: list[str] = []
         if self.config.system_prompt:
             system_parts.append(self.config.system_prompt)
+        craft_memory = await asyncio.to_thread(
+            _get_craft_memory_context,
+            self.config,
+            app_config=resolved_app_config,
+            user_id=self.user_id or DEFAULT_USER_ID,
+            project_id=self.project_id,
+            project_root=self.project_root,
+        )
+        if craft_memory:
+            system_parts.append(craft_memory)
         if skills:
             if skill_setup.skill_names:
                 skills_section = get_skill_index_prompt_section(

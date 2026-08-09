@@ -19,11 +19,11 @@ from dataclasses import replace
 
 import pytest
 
-from deerflow.agents.dbtl.live_stage.build_review import execution_bundle
+from deerflow.agents.dbtl.live_stage.build_review import execution_bundle, summarizer_unit
 from deerflow.dbtl.build_deck import MAX_FIGURE_BYTES, embed_figures, render_build_deck
 from deerflow.dbtl.build_execution import BuildExecutionBundle, BuildFigure, KeyOutcome, parse_execution_bundle
 from deerflow.dbtl.build_fulfillment import derive_build_fulfillment
-from deerflow.dbtl.build_summary import MAX_SUMMARY_FIGURES, BuildReviewPackage, SelectedFigure, parse_build_summary, render_summary_markdown
+from deerflow.dbtl.build_summary import MAX_SUMMARY_FIGURES, MAX_SUMMARY_SLIDES, BuildReviewPackage, BuildSlide, SelectedFigure, parse_build_summary, render_summary_markdown
 from deerflow.dbtl.deliverables import parse_deliverable_manifest
 
 PUBLISHED = {
@@ -209,6 +209,35 @@ class TestDeclarationsAreVerifiedNotTrusted:
 
 
 class TestTheSummarizerCannotCiteWhatDoesNotExist:
+    def test_recent_reviewer_feedback_is_labelled_and_included_in_the_prompt(self) -> None:
+        unit = summarizer_unit(
+            attempt_id="attempt-1",
+            agent_name="statistician",
+            bundle=_bundle(),
+            inputs=None,
+            cycle={"id": "cycle-1", "title": "Drought model"},
+            reviewer_feedback=[
+                {
+                    "stage": "build",
+                    "action_kind": "request_changes",
+                    "human_comment": "Keep the conclusion short.",
+                    "slide_comments": [
+                        {
+                            "slide_id": "limitations",
+                            "slide_title": "Limitations",
+                            "comment": "Lead with the holdout caveat.",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        assert "recent_project_reviewer_feedback" in unit.prompt
+        assert "reviewer-authored presentation guidance" in unit.prompt
+        assert "Lead with the holdout caveat" in unit.prompt
+        assert "Limitations" in unit.prompt
+        assert unit.skills == ("dbtl-build-deck-style",)
+
     def test_a_cited_figure_must_be_one_the_server_verified(self) -> None:
         parsed = parse_build_summary(
             json.dumps({"headline": "Fitted.", "figures": [{"path": "figs/invented.png", "reading": "Looks great."}]}),
@@ -217,6 +246,62 @@ class TestTheSummarizerCannotCiteWhatDoesNotExist:
 
         assert not parsed.ok
         assert "did not verify" in parsed.refusal
+
+    def test_a_valid_slide_plan_is_bounded_and_persisted_in_the_package(self) -> None:
+        parsed = parse_build_summary(
+            json.dumps(
+                {
+                    "headline": "Fitted.",
+                    "slide_plan": [
+                        {"kind": "summary", "title": "Bottom line", "body": "The build produced a held-out estimate."},
+                        {
+                            "kind": "figure",
+                            "title": "Held-out discrimination",
+                            "figure_path": ROC,
+                            "figure_reading": "The curve shows separation on the held-out site.",
+                        },
+                    ],
+                }
+            ),
+            bundle=_bundle(),
+        )
+
+        assert parsed.ok
+        assert [slide.title for slide in parsed.package.slide_plan] == ["Bottom line", "Held-out discrimination"]
+        assert parsed.package.as_dict()["slide_plan"][1]["figure_path"] == ROC
+
+    @pytest.mark.parametrize(
+        "slide_plan",
+        [
+            "not-a-list",
+            [{"kind": "summary", "title": "Empty", "body": ""}],
+            [{"kind": "figure", "title": "Invented", "figure_path": "/invented.png"}],
+            [{"kind": "figure", "title": "Unread", "figure_path": ROC}],
+            [{"kind": "summary", "title": f"Slide {index}", "body": "Text"} for index in range(MAX_SUMMARY_SLIDES + 1)],
+        ],
+    )
+    def test_an_unsafe_slide_plan_falls_back_without_failing_the_summary(self, slide_plan) -> None:
+        parsed = parse_build_summary(
+            json.dumps({"headline": "Fitted.", "slide_plan": slide_plan}),
+            bundle=_bundle(),
+        )
+
+        assert parsed.ok
+        assert parsed.package.slide_plan == ()
+
+    def test_a_plan_that_hides_recorded_caveats_falls_back(self) -> None:
+        parsed = parse_build_summary(
+            json.dumps(
+                {
+                    "headline": "Fitted.",
+                    "slide_plan": [{"kind": "summary", "title": "Bottom line", "body": "Only the favorable result."}],
+                }
+            ),
+            bundle=_bundle(limitations=("The external site is small.",)),
+        )
+
+        assert parsed.ok
+        assert parsed.package.slide_plan == ()
 
     def test_a_valid_summary_keeps_every_declared_figure_in_the_record(self) -> None:
         parsed = parse_build_summary(
@@ -448,6 +533,52 @@ class TestTheDeckHasNoSentenceOfItsOwn:
         html = self._render(BuildReviewPackage(headline="Fitted.", deviations=("Dropped site 4.",), rerun_procedure="python fit.py"))
 
         assert html.index("Key outcomes") < html.index("Deviations and limitations") < html.index("How to re-run it")
+
+    def test_a_valid_slide_plan_controls_content_order_with_one_figure_per_slide(self) -> None:
+        package = parse_build_summary(
+            json.dumps(
+                {
+                    "headline": "Fitted.",
+                    "slide_plan": [
+                        {"kind": "summary", "title": "Bottom line", "body": "Start with the held-out result."},
+                        {
+                            "kind": "figure",
+                            "title": "Held-out discrimination",
+                            "figure_path": ROC,
+                            "figure_reading": "The curve shows separation on the held-out site.",
+                        },
+                        {"kind": "limitations", "title": "What remains uncertain", "body": "The external site is small."},
+                    ],
+                }
+            ),
+            bundle=_bundle(),
+        ).package
+
+        html = self._render(package)
+
+        assert html.index("Bottom line") < html.index("Held-out discrimination") < html.index("What remains uncertain")
+        assert html.count("<img") == 1
+        assert "Other figures produced" not in html
+        assert "How to re-run it" not in html
+
+    def test_a_missing_slide_plan_uses_the_existing_deterministic_layout(self) -> None:
+        html = self._render(BuildReviewPackage(headline="Fitted.", key_outcomes=(KeyOutcome(name="Accuracy", value="0.62"),)))
+
+        assert "Key outcomes" in html
+        assert "Deviations and limitations" in html
+        assert "How to re-run it" in html
+
+    def test_a_directly_constructed_plan_with_an_unknown_figure_falls_back(self) -> None:
+        package = BuildReviewPackage(
+            headline="Fitted.",
+            key_outcomes=(KeyOutcome(name="Accuracy", value="0.62"),),
+            slide_plan=(BuildSlide(kind="figure", title="Invented", figure_path="/invented.png"),),
+        )
+
+        html = self._render(package)
+
+        assert "Key outcomes" in html
+        assert "Deviations and limitations" in html
 
     def test_deliverable_accounting_has_its_own_slide(self) -> None:
         package = parse_build_summary(

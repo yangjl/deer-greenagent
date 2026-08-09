@@ -24,9 +24,13 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from inspect import isawaitable
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.runnables import RunnableConfig
+
+if TYPE_CHECKING:
+    from deerflow.config.app_config import AppConfig
+    from deerflow.subagents.config import SubagentConfig
 
 from deerflow.agents.dbtl.live_stage.build_controls import DISABLED_GATE, BuildControlGate, BuildControlNotRecorded
 from deerflow.agents.dbtl.live_stage.build_meeting import BUILD_WORK_MEETING_CONTRACT, MeetingContext, meeting_units, parse_recommendation
@@ -69,6 +73,7 @@ from deerflow.agents.dbtl.live_stage.build_recorder import (
     make_build_step_recorder,
 )
 from deerflow.agents.dbtl.live_stage.build_review import (
+    MAX_RECENT_REVIEWER_FEEDBACK,
     SUMMARIZER_ROLE,
     execution_bundle,
     parse_summary,
@@ -330,6 +335,8 @@ _LIGHT_PILOT_TOOL_NAMES = frozenset({"read_file"})
 #: it was asked to plan was the sentence asking it not to.
 _READ_ONLY_ROLES = frozenset({SUMMARIZER_ROLE, PLANNER_ROLE})
 _READ_ONLY_TOOL_NAMES = frozenset({"read_file", "ls", "glob", "grep"})
+_MEMORY_TOOL_NAMES = frozenset({"memory_search", "memory_add", "memory_update", "memory_delete"})
+_SUMMARIZER_TOOL_NAMES = _READ_ONLY_TOOL_NAMES | _MEMORY_TOOL_NAMES
 
 
 def _runtime_view(config: RunnableConfig) -> dict[str, Any]:
@@ -417,7 +424,33 @@ def _tools_for_unit(tools: Sequence[Any], unit: WorkUnit) -> list[Any]:
     """
     if unit.role not in _READ_ONLY_ROLES:
         return list(tools)
-    return [tool for tool in tools if str(getattr(tool, "name", "")) in _READ_ONLY_TOOL_NAMES]
+    allowed = _SUMMARIZER_TOOL_NAMES if unit.role == SUMMARIZER_ROLE else _READ_ONLY_TOOL_NAMES
+    return [tool for tool in tools if str(getattr(tool, "name", "")) in allowed]
+
+
+def _with_craft_memory_tools(
+    tools: Sequence[Any],
+    worker_config: SubagentConfig,
+    *,
+    app_config: AppConfig,
+) -> list[Any]:
+    """Add existing explicit memory tools for an opted-in specialist."""
+    if not worker_config.craft_memory:
+        return list(tools)
+    memory_config = getattr(app_config, "memory", None)
+    if memory_config is None or not memory_config.enabled:
+        return list(tools)
+
+    from deerflow.agents.memory.manager import backend_requires_passive_writes_in_tool_mode
+    from deerflow.agents.memory.tools import get_memory_tools
+
+    if backend_requires_passive_writes_in_tool_mode(memory_config.manager_class):
+        raise ValueError("The configured memory backend requires passive writes and cannot provide isolated craft memory tools.")
+
+    result = list(tools)
+    existing_names = {str(getattr(tool, "name", "")) for tool in result}
+    result.extend(tool for tool in get_memory_tools() if str(getattr(tool, "name", "")) not in existing_names)
+    return result
 
 
 _HOST_FILESYSTEM_MCP_TOOL_NAMES = frozenset(
@@ -4828,6 +4861,8 @@ class LiveStageAdapter:
                     # Empty means no skill discovery or activation for this
                     # worker; no configured/global skill may widen it.
                     worker_config = replace(worker_config, skills=list(unit.skills or ()))
+                elif unit.role == SUMMARIZER_ROLE:
+                    worker_config = replace(worker_config, skills=list(unit.skills or ()))
             parent_model = metadata.get("model_name")
             # A seat that named its own model wins over the composer's. The name
             # was validated against the configured set when the roster was
@@ -4875,6 +4910,18 @@ class LiveStageAdapter:
                     )
                 tools = [build_test_rerun_tool(unit, unit_workspace=unit_workspace)]
             else:
+                try:
+                    tools = _with_craft_memory_tools(
+                        tools,
+                        worker_config,
+                        app_config=self._app_config,
+                    )
+                except ValueError as exc:
+                    return DispatchOutcome(
+                        unit_id=unit.unit_id,
+                        text=None,
+                        error=str(exc),
+                    )
                 tools = _tools_for_unit(_tools_for_stage_budget(tools, dispatch_budget), unit)
             tools = _tools_for_virtual_workspace(tools, writable_workspace=unit_workspace)
             trace_id = str(metadata.get("trace_id") or "") or None
@@ -5929,12 +5976,23 @@ class LiveStageAdapter:
         recomputed package digest is what proves the two are the same write-up.
         """
         agent = next((assignment.agent_name for assignment in outcome.plan.selection.assignments), "general-purpose")
+        reviewer_feedback: Sequence[Mapping[str, Any]] = ()
+        feedback_reader = getattr(self._repo, "recent_project_stage_feedback", None)
+        if callable(feedback_reader):
+            try:
+                reviewer_feedback = await feedback_reader(
+                    project_id=str(cycle.get("project_id") or ""),
+                    limit=MAX_RECENT_REVIEWER_FEEDBACK,
+                )
+            except Exception:  # noqa: BLE001 - presentation history is fail-soft
+                logger.warning("Recent project reviewer feedback could not be loaded.", exc_info=True)
         unit = summarizer_unit(
             attempt_id=attempt_id,
             agent_name=agent,
             bundle=bundle,
             inputs=inputs,
             cycle=cycle,
+            reviewer_feedback=reviewer_feedback,
         )
         if answer:
             # Quoted rather than paraphrased: it is the one part of the

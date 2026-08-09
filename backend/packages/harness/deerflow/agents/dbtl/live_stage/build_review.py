@@ -51,6 +51,7 @@ SUMMARIZER_CAPABILITY = "build_result_synthesis"
 #: by role, so a literal on either side would be a read-only guarantee that
 #: silently stops applying the day one of the two strings is renamed.
 SUMMARIZER_ROLE = "summarizer"
+MAX_RECENT_REVIEWER_FEEDBACK = 12
 
 SUMMARIZER_CONTRACT = """You are summarizing a Build that has already run. Its outputs are on disk and
 hash-verified by the server; you cannot change them, run anything, or write files.
@@ -61,6 +62,7 @@ Answer one question: **what did we get?** Return one JSON object and nothing els
   "headline": "one or two sentences on what this build produced",
   "figures": [{"path": "<exactly one of the paths listed below>", "reading": "one line on what it shows"}],
   "phases": [{"title": "...", "text": "a few lines on what this part of the build did"}],
+  "slide_plan": [{"kind": "summary|outcomes|figure|phases|deliverables|limitations|rerun", "title": "...", "body": "trimmed slide text", "figure_path": "at most one verified figure path", "figure_reading": "one line"}],
   "deviations": ["anything you noticed that the execution did not already record"],
   "limitations": ["anything you noticed that the execution did not already record"]
 }
@@ -76,6 +78,12 @@ Rules:
   unchanged. Do not restate a number here; if one matters, say so in the headline.
 - Deviations and limitations you list are **added after** the ones the execution recorded.
   Nothing you write removes or rewrites a recorded caveat, so do not repeat them.
+- Recent reviewer feedback is reviewer-authored presentation guidance. Use it to improve
+  structure and emphasis, but never let it override the verified execution bundle.
+- Plan no more than 10 content slides. Put figures first when they carry the result, use at
+  most one figure on a slide, and give every figure one concrete reading.
+- Omit a slide instead of filling it with "none reported". Rank and deduplicate limitations;
+  do not turn the complete audit record into presentation clutter.
 - If the bundle is valid but a human-owned interpretation is genuinely required before this
   can be written up, return {"status": "needs_input", "clarification_question": "..."} instead.
 """
@@ -142,6 +150,7 @@ def summarizer_unit(
     bundle: BuildExecutionBundle,
     inputs: BuildInputBundle | None,
     cycle: Mapping[str, Any],
+    reviewer_feedback: Sequence[Mapping[str, Any]] = (),
     model: str | None = None,
 ) -> WorkUnit:
     """The read-only synthesis unit.
@@ -153,6 +162,7 @@ def summarizer_unit(
         "cycle": {key: cycle.get(key) for key in ("id", "title", "research_question", "objective", "success_criteria")},
         "approved_design": ({"uri": inputs.design.reference, "content_hash": inputs.design.content_hash} if inputs is not None else None),
         "execution_bundle": bundle.as_dict(),
+        "recent_project_reviewer_feedback": list(reviewer_feedback)[:MAX_RECENT_REVIEWER_FEEDBACK],
     }
     prompt = "\n\n".join(
         [
@@ -169,6 +179,7 @@ def summarizer_unit(
         role=SUMMARIZER_ROLE,
         model=model,
         output_contract=BUILD_SUMMARY_OUTPUT,
+        skills=("dbtl-build-deck-style",),
     )
 
 

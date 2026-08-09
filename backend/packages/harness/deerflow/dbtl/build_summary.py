@@ -44,8 +44,10 @@ from deerflow.dbtl.build_fulfillment import BuildFulfillment
 
 #: How many figures the deck may lead with. The rest stay in the record.
 MAX_SUMMARY_FIGURES = 8
+MAX_SUMMARY_SLIDES = 10
 MAX_PHASE_NOTES = 12
 MAX_LINE_CHARS = 600
+_SLIDE_KINDS = frozenset({"summary", "outcomes", "figure", "phases", "deliverables", "limitations", "rerun"})
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(?P<body>.*?)\s*```\s*$", re.DOTALL)
 
@@ -86,6 +88,26 @@ class PhaseNote:
 
 
 @dataclass(frozen=True, slots=True)
+class BuildSlide:
+    """One content slide selected by the summarizer; styling stays deterministic."""
+
+    kind: str
+    title: str
+    body: str = ""
+    figure_path: str = ""
+    figure_reading: str = ""
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "kind": self.kind,
+            "title": self.title,
+            "body": self.body,
+            "figure_path": self.figure_path,
+            "figure_reading": self.figure_reading,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class BuildReviewPackage:
     """The document a Build approval binds to."""
 
@@ -94,6 +116,7 @@ class BuildReviewPackage:
     selected_figures: tuple[SelectedFigure, ...] = ()
     all_figures: tuple[BuildFigure, ...] = ()
     phase_notes: tuple[PhaseNote, ...] = ()
+    slide_plan: tuple[BuildSlide, ...] = ()
     deviations: tuple[str, ...] = ()
     limitations: tuple[str, ...] = ()
     rerun_procedure: str = ""
@@ -125,6 +148,7 @@ class BuildReviewPackage:
             "selected_figures": [item.as_dict() for item in self.selected_figures],
             "all_figures": [figure.as_dict() for figure in self.all_figures],
             "phase_notes": [note.as_dict() for note in self.phase_notes],
+            "slide_plan": [slide.as_dict() for slide in self.slide_plan],
             "deviations": list(self.deviations),
             "limitations": list(self.limitations),
             "rerun_procedure": self.rerun_procedure,
@@ -229,6 +253,7 @@ def parse_build_summary(raw: str, *, bundle: BuildExecutionBundle) -> SummaryPar
     notes = tuple(PhaseNote(title=_text(item.get("title"), limit=160), text=_text(item.get("text") or item.get("summary"))) for item in (payload.get("phases") or []) if isinstance(item, Mapping) and _text(item.get("title"), limit=160))[
         :MAX_PHASE_NOTES
     ]
+    slide_plan = _parse_slide_plan(payload.get("slide_plan"), bundle=bundle)
 
     # Selection is presentational, not evidentiary. If the summarizer omits a
     # verified figure list, show the first bounded set rather than generating a
@@ -251,6 +276,7 @@ def parse_build_summary(raw: str, *, bundle: BuildExecutionBundle) -> SummaryPar
         # never remove one from the record a reviewer can ask about.
         all_figures=bundle.figures,
         phase_notes=notes,
+        slide_plan=slide_plan,
         # Additive, in that order. The execution's own caveats lead because a
         # reviewer must see what the work recorded about itself before what a
         # later reader made of it, and a summarizer that supplied its own list
@@ -264,6 +290,45 @@ def parse_build_summary(raw: str, *, bundle: BuildExecutionBundle) -> SummaryPar
         deliverable_fulfillment=bundle.deliverable_fulfillment,
     )
     return SummaryParse(package=package, repaired=repaired)
+
+
+def _parse_slide_plan(value: Any, *, bundle: BuildExecutionBundle) -> tuple[BuildSlide, ...]:
+    """Parse an optional plan; any unsafe shape selects deterministic fallback."""
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or not value or len(value) > MAX_SUMMARY_SLIDES:
+        return ()
+
+    slides: list[BuildSlide] = []
+    seen_figures: set[str] = set()
+    for item in value:
+        if not isinstance(item, Mapping):
+            return ()
+        kind = _text(item.get("kind"), limit=32).lower()
+        title = _text(item.get("title"), limit=160)
+        body = _text(item.get("body"), limit=1200)
+        figure_path = _text(item.get("figure_path"), limit=1024)
+        figure_reading = _text(item.get("figure_reading"), limit=600)
+        if kind not in _SLIDE_KINDS or not title:
+            return ()
+        if figure_path:
+            if kind != "figure" or not figure_reading or bundle.figure_for(figure_path) is None or figure_path in seen_figures:
+                return ()
+            seen_figures.add(figure_path)
+        elif kind == "figure":
+            return ()
+        if not body and not figure_path:
+            return ()
+        slides.append(
+            BuildSlide(
+                kind=kind,
+                title=title,
+                body=body,
+                figure_path=figure_path,
+                figure_reading=figure_reading,
+            )
+        )
+    if (bundle.deviations or bundle.limitations) and not any(slide.kind == "limitations" for slide in slides):
+        return ()
+    return tuple(slides)
 
 
 def _merge(recorded: Sequence[str], added: Sequence[str]) -> tuple[str, ...]:

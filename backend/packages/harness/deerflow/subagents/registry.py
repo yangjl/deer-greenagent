@@ -41,6 +41,7 @@ def _build_custom_subagent_config(name: str, *, app_config: Any | None = None) -
         tools=custom.tools,
         disallowed_tools=custom.disallowed_tools,
         skills=custom.skills,
+        craft_memory=custom.craft_memory,
         model=custom.model,
         max_turns=custom.max_turns,
         timeout_seconds=custom.timeout_seconds,

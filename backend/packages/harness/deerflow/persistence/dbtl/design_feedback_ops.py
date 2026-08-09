@@ -882,6 +882,65 @@ class DesignFeedbackOpsMixin:
             ).scalars()
             return [self._action_payload(row) for row in rows]
 
+    async def recent_project_stage_feedback(
+        self,
+        *,
+        project_id: str,
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded newest-first reviewer-feedback projection."""
+        bounded_limit = max(1, min(int(limit), 50))
+        async with self._sf() as session:  # type: ignore[attr-defined]
+            rows = (
+                await session.execute(
+                    select(DbtlDesignFeedbackActionRow, DbtlDesignFeedbackSurfaceRow)
+                    .join(
+                        DbtlDesignFeedbackSurfaceRow,
+                        DbtlDesignFeedbackSurfaceRow.id == DbtlDesignFeedbackActionRow.surface_id,
+                    )
+                    .where(
+                        DbtlDesignFeedbackActionRow.project_id == project_id,
+                        DbtlDesignFeedbackSurfaceRow.project_id == project_id,
+                    )
+                    .order_by(
+                        DbtlDesignFeedbackActionRow.created_at.desc(),
+                        DbtlDesignFeedbackActionRow.id.desc(),
+                    )
+                    .limit(50)
+                )
+            ).all()
+
+        result: list[dict[str, Any]] = []
+        for action, surface in rows:
+            raw_slide_comments = dict(action.slide_comments or {})
+            if not str(action.human_comment or "").strip() and not raw_slide_comments:
+                continue
+            request = surface.decision_request if isinstance(surface.decision_request, dict) else {}
+            registered = request.get("commentable_slides")
+            titles = {str(item.get("id")): str(item.get("title") or item.get("id")) for item in (registered if isinstance(registered, list) else []) if isinstance(item, dict) and isinstance(item.get("id"), str)}
+            slide_comments = [
+                {
+                    "slide_id": slide_id,
+                    "slide_title": titles.get(slide_id, slide_id),
+                    "comment": comment,
+                }
+                for slide_id, comment in raw_slide_comments.items()
+            ]
+            result.append(
+                {
+                    "client_submission_id": action.id,
+                    "cycle_id": action.cycle_id,
+                    "stage": action.stage,
+                    "action_kind": action.action_kind,
+                    "human_comment": action.human_comment,
+                    "slide_comments": slide_comments,
+                    "created_at": self._action_payload(action)["created_at"],
+                }
+            )
+            if len(result) >= bounded_limit:
+                break
+        return result
+
     @staticmethod
     async def _live_surfaces(
         session: AsyncSession,
