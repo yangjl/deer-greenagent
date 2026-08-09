@@ -91,6 +91,10 @@ Build rerun declaration (required in provenance.rerun_spec):
 - expected_outputs contains only files the entry point itself creates when run
   in a fresh DBTL_WORKSPACE. Do not include source code, worker-created audit
   logs, or files that merely existed before the entry point ran.
+- Every expected_output must reproduce byte for byte. Figures therefore must be
+  PNG: .pdf, .svg, .ps and .eps each embed a creation timestamp, so the same
+  script renders different bytes on every run and Test's rerun refuses them.
+  Declaring one fails this phase.
 """.strip()
 
 GENERALIST = "general-purpose"
@@ -478,11 +482,44 @@ def gating_failed_phase_checks(result: StageWorkerResult, required_name: str = P
     return tuple(item.name.strip() for item in result.quality_checks if item.name.strip() and not item.passed and (item.name.strip() == required_name or not is_non_gating_build_check(item.name)))
 
 
+#: Figure formats that embed a creation timestamp, so re-rendering the same
+#: figure from the same script produces different bytes every run. Measured on
+#: matplotlib 3.11: PNG is byte-stable; PDF and SVG are not.
+NON_REPRODUCIBLE_OUTPUT_SUFFIXES = frozenset({".pdf", ".svg", ".ps", ".eps"})
+
+
+def non_reproducible_rerun_outputs(rerun_spec: Any) -> tuple[str, ...]:
+    """Declared rerun outputs whose format cannot hash the same twice.
+
+    Test re-runs the recorded command in a fresh workspace and requires every
+    ``expected_outputs`` entry to match its approved Build hash byte for byte.
+    A PDF or SVG figure stamps its own creation date, so it fails that check on
+    every run — the cycle is invalidated with ``irreproducible_execution`` for a
+    timestamp, with nothing wrong with the science, after a whole Build and Test
+    have already been paid for.
+
+    Caught here, in Build, the worker still has its one fresh correction and the
+    fix is one argument to ``savefig``.
+    """
+    outputs = rerun_spec.get("expected_outputs") if isinstance(rerun_spec, Mapping) else None
+    if not isinstance(outputs, (list, tuple)):
+        return ()
+    return tuple(dict.fromkeys(item for item in outputs if isinstance(item, str) and PurePosixPath(item.strip()).suffix.lower() in NON_REPRODUCIBLE_OUTPUT_SUFFIXES))
+
+
 def phase_completion_error(result: StageWorkerResult, required_name: str) -> str:
     """Explain why a server-required Build phase assertion did not pass."""
 
     if not required_name or result.status not in {WorkerStatus.COMPLETED, WorkerStatus.FAILED}:
         return ""
+    unstable = non_reproducible_rerun_outputs(result.provenance.get("rerun_spec"))
+    if unstable and result.status is WorkerStatus.COMPLETED:
+        named = ", ".join(unstable[:4])
+        return (
+            f"These declared rerun outputs cannot reproduce byte for byte and would invalidate the cycle at Test: {named}. "
+            "PDF, SVG, PS and EPS each embed a creation timestamp, so the same script renders different bytes on every run. "
+            "Save figures as PNG instead (fig.savefig(path_ending_in_dot_png)) and declare the PNG in expected_outputs."
+        )
     checks = [item for item in result.quality_checks if item.name.strip() == required_name]
     # A failed result never satisfies the phase, but one precise failed done
     # check is enough to tell v12's separate correction worker what to repair.
