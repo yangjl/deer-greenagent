@@ -17,6 +17,11 @@ assumes a computed gate survives in some form.
 **Scope:** Validity-pack selection and the applicability of checks. The Build
 stage, the human gate's mechanics, and the Learn hand-off are treated as given.
 
+**Amendment:** §12 adds **Position C**, which argues the motion is the wrong
+question — that the gate a discovery workflow needs is already built and simply
+not wired to the verdict. It was added after §§1–11 were written and is not
+answered by the cross-examination in §6. Read it before acting on §9.
+
 ---
 
 ## 1. What has changed since 2026-08-02
@@ -351,3 +356,100 @@ wall.
   accurate on 2026-08-02 and is now partly stale; re-verify rather than assume,
   and expect this document to age the same way.
 - Facts assembled 2026-08-09 against branch `fix/build-bugs`.
+
+---
+
+## 12. Amendment — Position C (added 2026-08-09, after the debate above)
+
+Added at the owner's argument. Sections 1–11 are unchanged; this position was
+not available to the cross-examination in §6 and is not answered by it.
+
+### Position C — the gate we need is already built and unplugged (*the Naturalist*)
+
+**C1. This workflow explores; it does not verify.** DBTL cycles ask open
+questions about things nobody knows yet. A and B both assume the fix is a
+better-fitting checklist. For exploratory work there is no checklist that fits,
+because the point of the work is that the right questions are not known in
+advance. Grading a pilot against a confirmatory pack turns every honest
+exploration into a failed confirmation, and no amount of pack selection changes
+that.
+
+**C2. Reproduction of the figure is already proven, in every domain, with no
+pack at all.** `expected_outputs` is required in the rerun record and holds the
+files the entry point itself creates (`build_execution.py:205`). The Test rerun
+requires each one to match the approved Build hash byte-for-byte
+(`test_rerun.py:519-527`). So "did this picture come from this data, by this
+script" is settled by machinery that is already shipped and is indifferent to
+whether the cycle is predictive. That is the entire deterministic guarantee a
+figure-first workflow needs, and it is domain-free by construction.
+
+**C3. What remains is only: what did Design ask for, and did Test get it.** Both
+halves exist. Design emits a `deliverable_manifest` with `expected_paths` and
+`acceptance_criteria`. Test runs `deliverable_audit`, which **recomputes** each
+item's verdict rather than trusting the worker's, requires the criteria be
+repeated verbatim so they cannot be softened, and cross-checks every cited hash
+against the server-owned Build lineage (`deliverable_audit.py:124-155`,
+`adapter.py:2094-2103`).
+
+**C4. And it is unplugged.** `deliverable_audit` contributes **nothing** to
+`evaluate_validity` — no reference in either direction. It is a precondition
+only: a refusal makes the evidence unusable, but the verdict is computed purely
+from the predictive checks and the headline metrics. The system already asks the
+right question, already answers it rigorously, and then discards the answer at
+the moment of judgement. This is the defect. Pack selection is a detour around
+it.
+
+**C5. Meaning is not mechanizable, and pretending otherwise is the actual harm.**
+Whether a plot is interesting, surprising, or worth keeping is the human's
+call. The remaining machine job is to make that call fast and well-informed:
+say what the figure shows, and say what would have to be true for it to be
+wrong. That is a presenter's job, and it must **interpret, never certify** —
+read-only and citation-bound, as the existing summarizer seat already is. A
+model that both composes the presentation and rules on it is the actor judging
+itself, which this architecture refuses everywhere else.
+
+### Where C must concede
+
+**B1 survives untouched and C has no answer to it.** Leakage is invisible in a
+figure, and "the promised deliverable was delivered and it regenerates" says
+nothing whatever about whether the holdout was drawn after filtering. C does not
+claim the predictive checks are worthless — it claims they are not *universal*.
+A predictive cycle should still face them in full. C removes the pack as the
+default judge of all work; it does not remove it as an option.
+
+**C also inherits A1.** Whatever a Design asks for must be asked *before* the
+work exists, or the acceptance criteria are a grade chosen after the fact. C
+relies on Design-time commitment exactly as the motion does — it simply commits
+to *deliverables*, which B1 conceded Design can do, rather than to *method*,
+which B argued it cannot.
+
+### What changes if C is right
+
+The critical path in §9 moves. Opening `ValidityCheckName` (step 2) stops being
+the blocker, because a discovery cycle no longer needs a domain check vocabulary
+at all — it needs reproduction, lineage, and delivery, all of which exist. The
+order becomes: wire the deliverable audit into the verdict, make the predictive
+pack opt-in rather than default, and fix the two blockers below.
+
+### Two blockers, independent of this whole debate
+
+**PDF and SVG figures are not byte-reproducible.** Measured 2026-08-09 in the
+repo's own gateway venv, matplotlib 3.11.1: repeated `savefig` of an identical
+figure gives an identical hash for PNG, and a **different** hash for PDF and SVG
+(both embed a creation date). A cycle that saves a publication-quality figure in
+either format fails the Test rerun deterministically, every time, and comes out
+`invalidated` with reason `irreproducible_execution` — over a timestamp, with
+nothing wrong with the science. Build's worked example happens to use `.png`,
+which is why this has not been hit; nothing requires it, and SVG is recognised
+as a figure elsewhere in the bundle. Under C this stops being a curiosity and
+becomes a correctness property of the gate.
+
+**A cycle with no headline metric cannot reach a verdict.** `evaluate_validity`
+forces `INCONCLUSIVE` when `metrics` is empty, independently of every check and
+every pack (`validity.py:266`). A figure-first cycle has no headline metric by
+definition. So even with all seven checks passing and every deliverable
+delivered, a descriptive cycle is stuck — and `inconclusive` cannot advance to
+Learn. This line has to change for C, and arguably for A and B as well.
+
+Both are small, both stand alone, and neither depends on how the larger argument
+is resolved.
