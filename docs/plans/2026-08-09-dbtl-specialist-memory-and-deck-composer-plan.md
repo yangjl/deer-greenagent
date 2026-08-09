@@ -1,13 +1,20 @@
-# Slide-deck specialist, and memory for DBTL specialists — a plan
+# Better Build decks, and memory for DBTL specialists — a plan
 
-**Status:** Plan. Not started. Phases 1–2 are prerequisites for everything else.
+**Status:** Plan. Not started.
 
 **Date:** 2026-08-09
 
 **Goal:** Build decks that are worth reading — fewer words, figures first, to the
-point — by a specialist that keeps getting better as reviewers comment on its
-work. Give the existing specialists (`statistician`, `build-engineer`) the same
-memory layer on the way.
+point — and that keep getting better as reviewers comment on them. Give the
+existing specialists (`statistician`, `build-engineer`) a craft-memory layer on
+the way, and pin plot appearance in a shared skill.
+
+**No new agent.** An earlier draft added a dedicated `slide-deck` specialist. It
+was cut: once plot style became a shared skill (§4b), the only thing left arguing
+for a separate agent identity was a private memory bucket, which recent reviewer
+comments already cover as ordinary context. Deck composition folds into the
+existing summarizer seat (§3), with a documented trigger for splitting it out
+later if that prompt gets muddy.
 
 ---
 
@@ -104,7 +111,7 @@ and check it in review. Record this as a known soft edge, not a guarantee.
 
 ---
 
-## 3. The slide-deck specialist
+## 3. Deck composition — folded into the existing summarizer seat
 
 ### Why the current deck is thin
 
@@ -122,55 +129,62 @@ discovery order.
 whatever the package holds into fixed slide shapes. **Nobody decides what belongs
 on a slide.** That is the gap — not the styling, which is fine.
 
-### Shape
+### No new specialist
 
-**A new read-only seat, dispatched inside the existing `render_review_deck`
-step.** No new step key, no `BUILD_WORKFLOW_V1` change, no migration.
+An earlier draft of this plan added a dedicated `slide-deck` seat. Once figure
+style moved to a shared skill (§4b), that seat stopped earning its keep: the only
+thing left requiring a separate agent identity was a private memory bucket, and
+that argument is weak because recent reviewer comments are fed in as context on
+every run (§4) — the model can distill them in place without remembering
+anything.
 
-- Agent `slide-deck` declared in `config.yaml` under `subagents.agents`, with its
-  own `system_prompt` and its own `skills:` whitelist.
-- New role `deck`, added to `_READ_ONLY_ROLES` (`adapter.py:331`) so it gets no
-  writable workspace — same posture as `summarizer`.
-- Its own memory bucket follows automatically from its agent name, once §1 lands.
+**Use the existing summarizer seat** (`SUMMARIZER_CAPABILITY =
+"build_result_synthesis"`, role `summarizer`, already in `_READ_ONLY_ROLES` at
+`adapter.py:331`, already a recorded step). It already selects figures, already
+writes readings, and its output already feeds the renderer. Give it the deck
+skill and extend its contract. **No new seat, role, agent, or config block.**
 
-**Why its own seat rather than folding into the summarizer:** the summarizer
-writes the durable Markdown record and is explicitly forbidden from judging
-("Do not say whether the result is good, acceptable, or sufficient",
-`build_review.py:62-64`). A deck is a different job for a different reader, it
-needs its own memory bucket to learn from deck comments specifically, and a bad
-deck must not be able to invalidate the write-up.
+Note what the thin deck actually proves: those filename-derived captions mean the
+summarizer never cited those figures at all — `execution_bundle` recovered them
+from the published PNGs. Part of this work is not new capability but making that
+seat do the job it already has.
 
 ### Contract
 
-Input: the `BuildReviewPackage`, the execution bundle's figure list with hashes,
-recent reviewer comments (§4), and its injected craft memory.
+Extend the summarizer's existing output with a **slide plan** — ordered slides,
+each naming a kind, a title, at most one figure path, one line on what that figure
+shows, and trimmed body text. Its current rules already carry over: cite only
+figure paths present in the bundle (`build_review.py:69-71`); never say whether a
+result is good (`:72-74`). Add: drop a slide rather than fill it with "none
+recorded", and rank and deduplicate limitations rather than listing all of them.
 
-Output: a **slide plan**, not HTML — ordered slides, each naming a kind, a title,
-at most one figure path, one line on what that figure shows, and trimmed body
-text. Rules mirroring the summarizer's: cite only figure paths present in the
-bundle; never assert whether a result is good; drop a slide rather than fill it
-with "none recorded".
+`render_build_deck` (`dbtl/build_deck.py:141-238`) consumes the plan instead of
+laying out the package itself. **Style stays entirely in the renderer** — the
+seat decides *what is on a slide*, never how it looks.
 
-`render_build_deck` consumes the plan instead of laying out the package itself.
-**Style stays entirely in the renderer** — the specialist decides *what is on a
-slide*, never how it looks.
+**The plan is stored with the summarizer's output, not recomputed at render
+time.** This preserves the existing guarantee that a failed deck can be retried
+without re-running the summarizer
+(`test_dbtl_build_workflow_execution.py::TestADeckRetryDoesNotReRunTheSummarizer`)
+— the retry re-renders the stored plan.
 
-**Fallback is mandatory.** If the composer fails, is capped, or returns an
-unusable plan, fall back to today's deterministic layout and let the step
-succeed. `write_build_deck` already wraps rendering in try/except with the
-comment "a presentation must not break the record"
-(`build_review.py:266-268`); keep that property.
+**Fallback is mandatory.** A missing, malformed, or capped plan falls back to
+today's deterministic layout and the step still succeeds. `write_build_deck`
+already wraps rendering in try/except with the comment "a presentation must not
+break the record" (`build_review.py:266-268`); keep that property.
 
 ### The skill
 
-One `SKILL.md` — the house deck style: figures first, one line per figure, no
-slide without content, limitations ranked and deduplicated, target slide count.
-It must be an enabled skill in the same user storage the Build phase gate uses
-(`adapter.py:1564-1577`), since that is the only registry `_load_skills` reads.
+One `SKILL.md` for deck style — figures first, one line per figure, no slide
+without content, limitations ranked and deduplicated, target slide count. Separate
+file from the plot-style skill (§4b): slide layout and plot appearance are
+different concerns. It must be an enabled skill in the storage `_load_skills`
+reads (`adapter.py:1564-1577`).
 
-**Skill vs memory:** the skill is the standing house style, edited by a human.
-Memory is what this agent has learned about *this* reviewer and project. Keep
-them separate — if a lesson generalizes, promote it into the skill by hand.
+**When to split this back out.** If the summarizer's prompt gets muddy holding two
+contracts — the durable Markdown record for the audit chain, and a deck a person
+skims to decide — split the deck into its own seat. That costs a config block and
+a role name, and nothing in this design forecloses it. Do not pay for it up front.
 
 ---
 
@@ -233,8 +247,9 @@ A reviewer comment like "axis labels are too small" becomes a one-line edit to t
 skill — applying to every figure in every later cycle at once, versioned and
 revertible — rather than a fact one agent learned and the others did not.
 
-The deck specialist gets its own **separate** skill for slide style (§3). Plot
-appearance and slide layout are different files owned by different seats.
+Slide layout gets its own **separate** skill (§3). Plot appearance is produced by
+the seats that draw; slide layout by the seat that presents. Different files,
+different declarers.
 
 **Consequence for §2:** craft memory keeps only wording and density — "one line per
 figure, not three", "this reviewer skims". Nothing that changes a pixel.
@@ -260,8 +275,10 @@ at 90 days, and consolidation off by default (`deermem/config.py:87-213`).
 
 - Any DBTL **stage** writing memory. Reserved for `MemoryWritePolicy`, per §0.
 - Changing the global `memory.mode` — the lead agent keeps middleware mode.
-- Letting the deck specialist judge whether results are good. It composes; the
-  human reads and decides.
+- A dedicated deck agent. Cut deliberately; §3 records the trigger for adding one
+  later.
+- Letting the summarizer judge whether results are good. It composes; the human
+  reads and decides. Its existing prohibition stays.
 - Learning *which figures matter* from reviewer taste. Figure selection follows
   the Design's deliverable manifest and the bundle; only presentation is learned.
   A deck that learns what a reviewer likes will start hiding what they do not.
@@ -277,12 +294,16 @@ at 90 days, and consolidation off by default (`deermem/config.py:87-213`).
 2. **Category discipline is prompt-only.** A specialist could file a scientific
    claim as `craft`. Not preventable in config today; needs review, and a
    write-side allowlist if it happens.
-3. **Deck composer becomes a new failure mode in Build.** Mitigated by the
+3. **Deck composition becomes a new failure mode in Build.** Mitigated by the
    mandatory deterministic fallback — the step must never fail because of it.
 4. **Passive writes may be forced by the backend** even in tool mode. Verify
    `backend_requires_passive_writes_in_tool_mode` before §2, not after.
 5. **Scoping regression.** If §1 is wrong, facts land in `__default__` and leak
    across projects. It is the one change worth testing hardest.
+6. **Two contracts in one seat.** The summarizer now owes both the durable
+   Markdown record and a slide plan, and a prompt serving two readers can serve
+   both worse. Watch write-up quality against known-good runs; §3 names the split
+   as the remedy.
 
 ---
 
@@ -291,10 +312,14 @@ at 90 days, and consolidation off by default (`deermem/config.py:87-213`).
 - Two named specialists in one project write distinct facts; assert two agent
   directories and no cross-read. Second project → different bucket.
 - A specialist run with memory disabled behaves exactly as today.
-- Deck composer failure, cap, and malformed plan each fall back to the current
-  layout with the step still succeeding.
+- Missing, malformed, and capped slide plans each fall back to the current layout
+  with the step still succeeding.
+- `TestADeckRetryDoesNotReRunTheSummarizer` still passes — a deck retry must
+  re-render the stored plan, not re-synthesize it.
 - The composed deck for the existing genomic-selection package: no empty slides,
   every figure carries a one-line reading, limitations deduplicated.
+- The summarizer's Markdown write-up is no worse than a known-good run after
+  taking on the second contract.
 - No path in this change reads or writes `MemoryWritePolicy`.
 
 ---
@@ -307,6 +332,6 @@ at 90 days, and consolidation off by default (`deermem/config.py:87-213`).
 §4b first because it is one file, depends on nothing else here, and improves every
 figure in the next cycle.
 
-§5 before §3 deliberately: it exercises the memory layer on two agents that
-already exist and whose output we can compare against known-good runs, before a
-brand-new specialist depends on it.
+§5 before §3 deliberately: it exercises the memory layer on two agents whose
+output can be compared against known-good runs, before the summarizer's contract
+changes underneath it.
