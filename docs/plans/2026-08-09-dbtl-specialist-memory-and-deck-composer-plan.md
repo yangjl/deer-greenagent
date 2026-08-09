@@ -198,6 +198,49 @@ raw comments each run, and separately records durable style lessons via
 
 ---
 
+## 4b. Figure style is a shared skill, never a memory
+
+Font size, axis labels, tick sizes and DPI are **not** the deck's to set — they are
+baked into the PNG by the Build worker's Python. The deck only embeds the finished
+image. Today there is **no figure-style guidance anywhere in the repo**: zero hits
+for `mplstyle`, `rcParams`, `plt.style`, `dpi`, `figsize` or axis-label wording in
+`build_phases.py` or `config.yaml`. Every plot inherits raw matplotlib defaults.
+
+**This must be pinned, not learned.** The Test rerun requires every expected output
+to match its approved Build hash byte-for-byte
+(`test_rerun.py:519-527`). A style that drifts as an agent learns would re-render
+the same script differently, change the hash, and invalidate the cycle over a font
+size. Deterministic appearance is a precondition of the reproducibility gate.
+
+**Shape: one shared `SKILL.md` carrying the house plot style** (an `.mplstyle` block
+or explicit `rcParams`), declared by any seat that draws — `build-engineer`,
+`statistician`, and any future analysis specialist.
+
+Two properties make a skill strictly better than a loose config file here:
+
+- **It is already hash-pinned into the Build record.** `_declared_skill_bindings`
+  (`adapter.py:1553-1586`) SHA-256s the skill's `SKILL.md` bytes into
+  `skill:<name>:sha256:<digest>`, recorded per phase (`adapter.py:5246,5255`) and
+  re-verified on replay (`:5342-5346`). So *which style produced this figure* is
+  provably part of the record, and editing the style shows up as a different
+  binding rather than as a silent change.
+- **It is genuinely shared.** Base skills resolve from `skills.path` /
+  `$DEER_FLOW_SKILLS_PATH` / `<project_root>/skills`
+  (`config/skills_config.py:37-57`); only *custom* skills redirect per user. One
+  house style, one place, every agent.
+
+A reviewer comment like "axis labels are too small" becomes a one-line edit to that
+skill — applying to every figure in every later cycle at once, versioned and
+revertible — rather than a fact one agent learned and the others did not.
+
+The deck specialist gets its own **separate** skill for slide style (§3). Plot
+appearance and slide layout are different files owned by different seats.
+
+**Consequence for §2:** craft memory keeps only wording and density — "one line per
+figure, not three", "this reviewer skims". Nothing that changes a pixel.
+
+---
+
 ## 5. Turn memory on for the existing specialists
 
 Once §1 and §2 land, `statistician` and `build-engineer` get memory by
@@ -258,7 +301,11 @@ at 90 days, and consolidation off by default (`deermem/config.py:87-213`).
 
 ## Order
 
+§4b (the plot-style skill — standalone, no dependencies, visible immediately) →
 §1 → §2 → §5 (memory, cheap, independently useful) → §4 → §3 (the deck).
+
+§4b first because it is one file, depends on nothing else here, and improves every
+figure in the next cycle.
 
 §5 before §3 deliberately: it exercises the memory layer on two agents that
 already exist and whose output we can compare against known-good runs, before a
