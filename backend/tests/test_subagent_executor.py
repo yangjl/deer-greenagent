@@ -16,6 +16,7 @@ the real implementation in isolation.
 
 import asyncio
 import importlib
+import re
 import sys
 import threading
 from datetime import datetime
@@ -3203,6 +3204,36 @@ class TestSubagentGuardrailAttribution:
         assert context.get("project_id") == "project-17"
         assert context.get("project_root") == "/srv/projects/project-17"
         assert context.get("is_subagent") is True
+
+    @pytest.mark.anyio
+    async def test_aexecute_names_the_subagent_so_per_agent_state_is_scoped(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """Per-agent state is keyed on ``context["agent_name"]``.
+
+        The lead publishes this key; the subagent path did not, so anything
+        scoping per agent through the runtime context — tool-mode memory being
+        the concrete case — silently resolved every specialist to the shared
+        ``__default__`` bucket. One statistician would then read a
+        build-engineer's notes back as its own, and the defect is invisible:
+        writes succeed, they just all land in one pile.
+        """
+        executor = self._make_executor(classes, user_id="alice", project_id="project-17")
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("agent_name") == executor.config.name
+        # The name has to survive as a usable scope key, not just be present:
+        # DeerMem's bucket validator accepts only [A-Za-z0-9-]+.
+        assert re.fullmatch(r"[A-Za-z0-9-]+", str(context["agent_name"])), "the configured subagent name cannot key a per-agent store"
 
     @pytest.mark.anyio
     async def test_aexecute_propagates_channel_user_id_to_subagent_context(

@@ -959,6 +959,14 @@ class SubagentExecutor:
             if self.project_root:
                 context["project_root"] = self.project_root
             context["is_subagent"] = True
+            # Which agent this is, for anything that scopes per-agent state.
+            # The lead publishes the same key (client.py). Without it here, a
+            # subagent's tool-mode memory writes resolve to the `__default__`
+            # bucket, so every specialist — statistician, build-engineer, any
+            # future one — shares a single undifferentiated pile and reads back
+            # another agent's craft notes as its own.
+            if self.config.name:
+                context["agent_name"] = self.config.name
             if self.execution_env:
                 from deerflow.runtime.secret_context import DBTL_EXECUTION_ENV_CONTEXT_KEY
 
