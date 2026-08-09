@@ -10,6 +10,7 @@ worker output are all tested as guarantees rather than conveniences.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -1210,3 +1211,86 @@ class TestBuildContract:
         assert "one item for every id" in build
         assert "provenance.deliverable_audit" in test
         assert "Independently inspect every expected path" in test
+
+
+class TestTheCapSalvageCheckIsNonGating:
+    """The salvage check is a flag on an admitted phase, not a second verdict.
+
+    If `phase_completion_error` read it as a contradiction the phase would fail
+    anyway and the whole salvage path would be an expensive no-op.
+    """
+
+    def test_the_salvage_check_is_recognised_as_non_gating(self) -> None:
+        from deerflow.agents.dbtl.live_stage.build_phases import BUILD_CAP_SALVAGE_CHECK, is_non_gating_build_check
+
+        assert is_non_gating_build_check(BUILD_CAP_SALVAGE_CHECK)
+
+    def test_a_done_phase_carrying_the_salvage_check_has_no_completion_error(self) -> None:
+        from deerflow.agents.dbtl.live_stage.build_phases import BUILD_CAP_SALVAGE_CHECK, phase_completion_error
+
+        result = parse_worker_result(
+            _valid_payload(
+                quality_checks=[
+                    {"name": "model.bin exists", "passed": True, "detail": ""},
+                    {"name": BUILD_CAP_SALVAGE_CHECK, "passed": False, "detail": "The worker hit its token budget."},
+                ]
+            ),
+            capability="c",
+            agent_name="a",
+        )
+
+        assert phase_completion_error(result, "model.bin exists") == ""
+
+
+class TestAdmittingACappedPhaseKeepsItsEvidence:
+    def _capped(self):
+        from deerflow.agents.dbtl.live_stage.build_phases import parse_phase_manifest
+
+        payload = _valid_payload(
+            provenance={
+                "tools_used": ["bash"],
+                "phase_manifest": {
+                    "version": 1,
+                    "entry_point": "/mnt/user-data/run.py",
+                    "declared_outputs": ["/mnt/user-data/model.bin"],
+                    "completion_condition": "model.bin exists",
+                },
+            }
+        )
+        result = parse_worker_result(payload, capability="c", agent_name="a", stop_reason="token_capped")
+        assert parse_phase_manifest(result.provenance.get("phase_manifest")) is not None
+        return result
+
+    def test_only_a_token_cap_with_a_manifest_is_salvageable(self) -> None:
+        from deerflow.agents.dbtl.live_stage.build_phases import is_capped_phase_salvageable
+
+        capped = self._capped()
+        assert is_capped_phase_salvageable(capped, required_version=1)
+        # A looping or turn-exhausted worker's output is more suspect, and a
+        # cap that landed before the manifest leaves nothing to verify against.
+        assert not is_capped_phase_salvageable(replace(capped, stop_reason="turn_capped"), required_version=1)
+        assert not is_capped_phase_salvageable(replace(capped, stop_reason="loop_capped"), required_version=1)
+        assert not is_capped_phase_salvageable(replace(capped, provenance={"tools_used": []}), required_version=1)
+        assert not is_capped_phase_salvageable(capped, required_version=3)
+
+    def test_admission_makes_it_trustworthy_without_losing_the_cap_or_the_manifest(self) -> None:
+        from deerflow.agents.dbtl.live_stage.build_phases import BUILD_CAP_SALVAGE_CHECK, admit_capped_phase
+
+        admitted, reason = admit_capped_phase(self._capped())
+
+        assert reason == "token_capped"
+        assert admitted.is_trustworthy
+        assert admitted.provenance["source_stop_reason"] == "token_capped"
+        assert admitted.provenance["phase_manifest"]["entry_point"] == "/mnt/user-data/run.py"
+        assert admitted.evidence_refs == self._capped().evidence_refs
+        assert any(check.name == BUILD_CAP_SALVAGE_CHECK and not check.passed for check in admitted.quality_checks)
+        assert any("cap salvage" in item.lower() for item in admitted.limitations)
+
+    def test_admitting_twice_adds_nothing_twice(self) -> None:
+        from deerflow.agents.dbtl.live_stage.build_phases import admit_capped_phase
+
+        once, _ = admit_capped_phase(self._capped())
+        twice, reason = admit_capped_phase(once)
+
+        assert twice == once
+        assert reason == "token_capped"

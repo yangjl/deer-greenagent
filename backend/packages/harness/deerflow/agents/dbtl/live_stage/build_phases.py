@@ -319,6 +319,67 @@ def record_build_observation(result: StageWorkerResult, note: str) -> StageWorke
     )
 
 
+#: A phase whose worker was stopped by the token budget *after* it had already
+#: written its structured result and manifest. The work is still judged by the
+#: server's own execution of the entry point; only the worker's further prose
+#: and self-review were cut short.
+BUILD_CAP_SALVAGE_CHECK = "build_phase_cap_salvage"
+BUILD_CAP_SALVAGE_MARKER = "build_phase_cap_salvage_v1"
+
+#: Deliberately narrower than ``was_capped``. A turn or loop cap means the worker
+#: was going in circles, so its own report is the part least worth trusting; a
+#: token cap only means it ran long.
+SALVAGEABLE_STOP_REASON = "token_capped"
+
+
+def is_capped_phase_salvageable(result: StageWorkerResult, *, required_version: int) -> bool:
+    """Whether a capped phase reported enough to be worth putting through the gates.
+
+    This is only the question "is there anything to verify against?". It grants
+    nothing: the containment and server-execution gates still decide, and a cap
+    never excuses either. A cap that landed before the structured result has no
+    manifest, so there is nothing to check and it stays a total failure.
+    """
+
+    if result.status is not WorkerStatus.COMPLETED or result.stop_reason != SALVAGEABLE_STOP_REASON:
+        return False
+    manifest = parse_phase_manifest(result.provenance.get("phase_manifest"))
+    return manifest is not None and manifest.version == required_version
+
+
+def admit_capped_phase(result: StageWorkerResult) -> tuple[StageWorkerResult, str]:
+    """Carry a token-capped but complete phase into the hard gates, flagged.
+
+    The cap is cleared from the result so the rest of the Build path treats it
+    as ordinary evidence — the gates it must still clear are unchanged — and the
+    original stop reason survives on provenance. The flag rides the same two
+    carriers as :func:`record_build_observation`: a limitation that reaches the
+    Build summary, deck and Test, and a failed non-gating check Test is told how
+    to weigh. Returns the result unchanged when already salvaged.
+    """
+
+    reason = result.stop_reason or SALVAGEABLE_STOP_REASON
+    if result.provenance.get("capped_phase_salvage"):
+        return result, reason
+    note = (
+        f"This phase's worker was stopped by its token budget ({reason}) after it had already written "
+        "its structured result and phase manifest. The server then executed the declared entry point, "
+        "verified the declared outputs and published the bytes, so the execution this phase is judged on "
+        "is complete. What the cap cut short is the worker's own further work and self-review, so treat "
+        "its prose and self-reported claims as possibly unfinished."
+    )
+    limitation = f"Build phase cap salvage (server execution verified): {note}"
+    check = QualityCheck(name=BUILD_CAP_SALVAGE_CHECK, passed=False, detail=note)
+    salvaged = replace(
+        result,
+        stop_reason=None,
+        limitations=tuple(dict.fromkeys((*result.limitations, limitation))),
+        quality_checks=(*result.quality_checks, check),
+        provenance={**result.provenance, "source_stop_reason": reason, "capped_phase_salvage": BUILD_CAP_SALVAGE_MARKER},
+    )
+    return salvaged, reason
+
+
 MAX_SCANNED_ENTRY_POINT_BYTES = 2 * 1024 * 1024
 _SCANNED_SOURCE_SUFFIXES = frozenset({".py", ".r", ".sh", ".bash", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jl", ".rb", ".pl"})
 
@@ -375,6 +436,13 @@ def is_non_gating_build_check(name: str) -> bool:
         or "notebook" in normalized
         or "jupyter" in normalized
         or "nbconvert" in normalized
+        # A token budget that cut the worker short *after* it wrote its structured
+        # result is a recorded limitation, not a Build gate: the server still
+        # executed the entry point, verified the declared outputs and published the
+        # bytes. Test and the human reviewer own whether the unfinished worker-side
+        # work matters. Two words rather than a bare "salvage" because a worker
+        # authors its own check names.
+        or "cap salvage" in normalized
     )
 
 

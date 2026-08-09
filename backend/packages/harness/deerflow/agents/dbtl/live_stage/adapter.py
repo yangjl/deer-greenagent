@@ -44,7 +44,9 @@ from deerflow.agents.dbtl.live_stage.build_phases import (
     PLANNER_ROLE,
     BuildPhaseManifest,
     PhaseAssignment,
+    admit_capped_phase,
     assign_phase,
+    is_capped_phase_salvageable,
     parse_phase_manifest,
     phase_completion_error,
     phase_correction_unit,
@@ -3921,8 +3923,8 @@ async def _settle_execution_step(
     await recorder.succeed(handle, digest, execution={"published_outputs": len(published)})
 
 
-async def _emit_build_verification_failure(unit: WorkUnit, error: str) -> None:
-    """Correct an earlier worker-completed event after server verification."""
+async def _emit_build_terminal_correction(unit: WorkUnit, event: dict[str, Any]) -> None:
+    """Correct an earlier terminal event for this worker after server verification."""
 
     try:
         from langgraph.config import get_stream_writer
@@ -3930,18 +3932,32 @@ async def _emit_build_verification_failure(unit: WorkUnit, error: str) -> None:
         from deerflow.utils.custom_events import aemit_custom_event
 
         await aemit_custom_event(
-            {
-                "type": "task_failed",
-                "task_id": unit.unit_id,
-                "error": error,
-                "display_summary": "Build output verification failed.",
-                "dbtl_stage": "build",
-            },
+            {"task_id": unit.unit_id, "dbtl_stage": "build", **event},
             writer=get_stream_writer(),
         )
     except RuntimeError:
         # Unit tests and non-stream callers have no LangGraph stream writer.
         pass
+
+
+async def _emit_build_verification_failure(unit: WorkUnit, error: str) -> None:
+    await _emit_build_terminal_correction(
+        unit,
+        {"type": "task_failed", "error": error, "display_summary": "Build output verification failed."},
+    )
+
+
+async def _emit_build_cap_salvage_admitted(unit: WorkUnit, result: StageWorkerResult) -> None:
+    """Undo the `task_failed` the cap raised, now that the hard gates have passed."""
+
+    await _emit_build_terminal_correction(
+        unit,
+        {
+            "type": "task_completed",
+            "result": json.dumps(result.as_dict(), ensure_ascii=False),
+            "display_summary": result.summary,
+        },
+    )
 
 
 class LiveStageAdapter:
@@ -5373,13 +5389,15 @@ class LiveStageAdapter:
                 paused, paused_title = True, assignment.phase.title
                 break
 
+            salvaged_cap = ""
+
             async def dispatch_fresh_correction(
                 failure: str,
                 *,
                 correct_live_terminal: bool = False,
             ) -> bool:
                 nonlocal unit, result, phase_outcome
-                if result is None or spec.version < 12 or unit.tool_contract.get("correction_attempt") or result.was_capped:
+                if result is None or spec.version < 12 or unit.tool_contract.get("correction_attempt") or result.was_capped or salvaged_cap:
                     return False
                 first_unit = unit
                 first_result = result
@@ -5427,8 +5445,16 @@ class LiveStageAdapter:
                 phase_outcome = correction_outcome
                 return True
 
+            # A token-capped phase is admitted only where the server itself runs the
+            # entry point; the hard gates below then still decide. Without that
+            # conjunct nothing verifies the real-execution family and a cap would be
+            # excused on the worker's own word.
+            if result is not None and "server_executed_entry_point" in spec.validity_gates and enforce_server_execution and is_capped_phase_salvageable(result, required_version=required_phase_manifest_version(spec)):
+                result, salvaged_cap = admit_capped_phase(result)
+                phase_outcome = replace(phase_outcome, results=(result,))
+
             completion_error = phase_completion_error(result, unit.completion_check) if result is not None else ""
-            correction_eligible = bool(result is not None and completion_error and spec.version >= 12 and not unit.tool_contract.get("correction_attempt") and not result.was_capped)
+            correction_eligible = bool(result is not None and completion_error and spec.version >= 12 and not unit.tool_contract.get("correction_attempt") and not result.was_capped and not salvaged_cap)
             if result is None or (not result.is_trustworthy and not correction_eligible):
                 results.extend(phase_outcome.results)
                 stopped = "; ".join(phase_outcome.rejected) or (str(result.summary).strip() if result is not None else "") or f"Phase {assignment.phase.title!r} returned no usable result."
@@ -5701,6 +5727,10 @@ class LiveStageAdapter:
             results.append(result)
             published.extend(phase_published)
             _extend_unique(input_artifacts, phase_input_artifacts)
+            if salvaged_cap:
+                # The cap already raised `task_failed`. Correct it only here, so a
+                # phase whose entry point then failed to verify keeps that failure.
+                await _emit_build_cap_salvage_admitted(unit, result)
             await recorder.succeed(
                 handle,
                 # The same function the restorer recomputes with, so a replay

@@ -717,7 +717,9 @@ class ReconciliationOpsMixin:
                         agent_name=str(result.get("agent_name") or ""),
                         via_generalist=bool(result.get("via_generalist", False)),
                         status=str(result.get("status") or "failed"),
-                        stop_reason=result.get("stop_reason"),
+                        # A salvaged capped phase clears its own stop_reason to become
+                        # admissible; the cap stays queryable via its provenance.
+                        stop_reason=result.get("stop_reason") or (result.get("provenance") or {}).get("source_stop_reason"),
                         result=dict(result),
                     )
                 )

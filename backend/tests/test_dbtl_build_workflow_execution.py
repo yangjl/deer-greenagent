@@ -21,6 +21,7 @@ import hashlib
 import json
 import re
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2253,3 +2254,219 @@ class TestADeckNobodyCanAnswerIsNotASuccess:
         deck = _step(await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id), BuildStepKey.RENDER_REVIEW_DECK)
         assert deck["status"] == StepState.FAILED.value
         assert deck["error_code"] == BuildErrorCode.DECK_REGISTRATION_FAILED.value
+
+
+class _CappedPhaseDispatcher(_WritingDispatcher):
+    """A phase that wrote its structured result and *then* ran out of budget.
+
+    The real shape of the cap that matters: the worker's sandbox work is on
+    disk and its contract parsed, and only the prose after it was cut off.
+    """
+
+    def __init__(
+        self,
+        *,
+        stop_reason: str = "token_capped",
+        drop_manifest: bool = False,
+        forbidden_path: bool = False,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._stop_reason = stop_reason
+        self._drop_manifest = drop_manifest
+        self._forbidden_path = forbidden_path
+
+    async def __call__(self, units, *, budget):
+        if any(unit.role != "phase" for unit in units):
+            return await super().__call__(units, budget=budget)
+        self.calls.append((tuple(units), budget))
+        outcomes = []
+        for unit in units:
+            self.phase_units.append(unit)
+            grant = _grant_from_prompt(unit.prompt)
+            grant.mkdir(parents=True, exist_ok=True)
+            entry_point = grant / "run.py"
+            output = grant / "model.bin"
+            plot = grant / "model_fit_comparison.png"
+            forbidden_line = "forbidden = '/test/model_fit_comparison.png'\n" if self._forbidden_path else ""
+            entry_point.write_text(
+                f"import os\nfrom pathlib import Path\nworkspace = Path(os.environ['DBTL_WORKSPACE'])\n{forbidden_line}(workspace / 'model.bin').write_text('fitted', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            output.write_text("fitted", encoding="utf-8")
+            plot.write_bytes(PNG)
+            payload = json.loads(_build_result(artifact=_virtual(output), figure=_virtual(plot)))
+            payload["artifact_refs"] = [_virtual(entry_point), _virtual(output), _virtual(plot)]
+            payload["evidence_refs"] = [{"kind": "workspace_file", "reference": _virtual(output), "description": "Fitted model."}]
+            _with_phase_manifest(
+                payload,
+                unit=unit,
+                entry_point=_virtual(entry_point),
+                declared_outputs=[_virtual(entry_point), _virtual(output), _virtual(plot)],
+            )
+            if self._drop_manifest:
+                payload["provenance"].pop("phase_manifest")
+            outcomes.append(DispatchOutcome(unit_id=unit.unit_id, text=json.dumps(payload), stop_reason=self._stop_reason))
+        return outcomes
+
+
+async def _run_build_on_the_server_path(
+    repo: DbtlCycleRepository,
+    root: Path,
+    *,
+    dispatcher,
+    monkeypatch,
+    entry_point_verifies: bool = True,
+    run_id: str = "run-1",
+    drop_execution_gate: bool = False,
+):
+    """Build with `enforce_server_execution` on — the only path salvage exists on."""
+    adapter = _adapter(repo, workflow=True, dispatcher=dispatcher)
+    adapter._dispatcher = None
+    monkeypatch.setattr(adapter, "_build_execution_preflight_error", lambda **_kwargs: "")
+    monkeypatch.setattr(adapter, "_production_dispatcher", lambda **_kwargs: dispatcher)
+    monkeypatch.setattr(
+        adapter_module,
+        "execute_and_verify_phase",
+        lambda *_args, **_kwargs: adapter_module.BuildPhaseVerification(
+            entry_point_verifies,
+            "The server executed the entry point successfully." if entry_point_verifies else "The entry point exited 1.",
+            "python run.py",
+        ),
+    )
+    if drop_execution_gate:
+        original = adapter_module.resolve_spec_by_key
+
+        def without_execution_gate(key):
+            spec = original(key)
+            if spec.stage != "build":
+                return spec
+            return replace(spec, validity_gates=tuple(gate for gate in spec.validity_gates if gate != "server_executed_entry_point"))
+
+        monkeypatch.setattr(adapter_module, "resolve_spec_by_key", without_execution_gate)
+    return await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Build the approved design.",
+        state={},
+        config=_runtime(root, run_id=run_id),
+    )
+
+
+class TestACappedPhaseSurvivesOnlyWhenTheHardGatesPass:
+    """Token exhaustion was the largest Build failure mode, and the most total.
+
+    A capped worker was discarded *before* anything verified it — including the
+    server's own execution of its entry point. So a phase whose code ran clean
+    and whose manifest was intact still cost a full budget and produced nothing.
+    Salvage admits that phase and lets the hard gates decide, exactly as they do
+    for any other phase; it never excuses them.
+    """
+
+    async def test_a_capped_phase_whose_entry_point_runs_is_admitted_and_flagged(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+        dispatcher = _CappedPhaseDispatcher(plan=SINGLE_PHASE_PLAN)
+
+        result = await _run_build_on_the_server_path(repo, root, dispatcher=dispatcher, monkeypatch=monkeypatch)
+
+        assert result.produced_usable_evidence, result.note
+        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        assert view["phases"][0]["status"] == StepState.SUCCEEDED.value
+        worker = (await repo.list_worker_runs("cycle-1", project_id="project-1", stage="build"))[0]
+        assert worker["status"] == "completed"
+        assert worker["result"]["provenance"]["source_stop_reason"] == "token_capped"
+        assert any(check["name"] == "build_phase_cap_salvage" and check["passed"] is False for check in worker["result"]["quality_checks"])
+        assert any("cap salvage" in item.lower() for item in worker["result"]["limitations"])
+
+    async def test_a_capped_phase_whose_entry_point_fails_still_fails_the_build(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+        dispatcher = _CappedPhaseDispatcher(plan=SINGLE_PHASE_PLAN)
+
+        result = await _run_build_on_the_server_path(
+            repo,
+            root,
+            dispatcher=dispatcher,
+            monkeypatch=monkeypatch,
+            entry_point_verifies=False,
+        )
+
+        assert not result.produced_usable_evidence
+        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        assert view["phases"][0]["error_code"] == BuildErrorCode.EXECUTION_CONTRACT_REJECTED.value
+        # Salvage clears `stop_reason`, which is what makes a phase correction-eligible.
+        # A capped build must not start costing a second worker on top of the first.
+        assert len(dispatcher.phase_units) == 1
+
+    async def test_a_capped_phase_that_reaches_outside_its_grant_is_refused(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+        dispatcher = _CappedPhaseDispatcher(plan=SINGLE_PHASE_PLAN, forbidden_path=True)
+
+        result = await _run_build_on_the_server_path(repo, root, dispatcher=dispatcher, monkeypatch=monkeypatch)
+
+        assert not result.produced_usable_evidence
+        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        assert view["phases"][0]["error_code"] == BuildErrorCode.EXECUTION_CONTRACT_REJECTED.value
+        assert "/test/model_fit_comparison.png" in view["phases"][0]["error_summary"]
+
+    async def test_a_cap_with_no_phase_manifest_is_a_total_failure(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        dispatcher = _CappedPhaseDispatcher(plan=SINGLE_PHASE_PLAN, drop_manifest=True)
+
+        result = await _run_build_on_the_server_path(repo, root, dispatcher=dispatcher, monkeypatch=monkeypatch)
+
+        assert not result.produced_usable_evidence
+
+    async def test_a_turn_capped_phase_is_not_salvaged(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        dispatcher = _CappedPhaseDispatcher(plan=SINGLE_PHASE_PLAN, stop_reason="turn_capped")
+
+        result = await _run_build_on_the_server_path(repo, root, dispatcher=dispatcher, monkeypatch=monkeypatch)
+
+        assert not result.produced_usable_evidence
+
+    async def test_without_the_execution_gate_a_cap_is_never_salvaged(self, project, monkeypatch) -> None:
+        """The single most important line in the change.
+
+        With no `server_executed_entry_point` gate nothing runs the phase's code,
+        so the real-execution family is unverifiable and the cap would be excused
+        on the worker's own word.
+        """
+        repo, root = project
+        await _ready_for_build(repo)
+        dispatcher = _CappedPhaseDispatcher(plan=SINGLE_PHASE_PLAN)
+
+        result = await _run_build_on_the_server_path(
+            repo,
+            root,
+            dispatcher=dispatcher,
+            monkeypatch=monkeypatch,
+            drop_execution_gate=True,
+        )
+
+        assert not result.produced_usable_evidence
+
+    async def test_a_salvaged_phase_reaches_the_durable_package_marked_partial(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        dispatcher = _CappedPhaseDispatcher(plan=SINGLE_PHASE_PLAN)
+
+        result = await _run_build_on_the_server_path(repo, root, dispatcher=dispatcher, monkeypatch=monkeypatch)
+
+        assert result.produced_usable_evidence, result.note
+        document = root / result.artifact_uri.removeprefix("/mnt/user-data/")
+        package = json.loads(next(document.parent.glob("build-package-*.json")).read_text(encoding="utf-8"))
+        # The reviewer's own record says the phase's account stops short of the
+        # work the server verified — the deck and the Test bundle read from here.
+        assert any("cap salvage" in item.lower() for item in package["execution"]["limitations"])
+        assert "cap salvage" in document.read_text(encoding="utf-8").lower()
+        # The cap stays queryable even though the admitted result's own reason is gone.
+        worker = (await repo.list_worker_runs("cycle-1", project_id="project-1", stage="build"))[0]
+        assert worker["stop_reason"] == "token_capped"

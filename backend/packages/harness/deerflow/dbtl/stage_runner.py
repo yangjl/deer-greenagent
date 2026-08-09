@@ -381,6 +381,14 @@ def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> st
                 "over it. If it could, add the relevant check with a diagnostic detail and a recommended_next_action",
                 "naming the exact Build correction to request; even then, do not fail a required validity check on the",
                 "bookkeeping alone. Whether to accept despite an open observation is the human reviewer's decision.",
+                "",
+                "A failed 'build_phase_cap_salvage' quality check may likewise appear in an approved Build package.",
+                "It records a phase whose worker hit its token budget after writing its structured result; the server",
+                "still ran and verified that phase's entry point, containment, and manifest before admitting it, so",
+                "the executed science is intact. Treat it the same way: carry it forward as a non-gating limitation",
+                "and do NOT fail a required validity check on it alone. One thing bookkeeping does not need: the cap",
+                "means that phase's own prose, claims, and self-review may be incomplete or absent, so weigh its",
+                "claims against the server execution receipt and published outputs rather than against its summary.",
             ]
         )
     return "\n".join(lines)
