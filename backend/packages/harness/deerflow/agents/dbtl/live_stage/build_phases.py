@@ -58,6 +58,31 @@ Build result declarations (required in addition to the shared result):
   for human review.
 """.strip()
 
+#: The house plot style, applied *in the entry point source* rather than through
+#: the environment. Test re-runs the recorded command in a fresh workspace and
+#: requires every figure to match its approved hash byte for byte, so a style set
+#: via matplotlibrc/MPLCONFIGDIR would not travel with the script and the re-run
+#: would render differently. In the source it reproduces anywhere.
+#:
+#: Kept byte-identical to the ``dbtl-plot-style`` skill by
+#: ``test_dbtl_plot_style.py`` — edit the SKILL.md and the test will name this
+#: constant if the two drift.
+DBTL_PLOT_STYLE_BLOCK = """plt.rcParams.update({
+    "figure.figsize": (6.4, 4.0), "figure.dpi": 150, "savefig.dpi": 150,
+    "savefig.bbox": "tight", "savefig.facecolor": "white",
+    "font.family": "sans-serif", "font.sans-serif": ["DejaVu Sans"],
+    "font.size": 11, "axes.titlesize": 13, "axes.labelsize": 12,
+    "xtick.labelsize": 10, "ytick.labelsize": 10, "legend.fontsize": 10,
+    "axes.spines.top": False, "axes.spines.right": False,
+    "axes.grid": True, "grid.alpha": 0.30, "grid.linewidth": 0.6,
+    "axes.axisbelow": True, "legend.frameon": False,
+    "lines.linewidth": 2.0, "lines.markersize": 6,
+    "patch.edgecolor": "white", "patch.linewidth": 0.5,
+    "axes.prop_cycle": plt.cycler(color=[
+        "#2a78d6", "#eb6834", "#1baf7a", "#eda100",
+        "#e87ba4", "#008300", "#4a3aa7", "#e34948"]),
+})"""
+
 BUILD_RERUN_RESULT_NOTE = """
 Build rerun declaration (required in provenance.rerun_spec):
 - Return {"version": 1, "entry_point": "/mnt/user-data/...", "command": "exact command",
@@ -654,6 +679,17 @@ def phase_unit(
                 "  DBTL_WORKSPACE first) and verify outputs by exact relative path, never by glob —",
                 "  a verification that fails on its own mechanics costs the phase exactly like a",
                 "  real failure.",
+                "- If this phase draws ANY figure, paste this house style block immediately after",
+                "  your matplotlib imports and before the first plot. It is not optional and not",
+                "  yours to adjust — it is what makes every figure in this project legible and",
+                "  colourblind-safe, and it lives in the source (never a matplotlibrc) so the",
+                "  server's re-run reproduces your figure byte for byte in a different workspace:",
+                "```python",
+                DBTL_PLOT_STYLE_BLOCK,
+                "```",
+                "  Then: label BOTH axes with units, title what the figure shows rather than what",
+                "  it is, and save PNG only — PDF and SVG embed a timestamp, so they hash",
+                "  differently on every run and fail the reproducibility check.",
                 "- Record package versions with importlib.metadata.version('numpy'), etc. NEVER read",
                 "  pkg.__version__: the jupyter meta-package has no __version__ and raises AttributeError,",
                 "  which has sunk whole phases here. Wrap each lookup in try/except and record 'unknown'",
