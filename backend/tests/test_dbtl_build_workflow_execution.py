@@ -2012,6 +2012,20 @@ class TestAPartialPhaseCannotAdvanceThePlan:
         assert not first.tool_contract.get("correction_attempt")
         assert correction.tool_contract["correction_attempt"] is True
         assert "The generated implementation test failed" in correction.prompt
+        encoded_handoff = correction.prompt.split("BEGIN SERVER-PARSED PREVIOUS RESULT\n", 1)[1].split("\nEND SERVER-PARSED PREVIOUS RESULT", 1)[0]
+        handoff = json.loads(encoded_handoff)
+        assert handoff["status"] == "failed"
+        assert handoff["summary"] == "Implemented and executed the approved design."
+        assert handoff["artifact_refs"]
+        assert handoff["failed_quality_checks"] == [
+            {
+                "name": "phase_done_condition",
+                "passed": False,
+                "detail": "The generated implementation test failed.",
+            }
+        ]
+        assert handoff["limitations"] == []
+        assert handoff["provenance"]["phase_manifest"]["entry_point"] in handoff["artifact_refs"]
 
     async def test_a_failed_done_condition_stops_before_the_next_phase(self, project) -> None:
         repo, root = project

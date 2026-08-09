@@ -40,6 +40,7 @@ from deerflow.dbtl.worker_result import QualityCheck, StageWorkerResult, WorkerS
 PLANNER_ROLE = "planner"
 PHASE_ROLE = "phase"
 PHASE_DONE_CHECK = "phase_done_condition"
+CORRECTION_HANDOFF_MAX_ITEMS = 20
 
 BUILD_PRESENTATION_RESULT_NOTE = """
 Build result declarations (required in addition to the shared result):
@@ -757,6 +758,7 @@ def phase_correction_unit(
     attempt_token: str,
     spec: StageSpec,
     previous_workspace: str,
+    previous_result: StageWorkerResult,
     failure: str,
     result_contract: str,
     granted_inputs: Sequence[str] = (),
@@ -769,6 +771,20 @@ def phase_correction_unit(
     of the old same-agent loop.
     """
     phase = assignment.phase
+    phase_manifest = parse_phase_manifest(previous_result.provenance.get("phase_manifest"))
+    manifest_snapshot = phase_manifest.as_dict() if phase_manifest is not None else None
+    if manifest_snapshot is not None:
+        for field_name in ("declared_outputs", "declared_inputs", "execution_inputs"):
+            if field_name in manifest_snapshot:
+                manifest_snapshot[field_name] = manifest_snapshot[field_name][:CORRECTION_HANDOFF_MAX_ITEMS]
+    previous_result_handoff = {
+        "status": previous_result.status.value,
+        "summary": previous_result.summary,
+        "artifact_refs": list(previous_result.artifact_refs[:CORRECTION_HANDOFF_MAX_ITEMS]),
+        "failed_quality_checks": [check.as_dict() for check in previous_result.quality_checks if not check.passed][:CORRECTION_HANDOFF_MAX_ITEMS],
+        "limitations": list(previous_result.limitations[:CORRECTION_HANDOFF_MAX_ITEMS]),
+        "provenance": {"phase_manifest": manifest_snapshot} if manifest_snapshot is not None else {},
+    }
     lines = [
         f"You are correcting phase {index} of the {spec.title} stage.",
         f"Phase: {phase.title}",
@@ -777,6 +793,11 @@ def phase_correction_unit(
         "",
         "The server rejected the first implementation for exactly this reason:",
         failure[:2_000],
+        "",
+        "The server parsed this bounded result from the first worker. Use it as recovery context, not as proof that the phase passed:",
+        "BEGIN SERVER-PARSED PREVIOUS RESULT",
+        json.dumps(previous_result_handoff, sort_keys=True, ensure_ascii=False),
+        "END SERVER-PARSED PREVIOUS RESULT",
         "",
         f"Its staged files are read-only at {previous_workspace}.",
         f"Write the corrected implementation under {STAGE_UNIT_WORKSPACE_PLACEHOLDER}; do not modify the previous workspace.",

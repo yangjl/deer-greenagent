@@ -26,6 +26,7 @@ from deerflow.dbtl.build_workflow import MAX_BUILD_PHASES
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_runner import BUILD_PLAN_OUTPUT
 from deerflow.dbtl.stage_spec import resolve_stage_spec
+from deerflow.dbtl.worker_result import failed_result
 
 ENGINEERING = Capability.SOFTWARE_ENGINEERING.value
 
@@ -271,6 +272,11 @@ class TestCorrectionUnitCanActuallyFinish:
             attempt_token="token",
             spec=resolve_stage_spec("build"),
             previous_workspace="/mnt/user-data/outputs/.dbtl-stage-work/x/build/y",
+            previous_result=failed_result(
+                capability=phase.capability.value,
+                agent_name="general-purpose",
+                reason="declared output missing",
+            ),
             failure="declared output missing",
             result_contract="contract",
         )

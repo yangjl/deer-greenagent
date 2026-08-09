@@ -5411,6 +5411,7 @@ class LiveStageAdapter:
                     attempt_token=safe_token(handle.step_run_id or f"{attempt_id}:{plan.digest}:{index}"),
                     spec=spec,
                     previous_workspace=first_workspace,
+                    previous_result=first_result,
                     failure=failure,
                     result_contract=f"{RESULT_CONTRACT}\n\n{BUILD_FULFILLMENT_CONTRACT}",
                     granted_inputs=granted_inputs,

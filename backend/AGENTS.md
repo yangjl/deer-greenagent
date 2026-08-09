@@ -3942,8 +3942,10 @@ same switch:
   Current Build is `generic:build:v12`, with a 500,000-token worker ceiling. A
   failed implementation check or deterministic server-verification refusal
   receives one fresh 200,000-token correction
-  worker carrying only the refusal and previous staged workspace; it does not
-  inherit the first worker's growing ReAct transcript.
+  worker carrying the refusal, previous staged workspace, and a bounded
+  server-parsed snapshot of the first worker's result (summary, artifacts,
+  failed checks, limitations, and phase manifest); it does not inherit the
+  first worker's growing ReAct transcript.
 
   V12 requires phase-manifest v3. `declared_inputs` binds the narrow set of
   workspace files consumed while implementing or executing the phase;
