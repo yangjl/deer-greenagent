@@ -50,7 +50,6 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-
 /**
  * What the hydrator actually produces: task ids in the store.
  *
@@ -178,7 +177,7 @@ describe("StageWorkHydrator durable hydration", () => {
       deferred<Awaited<ReturnType<typeof fetchStageWorkers>>>();
     mockedFetchStageWorkers
       .mockReturnValueOnce(staleRequest.promise)
-      .mockResolvedValueOnce([worker("worker-settled", "run-1")]);
+      .mockResolvedValue([worker("worker-settled", "run-1")]);
 
     const view = render(
       <SubtasksProvider>
@@ -192,7 +191,7 @@ describe("StageWorkHydrator durable hydration", () => {
 
     view.rerender(
       <SubtasksProvider>
-        <StageWorkHydrator threadId="thread-1" isLoading  />
+        <StageWorkHydrator threadId="thread-1" isLoading />
         <HydratedTaskIds />
       </SubtasksProvider>,
     );

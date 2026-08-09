@@ -2417,8 +2417,9 @@ class TestLiveStageBranch:
         assert "test is locked" in receipt
         assert "no stage worker ran" in receipt
 
+    @pytest.mark.parametrize("selected_cycle_id", [None, "cyc-1"])
     @pytest.mark.asyncio
-    async def test_explicit_build_command_after_hold_opens_a_new_governed_control(self):
+    async def test_explicit_build_command_after_hold_opens_a_new_governed_control(self, selected_cycle_id):
         lead_calls = []
         recovered = []
 
@@ -2468,7 +2469,7 @@ class TestLiveStageBranch:
             context=SupervisorContext(
                 project_id="proj-1",
                 project_name="G2F",
-                selected_cycle_id=None,
+                selected_cycle_id=selected_cycle_id,
             ),
             stage_adapter=Adapter(),
             state_schema=SCHEMA,
@@ -2477,10 +2478,21 @@ class TestLiveStageBranch:
         final = await graph.ainvoke(
             {
                 **FULL_STATE,
-                "messages": [HumanMessage(content="Replan the build", id="replan-after-hold")],
+                "messages": [
+                    HumanMessage(
+                        content=(
+                            "Replan Build to remove every hard-coded DBTL_INPUT_n ordinal from run_calibration.py, "
+                            "validate_calibration.py, test_rerun_spec.json, and RUNBOOK.md. Resolve the three immutable "
+                            "inputs by logical filename from the server-declared inputs, then preserve the one-phase Build, "
+                            "all eight deliverables, exact 2/1/0 results, byte-identical clean outputs, and appended-row "
+                            "tamper rejection."
+                        ),
+                        id="replan-after-hold",
+                    )
+                ],
             },
             config={
-                "configurable": {"thread_id": "replan-after-hold"},
+                "configurable": {"thread_id": f"replan-after-hold-{selected_cycle_id}"},
                 "context": {"run_id": "run-replan-after-hold"},
             },
         )
@@ -3107,7 +3119,18 @@ class TestLiveStageBranch:
         assert request["design_feedback_surface_id"] == "validity-new"
 
     @pytest.mark.asyncio
-    async def test_recorded_test_outcome_preserves_a_current_hold(self):
+    @pytest.mark.parametrize(
+        ("later_message", "reopens_handoff"),
+        [
+            ("continue the cycle", False),
+            ("Run the governed Learn stage now", True),
+        ],
+    )
+    async def test_recorded_test_outcome_preserves_a_current_hold_until_an_explicit_stage_request(
+        self,
+        later_message: str,
+        reopens_handoff: bool,
+    ):
         executed: list[dict] = []
         request_id = "dbtl-stage-handoff__cyc-1__current"
         request = {
@@ -3182,15 +3205,22 @@ class TestLiveStageBranch:
                             },
                         },
                     ),
-                    HumanMessage(id="later-message", content="continue the cycle"),
+                    HumanMessage(id="later-message", content=later_message),
                 ],
             },
             config={"configurable": {"thread_id": "test-learn-current-hold"}},
         )
 
         assert executed == []
-        assert not isinstance(final["messages"][-1], ToolMessage)
-        assert "held" in final["messages"][-1].content.lower()
+        if reopens_handoff:
+            assert isinstance(final["messages"][-1], ToolMessage)
+            reopened = final["messages"][-1].artifact["human_input"]
+            assert reopened["next_stage"] == "learn"
+            assert reopened["design_feedback_surface_id"] == "validity-current"
+            assert reopened["request_id"] != request_id
+        else:
+            assert not isinstance(final["messages"][-1], ToolMessage)
+            assert "held" in final["messages"][-1].content.lower()
 
     @pytest.mark.asyncio
     async def test_the_slide_deck_is_shown_before_the_question_it_needs_answered(self):

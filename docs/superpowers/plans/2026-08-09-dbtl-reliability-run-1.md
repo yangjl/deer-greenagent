@@ -14,6 +14,7 @@
 - Run 1 hard cap: 45 minutes or 350,000 model tokens.
 - Run 1 target: 25 minutes and 240,000 model tokens.
 - Freeze model names, reasoning, specialists, prompts, skills, deck behavior, DBTL policy, and stage-spec versions.
+- Use `gpt-5.6-sol-codex` as the composer/run model in both ordinary and governed conversations; keep the manual profile's `gpt-5.5-codex` setup and Design-meeting models unchanged.
 - Specialist craft memory starts empty and remains unavailable for writes.
 - Use visible browser controls for every human decision; API and SQL access are read-only diagnostics.
 - Do not patch source code or repair the database during a qualifying attempt.
@@ -85,12 +86,13 @@ Expected: both specialists show `craft_memory: false`; no specialist memory file
 Run:
 
 ```bash
-curl -fsS http://localhost:2026/api/health
+curl -fsSI http://localhost:2026/
+curl -fsS http://localhost:8001/openapi.json
 lsof -nP -iTCP:2026 -sTCP:LISTEN
 lsof -nP -iTCP:8001 -sTCP:LISTEN
 ```
 
-If the health request fails and no stage worker is active, run:
+If either HTTP request fails and no stage worker is active, run:
 
 ```bash
 make dbtl-manual-dev
@@ -225,7 +227,9 @@ WHERE p.name = 'Ordinary Reliability Maize';
 
 Expected: `0`.
 
-- [ ] **Step 2: Open a fresh ordinary project conversation and submit the control prompt**
+- [ ] **Step 2: Select GPT-5.6 Sol and submit the control prompt in a fresh ordinary conversation**
+
+Select **GPT-5.6 Sol (Codex Subscription)** in the composer model menu before submitting.
 
 Prompt:
 
@@ -278,6 +282,8 @@ Expected: zero rows.
 - Produces: one completed governed cycle with supported Test outcome and provisional-only Learn state
 
 - [ ] **Step 1: Explicitly start a new cycle through the composer scope**
+
+Select **GPT-5.6 Sol (Codex Subscription)** in the composer model menu before submitting.
 
 Prompt:
 
@@ -441,7 +447,7 @@ make dbtl-manual-capture SCENARIO=dbtl-reliability-run1-final
 
 Expected: final manifest records database and project hashes and the new resumable cycle URL.
 
-- [ ] **Step 6: Evaluate run 1 against the feasibility checkpoint**
+- [x] **Step 6: Evaluate run 1 against the feasibility checkpoint**
 
 The written evaluation must answer:
 
@@ -456,6 +462,16 @@ The written evaluation must answer:
 9. Which explicit, versioned changes to the campaign plan are recommended before run 2?
 
 Expected: a go, modify, or stop recommendation grounded in captured evidence; no retroactive redefinition of success.
+
+**Result:** Go with modifications. Run 1 completed as qualifying product success
+1 of 10 at 308,813 governed tokens and 16 minutes 16 seconds wall time. Test
+recorded `supported` on the first attempt and routed to Learn. The missing
+Design-added notebook was detected as a non-gating worker/package defect; no
+product fix or replay was required. The final checkpoint is
+`.deer-flow/manual-dbtl/scenarios/dbtl-reliability-run1-final/manifest.json`.
+The campaign design contains the versioned budget and protocol amendments. The
+owner subsequently raised the hard campaign ceiling to 5.0 million tokens and
+retired the ordinary-control arm after this one historical comparison.
 
 ### Task 6: Verify any observed product-fix batch before resuming
 

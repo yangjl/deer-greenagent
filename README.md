@@ -43,6 +43,14 @@ Design–Build–Test–Learn (DBTL) governance.
   Reconciliation form is not a validity failure. Test uses a server-owned list
   of required checks, so missing pedigree or relatedness data can remain a
   limitation without becoming a gate the approved Design never selected.
+  The clean Test rerun restores each hash-verified Build support file at its
+  recorded package-relative path, so runners that use layouts such as
+  `src/` and `data/` execute with the same approved structure while expected
+  outputs remain absent until the rerun creates them.
+  If an approved stage records its decision but the next-stage prompt fails to
+  arrive, reopening the authenticated deck re-enables that exact decision—including
+  a Test outcome route—so the prompt can be redelivered without repeating the
+  review.
   One-click Build approval opens Test atomically, and older checkpoints whose
   summary lags their active stage recover from the active row instead of
   rerunning Build. Live worker cards use the actual DBTL stage instead of

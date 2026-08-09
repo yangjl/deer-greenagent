@@ -123,10 +123,10 @@ def _adapter(executed: list, previewed: list):
     return Adapter()
 
 
-def _graph(executed: list, previewed: list):
+def _graph(executed: list, previewed: list, *, selected_cycle_id: str | None = "cyc-1"):
     return build_supervisor_graph(
         lead_agent=fake_lead_agent([]),
-        context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id="cyc-1"),
+        context=SupervisorContext(project_id="proj-1", project_name="G2F", selected_cycle_id=selected_cycle_id),
         stage_adapter=_adapter(executed, previewed),
         state_schema=SCHEMA,
     ).compile(checkpointer=InMemorySaver())
@@ -277,6 +277,23 @@ class TestTheRoundTripStillWorks:
 
         assert executed, "the meeting never ran"
         assert _dispatched_depth(executed) == "heavy"
+
+    @pytest.mark.asyncio
+    async def test_answering_the_new_card_runs_after_the_one_shot_cycle_scope_is_gone(self):
+        """The server card, not stale visible rerun prose, owns this answer."""
+        executed: list = []
+        previewed: list = []
+
+        asked = await _graph(executed, previewed).ainvoke(
+            _asking_again("Run the design meeting again now and incorporate the recorded requested changes exactly."),
+            config={"configurable": {"thread_id": "rerun-unscoped-ask"}},
+        )
+        await _graph(executed, previewed, selected_cycle_id=None).ainvoke(
+            self._answering(asked, "light"),
+            config={"configurable": {"thread_id": "rerun-unscoped-answer"}},
+        )
+
+        assert executed, "the preflight answer was mistaken for the older free-text rerun request"
 
     @pytest.mark.asyncio
     async def test_the_card_is_not_raised_a_second_time(self):

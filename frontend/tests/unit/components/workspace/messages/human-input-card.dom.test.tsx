@@ -101,4 +101,60 @@ describe("HumanInputCard form validation (DOM)", () => {
       ),
     ).toBe(false);
   });
+
+  it("shows only the participants selected for the council depth", () => {
+    render(
+      <I18nContext.Provider
+        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+      >
+        <HumanInputCard
+          request={{
+            ...formRequest,
+            version: 1,
+            clarification_type: "council_preflight",
+            context:
+              "**gpt-5.5-codex** · 4 workers\n\n- **Independent position**\n- **Independent position**\n- **Red team**\n- **Chair**",
+            input_mode: "single_choice",
+            recommended_option_id: "medium",
+            options: [
+              { id: "light", label: "Light debate", value: "light" },
+              { id: "medium", label: "Medium debate", value: "medium" },
+            ],
+            council_participants: [
+              participant("position-1", "position", "Independent position"),
+              participant("position-2", "position", "Independent position"),
+              participant("red-team", "red_team", "Red team"),
+              participant("chair", "chair", "Chair"),
+            ],
+          }}
+          onSubmit={() => undefined}
+        />
+      </I18nContext.Provider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Light debate" }));
+
+    expect(screen.queryByText(/4 workers/)).toBeNull();
+    expect(screen.getAllByText("Independent position")).toHaveLength(1);
+    expect(screen.getAllByText("Red team")).toHaveLength(1);
+    expect(screen.getAllByText("Chair")).toHaveLength(1);
+  });
 });
+
+function participant(id: string, role: string, roleLabel: string) {
+  return {
+    id,
+    role,
+    role_label: roleLabel,
+    agent_name: "general-purpose",
+    via_generalist: false,
+    model: "gpt-5.5-codex",
+    model_options: ["gpt-5.5-codex"],
+    max_tokens: 100000,
+    max_tokens_min: 10000,
+    max_tokens_max: 200000,
+    reasoning: "standard",
+    reasoning_options: ["standard"],
+    instructions: `Run ${roleLabel}.`,
+  };
+}

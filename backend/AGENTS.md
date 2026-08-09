@@ -2416,6 +2416,10 @@ admission failure or a later terminal background failure writes
 original client submission id starts only a new handoff run. The process-local
 watcher posts the failure into chat and updates the ledger; the authenticated
 surface read model reconstructs the same retry state after a Gateway restart.
+That retry allowlist includes Test's `choose_route` action as well as direct
+approval/advance actions; the selected route and comment still come from the
+original payload hash, so recovery can redeliver **Start Learn / Hold** without
+recomputing the Test outcome or permitting a different route.
 No DBTL-specific card is mounted by proposal evaluation,
 and continuation is not a proposable route because that request already
 executes the selected stage. Emitting a card without handling its answer is the failure
@@ -2837,10 +2841,14 @@ The Test rerun workspace is clean, not empty of approved source. Before Test
 dispatch, `prepare_test_rerun` hash-verifies and stages every published Build
 support artifact that is not an expected rerun output (for example the entry
 point, an imported `fit.py`, and a replay notebook). Expected outputs are never
-preseeded. A content-addressed entry point executes by its restored filename in
-that workspace so sibling imports and reads do not depend on the published
-hash-prefixed path. Missing, changed, colliding, or oversized support files fail
-preflight; Test must not repair Build evidence.
+preseeded. A support artifact with a recorded `source_path` is restored at that
+safe package-relative path (including parent directories such as `src/` and
+`data/`); older records without one retain the basename compatibility path. A
+content-addressed entry point executes by its restored path in that workspace
+so sibling imports and relative reads do not depend on the published
+hash-prefixed path. Absolute, traversal, non-canonical, missing, changed,
+colliding, or oversized support files fail preflight; Test must not repair Build
+evidence.
 
 Build's structured-result parser is deliberately looser only about the label on
 a concrete implementation file. Models often return semantic kinds such as

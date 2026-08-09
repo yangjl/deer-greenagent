@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { useId, useState } from "react";
 
+import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 
 export interface ProjectRailCollapsedItem {
@@ -23,41 +24,52 @@ export function ProjectRailFrame({
   collapsedItems?: readonly ProjectRailCollapsedItem[];
 }) {
   const [collapsed, setCollapsed] = useState(false);
+  const [mobileExpanded, setMobileExpanded] = useState(false);
   const contentId = useId();
+  const isMobile = useIsMobile();
+  const isCollapsed = isMobile ? !mobileExpanded : collapsed;
+
+  const setExpanded = (expanded: boolean) => {
+    if (isMobile) {
+      setMobileExpanded(expanded);
+    } else {
+      setCollapsed(!expanded);
+    }
+  };
 
   return (
     <aside
-      data-state={collapsed ? "collapsed" : "expanded"}
+      data-state={isCollapsed ? "collapsed" : "expanded"}
       className={cn(
-        "border-border bg-muted/20 hidden shrink-0 flex-col overflow-hidden border-r transition-[width] duration-200 ease-linear md:flex",
-        collapsed ? "w-12" : "w-64",
+        "border-border bg-muted/20 flex shrink-0 flex-col overflow-hidden border-r transition-[width] duration-200 ease-linear",
+        isCollapsed ? "w-12" : "w-64",
       )}
     >
       <div
         className={cn(
           "flex h-12 w-full shrink-0 items-center px-2",
-          collapsed ? "justify-center" : "justify-end",
+          isCollapsed ? "justify-center" : "justify-end",
         )}
       >
         <button
           type="button"
           aria-controls={contentId}
-          aria-expanded={!collapsed}
+          aria-expanded={!isCollapsed}
           aria-label={
-            collapsed ? "Expand project rail" : "Collapse project rail"
+            isCollapsed ? "Expand project rail" : "Collapse project rail"
           }
-          title={collapsed ? "Expand project rail" : "Collapse project rail"}
+          title={isCollapsed ? "Expand project rail" : "Collapse project rail"}
           className="text-muted-foreground hover:text-foreground flex size-7 items-center justify-center rounded-md transition-colors"
-          onClick={() => setCollapsed((value) => !value)}
+          onClick={() => setExpanded(isCollapsed)}
         >
-          {collapsed ? (
+          {isCollapsed ? (
             <PanelLeftOpenIcon className="size-4" />
           ) : (
             <PanelLeftCloseIcon className="size-4" />
           )}
         </button>
       </div>
-      {collapsed ? (
+      {isCollapsed ? (
         <nav
           id={contentId}
           aria-label="Project rail sections"
@@ -73,7 +85,7 @@ export function ProjectRailFrame({
                 title={item.label}
                 className="text-muted-foreground hover:bg-muted hover:text-foreground flex size-8 shrink-0 items-center justify-center rounded-md transition-colors"
                 onClick={() => {
-                  setCollapsed(false);
+                  setExpanded(true);
                   item.onSelect?.();
                 }}
               >

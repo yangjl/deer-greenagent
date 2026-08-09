@@ -443,6 +443,126 @@ def test_published_build_support_files_are_staged_without_preseeding_expected_ou
     assert unit.tool_contract["staged_files"] == [{"source": source, "name": name} for source, name in prepared.staged_files]
 
 
+def test_published_build_support_file_can_be_a_declared_rerun_input(tmp_path: Path) -> None:
+    lineage, _build_output = _project(tmp_path)
+    published = tmp_path / "outputs/dbtl/build/fedcba9876543210-training.csv"
+    published.parent.mkdir(parents=True, exist_ok=True)
+    published.write_text("x,y\n0,1\n", encoding="utf-8")
+    uri = f"/mnt/user-data/{published.relative_to(tmp_path)}"
+    lineage["rerun_spec"]["inputs"].append(uri)
+    lineage["output_artifacts"].append(
+        {
+            "uri": uri,
+            "content_hash": _sha(published.read_bytes()),
+            "revision": 1,
+            "source_path": "training.csv",
+        }
+    )
+
+    prepared = prepare_test_rerun(lineage, project_root=str(tmp_path))
+
+    assert isinstance(prepared, PreparedTestRerun)
+    assert (uri, "training.csv") in prepared.staged_files
+
+
+def test_published_build_support_files_restore_their_package_relative_paths(tmp_path: Path) -> None:
+    lineage, _build_output = _project(tmp_path)
+    published = tmp_path / "outputs/dbtl/build"
+    published.mkdir(parents=True, exist_ok=True)
+    entrypoint = published / "0123456789abcdef-run.py"
+    training = published / "fedcba9876543210-training.csv"
+    entrypoint.write_text("from pathlib import Path\nPath('data/training.csv').read_text()\n", encoding="utf-8")
+    training.write_text("x,y\n0,1\n", encoding="utf-8")
+    lineage["rerun_spec"].update(
+        {
+            "entry_point": f"/mnt/user-data/{entrypoint.relative_to(tmp_path)}",
+            "command": "python src/run.py",
+        }
+    )
+    lineage["output_artifacts"].extend(
+        [
+            {
+                "uri": f"/mnt/user-data/{entrypoint.relative_to(tmp_path)}",
+                "content_hash": _sha(entrypoint.read_bytes()),
+                "revision": 1,
+                "source_path": "src/run.py",
+            },
+            {
+                "uri": f"/mnt/user-data/{training.relative_to(tmp_path)}",
+                "content_hash": _sha(training.read_bytes()),
+                "revision": 1,
+                "source_path": "data/training.csv",
+            },
+        ]
+    )
+
+    prepared = prepare_test_rerun(lineage, project_root=str(tmp_path))
+
+    assert isinstance(prepared, PreparedTestRerun)
+    assert prepared.spec.command == "python 'src/run.py'"
+    assert prepared.staged_files == (
+        (f"/mnt/user-data/{entrypoint.relative_to(tmp_path)}", "src/run.py"),
+        (f"/mnt/user-data/{training.relative_to(tmp_path)}", "data/training.csv"),
+    )
+
+
+def test_unsafe_published_source_path_fails_before_test_dispatch(tmp_path: Path) -> None:
+    lineage, _build_output = _project(tmp_path)
+    published = tmp_path / "outputs/dbtl/build/0123456789abcdef-run.py"
+    published.parent.mkdir(parents=True, exist_ok=True)
+    published.write_text("print('run')\n", encoding="utf-8")
+    lineage["rerun_spec"].update(
+        {
+            "entry_point": f"/mnt/user-data/{published.relative_to(tmp_path)}",
+            "command": "python run.py",
+        }
+    )
+    lineage["output_artifacts"].append(
+        {
+            "uri": f"/mnt/user-data/{published.relative_to(tmp_path)}",
+            "content_hash": _sha(published.read_bytes()),
+            "revision": 1,
+            "source_path": "../run.py",
+        }
+    )
+
+    record = prepare_test_rerun(lineage, project_root=str(tmp_path))
+
+    assert isinstance(record, RerunRecord)
+    assert record.status is RerunStatus.FAILED
+    assert "unsafe recorded source path" in record.reason
+
+
+def test_published_entrypoint_itself_must_be_in_the_hash_bound_staging_set(tmp_path: Path) -> None:
+    lineage, _build_output = _project(tmp_path)
+    published = tmp_path / "outputs/dbtl/build"
+    published.mkdir(parents=True, exist_ok=True)
+    entrypoint = published / "0123456789abcdef-run.py"
+    decoy = published / "fedcba9876543210-run.py"
+    entrypoint.write_text("print('approved entry')\n", encoding="utf-8")
+    decoy.write_text("print('different support file')\n", encoding="utf-8")
+    lineage["rerun_spec"].update(
+        {
+            "entry_point": f"/mnt/user-data/{entrypoint.relative_to(tmp_path)}",
+            "command": "python run.py",
+        }
+    )
+    lineage["output_artifacts"].append(
+        {
+            "uri": f"/mnt/user-data/{decoy.relative_to(tmp_path)}",
+            "content_hash": _sha(decoy.read_bytes()),
+            "revision": 1,
+            "source_path": "run.py",
+        }
+    )
+
+    record = prepare_test_rerun(lineage, project_root=str(tmp_path))
+
+    assert isinstance(record, RerunRecord)
+    assert record.status is RerunStatus.FAILED
+    assert "entry point is not available" in record.reason
+
+
 def test_duplicate_expected_output_filenames_fail_before_dispatch(tmp_path: Path) -> None:
     lineage, build_output = _project(tmp_path)
     duplicate_uri = "/mnt/user-data/outputs/dbtl/other/model.bin"
@@ -538,7 +658,7 @@ async def test_rerun_tool_executes_bound_command_then_returns_control_to_worker(
     prepared = PreparedTestRerun(
         spec=base.spec,
         output_hashes=base.output_hashes,
-        staged_files=(("/mnt/user-data/outputs/dbtl/build/0123456789abcdef-fit.py", "fit.py"),),
+        staged_files=(("/mnt/user-data/outputs/dbtl/build/0123456789abcdef-fit.py", "src/fit.py"),),
     )
     unit = make_test_rerun_unit(
         prepared,
@@ -564,5 +684,6 @@ async def test_rerun_tool_executes_bound_command_then_returns_control_to_worker(
     assert result.endswith("Native sandbox response: ok")
     assert calls[0][0] is runtime
     assert calls[0][1] == "Execute the server-bound Build rerun and retain its receipt."
-    assert f"cp /mnt/user-data/outputs/dbtl/build/0123456789abcdef-fit.py {UNIT_WORKSPACE}/fit.py" in calls[0][2]
+    assert f"mkdir -p {UNIT_WORKSPACE}/src" in calls[0][2]
+    assert f"cp /mnt/user-data/outputs/dbtl/build/0123456789abcdef-fit.py {UNIT_WORKSPACE}/src/fit.py" in calls[0][2]
     assert COMMAND in calls[0][2]

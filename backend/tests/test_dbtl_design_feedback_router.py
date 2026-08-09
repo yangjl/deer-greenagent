@@ -94,7 +94,16 @@ def test_handoff_marker_reports_exception_advance() -> None:
     assert dbtl_cycles._stage_advanced_with_exception(cycle, "build") is False
 
 
-def test_downstream_learn_deck_reviews_its_own_evidence_normally() -> None:
+def test_test_route_handoff_failure_reopens_the_exact_route_action() -> None:
+    assert dbtl_cycles._handoff_retry_actions(
+        {
+            "status": "handoff_failed",
+            "action_kind": "choose_route",
+        }
+    ) == ["choose_route"]
+
+
+def test_invalidated_test_preserves_its_server_computed_route_menu() -> None:
     dossier = {"condition": "untrusted", "content_hash": "d" * 64}
 
     assert dbtl_cycles._evidence_exception_review_actions(
@@ -102,8 +111,19 @@ def test_downstream_learn_deck_reviews_its_own_evidence_normally() -> None:
         stage_status="in_progress",
         evidence_exception=dossier,
         enabled=True,
-        route_slugs={"learn_from_invalidated_evidence"},
-    ) == ["retry_with_guidance", "continue_with_red_flag"]
+        route_slugs={
+            "learn_from_invalidated_evidence",
+            "repeat_test",
+            "return_to_build",
+            "return_to_design",
+            "close_cycle",
+        },
+    ) == ["retry_with_guidance", "choose_route"]
+
+
+def test_downstream_learn_deck_reviews_its_own_evidence_normally() -> None:
+    dossier = {"condition": "untrusted", "content_hash": "d" * 64}
+
     assert (
         dbtl_cycles._evidence_exception_review_actions(
             stage="test",

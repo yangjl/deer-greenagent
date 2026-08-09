@@ -438,7 +438,9 @@ export function HumanInputCard({
               <h2 id={titleId} className="text-sm leading-5 font-medium">
                 {request.title ?? t.toolCalls.needYourHelp}
               </h2>
-              {request.context ? (
+              {request.context &&
+              (!isCouncilPreflight ||
+                effectiveCouncilOptionId === request.recommended_option_id) ? (
                 <div className="text-muted-foreground text-sm leading-6">
                   <MarkdownContent
                     content={request.context}

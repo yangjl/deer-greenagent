@@ -11,6 +11,7 @@ from deerflow.agents.dbtl.live_stage.adapter import (
 from deerflow.dbtl.transition_assessment import (
     DEFAULT_STANDARD_RATIONALE,
     TransitionDifficulty,
+    build_transition_assessment_prompt,
     parse_transition_assessment,
     standard_assessment,
 )
@@ -44,6 +45,19 @@ def test_standard_fallback_never_silently_becomes_routine() -> None:
     assert assessment.difficulty is TransitionDifficulty.STANDARD
     assert assessment.rationale == DEFAULT_STANDARD_RATIONALE
     assert assessment.source == "fallback"
+
+
+def test_review_disclaimer_and_superseded_history_are_not_transition_risks() -> None:
+    prompt = build_transition_assessment_prompt(
+        stage="learn",
+        cycle={"id": "cycle-1", "title": "Bounded fixture"},
+        evidence_summary=(
+            "> This package **does not satisfy** the review gate. A person must read it and decide; nothing here advances the cycle on its own.\n\nThe current authoritative rerun passed; an earlier failed rerun remains in history."
+        ),
+    )
+
+    assert "not evidence that the stage failed" in prompt
+    assert "superseded or historical evidence is not materially disputed current work by itself" in prompt
 
 
 @pytest.mark.asyncio

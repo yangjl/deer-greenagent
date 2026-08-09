@@ -877,17 +877,18 @@ export function deriveHumanInputThreadState(
  *
  * A surface id on a request means two different things depending on the card.
  * On a Design decision it means the deck *is* the input surface, so the card
- * must not also appear in chat. On a stage handoff it is only an audit binding
- * — which surface's approval opened this stage — and the deck has no control
- * that could answer it. Suppressing both made the Start/Hold card render as
- * nothing at all: the control existed in durable history and no one could see
- * or answer it.
+ * must not also appear in chat. On stage handoffs and Test decisions it is
+ * only an audit binding: the deck has no active control that can answer the
+ * chat-owned request. Suppressing those cards renders their durable controls
+ * as empty regions.
  *
  * The check is an allowlist so a future surface-bound card stays suppressed by
  * default; being invisible is recoverable, being wrongly interactive is not.
  */
 const CHAT_ANSWERED_SURFACE_CLARIFICATION_TYPES = new Set([
   "dbtl_stage_handoff",
+  "dbtl_test_review",
+  "dbtl_test_outcome",
 ]);
 
 export function isDeckOwnedHumanInputRequest(

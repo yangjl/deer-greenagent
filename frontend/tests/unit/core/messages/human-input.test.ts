@@ -316,6 +316,29 @@ test("a stage handoff card is answered in chat even though it names a surface", 
   expect(hasOpenHumanInputRequest([requestMessage])).toBe(true);
 });
 
+test.each(["dbtl_test_review", "dbtl_test_outcome"])(
+  "%s card is answered in chat even though it names the Test evidence surface",
+  (clarificationType) => {
+    const requestMessage = {
+      type: "tool",
+      name: "ask_clarification",
+      content: "fallback",
+      artifact: {
+        human_input: {
+          ...requestPayload,
+          clarification_type: clarificationType,
+          design_feedback_surface_id: "test-evidence:cycle-1:hash",
+        },
+      },
+    } as unknown as Message;
+
+    expect(
+      isDeckOwnedHumanInputRequest(extractHumanInputRequest(requestMessage)),
+    ).toBe(false);
+    expect(hasOpenHumanInputRequest([requestMessage])).toBe(true);
+  },
+);
+
 test("an unknown surface-bound card stays deck-owned", () => {
   // The allowlist is deliberately narrow: a future surface-bound card should
   // stay suppressed until someone decides it is answered in chat.

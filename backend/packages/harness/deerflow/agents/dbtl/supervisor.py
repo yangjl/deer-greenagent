@@ -245,15 +245,15 @@ _REVIEW_INTENT_RE = re.compile(
 
 _STAGE_CONTROL_PATTERNS = (
     re.compile(
-        r"\b(?P<action>start|run|retry|rerun|re-run|replan|re-plan|restart)\s+(?:to\s+)?(?:the\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
+        r"\b(?P<action>start|run|retry|rerun|re-run|replan|re-plan|restart)\s+(?:to\s+)?(?:the\s+)?(?:governed\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?P<action>move|go|proceed|advance|continue)\s+(?:ahead\s+)?(?:to|into|with)\s+(?:the\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
+        r"\b(?P<action>move|go|proceed|advance|continue)\s+(?:ahead\s+)?(?:to|into|with)\s+(?:the\s+)?(?:governed\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?P<action>let['’]?s|let\s+us|shall\s+we)\s+(?:(?:start|run|retry|rerun|re-run|replan|re-plan|restart)\s+(?:to\s+)?|(?:move|go|proceed|advance|continue)\s+(?:to|into|with)\s+)?(?:the\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
+        r"\b(?P<action>let['’]?s|let\s+us|shall\s+we)\s+(?:(?:start|run|retry|rerun|re-run|replan|re-plan|restart)\s+(?:to\s+)?|(?:move|go|proceed|advance|continue)\s+(?:to|into|with)\s+)?(?:the\s+)?(?:governed\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
         re.IGNORECASE,
     ),
 )
@@ -659,10 +659,11 @@ def _stage_handoff_message(
     next_stage = str(marker["next_stage"]).strip().lower()
     cycle_id = str(marker["cycle_id"])
     surface_id = str(marker["surface_id"])
+    request_instance_id = str(marker.get("request_instance_id") or surface_id)
     request_id = card_request_id(
         STAGE_HANDOFF_PREFIX,
         cycle_id,
-        surface_id,
+        request_instance_id,
         approved_stage,
         next_stage,
     )
@@ -1654,14 +1655,14 @@ def build_supervisor_graph(
             str(active_discovery.get("id") or "") if active_discovery else None,
             discovery_suppressed=discovery_suppressed or _declined_setup_confirmation(state),
         )
-        if decision.branch is SupervisorBranch.ORDINARY and context.project_id and context.selected_cycle_id is None and _stage_control_intent(_latest_user_text(state)) is not None:
+        scoped_cycle = context.selected_cycle_id or decision.cycle_id
+        waiting_control = bool(context.project_id and (_pending_stage_handoff_control(state, selected_cycle_id=scoped_cycle) is not None or _pending_build_control(state, selected_cycle_id=scoped_cycle) is not None))
+        if (decision.branch is SupervisorBranch.ORDINARY or decision.route.source is RouteSource.CLASSIFIER) and context.project_id and context.selected_cycle_id is None and _stage_control_intent(_latest_user_text(state)) is not None:
             return SupervisorBranch.CYCLE_CONTINUATION.value
         # An unanswered control outranks the parked-Design route below. Parking
         # sends ordinary cycle work to the lead agent, which is right — but a
         # waiting control is not ordinary cycle work, and the fence's whole
         # premise is that no path to ORDINARY skips it.
-        scoped_cycle = context.selected_cycle_id or decision.cycle_id
-        waiting_control = bool(context.project_id and (_pending_stage_handoff_control(state, selected_cycle_id=scoped_cycle) is not None or _pending_build_control(state, selected_cycle_id=scoped_cycle) is not None))
         if decision.branch is SupervisorBranch.CYCLE_CONTINUATION and not waiting_control:
             reader = getattr(stage_adapter, "parked_design_context", None)
             if callable(reader):
@@ -2170,7 +2171,9 @@ def build_supervisor_graph(
         # cycle, but the command is still unscoped from the composer's point of
         # view. Keep the explicit intent so a held Build can raise its fresh
         # recovery control instead of falling through to generic guidance.
-        unscoped_stage_intent = _stage_control_intent(latest_text) if context.selected_cycle_id is None else None
+        stage_control_intent = _stage_control_intent(latest_text)
+        build_recovery_intent = stage_control_intent
+        unscoped_stage_intent = stage_control_intent if context.selected_cycle_id is None else None
         active_cycles: list[dict[str, Any]] = []
         if decision.cycle_id is None and (_review_intent(latest_text) is not None or unscoped_stage_intent is not None):
             active_cycles = [item for item in await _active_cycles(stage_adapter, project_id=context.project_id) if not item.get("parked")]
@@ -2233,6 +2236,13 @@ def build_supervisor_graph(
                         )
                     }
         preflight_answer = _card_answer(state, COUNCIL_PREFLIGHT_PREFIX)
+        # A preflight reply is hidden card transport, so ``latest_text`` is the
+        # visible rerun request that opened the card. Once the server-owned
+        # card is answered, that older prose must not be re-read as an unscoped
+        # command and diverted to stage-control guidance.
+        if preflight_answer is not None:
+            build_recovery_intent = None
+            unscoped_stage_intent = None
         if preflight_answer is not None and discovery_store is not None and context.project_id:
             preflight_request = _emitted_card_request(state, preflight_answer[0])
             discovery_event_id = str((preflight_request or {}).get("dbtl_discovery_event_id") or "")
@@ -2273,6 +2283,7 @@ def build_supervisor_graph(
         # detector must stand down or it reopens another card instead of
         # dispatching the choice the person just made.
         if handoff_answer is not None:
+            build_recovery_intent = None
             unscoped_stage_intent = None
 
         # Before the Test cards and before anything else that could dispatch: a
@@ -2293,6 +2304,7 @@ def build_supervisor_graph(
         # this card. It must not be re-read as free text after the card itself
         # has resolved; the bound answer is the authority for this request.
         if build_control_answer is not None:
+            build_recovery_intent = None
             unscoped_stage_intent = None
 
         test_cards = await handle_test_cards(
@@ -2334,6 +2346,18 @@ def build_supervisor_graph(
                     and str(latest_request.get("next_stage") or "") == "learn"
                 )
                 if same_handoff and latest_answer == "hold_here":
+                    if stage_control_intent is not None and stage_control_intent[1] == str(marker.get("next_stage") or ""):
+                        reopened_marker = dict(marker)
+                        reopened_marker["request_instance_id"] = request_nonce or "reopened"
+                        return {
+                            "messages": list(
+                                _stage_handoff_message(
+                                    decision,
+                                    reopened_marker,
+                                    request_nonce=request_nonce,
+                                )
+                            )
+                        }
                     return {"messages": [receipt_message("Learn remains held. No governed stage work was started; use the current server-owned control when you are ready to reopen it.")]}
                 if isinstance(marker, Mapping) and not same_handoff:
                     return {
@@ -2424,7 +2448,7 @@ def build_supervisor_graph(
         # Build command is not ordinary conversation. Re-open a *new* durable
         # control from the latest Build record; never reinterpret the words as
         # consent and never let the Lead Agent simulate governed work.
-        if unscoped_stage_intent is not None and unscoped_stage_intent[1] == "build":
+        if build_recovery_intent is not None and build_recovery_intent[1] == "build":
             if not active_cycles:
                 active_cycles = [item for item in await _active_cycles(stage_adapter, project_id=context.project_id) if not item.get("parked")]
             recovery_cycle_id = decision.cycle_id
@@ -2435,7 +2459,7 @@ def build_supervisor_graph(
                 recovered = recover(
                     project_id=context.project_id,
                     cycle_id=recovery_cycle_id,
-                    requested_action=unscoped_stage_intent[0],
+                    requested_action=build_recovery_intent[0],
                     config=config,
                 )
                 if isawaitable(recovered):

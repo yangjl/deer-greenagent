@@ -973,3 +973,74 @@ async def test_failed_review_meeting_can_retry_under_the_same_action_id(tmp_path
     assert retried["run_id"] is None
     assert retried["human_comment"] == "Check the holdout and fold evidence."
     assert retried["receipt"]["failed_attempts"][-1]["run_id"] == "run-failed-meeting"
+
+
+async def test_high_stakes_rationale_error_names_the_reviewed_stage(tmp_path: Path) -> None:
+    repo = await _repo(tmp_path)
+    await _awaiting_test_review(repo)
+    await repo.record_validity_assessment(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        metrics=[{"name": "accuracy", "value": 0.94, "threshold": 0.70, "criterion": "gte"}],
+        checks=_checks(),
+        recommendation="advance_to_learn",
+        limitations=[],
+        rationale="The bounded result is supported.",
+        reviewer_user_id="reviewer-1",
+        reviewer_project_role="owner",
+        expected_db_revision=await _revision(repo),
+        idempotency_key="assessment-for-learn-rationale",
+    )
+    await _attach(repo, "learn", "learn-rationale")
+    await repo.submit_stage_for_review(
+        cycle_id="cycle-1",
+        project_id="project-1",
+        stage="learn",
+        expected_db_revision=await _revision(repo),
+        actor_user_id="user-1",
+        idempotency_key="submit-learn-rationale",
+    )
+    cycle = await repo.get_cycle("cycle-1", project_id="project-1")
+    assert cycle is not None
+    attempt = next(item for item in cycle["stages"] if item["stage"] == "learn")
+    evidence = next(item for item in cycle["artifacts"] if item["stage_attempt_id"] == attempt["id"] and item["artifact_type"] == "learn_package")
+    surface = await repo.register_stage_feedback_surface(
+        stage="learn",
+        project_id="project-1",
+        cycle_id="cycle-1",
+        stage_attempt_id=attempt["id"],
+        design_round=1,
+        originating_thread_id="thread-1",
+        mode="stage_review",
+        deck_uri="/mnt/user-data/outputs/learn-slides.html",
+        deck_content_hash=HASH_A,
+        evidence_artifact_id=evidence["id"],
+        evidence_artifact_revision=evidence["revision"],
+        evidence_content_hash=evidence["content_hash"],
+        decision_request={
+            "transition_gate": {
+                "stage": "learn",
+                "assessment": {"difficulty": "high_stakes"},
+                "routes": [],
+            }
+        },
+    )
+
+    with pytest.raises(DesignFeedbackConflict, match="A high-stakes Learn verdict"):
+        await repo.reserve_stage_feedback_action(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            surface_id=surface["surface_id"],
+            originating_thread_id="thread-1",
+            action_kind="approve",
+            selected_card_ids=[],
+            human_comment="",
+            client_submission_id="learn-high-stakes-no-rationale",
+            expected_db_revision=int(cycle["db_revision"]),
+            expected_evidence={
+                "artifact_id": evidence["id"],
+                "revision": evidence["revision"],
+                "content_hash": evidence["content_hash"],
+            },
+            expected_deck_hash=HASH_A,
+        )

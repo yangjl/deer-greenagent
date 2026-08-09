@@ -679,7 +679,7 @@ class DesignFeedbackOpsMixin:
                 # one place it still costs the reviewer something: their own
                 # words, on every approving or ending verdict.
                 if action_kind in {"advance", "approve", "request_changes", "reject"} and effective_difficulty == "high_stakes" and not has_written_feedback:
-                    raise DesignFeedbackConflict("A high-stakes Design verdict requires the reviewer's written rationale.")
+                    raise DesignFeedbackConflict(f"A high-stakes {surface.stage.title()} verdict requires the reviewer's written rationale.")
                 evidence = expected_evidence or {}
                 exact = {
                     "artifact_id": surface.evidence_artifact_id,

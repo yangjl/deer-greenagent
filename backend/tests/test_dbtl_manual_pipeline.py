@@ -134,6 +134,26 @@ def test_profile_is_isolated_and_disables_background_writers(tmp_path: Path) -> 
     assert original["channels"]["slack"]["enabled"] is True
 
 
+def test_profile_enables_memory_for_opted_in_craft_specialists(tmp_path: Path) -> None:
+    source = _source_config(tmp_path / "config.yaml")
+    source_config = yaml.safe_load(source.read_text(encoding="utf-8"))
+    source_config["subagents"] = {
+        "custom_agents": {
+            "build-engineer": {"description": "Build specialist", "craft_memory": True},
+        }
+    }
+    source.write_text(yaml.safe_dump(source_config), encoding="utf-8")
+
+    profile = dbtl_manual.initialize_profile(
+        source_config=source,
+        manual_root=tmp_path / ".deer-flow" / "manual-dbtl",
+    )
+
+    generated = yaml.safe_load(profile.read_text(encoding="utf-8"))
+    assert generated["memory"]["enabled"] is True
+    assert generated["memory"]["injection_enabled"] is True
+
+
 def test_existing_manual_profile_is_upgraded_to_persistent_history_without_force(tmp_path: Path) -> None:
     source = _source_config(tmp_path / "config.yaml")
     manual_root = tmp_path / ".deer-flow" / "manual-dbtl"

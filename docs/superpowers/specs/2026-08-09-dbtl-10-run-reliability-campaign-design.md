@@ -1,6 +1,6 @@
 # DBTL Ten-Run Reliability Campaign
 
-**Status:** Approved design; execution pending written-spec review
+**Status:** Runs 1–4 complete; Run 5 captured as non-qualifying `invalidated` at its 500,000-token stop; revised Run 6 not started
 
 **Date:** 2026-08-09
 
@@ -92,12 +92,12 @@ Runs execute sequentially in increasing route complexity:
 | 2 | Exact supported replay | Same fixture and route reproduce run 1's product behavior |
 | 3 | Design clarification | Chair requests input, resumes from the answer, then completes |
 | 4 | Design request changes | A second meeting/deck is created and the revised Design completes |
-| 5 | Reconciliation judgement | A human resolves the declared judgement before Build proceeds |
-| 6 | Build request changes | Build revises once, then passes Test and completes Learn |
-| 7 | Test `not_supported` | The valid negative outcome follows its allowed route to Learn |
-| 8 | Test `inconclusive` | Test repeats once, preserves both attempts, then routes to Learn |
-| 9 | Test `invalidated` | The cycle returns to Build, repairs the package, retests, and completes |
-| 10 | Recovery and idempotency | Hold, refresh, stale action, and duplicate action handling preserve state before completion |
+| 5 | Build request changes | Build revises once, then passes Test and completes Learn |
+| 6 | Test `not_supported` | The valid negative outcome follows its allowed route to Learn |
+| 7 | Test `inconclusive` | Test repeats once, preserves both attempts, then routes to Learn |
+| 8 | Test `invalidated` | The cycle returns to Build, repairs the package, retests, and completes |
+| 9 | Recovery and idempotency | Hold, refresh, stale action, and duplicate action handling preserve state before completion |
+| 10 | Final supported replay | Replays the repaired straight-through route without a product bug |
 
 Each scenario must declare before execution:
 
@@ -151,16 +151,20 @@ before it becomes qualifying success 1.
 | Deck and review overhead | 10,000 |
 | **Typical run** | **240,000** |
 
-Simple runs should finish in about 25 minutes. A single attempt has a hard cap
-of 45 minutes or 350,000 model tokens. Waiting for an operator at a visible
+Simple runs should finish in about 25 minutes. Runs 3–5 have an owner-amended
+hard cap of 45 minutes or 500,000 model tokens per attempt; this supersedes the
+earlier 350,000-token attempt ceiling for those runs only. Waiting for an operator at a visible
 human gate is recorded separately and does not count as model runtime.
 
 ### Campaign ceiling
 
-- Ten qualifying runs: 2.4 million tokens.
-- Failed-attempt and replay reserve: 400,000 tokens.
-- Diagnosis and review reserve: 200,000 tokens.
-- Hard campaign ceiling: 3.0 million tokens and eight elapsed working hours.
+- Checkpoint forecast for ten qualifying governed runs: 3.8 million tokens,
+  including the completed Run 1 ordinary control.
+- Additional failed-attempt, replay, diagnosis, and review reserve: 1.2 million
+  tokens.
+- Hard campaign ceiling: 5.0 million tokens and eight elapsed working hours.
+- Run 1 is the only ordinary-chat control. Runs 2 through 10 use governed DBTL
+  only.
 
 The working-day allocation is approximately five hours for qualifying runs, two
 hours for diagnosis and clean replays, and one hour for setup and final analysis.
@@ -267,7 +271,9 @@ Campaign reporting includes:
 
 ## Stop and escalation rules
 
-Stop one attempt when it reaches 45 minutes or 350,000 model tokens.
+Stop Runs 3–5 when an attempt reaches 45 minutes or 500,000 model tokens. The
+original 350,000-token stop remains the default for later runs unless the owner
+amends it.
 
 Pause the campaign when:
 
@@ -277,7 +283,7 @@ Pause the campaign when:
 - database integrity or artifact provenance is uncertain;
 - specialist craft memory changes unexpectedly;
 - frozen configuration drifts; or
-- total use reaches 2.7 million tokens before eight qualifying successes.
+- total use reaches 4.5 million tokens before eight qualifying successes.
 
 Do not weaken evidence, validation, or governance rules to make a scenario pass.
 
@@ -296,7 +302,7 @@ The campaign is successful only when:
    each scenario.
 7. Eligible happy-path Builds achieve at least 80% first-pass Test success.
 8. Craft-memory writes remain zero.
-9. Total use remains within eight working hours and three million model tokens.
+9. Total use remains within eight working hours and five million model tokens.
 10. Failed and invalid attempts remain in the denominator and failure ledger.
 
 ## Non-goals
@@ -311,7 +317,127 @@ The campaign is successful only when:
 
 ## Recommended next step
 
-After written-spec review, create an executable run plan for scenario 1, capture
-its clean baseline, and run the straight-through supported cycle as the
-feasibility checkpoint. Review its budget, route, evidence, and failures before
-locking the detailed procedures for scenarios 2 through 10.
+Complete the owner-authorized Runs 3–5 sequentially, preserving the Run 1
+fixture, frozen models, stage specs, specialist configuration, and empty
+craft-memory control. Do not create another ordinary-chat comparison, and stop
+before preparing or starting revised Run 6. The former reconciliation-judgement
+scenario is removed: reconciliation is not a Build gate, and the campaign must
+not revive it as one.
+
+## Feasibility checkpoint amendment — Run 1
+
+**Recorded:** 2026-08-09
+
+Run 1 is qualifying product success 1 of 10. The governed cycle completed the
+declared straight-through `supported` route with Design, Build, Test, and Learn
+approved. All human actions used visible browser controls; the refreshed page
+and database both showed the completed cycle. No source patch, hidden transition,
+database repair, memory write, promotion, or publication occurred.
+
+The governed run used 308,813 model tokens and 16 minutes 16 seconds wall time,
+including about 8 minutes 8 seconds of recorded run execution and about 8
+minutes 8 seconds of operator review. The ordinary control used 144,949 tokens
+and 1 minute 58 seconds. Governed usage was:
+
+| Component | Tokens | Share |
+| --- | ---: | ---: |
+| Supervisor and routing | 9,429 | 3.1% |
+| Design | 22,594 | 7.3% |
+| Build planning and execution | 100,487 | 32.5% |
+| Test | 120,954 | 39.2% |
+| Learn | 55,349 | 17.9% |
+| **Governed total** | **308,813** | **100%** |
+
+Test dominated token use. It independently recomputed the result, verified the
+server-owned clean rerun, and recorded `supported` with recommendation
+`advance_to_learn`. The Build outputs reproduced byte-for-byte and the immutable
+input hashes did not change.
+
+One worker/package defect remains in the denominator. The Design chair added a
+required replay notebook that was not requested by the scenario. During Build
+planning, the operator used **Change the plan** to remove it; the Build worker
+then marked that Design-approved deliverable `not_applicable`. Test correctly
+kept the approved Design manifest authoritative, failed the notebook deliverable
+audit, and treated it as a non-gating limitation because it is not one of the
+pinned validity pack's seven scientific checks. This is not classified as a
+product bug: the governance boundary, evidence, outcome computation, route, and
+terminal state behaved as designed. It is a worker/package-quality defect and
+an avoidable operator detour.
+
+The following amendments apply from Run 2 onward:
+
+1. A Build-plan revision may not be used to remove a Design-approved deliverable.
+   Either accept and build the manifest or revise the Design before approval.
+2. For Run 2, accept the one-phase Build plan when it covers the approved
+   manifest; do not use **Change the plan** merely to remove an added small
+   artifact. This avoids the two extra planning calls that cost 15,579 tokens
+   in Run 1.
+3. Keep the 350,000-token and 45-minute per-attempt hard stops. For scenarios
+   that intentionally repeat Test or return to Build, ledger each bounded stage
+   continuation as a new attempt while preserving the single durable cycle.
+4. Replace the 240,000-token typical-run forecast with 295,000 tokens for a
+   straight-through run. Use 420,000 for a one-repeat scenario and 520,000 for
+   a Build-repair-plus-retest scenario.
+5. The owner approved a five-million-token hard ceiling. The 3.8-million-token
+   checkpoint forecast is the operating forecast; the remaining 1.2 million is
+   reserved for failed attempts, recovery-route continuations, diagnosis, and
+   clean replay. The eight-hour wall ceiling remains unchanged.
+6. Run 1's ordinary control remains historical evidence but is not repeated.
+   Runs 2 through 10 contain only the governed cycle, its visible human gates,
+   and read-only verification. Run 2 is authorized under this amendment.
+
+## Feasibility checkpoint amendment — Run 2
+
+**Recorded:** 2026-08-09
+
+Run 2 is qualifying terminal-route success 2 of 10. It exactly replayed the
+straight-through route: Design, one-phase Build, server-computed Test
+`supported`, Learn, then completed. All state transitions and human decisions
+used visible product controls. Refresh preserved the completed cycle and all
+four approved stage decisions. Build reproduced byte-for-byte, Test passed all
+seven required validity checks, and Learn created only eleven provisional
+synthetic-software candidates. There were no hidden writes, database repairs,
+craft-memory writes, promotions, publications, or ordinary-chat control.
+
+Run 2 used 325,166 model tokens and 13 minutes 23 seconds wall time, including
+about 8 minutes 59 seconds of recorded execution. Usage was:
+
+| Component | Tokens | Share |
+| --- | ---: | ---: |
+| Supervisor and routing | 9,400 | 2.9% |
+| Design | 22,470 | 6.9% |
+| Build planning and execution | 86,850 | 26.7% |
+| Test | 150,236 | 46.2% |
+| Learn | 56,210 | 17.3% |
+| **Governed total** | **325,166** | **100%** |
+
+The Run 1 worker/package defect did not recur. Build produced every approved
+deliverable, including the validator and replay notebook, and Test audited all
+seven artifacts. Avoiding the plan-removal detour reduced Build usage by 13,637
+tokens. Test increased by 29,282 tokens because it independently reviewed the
+larger complete package; Test remains the largest and most variable cost.
+
+One non-routing product defect was observed and fixed after the terminal cycle.
+When the operator changed the Design preflight from the recommended four-worker
+roster to **Light debate**, the structured editor correctly showed three
+participants but the immutable fallback Markdown still said `4 workers`. The
+backend dispatched the selected three participants, and route/evidence state
+was unaffected. The UI now hides the stale fallback after a depth change, with
+a DOM regression test. Run 2 therefore counts toward the ten terminal-route
+successes but resets the product-bug-free streak; the required final five
+bug-free attempts have not started.
+
+The following amendments apply after Run 2:
+
+1. Raise the straight-through operating forecast from 295,000 to 320,000 model
+   tokens. Keep the 350,000 per-attempt hard stop; Run 2 left only 24,834 tokens
+   of headroom.
+2. Keep Test as a separate specialist stage and preserve its independent rerun
+   and validity workers. Do not reduce evidence to save tokens.
+3. Preserve the complete Design manifest in Build planning. The full package
+   eliminated Run 1's deliverable defect and improved downstream audit quality.
+4. The campaign has used 633,979 governed tokens. Including Run 1's historical
+   ordinary control, total experiment use is 778,928 tokens, leaving 4,221,072
+   under the five-million hard ceiling.
+5. Run 3 is not authorized. Do not prepare, start, or infer authorization for it
+   from this checkpoint; wait for an explicit owner decision.

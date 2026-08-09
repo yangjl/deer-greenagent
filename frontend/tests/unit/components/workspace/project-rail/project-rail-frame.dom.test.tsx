@@ -12,6 +12,41 @@ import { ProjectRailFrame } from "@/components/workspace/project-rail/project-ra
 afterEach(cleanup);
 
 describe("ProjectRailFrame", () => {
+  it("keeps project sections reachable on a mobile viewport", () => {
+    const originalMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes("max-width"),
+      media: query,
+      onchange: null,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      dispatchEvent: () => true,
+    })) as typeof window.matchMedia;
+
+    try {
+      const { container } = render(
+        <ProjectRailFrame
+          collapsedItems={[{ icon: CircleDashedIcon, label: "Cycles" }]}
+        >
+          <div>Cycle content</div>
+        </ProjectRailFrame>,
+      );
+
+      const rail = container.querySelector("aside");
+      expect(rail?.getAttribute("data-state")).toBe("collapsed");
+      expect(rail?.className.split(/\s+/)).not.toContain("hidden");
+      expect(screen.getByRole("button", { name: "Cycles" })).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "Cycles" }));
+      expect(rail?.getAttribute("data-state")).toBe("expanded");
+      expect(screen.getByText("Cycle content")).toBeTruthy();
+    } finally {
+      window.matchMedia = originalMatchMedia;
+    }
+  });
+
   it("collapses to section icons and expands at the selected section", () => {
     let selectedSection = "";
     const { container } = render(

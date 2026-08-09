@@ -102,6 +102,8 @@ def build_transition_assessment_prompt(
             "- routine: bounded, well-supported, reversible work with no material unresolved risk",
             "- standard: normal expert review, some judgement or uncertainty, no exceptional consequence",
             "- high_stakes: irreversible, safety-critical, scientifically consequential, or materially disputed work",
+            "- the standard statement that a package does not yet satisfy its human review gate is not evidence that the stage failed",
+            "- superseded or historical evidence is not materially disputed current work by itself; assess the current authoritative evidence",
             "",
             "Do not propose routes and do not approve anything. Reply with exactly one JSON object:",
             '{"difficulty":"routine|standard|high_stakes","rationale":"specific evidence-bound reasons"}',

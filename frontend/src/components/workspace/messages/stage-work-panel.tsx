@@ -41,7 +41,15 @@ export function StageWorkHydrator({
   const hydratedRef = useRef<string | null>(null);
   const retryEpochRef = useRef<string | null>(null);
   const retryAttemptRef = useRef(0);
+  const previousIsLoadingRef = useRef(isLoading);
+  const [loadingEpoch, setLoadingEpoch] = useState(0);
   const [retryToken, setRetryToken] = useState(0);
+  useEffect(() => {
+    if (isLoading && !previousIsLoadingRef.current) {
+      setLoadingEpoch((value) => value + 1);
+    }
+    previousIsLoadingRef.current = isLoading;
+  }, [isLoading]);
   useEffect(() => {
     // Hydrate even while the thread is still loading. A mid-run reload — or a
     // tab opened onto a thread whose Build/Test/Learn phase is already running —
@@ -111,7 +119,7 @@ export function StageWorkHydrator({
       if (retryTimer) clearTimeout(retryTimer);
       if (hydratedRef.current === epoch) hydratedRef.current = null;
     };
-  }, [threadId, isLoading, retryToken, reconcileSubtasks]);
+  }, [threadId, loadingEpoch, retryToken, reconcileSubtasks]);
 
   return null;
 }

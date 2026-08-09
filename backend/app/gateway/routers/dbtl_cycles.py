@@ -210,7 +210,24 @@ def _evidence_exception_review_actions(
     if stage == "test" and "learn_from_invalidated_evidence" not in route_slugs:
         incomplete_degraded_pack = evidence_exception.get("condition") == "degraded_verified" and not evidence_exception.get("available_artifacts")
         return ["retry_with_guidance"] if not route_slugs or incomplete_degraded_pack else None
+    if stage == "test":
+        return ["retry_with_guidance", "choose_route"]
     return ["retry_with_guidance", "continue_with_red_flag"]
+
+
+def _handoff_retry_actions(action: dict[str, Any]) -> list[str]:
+    """Reopen only a verdict kind whose review is committed but card delivery failed."""
+    if action.get("status") != "handoff_failed":
+        return []
+    retry_kind = str(action.get("action_kind") or "")
+    retryable = {
+        "approve",
+        "advance",
+        "choose_route",
+        "continue_with_red_flag",
+        "learn_exploratory",
+    }
+    return [retry_kind] if retry_kind in retryable else []
 
 
 async def _post_design_meeting_turn(
@@ -1063,8 +1080,7 @@ async def _design_feedback_read_model(
         allowed_actions = apply_meeting_gate(_surface_meeting_gate(surface, dbtl_config, stage=stage, cycle=cycle), allowed_actions)
         allowed_actions = filter_stage_feedback_intents(surface_stage, allowed_actions)
         if latest_action is not None and latest_action.get("status") == "handoff_failed":
-            retry_kind = str(latest_action.get("action_kind") or "")
-            allowed_actions = [retry_kind] if retry_kind in {"approve", "advance", "learn_exploratory", "continue_with_red_flag"} else []
+            allowed_actions = _handoff_retry_actions(latest_action)
         elif latest_action is not None and latest_action.get("status") == "failed" and latest_action.get("action_kind") == "retry_with_guidance":
             allowed_actions = ["retry_with_guidance"]
         interactive = bool(allowed_actions)
