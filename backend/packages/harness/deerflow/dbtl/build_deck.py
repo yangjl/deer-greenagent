@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import base64
 import html
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from deerflow.dbtl.build_summary import BuildReviewPackage, SelectedFigure
 from deerflow.dbtl.council_deck import (
@@ -102,11 +104,47 @@ def _e(value: str) -> str:
     return html.escape(value or "")
 
 
+#: The publisher prefixes a governed filename with a short content hash. A
+#: reader recognises the figure by its name, not by that prefix.
+_PUBLISHED_PREFIX = re.compile(r"^[0-9a-f]{8,}-")
+
+
+def readable_artifact_name(path: str) -> str:
+    """The filename a person would say out loud, not the governed URI.
+
+    Slides used to stamp the full virtual path under every figure — six nested
+    directories and a content hash for a file the reader is already looking at.
+    The full path stays in the machine record, where a path belongs.
+    """
+    name = PurePosixPath(str(path or "").strip()).name
+    return _PUBLISHED_PREFIX.sub("", name) or str(path or "")
+
+
+def readable_number(value: str) -> str:
+    """Round a worker's raw float for reading, leaving anything else alone.
+
+    Workers emit full float repr — `0.0615427182312` — because that is what
+    `str()` gives. Twelve digits on a slide is noise a reviewer has to squint
+    past, and it implies a precision the estimate does not have.
+    """
+    text = str(value or "").strip()
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return text
+    if number == int(number) and abs(number) < 1e15:
+        return str(int(number))
+    return f"{number:.4g}"
+
+
 def _outcomes_body(package: BuildReviewPackage) -> str:
     if not package.key_outcomes:
+        # Not noise: Test cannot reach a verdict at all without headline
+        # metrics, so a figure-only Build is telling the reviewer something
+        # they are going to meet again two stages later.
         return '<p class="empty">This build reported no numeric outcomes.</p>'
     entries = "".join(
-        f'<article class="contested"><h3>{_e(outcome.name)}</h3><p class="verdict verdict--settled"><span>Recorded</span>{_e(outcome.value)}{(" " + _e(outcome.unit)) if outcome.unit else ""}</p></article>'
+        f'<article class="contested"><h3>{_e(outcome.name)}</h3><p class="verdict verdict--settled"><span>Recorded</span>{_e(readable_number(outcome.value))}{(" " + _e(outcome.unit)) if outcome.unit else ""}</p></article>'
         for outcome in package.key_outcomes
     )
     return f'<div class="contested-grid">{entries}</div>'
@@ -114,14 +152,14 @@ def _outcomes_body(package: BuildReviewPackage) -> str:
 
 def _figure_slide(embedded: EmbeddedFigure) -> str:
     figure = embedded.figure.figure
-    caption = figure.caption or figure.shows or figure.path
+    caption = figure.caption or figure.shows or readable_artifact_name(figure.path)
     visual = f'<img alt="{_e(caption)}" src="{embedded.data_uri}" style="display:block;max-width:100%;max-height:58vh;margin:auto">' if embedded.embedded else f'<p class="empty">{_e(embedded.skipped_reason)}</p>'
     reading = f'<p class="lede">{_e(embedded.figure.reading)}</p>' if embedded.figure.reading else ""
     return render_design_deck_slide(
         kind="figure",
         eyebrow="Figure",
         title=caption,
-        body=f'<div class="contested">{visual}</div>{reading}<p class="stamp">{_e(figure.path)}</p>',
+        body=f'<div class="contested">{visual}</div>{reading}<p class="stamp">{_e(readable_artifact_name(figure.path))}</p>',
     )
 
 
@@ -133,8 +171,20 @@ def _list_slide(
     empty: str,
     note_id: str = "",
 ) -> str:
-    body = "".join(f"<li>{_e(entry)}</li>" for entry in entries)
-    inner = f"<ul>{body}</ul>" if entries else f'<p class="empty">{_e(empty)}</p>'
+    """One list section, deduplicated.
+
+    An empty section still renders. That looks like noise and is not: each of
+    these slides is a comment anchor, and the absence is reviewable information
+    — "no limitations recorded" is a thing a reviewer may want to object to, and
+    "no rerun procedure" tells them the `structured_rerun_spec` gate is about to
+    bite. Dropping the slide would take away the only place to say so.
+
+    Exact repeats *are* dropped: workers routinely restate one caveat in two
+    phases, and listing it twice adds nothing to read.
+    """
+    kept = list(dict.fromkeys(entry for entry in entries if entry and entry.strip()))
+    body = "".join(f"<li>{_e(entry)}</li>" for entry in kept)
+    inner = f"<ul>{body}</ul>" if kept else f'<p class="empty">{_e(empty)}</p>'
     return render_design_deck_slide(kind="detail", eyebrow=eyebrow, title=title, body=inner, note_id=note_id, note_label=title)
 
 
@@ -177,6 +227,8 @@ def render_build_deck(
                 _list_slide(
                     "Other figures produced",
                     "Not shown here",
+                    # The full path stays here: this figure is *not* on screen,
+                    # so the reader needs enough to go and find it.
                     [figure.path for figure in package.all_figures if figure.path not in shown],
                     empty="None.",
                 )
