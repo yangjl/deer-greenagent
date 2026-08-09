@@ -9,6 +9,7 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.dbtl.live_stage.test_rerun import TestRerunRecord, TestRerunStatus, parse_test_rerun_record
+from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.cycle_state import StageStatus
 from deerflow.dbtl.stage_meetings import review_meeting_recorded, surface_meeting_gate
 from deerflow.dbtl.stage_spec import StageSpecNotFound, resolve_spec_by_key
@@ -48,14 +49,31 @@ def validated_test_assessment(
     build_test: Mapping[str, Any] | None,
     rerun: TestRerunRecord | None = None,
 ) -> dict[str, Any] | None:
-    """Return the first complete Test assessment under the pinned pack.
+    """Return the Test assessment that owns the verdict, under the pinned pack.
 
     Workers calculate typed metrics and checks; the server reconstructs those
     values and deterministically computes the outcome and legal routes.
+
+    **The seat decides, not the list order.** Test dispatches several workers and
+    more than one may return a complete `validity_assessment` — a
+    `statistical_analysis` seat will happily grade the same run and reach a
+    different verdict. Taking whichever appeared first made the answer depend on
+    iteration order, and the two call sites do not share one: the deck built its
+    route menu from one worker's outcome while the gate's own recompute used
+    another's. A reviewer was then offered "Learn from invalid evidence" on a run
+    the validator considered supported, and every route on the card that the two
+    did not happen to agree on failed with "not compatible with the
+    server-computed Test outcome" — an unanswerable gate.
+
+    `TEST_SPEC` names `VALIDITY_ASSESSMENT` as its *required* capability and the
+    rest as optional, so that seat's assessment is the verdict and the others are
+    supporting opinion. Ordering by that makes both call sites agree by
+    construction, whatever order they iterate in.
     """
     required = {item.value for item in DEFAULT_VALIDITY_PACK.required_checks}
     lineage = dict((build_test or {}).get("build_lineage") or {})
-    for result in results:
+    ordered = sorted(results, key=lambda item: str(item.capability) != Capability.VALIDITY_ASSESSMENT.value)
+    for result in ordered:
         if not result.is_trustworthy:
             continue
         raw = result.provenance.get("validity_assessment")
