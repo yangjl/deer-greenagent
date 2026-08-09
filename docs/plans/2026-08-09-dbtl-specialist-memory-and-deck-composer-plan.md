@@ -63,7 +63,8 @@ subagent's runtime context.
 
 **Naming constraint:** `validate_agent_name` (`deermem/core/paths.py:56-62`)
 enforces `^[A-Za-z0-9-]+$`. `statistician` and `build-engineer` pass. **Underscores
-do not** — the new specialist must be named `slide-deck`, not `slide_deck`.
+do not** — any agent added later must be named e.g. `slide-deck`, never
+`slide_deck`.
 
 **Verify:** two subagents with different names, same project, write one fact each;
 assert two directories under `agents/`, and that a second project produces a
