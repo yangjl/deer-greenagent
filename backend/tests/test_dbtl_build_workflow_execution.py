@@ -29,6 +29,7 @@ import pytest
 import pytest_asyncio
 
 from deerflow.agents.dbtl.live_stage import adapter as adapter_module
+from deerflow.agents.dbtl.live_stage import token_usage as token_usage_module
 from deerflow.agents.dbtl.live_stage import workspace as workspace_module
 from deerflow.agents.dbtl.live_stage.adapter import LiveStageAdapter
 from deerflow.config.database_config import DatabaseConfig
@@ -2023,14 +2024,14 @@ class TestAPartialPhaseCannotAdvanceThePlan:
         await _ready_for_build(repo)
         dispatcher = _FreshCorrectionDispatcher(plan=SINGLE_PHASE_PLAN)
         merged_usage: list[dict[str, int]] = []
-        original_merge = adapter_module._merge_token_usage
+        original_merge = token_usage_module._merge_token_usage
 
         def observed_merge(*values):
             merged = original_merge(*values)
             merged_usage.append(merged)
             return merged
 
-        monkeypatch.setattr(adapter_module, "_merge_token_usage", observed_merge)
+        monkeypatch.setattr(token_usage_module, "_merge_token_usage", observed_merge)
 
         result, _ = await _run_build(
             repo,

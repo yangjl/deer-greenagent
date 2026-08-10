@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
     from deerflow.subagents.config import SubagentConfig
 
+from deerflow.agents.dbtl.live_stage import token_usage as tokens
 from deerflow.agents.dbtl.live_stage import workspace
 from deerflow.agents.dbtl.live_stage.build_controls import DISABLED_GATE, BuildControlGate, BuildControlNotRecorded
 from deerflow.agents.dbtl.live_stage.build_meeting import BUILD_WORK_MEETING_CONTRACT, MeetingContext, meeting_units, parse_recommendation
@@ -715,46 +716,6 @@ def _seat_identity(unit: WorkUnit, *, model: str, stage: str = "design") -> dict
         # watching three lanes finish cannot otherwise tell which one mattered.
         "counts_toward_stage_output": unit.role == "chair",
     }
-
-
-def _summarize_token_usage(
-    records: Sequence[Mapping[str, int | str | None]] | None,
-) -> dict[str, int] | None:
-    """Collapse a seat's per-call records into one provider-reported meter."""
-    if not records:
-        return None
-    usage = {key: sum(int(record.get(key, 0) or 0) for record in records if isinstance(record.get(key, 0), (int, float))) for key in ("input_tokens", "output_tokens", "total_tokens")}
-    return usage if any(usage.values()) else None
-
-
-def _merge_token_usage(*values: Mapping[str, int] | None) -> dict[str, int]:
-    return {key: sum(int(value.get(key, 0) or 0) for value in values if value is not None) for key in ("input_tokens", "output_tokens", "total_tokens")}
-
-
-def _report_subagent_token_usage(
-    config: RunnableConfig,
-    result: Any,
-) -> None:
-    """Add direct DBTL subagent calls to the parent run's usage journal once."""
-    if getattr(result, "usage_reported", True):
-        return
-    records = getattr(result, "token_usage_records", None) or []
-    if not records:
-        return
-    callbacks = config.get("callbacks")
-    handlers = getattr(callbacks, "handlers", callbacks)
-    if not isinstance(handlers, Sequence) or isinstance(handlers, (str, bytes)):
-        return
-    for handler in handlers:
-        recorder = getattr(handler, "record_external_llm_usage_records", None)
-        if not callable(recorder):
-            continue
-        try:
-            recorder(records)
-            result.usage_reported = True
-        except Exception:  # noqa: BLE001 - metering failure must not lose work
-            logger.warning("Failed to record Design council token usage.", exc_info=True)
-        return
 
 
 def _terminal_seat_event(
@@ -4239,8 +4200,8 @@ class LiveStageAdapter:
                     await worker_activity.settle(ActivityState.CANCELLED)
                 raise
 
-            _report_subagent_token_usage(config, result)
-            token_usage = _summarize_token_usage(result.token_usage_records)
+            tokens._report_subagent_token_usage(config, result)
+            token_usage = tokens._summarize_token_usage(result.token_usage_records)
             if result.status is SubagentStatus.COMPLETED:
                 dispatch_outcome = DispatchOutcome(
                     unit_id=unit.unit_id,
@@ -4638,7 +4599,7 @@ class LiveStageAdapter:
                 if corrected is not None and corrected.is_trustworthy:
                     corrected = replace(
                         corrected,
-                        token_usage=_merge_token_usage(first_result.token_usage, corrected.token_usage),
+                        token_usage=tokens._merge_token_usage(first_result.token_usage, corrected.token_usage),
                         provenance={
                             **corrected.provenance,
                             "correction_of": first_unit.unit_id,

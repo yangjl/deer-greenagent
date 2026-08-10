@@ -21,9 +21,7 @@ from deerflow.agents.dbtl.live_stage.adapter import (
     _design_deliverable_manifest,
     _executable_stage,
     _project_file_snapshot,
-    _report_subagent_token_usage,
     _stage_worker_config,
-    _summarize_token_usage,
     _token_limit_for_worker,
     _tools_for_stage_budget,
     _validated_deliverable_audit,
@@ -31,6 +29,10 @@ from deerflow.agents.dbtl.live_stage.adapter import (
 )
 from deerflow.agents.dbtl.live_stage.feedback_surfaces import bound_evidence as _bound_evidence
 from deerflow.agents.dbtl.live_stage.test_rerun import RERUN_EXIT_STATUS_NAME, RERUN_STDERR_NAME, RERUN_STDOUT_NAME
+from deerflow.agents.dbtl.live_stage.token_usage import (
+    _report_subagent_token_usage,
+    _summarize_token_usage,
+)
 from deerflow.agents.dbtl.live_stage.workspace import safe_token, verified_workspace_files
 from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.capabilities import Capability

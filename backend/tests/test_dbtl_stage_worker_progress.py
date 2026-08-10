@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.agents.dbtl.live_stage import adapter as adapter_module
+from deerflow.agents.dbtl.live_stage import token_usage as token_usage_module
 from deerflow.dbtl.stage_runner import WorkerBudget, WorkUnit
 from deerflow.subagents.config import SubagentConfig
 
@@ -109,8 +110,8 @@ def dispatch(monkeypatch):
     # should not fail eight progress tests with a TypeError that says nothing
     # about progress.
     monkeypatch.setattr(adapter_module, "_model_call_budget", lambda turns, **_: 6)
-    monkeypatch.setattr(adapter_module, "_report_subagent_token_usage", lambda config, result: None)
-    monkeypatch.setattr(adapter_module, "_summarize_token_usage", lambda records: None)
+    monkeypatch.setattr(token_usage_module, "_report_subagent_token_usage", lambda config, result: None)
+    monkeypatch.setattr(token_usage_module, "_summarize_token_usage", lambda records: None)
 
     tools_module = types.ModuleType("deerflow.tools")
     tools_module.get_available_tools = lambda **kwargs: []
