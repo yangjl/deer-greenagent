@@ -192,13 +192,22 @@ def test_config_example_does_not_enable_empty_extensions_block_by_default():
 
 
 def test_config_example_registers_two_dbtl_specialists():
+    """The shipped example is the coverage map; drift in it is a real change.
+
+    ``scientific_reporting`` sits on build-engineer deliberately. Mining all 41
+    historical Build worker runs showed reporting phases at 0/9, every one of
+    them falling through to the general-purpose stand-in; covering the
+    capability with the specialist is what fixed it (2af7adc4). Pinning the
+    exact map rather than a subset is the point of this test — a capability
+    quietly appearing or vanishing here changes which seat real work lands on.
+    """
     config_example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
 
     config_data = yaml.safe_load(config_example_path.read_text(encoding="utf-8"))
     specialists = config_data["subagents"]["custom_agents"]
 
     assert {name: agent["dbtl_capabilities"] for name, agent in specialists.items()} == {
-        "build-engineer": ["software_and_workflow_engineering"],
+        "build-engineer": ["software_and_workflow_engineering", "scientific_reporting"],
         "statistician": ["statistical_analysis"],
     }
 

@@ -17,13 +17,13 @@ import importlib.util
 import os
 import sys
 import types
-from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
 
 from deerflow.agents.dbtl.live_stage import adapter as adapter_module
 from deerflow.dbtl.stage_runner import WorkerBudget, WorkUnit
+from deerflow.subagents.config import SubagentConfig
 
 pytestmark = pytest.mark.asyncio
 
@@ -48,15 +48,18 @@ class _FakeStatus:
     COMPLETED = "completed"
 
 
-@dataclass
-class _FakeConfig:
-    """A real dataclass: the adapter pins the effective model with `replace`."""
+def _worker_config(name: str) -> SubagentConfig:
+    """The *real* config type, not a stand-in.
 
-    name: str
-    model: str = "inherit"
-    max_turns: int = 40
-    timeout_seconds: int = 600
-    skills: list[str] | None = None
+    A hand-rolled double drifts silently: when ``craft_memory`` was added to
+    ``SubagentConfig`` the copy here kept the old field set, and every test in
+    this file died on ``AttributeError`` inside production code that was doing
+    nothing wrong. Constructing the real dataclass costs one extra argument and
+    makes that failure impossible to repeat — the adapter still pins the
+    effective model with ``replace``, which works because this is a dataclass
+    for the same reason the double was.
+    """
+    return SubagentConfig(name=name, description="stage worker", model="inherit", max_turns=40, timeout_seconds=600)
 
 
 class _FakeExecutor:
@@ -91,7 +94,7 @@ def dispatch(monkeypatch):
 
     subagents = types.ModuleType("deerflow.subagents")
     subagents.SubagentExecutor = _FakeExecutor
-    subagents.get_subagent_config = lambda name, app_config=None: _FakeConfig(name=name)
+    subagents.get_subagent_config = lambda name, app_config=None: _worker_config(name)
     monkeypatch.setitem(sys.modules, "deerflow.subagents", subagents)
 
     executor_module = types.ModuleType("deerflow.subagents.executor")
