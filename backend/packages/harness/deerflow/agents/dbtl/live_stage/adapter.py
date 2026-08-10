@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
     from deerflow.subagents.config import SubagentConfig
 
+from deerflow.agents.dbtl.live_stage import workspace
 from deerflow.agents.dbtl.live_stage.build_controls import DISABLED_GATE, BuildControlGate, BuildControlNotRecorded
 from deerflow.agents.dbtl.live_stage.build_meeting import BUILD_WORK_MEETING_CONTRACT, MeetingContext, meeting_units, parse_recommendation
 from deerflow.agents.dbtl.live_stage.build_phase_verification import (
@@ -132,8 +133,6 @@ from deerflow.agents.dbtl.live_stage.workspace import (
     project_file_snapshot,
     project_manifest,
     safe_token,
-    sha256_file,
-    unit_stage_workspace,
     verified_workspace_files,
     workspace_lexical_path,
     workspace_relative_path,
@@ -1585,10 +1584,8 @@ def _stage_handoff_refusal(
 # copies is how a check ends up enforced on one path and not the other.
 _safe_token = safe_token
 _prepare_stage_workspace = prepare_stage_workspace
-_unit_stage_workspace = unit_stage_workspace
 _project_manifest = project_manifest
 _project_file_snapshot = project_file_snapshot
-_sha256_file = sha256_file
 
 
 async def _declared_skill_bindings(
@@ -1620,7 +1617,7 @@ async def _declared_skill_bindings(
         try:
             if path.is_symlink() or not path.is_file():
                 raise OSError("not a regular file")
-            digest = await asyncio.to_thread(_sha256_file, path)
+            digest = await asyncio.to_thread(workspace.sha256_file, path)
         except OSError:
             raise ValueError(f"Build skill {name!r} has no readable regular SKILL.md file.") from None
         bindings[name] = f"skill:{name}:sha256:{digest}"
@@ -1643,7 +1640,7 @@ def _bind_stage_unit_workspaces(
             unit,
             prompt=unit.prompt.replace(
                 STAGE_UNIT_WORKSPACE_PLACEHOLDER,
-                unit_stage_workspace(stage_workspace, unit.unit_id),
+                workspace.unit_stage_workspace(stage_workspace, unit.unit_id),
             ),
         )
         for unit in units
@@ -1700,7 +1697,7 @@ def _directory_input_artifacts(
     artifacts: list[str] = []
     for name in sorted(published):
         try:
-            digest = _sha256_file(current[name])
+            digest = workspace.sha256_file(current[name])
         except OSError:
             raise ValueError(f"Build input {name!r} is no longer readable.") from None
         if digest != published[name]:
@@ -1710,7 +1707,7 @@ def _directory_input_artifacts(
     for name in sorted(snapshotted):
         try:
             stat = current[name].stat()
-            digest = _sha256_file(current[name])
+            digest = workspace.sha256_file(current[name])
         except OSError:
             raise ValueError(f"Build input {name!r} is no longer readable.") from None
         if (stat.st_size, stat.st_mtime_ns) != snapshotted[name]:
@@ -1803,7 +1800,7 @@ def _build_input_artifacts(
             # recorded hash -- re-read here so a file altered after publication
             # is refused rather than silently rebound to its new bytes.
             try:
-                current = _sha256_file(path)
+                current = workspace.sha256_file(path)
             except OSError:
                 raise ValueError(f"Build input {relative!r} is no longer readable.") from None
             if current != published_hash:
@@ -1823,7 +1820,7 @@ def _build_input_artifacts(
             continue
         if (stat.st_size, stat.st_mtime_ns) != before:
             raise ValueError(f"Build input {relative!r} changed during execution; rerun Build from an unchanged source file.")
-        artifacts.append(f"workspace_file:{relative}:sha256:{_sha256_file(path)}")
+        artifacts.append(f"workspace_file:{relative}:sha256:{workspace.sha256_file(path)}")
 
     return list(dict.fromkeys(artifacts))
 
@@ -2164,7 +2161,7 @@ def _test_owned_deliverable_candidates(
         items = raw.get("items") if isinstance(raw, Mapping) else None
         if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
             continue
-        unit_workspace = _unit_stage_workspace(stage_workspace, unit.unit_id)
+        unit_workspace = workspace.unit_stage_workspace(stage_workspace, unit.unit_id)
         for item in items:
             if not isinstance(item, Mapping):
                 continue
@@ -2194,7 +2191,7 @@ def _test_owned_deliverable_candidates(
                     )
                 except (FileNotFoundError, OSError, ValueError):
                     continue
-                if len(verified) != 1 or _sha256_file(verified[0][1]) != content_hash:
+                if len(verified) != 1 or workspace.sha256_file(verified[0][1]) != content_hash:
                     continue
                 relative = PurePosixPath(expected[0])
                 if not relative.parts or relative.parts[0] != "outputs":
@@ -2329,7 +2326,7 @@ def _input_artifacts_intact(input_artifacts: Sequence[str], *, project_root: str
             return False
         _normalized, path = resolved
         try:
-            if not path.is_file() or path.is_symlink() or _sha256_file(path) != expected:
+            if not path.is_file() or path.is_symlink() or workspace.sha256_file(path) != expected:
                 return False
         except OSError:
             return False
@@ -3062,7 +3059,7 @@ def _publish_build_worker_artifacts(
         if not result.is_trustworthy:
             validated_results.append(result)
             continue
-        unit_workspace = _unit_stage_workspace(stage_workspace, unit.unit_id)
+        unit_workspace = workspace.unit_stage_workspace(stage_workspace, unit.unit_id)
         lexical_root = _workspace_lexical_path(unit_workspace, project_root=project_root)
         failure = ""
         remapped: dict[str, tuple[str, ...]] = {}
@@ -3119,7 +3116,7 @@ def _publish_build_worker_artifacts(
                     uri = published_sources.get(source_relative)
                     if uri is None:
                         try:
-                            content_hash = _sha256_file(source)
+                            content_hash = workspace.sha256_file(source)
                             safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", source.name).strip("-.") or "artifact"
                             destination_relative = stage_dir / "artifacts" / attempt_id / _safe_token(unit.unit_id) / f"{content_hash[:16]}-{safe_name[:96]}"
                             destination = outputs_root / destination_relative
@@ -3338,7 +3335,7 @@ def _restore_build_summary(payload: Any, *, bundle: BuildExecutionBundle, expect
         return None
     _relative, host = resolved
     try:
-        if not host.is_file() or host.is_symlink() or _sha256_file(host) != expected_digest:
+        if not host.is_file() or host.is_symlink() or workspace.sha256_file(host) != expected_digest:
             logger.warning("The recorded Build review document is no longer the one its attempt committed; the summarizer will run again.")
             return None
     except OSError:
@@ -3379,7 +3376,7 @@ def _published_bytes_intact(published: Sequence[Mapping[str, Any]], *, project_r
             return False
         _relative, host = resolved
         try:
-            if not host.is_file() or host.is_symlink() or _sha256_file(host) != expected:
+            if not host.is_file() or host.is_symlink() or workspace.sha256_file(host) != expected:
                 return False
         except OSError:
             return False
@@ -4390,7 +4387,7 @@ class LiveStageAdapter:
         adapter_activity_id = current_activity_id()
 
         async def run_one(unit: WorkUnit, index: int) -> DispatchOutcome:
-            unit_workspace = _unit_stage_workspace(stage_workspace, unit.unit_id) if stage_workspace else None
+            unit_workspace = workspace.unit_stage_workspace(stage_workspace, unit.unit_id) if stage_workspace else None
             if unit_workspace:
                 resolved_workspace = _workspace_relative_path(unit_workspace, project_root=project_root)
                 if resolved_workspace is None:
@@ -5018,7 +5015,7 @@ class LiveStageAdapter:
                 first_result = result
                 if correct_live_terminal:
                     await _emit_build_verification_failure(first_unit, failure)
-                first_workspace = _unit_stage_workspace(stage_workspace, first_unit.unit_id)
+                first_workspace = workspace.unit_stage_workspace(stage_workspace, first_unit.unit_id)
                 correction = phase_correction_unit(
                     assignment,
                     index=index,
@@ -5116,7 +5113,7 @@ class LiveStageAdapter:
                         completion_condition=assignment.phase.done_condition,
                         required_version=required_phase_manifest_version(spec),
                     )
-                    unit_workspace = _unit_stage_workspace(stage_workspace, current_unit.unit_id)
+                    unit_workspace = workspace.unit_stage_workspace(stage_workspace, current_unit.unit_id)
                     if raw_manifest is None:
                         return current_result, BuildPhaseVerification(False, raw_manifest_error, "")
                     raw_manifest = resolve_issued_input_tokens(raw_manifest, issued_inputs=granted_inputs)
@@ -7245,7 +7242,7 @@ class LiveStageAdapter:
                             worker_rerun,
                             prepared,
                             project_root=project_root,
-                            unit_workspace=_unit_stage_workspace(stage_workspace, rerun_unit.unit_id),
+                            unit_workspace=workspace.unit_stage_workspace(stage_workspace, rerun_unit.unit_id),
                         )
                         test_rerun_pair = (
                             rerun_unit,

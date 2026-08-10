@@ -29,6 +29,7 @@ import pytest
 import pytest_asyncio
 
 from deerflow.agents.dbtl.live_stage import adapter as adapter_module
+from deerflow.agents.dbtl.live_stage import workspace as workspace_module
 from deerflow.agents.dbtl.live_stage.adapter import LiveStageAdapter
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.dbtl.agent_selector import AgentCandidate
@@ -854,14 +855,14 @@ class TestABuildStopsBeingOneOpaqueWorker:
     async def test_an_output_hash_read_error_fails_the_phase_instead_of_crashing(self, project, monkeypatch) -> None:
         repo, root = project
         await _ready_for_build(repo)
-        original = adapter_module._sha256_file
+        original = workspace_module.sha256_file
 
         def _unreadable(path: Path) -> str:
             if ".dbtl-stage-work" in path.parts and path.name == "model.bin":
                 raise OSError("worker output became unreadable")
             return original(path)
 
-        monkeypatch.setattr(adapter_module, "_sha256_file", _unreadable)
+        monkeypatch.setattr(workspace_module, "sha256_file", _unreadable)
 
         result, _dispatcher = await _run_build(
             repo,
@@ -1781,7 +1782,7 @@ class TestAPhaseMayBuildOnThePhaseBeforeIt:
         def unreadable(_path):
             raise OSError("unreadable")
 
-        monkeypatch.setattr(adapter_module, "_sha256_file", unreadable)
+        monkeypatch.setattr(workspace_module, "sha256_file", unreadable)
 
         with pytest.raises(ValueError, match="no longer readable"):
             adapter_module._directory_input_artifacts(
