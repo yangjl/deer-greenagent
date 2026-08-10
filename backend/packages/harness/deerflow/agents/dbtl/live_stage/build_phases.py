@@ -227,6 +227,30 @@ def _entry_point_published(entry_point: str, refs: Sequence[str]) -> bool:
     return False
 
 
+#: Refused when a manifest executes an input the server never granted.
+UNDECLARED_RUNTIME_INPUTS = "The Build phase manifest's execution_inputs must be a subset of declared_inputs."
+
+
+def runtime_inputs_undeclared(manifest: BuildPhaseManifest) -> bool:
+    """True when ``execution_inputs`` names something ``declared_inputs`` does not.
+
+    ``execution_inputs`` defines the compact ``DBTL_INPUT_1..N`` runtime numbering
+    that Build verification and Test both bind to. An entry outside
+    ``declared_inputs`` is an input the server never issued, so the two sides
+    would number different environments while each believed it agreed with the
+    other — the Run 6 failure.
+
+    All three manifest entry points ask this, and each used to spell it out
+    inline. One predicate means a future change to the rule cannot land in two
+    of the three places, which is the failure mode duplicated conditions
+    actually have.
+
+    Gated on the *manifest's* version, not the required one, because manifests
+    below v3 carry no ``execution_inputs`` to check.
+    """
+    return manifest.version >= 3 and not set(manifest.execution_inputs).issubset(manifest.declared_inputs)
+
+
 def verify_phase_manifest(
     result: StageWorkerResult,
     *,
@@ -250,8 +274,8 @@ def verify_phase_manifest(
         return None, "The Build phase entry point is not an executable script type supported by the server."
     if manifest.completion_condition != completion_condition.strip():
         return None, "The Build phase manifest changed the versioned completion condition from the recorded plan."
-    if manifest.version >= 3 and not set(manifest.execution_inputs).issubset(manifest.declared_inputs):
-        return None, "The Build phase manifest's execution_inputs must be a subset of declared_inputs."
+    if runtime_inputs_undeclared(manifest):
+        return None, UNDECLARED_RUNTIME_INPUTS
     return manifest, ""
 
 
@@ -290,8 +314,8 @@ def verify_unpublished_phase_manifest(
         return None, "The Build phase entry point is not an executable script type supported by the server."
     if manifest.completion_condition != completion_condition.strip():
         return None, "The Build phase manifest changed the versioned completion condition from the recorded plan."
-    if manifest.version >= 3 and not set(manifest.execution_inputs).issubset(manifest.declared_inputs):
-        return None, "The Build phase manifest's execution_inputs must be a subset of declared_inputs."
+    if runtime_inputs_undeclared(manifest):
+        return None, UNDECLARED_RUNTIME_INPUTS
     return manifest, ""
 
 
@@ -316,7 +340,7 @@ def reconcile_published_manifest(
     bookkeeping and stay hard.
     """
     manifest = parse_phase_manifest(result.provenance.get("phase_manifest"))
-    if manifest is None or manifest.version != required_version or manifest.completion_condition != completion_condition.strip() or (manifest.version >= 3 and not set(manifest.execution_inputs).issubset(manifest.declared_inputs)):
+    if manifest is None or manifest.version != required_version or manifest.completion_condition != completion_condition.strip() or runtime_inputs_undeclared(manifest):
         return None
     published_uris = tuple(dict.fromkeys(str(item.get("uri") or "") for item in published if str(item.get("uri") or "")))
     if not published_uris or not _entry_point_published(manifest.entry_point, published_uris):

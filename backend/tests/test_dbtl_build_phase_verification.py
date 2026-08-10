@@ -19,6 +19,8 @@ from deerflow.agents.dbtl.live_stage.build_phase_verification import (
 from deerflow.agents.dbtl.live_stage.build_phases import (
     BuildPhaseManifest,
     _entry_point_published,
+    reconcile_published_manifest,
+    verify_phase_manifest,
     verify_unpublished_phase_manifest,
 )
 from deerflow.dbtl.build_grant import INPUT_ENV_PREFIX, WORKSPACE_ENV
@@ -447,7 +449,7 @@ def test_build_verifier_keeps_jupyter_state_inside_the_phase_grant(
 class _Result:
     """Minimal stand-in for a StageWorkerResult that the manifest verifier reads."""
 
-    def __init__(self, entry_point, artifact_refs, *, declared_outputs=None):
+    def __init__(self, entry_point, artifact_refs, *, declared_outputs=None, declared_inputs=(), execution_inputs=()):
         self.artifact_refs = tuple(artifact_refs)
         self.provenance = {
             "phase_manifest": {
@@ -455,10 +457,86 @@ class _Result:
                 "entry_point": entry_point,
                 "declared_outputs": list(declared_outputs if declared_outputs is not None else artifact_refs),
                 "completion_condition": "done",
-                "declared_inputs": [],
-                "execution_inputs": [],
+                "declared_inputs": list(declared_inputs),
+                "execution_inputs": list(execution_inputs),
             }
         }
+
+
+class TestRuntimeInputsMustBeDeclared:
+    """Run 6: Build verification and Test rerun bound different input environments.
+
+    ``execution_inputs`` defines the compact ``DBTL_INPUT_1..N`` runtime numbering
+    that Build verification and Test both read. An entry outside
+    ``declared_inputs`` names an input the server never granted, so the two sides
+    number different environments while each believes it agrees with the other.
+
+    The rule is enforced at all three manifest entry points, and was written out
+    three times. These pin the behaviour at each one so the copies can be
+    collapsed onto a single predicate without anyone having to take on trust that
+    they were identical.
+    """
+
+    WS = "/mnt/user-data/outputs/.dbtl-stage-work/dbtl-x/build/y"
+    MESSAGE = "The Build phase manifest's execution_inputs must be a subset of declared_inputs."
+
+    def _refs(self):
+        return [f"{self.WS}/src/run.py", f"{self.WS}/model.json"]
+
+    def _undeclared(self, refs):
+        return _Result("src/run.py", refs, declared_inputs=["DBTL_INPUT_1"], execution_inputs=["DBTL_INPUT_2"])
+
+    def test_the_published_verifier_refuses_an_undeclared_runtime_input(self):
+        refs = self._refs()
+        manifest, error = verify_phase_manifest(
+            self._undeclared(refs),
+            published=[{"uri": ref, "source_path": ref} for ref in refs],
+            completion_condition="done",
+            required_version=3,
+        )
+
+        assert manifest is None
+        assert error == self.MESSAGE
+
+    def test_the_pre_publication_verifier_refuses_an_undeclared_runtime_input(self):
+        manifest, error = verify_unpublished_phase_manifest(
+            self._undeclared(self._refs()),
+            completion_condition="done",
+            required_version=3,
+        )
+
+        assert manifest is None
+        assert error == self.MESSAGE
+
+    def test_bookkeeping_reconciliation_refuses_an_undeclared_runtime_input(self):
+        """Reconciliation forgives a bookkeeping desync. It must not forgive this
+        one: an ungranted runtime input is a contract disagreement, not
+        bookkeeping, and letting it through here would reopen the Run 6 failure
+        on the *recovery* path.
+        """
+        refs = self._refs()
+
+        assert (
+            reconcile_published_manifest(
+                self._undeclared(refs),
+                published=[{"uri": ref, "source_path": ref} for ref in refs],
+                completion_condition="done",
+                required_version=3,
+            )
+            is None
+        )
+
+    def test_a_runtime_input_that_was_granted_passes_every_entry_point(self):
+        """The guard against over-tightening: declared and executed agreeing is
+        the ordinary case and must stay cheap.
+        """
+        refs = self._refs()
+        granted = _Result("src/run.py", refs, declared_inputs=["DBTL_INPUT_1"], execution_inputs=["DBTL_INPUT_1"])
+        published = [{"uri": ref, "source_path": ref} for ref in refs]
+
+        assert verify_phase_manifest(granted, published=published, completion_condition="done", required_version=3)[1] == ""
+        assert verify_unpublished_phase_manifest(granted, completion_condition="done", required_version=3)[1] == ""
+        assert reconcile_published_manifest(granted, published=published, completion_condition="done", required_version=3) is not None
 
 
 def test_entry_point_published_tolerates_relative_vs_full_virtual_form():
