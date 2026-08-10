@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -402,3 +403,82 @@ def atomic_write(destination: Path, content: bytes) -> None:
     finally:
         if temp_path is not None:
             Path(temp_path).unlink(missing_ok=True)
+
+
+#: How a Build phase names an input it consumed: the path plus the exact bytes.
+_WORKSPACE_INPUT_BINDING = re.compile(r"^workspace_file:(.+):sha256:([0-9a-f]{64})$")
+
+
+def atomic_copy(source: Path, destination: Path, *, expected_hash: str) -> None:
+    """Copy one validated worker file without exposing a partial artifact."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: str | None = None
+    try:
+        with (
+            source.open("rb") as reader,
+            tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=destination.parent,
+                prefix=f".{destination.name}.",
+                delete=False,
+            ) as writer,
+        ):
+            temp_path = writer.name
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: reader.read(1024 * 1024), b""):
+                digest.update(chunk)
+                writer.write(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+        if digest.hexdigest() != expected_hash:
+            raise ValueError("Worker artifact changed while it was being published.")
+        os.replace(temp_path, destination)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            Path(temp_path).unlink(missing_ok=True)
+
+
+def input_artifacts_intact(input_artifacts: Sequence[str], *, project_root: str) -> bool:
+    """Verify that replayed phase inputs still have the bytes it actually read."""
+    for binding in input_artifacts:
+        if binding.startswith("dataset:"):
+            # Dataset hashes are durable cycle material and already flow through
+            # load_design -> plan_build. Workspace files need a live byte check.
+            continue
+        match = _WORKSPACE_INPUT_BINDING.fullmatch(binding)
+        if match is None:
+            return False
+        relative, expected = match.groups()
+        resolved = workspace_relative_path(relative, project_root=project_root)
+        if resolved is None:
+            return False
+        _normalized, path = resolved
+        try:
+            if not path.is_file() or path.is_symlink() or sha256_file(path) != expected:
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def published_bytes_intact(published: Sequence[Mapping[str, Any]], *, project_root: str) -> bool:
+    """Are the outputs this phase published still exactly what it published?
+
+    A payload that parses proves what the worker *said*; it proves nothing about
+    the governed tree the next phase, the summarizer, and the deck all read
+    from. A file deleted, truncated, or edited since the phase committed would
+    otherwise be replayed as evidence under the hash it no longer has.
+    """
+    for entry in published:
+        expected = str(entry.get("content_hash") or "")
+        resolved = workspace_relative_path(str(entry.get("uri") or ""), project_root=project_root)
+        if not expected or resolved is None:
+            return False
+        _relative, host = resolved
+        try:
+            if not host.is_file() or host.is_symlink() or sha256_file(host) != expected:
+                return False
+        except OSError:
+            return False
+    return True

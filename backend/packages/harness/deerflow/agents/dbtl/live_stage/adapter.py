@@ -17,7 +17,6 @@ import os
 import platform
 import re
 import sys
-import tempfile
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, replace
@@ -2023,9 +2022,6 @@ def _dbtl_worker_execution_env(
     return env
 
 
-_WORKSPACE_INPUT_BINDING = re.compile(r"^workspace_file:(.+):sha256:([0-9a-f]{64})$")
-
-
 def _design_deliverable_manifest(
     chair_result: StageWorkerResult,
     *,
@@ -2220,7 +2216,7 @@ def _publish_test_owned_deliverables(candidates: Sequence[Mapping[str, Any]]) ->
         destination = item.get("_destination")
         if not isinstance(source, Path) or not isinstance(destination, Path):
             raise ValueError("A verified Test deliverable lost its publication path.")
-        _atomic_copy(source, destination, expected_hash=str(item.get("content_hash") or ""))
+        workspace.atomic_copy(source, destination, expected_hash=str(item.get("content_hash") or ""))
 
 
 def _reusable_test_worker_results(
@@ -2308,29 +2304,6 @@ def _has_reusable_test_evidence(
         if any(other_id.startswith(f"{prefix}-") and isinstance(other.provenance.get("validity_assessment"), Mapping) for other_id, other in parsed):
             return True
     return False
-
-
-def _input_artifacts_intact(input_artifacts: Sequence[str], *, project_root: str) -> bool:
-    """Verify that replayed phase inputs still have the bytes it actually read."""
-    for binding in input_artifacts:
-        if binding.startswith("dataset:"):
-            # Dataset hashes are durable cycle material and already flow through
-            # load_design -> plan_build. Workspace files need a live byte check.
-            continue
-        match = _WORKSPACE_INPUT_BINDING.fullmatch(binding)
-        if match is None:
-            return False
-        relative, expected = match.groups()
-        resolved = _workspace_relative_path(relative, project_root=project_root)
-        if resolved is None:
-            return False
-        _normalized, path = resolved
-        try:
-            if not path.is_file() or path.is_symlink() or workspace.sha256_file(path) != expected:
-                return False
-        except OSError:
-            return False
-    return True
 
 
 #: The design-council chair's result contract: the rules the server actually
@@ -2995,36 +2968,6 @@ def _write_authored_design_deck(
     )
 
 
-def _atomic_copy(source: Path, destination: Path, *, expected_hash: str) -> None:
-    """Copy one validated worker file without exposing a partial artifact."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temp_path: str | None = None
-    try:
-        with (
-            source.open("rb") as reader,
-            tempfile.NamedTemporaryFile(
-                mode="wb",
-                dir=destination.parent,
-                prefix=f".{destination.name}.",
-                delete=False,
-            ) as writer,
-        ):
-            temp_path = writer.name
-            digest = hashlib.sha256()
-            for chunk in iter(lambda: reader.read(1024 * 1024), b""):
-                digest.update(chunk)
-                writer.write(chunk)
-            writer.flush()
-            os.fsync(writer.fileno())
-        if digest.hexdigest() != expected_hash:
-            raise ValueError("Worker artifact changed while it was being published.")
-        os.replace(temp_path, destination)
-        temp_path = None
-    finally:
-        if temp_path is not None:
-            Path(temp_path).unlink(missing_ok=True)
-
-
 _MAX_BUILD_PUBLISHED_FILES_PER_UNIT = 500
 
 
@@ -3120,7 +3063,7 @@ def _publish_build_worker_artifacts(
                             safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", source.name).strip("-.") or "artifact"
                             destination_relative = stage_dir / "artifacts" / attempt_id / _safe_token(unit.unit_id) / f"{content_hash[:16]}-{safe_name[:96]}"
                             destination = outputs_root / destination_relative
-                            _atomic_copy(source, destination, expected_hash=content_hash)
+                            workspace.atomic_copy(source, destination, expected_hash=content_hash)
                         except (OSError, ValueError):
                             failure = f"Build artifact {reference!r} changed or became unreadable while it was being published."
                             break
@@ -3361,28 +3304,6 @@ def _restored_build_plan(payload: Any, *, expected_digest: str, input_digest_val
     return plan
 
 
-def _published_bytes_intact(published: Sequence[Mapping[str, Any]], *, project_root: str) -> bool:
-    """Are the outputs this phase published still exactly what it published?
-
-    A payload that parses proves what the worker *said*; it proves nothing about
-    the governed tree the next phase, the summarizer, and the deck all read
-    from. A file deleted, truncated, or edited since the phase committed would
-    otherwise be replayed as evidence under the hash it no longer has.
-    """
-    for entry in published:
-        expected = str(entry.get("content_hash") or "")
-        resolved = workspace_relative_path(str(entry.get("uri") or ""), project_root=project_root)
-        if not expected or resolved is None:
-            return False
-        _relative, host = resolved
-        try:
-            if not host.is_file() or host.is_symlink() or workspace.sha256_file(host) != expected:
-                return False
-        except OSError:
-            return False
-    return True
-
-
 def _restore_phase(
     payload: Any,
     *,
@@ -3424,10 +3345,10 @@ def _restore_phase(
     if not expected_digest or phase_output_digest(result=raw_result, published=published, input_artifacts=input_artifacts) != expected_digest:
         logger.warning("A recorded Build phase payload did not match the digest its attempt committed; the phase will run again.")
         return None
-    if not _input_artifacts_intact(input_artifacts, project_root=project_root):
+    if not workspace.input_artifacts_intact(input_artifacts, project_root=project_root):
         logger.warning("A recorded Build phase's inputs changed after it ran; the phase will run again.")
         return None
-    if not _published_bytes_intact(published, project_root=project_root):
+    if not workspace.published_bytes_intact(published, project_root=project_root):
         logger.warning("A recorded Build phase's published outputs are no longer what it published; the phase will run again.")
         return None
     try:
