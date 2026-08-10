@@ -2358,6 +2358,8 @@ class TestLiveStageBranch:
             "can we go to Test stage?",
             "Retry Build using the approved design",
             "Replan the build",
+            "Perform one minimal governed Build repair against the approved design.",
+            "Fix the governed Test stage without starting another cycle.",
             "Okay, let's start to build following this new plan",
         ],
     )

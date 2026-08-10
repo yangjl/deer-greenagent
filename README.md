@@ -51,6 +51,9 @@ Design–Build–Test–Learn (DBTL) governance.
   arrive, reopening the authenticated deck re-enables that exact decision—including
   a Test outcome route—so the prompt can be redelivered without repeating the
   review.
+  A governed retry that republishes byte-identical evidence binds its new deck
+  to the newest matching artifact revision, so the fresh review surface remains
+  actionable instead of immediately reporting itself stale.
   One-click Build approval opens Test atomically, and older checkpoints whose
   summary lags their active stage recover from the active row instead of
   rerunning Build. Live worker cards use the actual DBTL stage instead of
@@ -104,7 +107,9 @@ Design–Build–Test–Learn (DBTL) governance.
   implementation, so orientation-only reads do not invalidate the phase or
   enter Build lineage. It uses a 500,000-token ceiling, issues exact
   workspace/input paths through the environment, requires manifest-v3 runtime
-  inputs, scans declared source outputs for invented paths, and has the server
+  inputs, and executes Build under the same compact `DBTL_INPUT_1..N` list that
+  Test will rerun—undeclared candidate inputs are never ambient execution
+  state. It scans declared source outputs for invented paths and has the server
   execute the entry point before publication. Server verification also points
   Jupyter and IPython configuration, data, and runtime state into the phase's
   writable workspace, so an installed notebook tool never needs host-home

@@ -2952,6 +2952,32 @@ def test_evidence_matching_uses_the_keys_the_repository_actually_returns() -> No
     assert _bound_evidence(payload, artifact_uri=row.uri, content_hash="f" * 64) is None
 
 
+def test_evidence_matching_binds_the_newest_identical_artifact_revision() -> None:
+    """A replayed package must not make its freshly rendered deck stale."""
+    shared = {
+        "stage_attempt_id": "attempt-build",
+        "artifact_type": "build_package",
+        "content_hash": "d" * 64,
+        "uri": "/mnt/user-data/outputs/dbtl/x/build/build-review.md",
+    }
+    cycle = {
+        "artifacts": [
+            {**shared, "id": "artifact-old", "revision": 4},
+            {**shared, "id": "artifact-new", "revision": 5},
+        ]
+    }
+
+    matched = _bound_evidence(
+        cycle,
+        artifact_uri=shared["uri"],
+        content_hash=shared["content_hash"],
+    )
+
+    assert matched is not None
+    assert matched["id"] == "artifact-new"
+    assert matched["revision"] == 5
+
+
 @pytest.mark.asyncio
 async def test_a_paused_deck_embeds_the_surface_id_it_is_registered_under(
     tmp_path: Path,

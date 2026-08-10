@@ -245,7 +245,7 @@ _REVIEW_INTENT_RE = re.compile(
 
 _STAGE_CONTROL_PATTERNS = (
     re.compile(
-        r"\b(?P<action>start|run|retry|rerun|re-run|replan|re-plan|restart)\s+(?:to\s+)?(?:the\s+)?(?:governed\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
+        r"\b(?P<action>start|run|retry|rerun|re-run|replan|re-plan|restart|repair|fix)\s+(?:to\s+)?(?:the\s+)?(?:governed\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -253,7 +253,11 @@ _STAGE_CONTROL_PATTERNS = (
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(?P<action>let['’]?s|let\s+us|shall\s+we)\s+(?:(?:start|run|retry|rerun|re-run|replan|re-plan|restart)\s+(?:to\s+)?|(?:move|go|proceed|advance|continue)\s+(?:to|into|with)\s+)?(?:the\s+)?(?:governed\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
+        r"\b(?:perform|apply|make)\s+(?:(?:one|a)\s+)?(?:(?:minimal|targeted|small)\s+)?(?:governed\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\s+(?P<action>repair|fix)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?P<action>let['’]?s|let\s+us|shall\s+we)\s+(?:(?:start|run|retry|rerun|re-run|replan|re-plan|restart|repair|fix)\s+(?:to\s+)?|(?:move|go|proceed|advance|continue)\s+(?:to|into|with)\s+)?(?:the\s+)?(?:governed\s+)?(?P<stage>design|reconciliation|build|test|learn)(?:\s+stage)?\b",
         re.IGNORECASE,
     ),
 )

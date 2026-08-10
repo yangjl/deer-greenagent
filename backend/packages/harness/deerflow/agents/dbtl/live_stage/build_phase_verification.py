@@ -145,9 +145,15 @@ def verification_shell_command(
     manifest: BuildPhaseManifest,
     *,
     unit_workspace: str,
-    issued_inputs: tuple[str, ...] | None = None,
 ) -> tuple[str, dict[str, str]]:
-    """Return the bounded command and server-issued environment for a phase."""
+    """Return the bounded command and the phase's declared runtime environment.
+
+    ``issued_inputs`` is a discovery catalog, not ambient execution authority.
+    Test numbers ``rerun_spec.inputs`` compactly from one, so Build must prove
+    the entry point under that same contract. Injecting the whole issued catalog
+    here let code depend on an undeclared ``DBTL_INPUT_n`` and pass Build only to
+    fail the authoritative Test rerun.
+    """
     workspace = unit_workspace.rstrip("/")
     run_script = entry_command(manifest.entry_point)
     stdout = f"{workspace}/{VERIFY_STDOUT}"
@@ -168,7 +174,7 @@ def verification_shell_command(
     env = build_input_grant(
         workspace=workspace,
         project_root="/mnt/user-data",
-        declared_inputs=manifest.execution_inputs if issued_inputs is None else issued_inputs,
+        declared_inputs=manifest.execution_inputs,
     )
     return shell, env
 
@@ -258,7 +264,7 @@ def execute_and_verify_phase(
         return BuildPhaseVerification(False, receipt_error, "")
 
     try:
-        shell, env = verification_shell_command(manifest, unit_workspace=unit_workspace, issued_inputs=issued_inputs)
+        shell, env = verification_shell_command(manifest, unit_workspace=unit_workspace)
         execute(shell, env, timeout_seconds)
     except Exception as exc:  # noqa: BLE001 - converted into a bounded stage receipt
         return BuildPhaseVerification(False, f"The server could not execute the Build entry point: {exc}", entry_command(manifest.entry_point))

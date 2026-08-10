@@ -1685,6 +1685,7 @@ class _GrantedPathFreshCorrectionDispatcher(_WritingDispatcher):
             output.write_text("fitted", encoding="utf-8")
             plot.write_bytes(PNG)
             payload = json.loads(_build_result(artifact=_virtual(output), figure=_virtual(plot)))
+            payload["provenance"]["rerun_spec"]["inputs"] = []
             payload["artifact_refs"] = [_virtual(entry_point), _virtual(output), _virtual(plot)]
             payload["evidence_refs"] = [{"kind": "workspace_file", "reference": _virtual(output), "description": "Fitted model."}]
             _with_phase_manifest(
@@ -2341,12 +2342,14 @@ class _CappedPhaseDispatcher(_WritingDispatcher):
         stop_reason: str = "token_capped",
         drop_manifest: bool = False,
         forbidden_path: bool = False,
+        mismatched_rerun_inputs: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self._stop_reason = stop_reason
         self._drop_manifest = drop_manifest
         self._forbidden_path = forbidden_path
+        self._mismatched_rerun_inputs = mismatched_rerun_inputs
 
     async def __call__(self, units, *, budget):
         if any(unit.role != "phase" for unit in units):
@@ -2368,6 +2371,7 @@ class _CappedPhaseDispatcher(_WritingDispatcher):
             output.write_text("fitted", encoding="utf-8")
             plot.write_bytes(PNG)
             payload = json.loads(_build_result(artifact=_virtual(output), figure=_virtual(plot)))
+            payload["provenance"]["rerun_spec"]["inputs"] = ["/mnt/user-data/yield.csv"] if self._mismatched_rerun_inputs else []
             payload["artifact_refs"] = [_virtual(entry_point), _virtual(output), _virtual(plot)]
             payload["evidence_refs"] = [{"kind": "workspace_file", "reference": _virtual(output), "description": "Fitted model."}]
             _with_phase_manifest(
@@ -2467,7 +2471,10 @@ class TestACappedPhaseSurvivesOnlyWhenTheHardGatesPass:
         )
 
         assert not result.produced_usable_evidence
-        view = await repo.build_workflow_view(project_id="project-1", stage_attempt_id=stage_attempt_id)
+        view = await repo.build_workflow_view(
+            project_id="project-1",
+            stage_attempt_id=stage_attempt_id,
+        )
         assert view["phases"][0]["error_code"] == BuildErrorCode.EXECUTION_CONTRACT_REJECTED.value
         # Salvage clears `stop_reason`, which is what makes a phase correction-eligible.
         # A capped build must not start costing a second worker on top of the first.
@@ -2542,3 +2549,30 @@ class TestACappedPhaseSurvivesOnlyWhenTheHardGatesPass:
         # The cap stays queryable even though the admitted result's own reason is gone.
         worker = (await repo.list_worker_runs("cycle-1", project_id="project-1", stage="build"))[0]
         assert worker["stop_reason"] == "token_capped"
+
+
+class TestBuildAndTestShareOneRuntimeInputContract:
+    async def test_a_rerun_record_cannot_drop_or_add_phase_runtime_inputs(self, project, monkeypatch) -> None:
+        repo, root = project
+        await _ready_for_build(repo)
+        stage_attempt_id = await _build_stage_attempt_id(repo)
+        dispatcher = _CappedPhaseDispatcher(
+            plan=SINGLE_PHASE_PLAN,
+            stop_reason="",
+            mismatched_rerun_inputs=True,
+        )
+
+        result = await _run_build_on_the_server_path(
+            repo,
+            root,
+            dispatcher=dispatcher,
+            monkeypatch=monkeypatch,
+        )
+
+        assert not result.produced_usable_evidence
+        assert len(dispatcher.phase_units) == 2, "the mismatch should receive exactly one fresh correction"
+        view = await repo.build_workflow_view(
+            project_id="project-1",
+            stage_attempt_id=stage_attempt_id,
+        )
+        assert "Build and Test cannot verify different input environments" in view["phases"][0]["error_summary"]

@@ -670,16 +670,19 @@ def phase_unit(
         *(
             [
                 "",
-                "The server issues your paths; do not compose your own. Your code must read its inputs",
-                f"from {INPUT_ENV_PREFIX}1, {INPUT_ENV_PREFIX}2, ... in the server-issued order below, with {INPUT_ENV_PREFIX}COUNT",
-                f"holding how many) and write beneath {WORKSPACE_ENV}, either by reading those environment",
+                "The server issues a candidate input catalog; do not compose your own paths. Choose only",
+                "the files the entry point actually consumes, list them in phase_manifest.execution_inputs",
+                f"in runtime order, and make the final code read that compact list as {INPUT_ENV_PREFIX}1,",
+                f"{INPUT_ENV_PREFIX}2, ... ({INPUT_ENV_PREFIX}COUNT holds how many). Write beneath {WORKSPACE_ENV}",
+                "by reading those environment",
                 "variables directly. An entry point that",
                 "names an absolute path to its data is refused before it runs, and the refusal names the",
                 "literal and the line. A path you compose yourself is a guess about a filesystem you",
                 "cannot see, and a wrong guess costs the whole phase.",
-                "Server-issued input order for this phase:",
+                "Server-issued candidate input catalog for this phase:",
                 *(f"  {INPUT_ENV_PREFIX}{position}={path}" for position, path in enumerate(granted_inputs, start=1)),
-                "In phase_manifest.declared_inputs list the exact subset your implementation consumed; this does not renumber the environment.",
+                "In phase_manifest.declared_inputs list the exact subset your implementation consumed;",
+                "declared_inputs does not define runtime numbering — execution_inputs below does.",
             ]
             if "granted_paths_only" in spec.validity_gates
             else []
@@ -782,7 +785,7 @@ def phase_unit(
                                 *(
                                     [
                                         "Also return execution_inputs containing only the server-issued inputs the entry point consumes at runtime.",
-                                        "execution_inputs is a subset of declared_inputs and does not renumber DBTL_INPUT_n.",
+                                        "execution_inputs is a subset of declared_inputs; its order defines the compact DBTL_INPUT_1..N runtime used by both Build verification and Test.",
                                         "The entry_point must be an executable script ending in .py, .sh, .bash, .R, .js, .mjs, .cjs, .ts, .tsx, .jl, .rb, or .pl.",
                                         "A notebook may be a declared output, but it is a human replay playbook and must never be the entry_point.",
                                         "Create the entry-point script inside this phase workspace and include that exact path in both artifact_refs and declared_outputs.",
@@ -887,14 +890,14 @@ def phase_correction_unit(
         "- Return exactly ONE JSON object as the structured result; no prose before or after it.",
         "- Verify from the workspace root: cd into DBTL_WORKSPACE before running any reproduction or audit command, and check outputs by exact relative path (no globs).",
         "  Corrections here have died on a reproduce script invoked from the wrong directory and on audit globs that missed the real files.",
-        "Server-issued input order for this correction:",
+        "Server-issued candidate input catalog for this correction:",
         *(f"  {INPUT_ENV_PREFIX}{position}={path}" for position, path in enumerate(granted_inputs, start=1)),
         f"In provenance.phase_manifest return version={required_phase_manifest_version(spec)}, the executable entry_point path,",
         "declared_outputs containing every artifact_refs path exactly once, and",
         "completion_condition copied verbatim from Done when (or an empty string when none was recorded).",
         "In declared_inputs list only exact workspace files actually consumed to implement or execute the correction.",
         "In execution_inputs list only server-issued inputs the corrected entry point consumes at runtime.",
-        "execution_inputs is a subset of declared_inputs and does not renumber DBTL_INPUT_n.",
+        "execution_inputs is a subset of declared_inputs; its order defines the compact DBTL_INPUT_1..N runtime used by both Build verification and Test.",
         "Create the entry-point script inside this correction workspace and include that exact path in both artifact_refs and declared_outputs.",
         "A notebook is a human replay output, never the entry_point; use a concise validator script for a notebook-only correction.",
         f"Return exactly one {PHASE_DONE_CHECK!r} check, passed only after the corrected entry point runs and the Done when condition holds.",

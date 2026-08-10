@@ -3246,19 +3246,19 @@ def _stage_attempt_row_id(cycle: Mapping[str, Any], stage: str) -> str:
 def _bound_evidence(cycle: Mapping[str, Any], *, artifact_uri: str, content_hash: str) -> Mapping[str, Any] | None:
     """The artifact row a review deck projects, matched by its exact hash.
 
-    Matched on the content hash rather than "the newest artifact", because
-    attachment order is not evidence: the deck must bind to the document it was
-    rendered from or to nothing at all.
+    Matched on the content hash rather than merely "the newest artifact",
+    because attachment order is not evidence: the deck must bind to the
+    document it was rendered from or to nothing at all. A retry may record the
+    same document again, so identical matches bind the newest revision.
     """
     artifacts = cycle.get("artifacts")
     if not artifacts or not isinstance(artifacts, Sequence) or isinstance(artifacts, str):
         return None
-    for item in artifacts:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("content_hash") or "") == content_hash and str(item.get("uri") or "") == artifact_uri:
-            return item
-    return None
+    return max(
+        (item for item in artifacts if isinstance(item, dict) and str(item.get("content_hash") or "") == content_hash and str(item.get("uri") or "") == artifact_uri),
+        key=lambda item: int(item.get("revision") or 0),
+        default=None,
+    )
 
 
 def _atomic_copy(source: Path, destination: Path, *, expected_hash: str) -> None:
@@ -5559,6 +5559,22 @@ class LiveStageAdapter:
                             "phase_manifest": raw_manifest.as_dict(),
                         },
                     )
+                    phase_rerun = parse_rerun_spec((current_result.provenance or {}).get("rerun_spec"))
+                    if phase_rerun is not None:
+                        rerun_inputs = resolve_issued_input_tokens(
+                            replace(
+                                raw_manifest,
+                                declared_inputs=tuple(phase_rerun.inputs),
+                                execution_inputs=tuple(phase_rerun.inputs),
+                            ),
+                            issued_inputs=granted_inputs,
+                        ).execution_inputs
+                        if rerun_inputs != raw_manifest.execution_inputs:
+                            return current_result, BuildPhaseVerification(
+                                False,
+                                "The Build phase rerun_spec.inputs must exactly match phase_manifest.execution_inputs in runtime order; Build and Test cannot verify different input environments.",
+                                "",
+                            )
                     grant_error = verify_granted_paths(
                         raw_manifest,
                         read_source=functools.partial(_published_source_text, project_root=project_root),

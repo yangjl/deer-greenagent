@@ -3312,8 +3312,11 @@ wrote (recomputing it in the caller could differ from the file on disk without
 anyone noticing). Mode is chosen from what exists: `chair_feedback` when the
 chair paused, `stage_review` when the review package can be matched by
 `_bound_evidence` — **by content hash, never by attachment order**, since a deck
-must bind to the document it was rendered from or to nothing — and `read_only`
-otherwise, including when there is no originating thread. Registration is
+must bind to the document it was rendered from or to nothing. When a retry
+records the same URI and content hash again, `_bound_evidence` selects the
+highest matching artifact revision so the new deck and the current reviewable
+artifact row agree. `read_only` applies otherwise, including when there is no
+originating thread. Registration is
 fail-visible: meeting evidence is already durable by the time it runs, but an
 unregistered deck is an owner who cannot answer the gate. The run therefore
 fails and may safely retry registration instead of returning a surface id that
@@ -3958,9 +3961,11 @@ same switch:
   V12 requires phase-manifest v3. `declared_inputs` binds the narrow set of
   workspace files consumed while implementing or executing the phase;
   `execution_inputs` is the subset the declared entry point consumes at
-  runtime. The latter must come from the server-issued grant, but it does not
-  renumber `DBTL_INPUT_n`: server execution receives the original issued order
-  so a script using only `DBTL_INPUT_2` still receives that exact variable.
+  runtime. The latter must come from the server-issued candidate catalog, and
+  its order defines the compact runtime grant: Build verification and Test both
+  expose it as `DBTL_INPUT_1`, `DBTL_INPUT_2`, … with no undeclared ambient
+  inputs. A parseable worker rerun record must name the identical ordered inputs
+  or the phase is corrected before review.
   `_execute_server_build_command` owns notebook runtime state as part of that
   same grant: it overrides `JUPYTER_CONFIG_DIR`, `JUPYTER_DATA_DIR`,
   `JUPYTER_RUNTIME_DIR`, and `IPYTHONDIR` with paths beneath the phase workspace

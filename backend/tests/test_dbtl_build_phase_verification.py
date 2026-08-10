@@ -222,6 +222,8 @@ def test_implementation_only_inputs_are_not_injected_at_runtime(tmp_path: Path) 
     workspace, host = _workspace(tmp_path)
     implementation_input = f"{workspace}/src/helper.py"
     (host / "src/helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    issued_input = tmp_path / "trial.csv"
+    issued_input.write_text("x\n1\n", encoding="utf-8")
     observed: dict[str, str] = {}
 
     def execute(_command: str, env: dict[str, str], _timeout: float) -> str:
@@ -237,10 +239,45 @@ def test_implementation_only_inputs_are_not_injected_at_runtime(tmp_path: Path) 
         unit_workspace=workspace,
         execute=execute,
         timeout_seconds=45,
+        issued_inputs=("/mnt/user-data/trial.csv",),
     )
 
     assert record.passed is True
     assert f"{INPUT_ENV_PREFIX}1" not in observed
+
+
+def test_runtime_inputs_are_compactly_numbered_like_the_test_rerun(tmp_path: Path) -> None:
+    workspace, host = _workspace(tmp_path)
+    train = tmp_path / "train.csv"
+    holdout = tmp_path / "holdout.csv"
+    train.write_text("x\n1\n", encoding="utf-8")
+    holdout.write_text("x\n2\n", encoding="utf-8")
+    observed: dict[str, str] = {}
+
+    def execute(_command: str, env: dict[str, str], _timeout: float) -> str:
+        observed.update(env)
+        (host / VERIFY_STDOUT).write_text("ok\n", encoding="utf-8")
+        (host / VERIFY_STDERR).write_text("", encoding="utf-8")
+        (host / VERIFY_STATUS).write_text("0\n", encoding="utf-8")
+        return ""
+
+    record = execute_and_verify_phase(
+        _manifest(
+            workspace,
+            inputs=("/mnt/user-data/holdout.csv",),
+            execution_inputs=("/mnt/user-data/holdout.csv",),
+        ),
+        project_root=str(tmp_path),
+        unit_workspace=workspace,
+        execute=execute,
+        timeout_seconds=45,
+        issued_inputs=("/mnt/user-data/train.csv", "/mnt/user-data/holdout.csv"),
+    )
+
+    assert record.passed is True
+    assert observed[f"{INPUT_ENV_PREFIX}COUNT"] == "1"
+    assert observed[f"{INPUT_ENV_PREFIX}1"] == "/mnt/user-data/holdout.csv"
+    assert f"{INPUT_ENV_PREFIX}2" not in observed
 
 
 def test_execution_inputs_must_come_from_the_issued_grant(tmp_path: Path) -> None:
