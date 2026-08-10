@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
-import html
 import json
 import logging
 import os
@@ -96,6 +95,8 @@ from deerflow.agents.dbtl.live_stage.build_stage import (
 from deerflow.agents.dbtl.live_stage.design_input import approved_design_artifact, resolve_build_inputs
 from deerflow.agents.dbtl.live_stage.feedback_surfaces import (
     FeedbackSurfacePlan,
+    RenderedDeck,
+    _persist_deck,
     plan_surface,
     registration_kwargs,
 )
@@ -115,6 +116,11 @@ from deerflow.agents.dbtl.live_stage.test_review import (
 )
 from deerflow.agents.dbtl.live_stage.test_review import (
     validated_test_assessment as _validated_test_assessment,
+)
+from deerflow.agents.dbtl.live_stage.test_stage import (
+    _read_evidence_exception_package,
+    _write_evidence_exception_deck,
+    _write_evidence_exception_package,
 )
 from deerflow.agents.dbtl.live_stage.types import LiveStageResult
 from deerflow.agents.dbtl.live_stage.workspace import (
@@ -183,10 +189,6 @@ from deerflow.dbtl.council_deck import (
     extract_commentable_slides,
     render_authored_design_deck,
     render_council_deck,
-    render_design_deck_shell,
-    render_design_deck_slide,
-    render_stage_feedback_bridge,
-    render_stage_review_controls,
 )
 from deerflow.dbtl.council_proposal import (
     CouncilProposal,
@@ -2839,20 +2841,6 @@ def _write_stage_package(
     return uri, document_hash, digest
 
 
-@dataclass(frozen=True, slots=True)
-class RenderedDeck:
-    """A written deck and the hash of the exact bytes written.
-
-    The hash is returned rather than recomputed by the caller because the file
-    on disk is what a person is shown, and a second hash of a second render
-    could differ from it without anyone noticing.
-    """
-
-    uri: str
-    content_hash: str
-    commentable_slides: tuple[dict[str, str], ...] = ()
-
-
 def _write_build_driver(
     *,
     project_root: str,
@@ -2972,199 +2960,6 @@ def _write_council_deck(
         cycle=cycle,
         stage=stage,
         document=document,
-        commentable_slides=extract_commentable_slides(deck_html),
-    )
-
-
-def _persist_deck(
-    *,
-    project_root: str,
-    cycle: Mapping[str, Any],
-    stage: str,
-    document: bytes,
-    commentable_slides: tuple[dict[str, str], ...] = (),
-) -> RenderedDeck | None:
-    """Write rendered deck bytes beside the stage's review package.
-
-    Shared by every deck renderer so the naming, content addressing, and
-    fail-soft behaviour cannot drift between them.
-    """
-    content_hash = hashlib.sha256(document).hexdigest()
-    try:
-        root = Path(project_root).expanduser().resolve()
-        ensure_project_dirs(root)
-        stage_dir = stage_output_dir(
-            cycle_id=str(cycle["id"]),
-            cycle_title=str(cycle.get("title") or ""),
-            stage=stage,
-        )
-        relative = stage_dir / stage_file_name(
-            stage=stage,
-            kind="slides",
-            revision=cycle.get("db_revision"),
-            content_hash=content_hash,
-        )
-        atomic_write(project_outputs_dir(root) / relative, document)
-    except Exception:  # noqa: BLE001 - same reason
-        logger.warning("Could not write the design meeting slide deck.", exc_info=True)
-        return None
-    return RenderedDeck(
-        uri=f"/mnt/user-data/outputs/{relative.as_posix()}",
-        content_hash=content_hash,
-        commentable_slides=commentable_slides,
-    )
-
-
-def _write_evidence_exception_package(
-    *,
-    project_root: str,
-    cycle: Mapping[str, Any],
-    dossier: EvidenceExceptionDossier,
-) -> tuple[str, str, str]:
-    """Persist the canonical dossier bytes whose SHA-256 is its contract hash."""
-    payload = dossier.as_dict()
-    content_hash = str(payload.pop("content_hash"))
-    document = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        default=str,
-    ).encode("utf-8")
-    if hashlib.sha256(document).hexdigest() != content_hash:
-        raise ValueError("Evidence exception serialization does not match its canonical hash.")
-    root = Path(project_root).expanduser().resolve()
-    ensure_project_dirs(root)
-    relative = stage_output_dir(
-        cycle_id=str(cycle["id"]),
-        cycle_title=str(cycle.get("title") or ""),
-        stage=dossier.stage,
-    ) / stage_file_name(
-        stage=dossier.stage,
-        kind="evidence-exception",
-        revision=cycle.get("db_revision"),
-        content_hash=content_hash,
-    )
-    atomic_write(project_outputs_dir(root) / relative, document)
-    reasons = ", ".join(reason.value.replace("_", " ") for reason in dossier.reason_codes)
-    return (
-        f"/mnt/user-data/outputs/{relative.as_posix()}",
-        content_hash,
-        f"{dossier.condition.value.replace('_', ' ').title()} evidence exception: {reasons}.",
-    )
-
-
-def _read_evidence_exception_package(
-    *,
-    project_root: str,
-    artifact: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    """Read only a content-addressed dossier from the governed output tree."""
-    uri = str(artifact.get("uri") or "")
-    expected_hash = str(artifact.get("content_hash") or "")
-    prefix = "/mnt/user-data/outputs/"
-    if not uri.startswith(prefix) or len(expected_hash) != 64:
-        return None
-    root = project_outputs_dir(Path(project_root).expanduser().resolve())
-    candidate = (root / uri.removeprefix(prefix)).resolve()
-    try:
-        candidate.relative_to(root.resolve())
-        document = candidate.read_bytes()
-        if hashlib.sha256(document).hexdigest() != expected_hash:
-            return None
-        payload = json.loads(document)
-    except (OSError, ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    payload["content_hash"] = expected_hash
-    return payload
-
-
-def _write_evidence_exception_deck(
-    *,
-    project_root: str,
-    cycle: Mapping[str, Any],
-    dossier: EvidenceExceptionDossier,
-    package_path: str,
-    surface_id: str,
-    transition_gate: Mapping[str, Any],
-) -> RenderedDeck | None:
-    """Render metadata only; quarantined artifact bytes are never embedded."""
-
-    def items(values: Sequence[object], empty: str) -> str:
-        rendered = "".join(f"<li>{html.escape(str(value))}</li>" for value in values)
-        return f"<ul>{rendered}</ul>" if rendered else f"<p>{html.escape(empty)}</p>"
-
-    payload = dossier.as_dict()
-    slides = [
-        render_design_deck_slide(
-            kind="title",
-            eyebrow="Evidence exception",
-            title=f"{dossier.stage.title()} cannot take the clean review path",
-            body=(
-                '<p class="lede"><strong>Red flag:</strong> this evidence remains failed or untrusted. '
-                "Continuing is not approval and cannot turn it into scientific support.</p>"
-                f'<p class="stamp">Dossier SHA-256: {html.escape(dossier.content_hash)}</p>'
-            ),
-            note_id="exception-summary",
-            note_label="Exception summary",
-        ),
-        render_design_deck_slide(
-            kind="evidence",
-            eyebrow="Server classification",
-            title=dossier.condition.value.replace("_", " ").title(),
-            body=(
-                f"<p><strong>Scientific effect:</strong> {html.escape(dossier.scientific_effect.value.replace('_', ' '))}</p>"
-                f"<p><strong>Reason codes:</strong> {html.escape(', '.join(reason.value for reason in dossier.reason_codes))}</p>"
-                f'<p><a href="{html.escape(package_path)}">Open the immutable dossier</a></p>'
-            ),
-            note_id="classification",
-            note_label="Classification",
-        ),
-        render_design_deck_slide(
-            kind="evidence",
-            eyebrow="Trusted record",
-            title="What the server verified",
-            body=items(dossier.verified_facts, "No positive execution fact was independently verified."),
-            note_id="verified-facts",
-            note_label="Verified facts",
-        ),
-        render_design_deck_slide(
-            kind="contested",
-            eyebrow="Quarantine",
-            title="What must not be relied on",
-            body=(
-                f"<p>{len(dossier.untrusted_claims)} worker/client claim(s) remain quarantined in the immutable dossier; their content is not rendered here.</p>"
-                + f"<p><strong>Affected deliverables:</strong> {html.escape(json.dumps(payload['affected_deliverables'], ensure_ascii=False, default=str))}</p>"
-                + f"<p><strong>Failed checks:</strong> {html.escape(json.dumps(payload['failed_checks'], ensure_ascii=False, default=str))}</p>"
-            ),
-            note_id="quarantine",
-            note_label="Quarantined evidence",
-        ),
-        render_design_deck_slide(
-            kind="review",
-            eyebrow="Human gate",
-            title=f"Review the {dossier.stage.title()} exception",
-            body=render_stage_review_controls(dossier.stage, transition_gate),
-            note_id="human-gate",
-            note_label="Human decision",
-        ),
-    ]
-    try:
-        deck_html = render_design_deck_shell(
-            title=html.escape(f"{cycle.get('title') or 'DBTL'} — evidence exception"),
-            slides=slides,
-            bridge=render_stage_feedback_bridge(surface_id, dossier.stage),
-        )
-    except Exception:  # noqa: BLE001 - the immutable dossier already exists
-        logger.warning("Could not render the evidence exception deck.", exc_info=True)
-        return None
-    return _persist_deck(
-        project_root=project_root,
-        cycle=cycle,
-        stage=dossier.stage,
-        document=deck_html.encode("utf-8"),
         commentable_slides=extract_commentable_slides(deck_html),
     )
 

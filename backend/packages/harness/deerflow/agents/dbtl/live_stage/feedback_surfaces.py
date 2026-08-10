@@ -32,12 +32,19 @@ this deck was rendered from is worse than shipping a deck that cannot answer.
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from deerflow.agents.dbtl.live_stage.workspace import atomic_write
 from deerflow.dbtl.build_deck import BUILD_DECK_SURFACE_VERSION
 from deerflow.dbtl.decision_request import DecisionRequest
+from deerflow.dbtl.review_paths import stage_file_name, stage_output_dir
+from deerflow.projects.storage import ensure_project_dirs, project_outputs_dir
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,4 +227,57 @@ def registration_kwargs(
         evidence_artifact_revision=int(plan.evidence["revision"]) if plan.evidence is not None else None,
         evidence_content_hash=plan.evidence_content_hash or None,
         stage=plan.stage,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedDeck:
+    """A written deck and the hash of the exact bytes written.
+
+    The hash is returned rather than recomputed by the caller because the file
+    on disk is what a person is shown, and a second hash of a second render
+    could differ from it without anyone noticing.
+    """
+
+    uri: str
+    content_hash: str
+    commentable_slides: tuple[dict[str, str], ...] = ()
+
+
+def _persist_deck(
+    *,
+    project_root: str,
+    cycle: Mapping[str, Any],
+    stage: str,
+    document: bytes,
+    commentable_slides: tuple[dict[str, str], ...] = (),
+) -> RenderedDeck | None:
+    """Write rendered deck bytes beside the stage's review package.
+
+    Shared by every deck renderer so the naming, content addressing, and
+    fail-soft behaviour cannot drift between them.
+    """
+    content_hash = hashlib.sha256(document).hexdigest()
+    try:
+        root = Path(project_root).expanduser().resolve()
+        ensure_project_dirs(root)
+        stage_dir = stage_output_dir(
+            cycle_id=str(cycle["id"]),
+            cycle_title=str(cycle.get("title") or ""),
+            stage=stage,
+        )
+        relative = stage_dir / stage_file_name(
+            stage=stage,
+            kind="slides",
+            revision=cycle.get("db_revision"),
+            content_hash=content_hash,
+        )
+        atomic_write(project_outputs_dir(root) / relative, document)
+    except Exception:  # noqa: BLE001 - same reason
+        logger.warning("Could not write the design meeting slide deck.", exc_info=True)
+        return None
+    return RenderedDeck(
+        uri=f"/mnt/user-data/outputs/{relative.as_posix()}",
+        content_hash=content_hash,
+        commentable_slides=commentable_slides,
     )
