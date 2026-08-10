@@ -7,29 +7,52 @@ declared boundary — and every function here is a pure function of values
 already in hand. Nothing reads a repository, starts a worker, or writes a
 durable row; the adapter still owns all three.
 
-Restore and resume deliberately did **not** come with them. ``_restore_phase``
-and ``_restore_build_summary`` reach ``_sha256_file`` and the artifact
-intactness helpers, and ``_sha256_file`` is a ``monkeypatch.setattr`` target on
-the adapter module guarding the tampered-or-unreadable-file path. Moving those
-would resolve the name in this module instead, leaving the patch rebinding a
-name nobody calls — the tests would stay green while no longer testing the
-thing they exist for. They move when their own dependencies do, not before.
+Restore and resume live here too, and could not until recently. They re-check
+that recorded bytes are still the bytes on disk, which meant reaching hashing
+and intactness helpers the adapter had aliased privately — and a test patched
+that alias to simulate an unreadable artifact. Moving them then would have
+resolved the name here instead, leaving the patch rebinding something nobody
+calls, and the tests green while testing nothing. Once those helpers moved to
+``workspace``, where one patch on the owner intercepts every caller, the hazard
+went with them.
+
+What restore is *for*: a Build that already ran must be replayable from its
+durable record without paying to run it again, and a record that no longer
+matches the world it described must be refused rather than trusted. Every
+function below returns ``None`` on any mismatch, which sends the phase back
+through a real run. Silence is the safe answer here; a restored phase that is
+subtly wrong is not.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from deerflow.agents.dbtl.live_stage.build_phases import PhaseAssignment
+from deerflow.agents.dbtl.live_stage import workspace
+from deerflow.agents.dbtl.live_stage.build_phases import (
+    PhaseAssignment,
+    phase_completion_error,
+    phase_unit,
+    required_phase_manifest_version,
+    verify_phase_manifest,
+)
+from deerflow.agents.dbtl.live_stage.build_review import parse_summary
+from deerflow.agents.dbtl.live_stage.workspace import workspace_relative_path
 from deerflow.dbtl.build_control import BuildControlAction, BuildControlAnswer, BuildControlKind
+from deerflow.dbtl.build_execution import BuildExecutionBundle
 from deerflow.dbtl.build_input import BuildInputBundle
-from deerflow.dbtl.build_plan import BuildPhasePlan
-from deerflow.dbtl.build_workflow import BuildErrorCode
-from deerflow.dbtl.stage_runner import StageExecutionOutcome
-from deerflow.dbtl.worker_result import StageWorkerResult
+from deerflow.dbtl.build_plan import BuildPhasePlan, restore_build_plan
+from deerflow.dbtl.build_summary import BuildReviewPackage
+from deerflow.dbtl.build_workflow import BuildErrorCode, phase_output_digest, plan_output_digest
+from deerflow.dbtl.stage_runner import StageExecutionOutcome, WorkUnit
+from deerflow.dbtl.stage_spec import StageSpec
+from deerflow.dbtl.worker_result import StageWorkerResult, parse_worker_result
+
+logger = logging.getLogger(__name__)
 
 
 def _build_plan_display_summary(plan: BuildPhasePlan) -> str:
@@ -209,3 +232,169 @@ def _stops_at_boundary(assignment: PhaseAssignment, *, index: int, total: int) -
     cannot then be resumed past it.
     """
     return assignment.phase.pause_after and index < total
+
+
+@dataclass(frozen=True, slots=True)
+class _BuildSummary:
+    """What one `summarize_results` attempt produced.
+
+    `text` is the summarizer's own answer, kept only so a later run can rebuild
+    this package without paying for a second synthesis. It is scratch, never
+    evidence: the document a person reviews is the Markdown written from the
+    parsed package, and that is what the approval binds to.
+    """
+
+    package: BuildReviewPackage | None = None
+    refusal: str = ""
+    question: str = ""
+    text: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _RestoredSummary:
+    """A committed write-up, proven to be the one the record describes."""
+
+    package: BuildReviewPackage
+    uri: str
+    content_hash: str
+
+
+def _restore_build_summary(payload: Any, *, bundle: BuildExecutionBundle, expected_digest: str, project_root: str) -> _RestoredSummary | None:
+    """Rebuild a committed write-up, or `None` to run the summarizer again.
+
+    A deck that failed to render must be retryable on its own — that is the
+    whole reason the write-up is a separate step. Re-running the summarizer
+    instead produced a *different* package (the review document embeds the cycle
+    revision, so its hash moves), which the replayed step could no longer record:
+    the deck then rendered one write-up while the chain named another.
+
+    Two things are checked, because the payload is an ordinary file inside the
+    project: the re-parsed package must recompute the digest recorded beside it,
+    and the review document must still hash to what the attempt committed.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    uri = str(payload.get("artifact_uri") or "")
+    recorded = str(payload.get("package_digest") or "")
+    if not uri or not recorded or not expected_digest:
+        return None
+    parsed = parse_summary(str(payload.get("text") or ""), bundle=bundle)
+    if not parsed.ok or parsed.package is None or parsed.package.digest != recorded:
+        logger.warning("A recorded Build write-up did not match the package its attempt committed; the summarizer will run again.")
+        return None
+    resolved = workspace_relative_path(uri, project_root=project_root)
+    if resolved is None:
+        return None
+    _relative, host = resolved
+    try:
+        if not host.is_file() or host.is_symlink() or workspace.sha256_file(host) != expected_digest:
+            logger.warning("The recorded Build review document is no longer the one its attempt committed; the summarizer will run again.")
+            return None
+    except OSError:
+        return None
+    return _RestoredSummary(package=parsed.package, uri=uri, content_hash=expected_digest)
+
+
+def _restored_build_plan(payload: Any, *, expected_digest: str, input_digest_value: str) -> BuildPhasePlan | None:
+    """A committed plan read back, or `None` to draw it again.
+
+    `restore_build_plan` answers "is this a plan?"; the recomputed digest
+    answers "is this *the* plan this attempt committed, drawn from the Design
+    this run resolved?". Scratch is an ordinary file inside the project, so a
+    plan that merely parses is not evidence that these phases were the ones
+    approved — and a swapped one would silently rebind every phase beneath it.
+    """
+    plan = restore_build_plan(payload)
+    if plan is None:
+        return None
+    if not expected_digest or plan_output_digest(plan_digest=plan.digest, input_digest_value=input_digest_value) != expected_digest:
+        logger.warning("A recorded Build plan did not match the digest its attempt committed; the plan will be drawn again.")
+        return None
+    return plan
+
+
+def _restore_phase(
+    payload: Any,
+    *,
+    assignment: PhaseAssignment,
+    index: int,
+    spec: StageSpec,
+    expected_digest: str,
+    project_root: str,
+) -> tuple[WorkUnit, StageWorkerResult, list[dict[str, Any]], list[str]] | None:
+    """Rebuild a phase that already committed, or `None` to run it again.
+
+    A phase's committed row proves the work happened and its outputs are in the
+    governed tree; this is what turns that proof into something the run can use
+    instead of dispatching a second time. Everything about it is fail-soft — a
+    payload that is missing, malformed, or no longer trustworthy costs one
+    re-run, while accepting a damaged one would file work nobody did.
+
+    **The payload is only ever accepted against the digest it was recorded
+    under.** Scratch is an ordinary file in the project the person can edit, and
+    a shape check answers "is this a phase result?" rather than "is this *the*
+    phase result this row committed?" — so the digest is recomputed and the
+    published bytes are re-hashed before any of it counts as work that happened.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    unit_id = str(payload.get("unit_id") or "")
+    raw_result = payload.get("result")
+    if not unit_id or not isinstance(raw_result, Mapping):
+        return None
+    published = [dict(item) for item in payload.get("published") or () if isinstance(item, Mapping)]
+    if not published:
+        return None
+    # Older scratch payloads did not bind inputs. They cannot prove which bytes
+    # a replayed phase read, so they are deliberately re-opened once rather than
+    # being grandfathered into a provenance guarantee they never made.
+    if "input_artifacts" not in payload:
+        return None
+    input_artifacts = [str(item) for item in payload.get("input_artifacts") or () if isinstance(item, str)]
+    if not expected_digest or phase_output_digest(result=raw_result, published=published, input_artifacts=input_artifacts) != expected_digest:
+        logger.warning("A recorded Build phase payload did not match the digest its attempt committed; the phase will run again.")
+        return None
+    if not workspace.input_artifacts_intact(input_artifacts, project_root=project_root):
+        logger.warning("A recorded Build phase's inputs changed after it ran; the phase will run again.")
+        return None
+    if not workspace.published_bytes_intact(published, project_root=project_root):
+        logger.warning("A recorded Build phase's published outputs are no longer what it published; the phase will run again.")
+        return None
+    try:
+        result = parse_worker_result(
+            raw_result,
+            capability=assignment.phase.capability.value,
+            agent_name=assignment.agent_name,
+            stage="build",
+        )
+    except Exception:  # noqa: BLE001 - a payload this server wrote is still untrusted on the way back
+        logger.warning("A recorded Build phase payload could not be read back; the phase will run again.", exc_info=True)
+        return None
+    if not result.is_trustworthy:
+        return None
+    unit = phase_unit(
+        assignment,
+        index=index,
+        attempt_id="",
+        attempt_token="",
+        spec=spec,
+        context="",
+        result_contract="",
+    )
+    if phase_completion_error(result, unit.completion_check):
+        logger.warning("A recorded Build phase no longer satisfies its pinned completion contract; the phase will run again.")
+        return None
+    if "server_verified_phase_manifest" in spec.validity_gates:
+        _manifest, manifest_error = verify_phase_manifest(
+            result,
+            published=published,
+            completion_condition=assignment.phase.done_condition,
+            required_version=required_phase_manifest_version(spec),
+        )
+        if manifest_error:
+            logger.warning("A recorded Build phase no longer satisfies its pinned manifest contract: %s", manifest_error)
+            return None
+    # The recorded bindings travel out too: Build lineage is assembled from what
+    # each phase actually read, and a replayed phase that contributed nothing
+    # would quietly drop its inputs from the provenance record.
+    return replace(unit, unit_id=unit_id), result, published, input_artifacts
