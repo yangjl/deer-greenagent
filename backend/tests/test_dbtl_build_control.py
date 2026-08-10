@@ -187,6 +187,78 @@ class TestEveryOptionSaysWhatChoosingItCosts:
         assert "requested changes remain recorded" in card["rationale"]
         assert "earlier Hold" not in card["rationale"]
 
+    def test_requested_changes_withhold_the_retry_that_has_nothing_left_to_run(self) -> None:
+        """Run 6: a completed Build whose review requested changes recommended
+        ``retry_step``. Retrying re-ran nothing and appended a second identical
+        artifact revision, so the reviewer's changes were never addressed and
+        the evidence trail gained a duplicate nobody asked for.
+
+        Once every phase has finished there is no stopped step, so the option is
+        *withheld* rather than merely un-recommended — a control offers only what
+        the server put on it, and an option that cannot do useful work is not a
+        choice, it is a trap.
+        """
+        card = paused_build_recovery_request(
+            previous={
+                "id": "dbc-old",
+                "cycle_id": "cycle-1",
+                "stage_attempt_id": "sa-1",
+                "workflow_spec_key": "generic:build-workflow:v1",
+                "step_key": "execute_phases",
+                "plan_digest": "plan-1",
+            },
+            cycle_revision=9,
+            changes_requested=True,
+        ).as_card()
+
+        ids = [option["id"] for option in card["options"]]
+        assert "retry" not in ids, "a completed Build has no stopped step to retry"
+        assert ids == ["replan", "restart", "hold"]
+        assert card["recommended_option_id"] == "replan", "requested changes are repaired by replanning, not by replaying"
+
+    def test_asking_for_a_retry_by_name_does_not_reopen_it_after_requested_changes(self) -> None:
+        """The typed request is a hint about intent, not authority over the
+        option set. Letting ``requested_action`` put ``retry`` back would restore
+        the Run 6 failure through the one path a frustrated reviewer is most
+        likely to take.
+        """
+        card = paused_build_recovery_request(
+            previous={
+                "id": "dbc-old",
+                "cycle_id": "cycle-1",
+                "stage_attempt_id": "sa-1",
+                "workflow_spec_key": "generic:build-workflow:v1",
+                "step_key": "execute_phases",
+                "plan_digest": "plan-1",
+            },
+            cycle_revision=9,
+            requested_action="retry",
+            changes_requested=True,
+        ).as_card()
+
+        assert "retry" not in [option["id"] for option in card["options"]]
+        assert card["recommended_option_id"] == "replan"
+
+    def test_a_held_build_still_offers_the_retry_its_stopped_step_needs(self) -> None:
+        """The narrow fix must stay narrow: a Build that paused or failed
+        mid-flight has a real stopped step, and retry is the cheapest correct
+        answer for it.
+        """
+        card = paused_build_recovery_request(
+            previous={
+                "id": "dbc-old",
+                "cycle_id": "cycle-1",
+                "stage_attempt_id": "sa-1",
+                "workflow_spec_key": "generic:build-workflow:v1",
+                "step_key": "execute_phases",
+                "plan_digest": "plan-1",
+            },
+            cycle_revision=8,
+        ).as_card()
+
+        assert [option["id"] for option in card["options"]] == ["retry", "replan", "restart", "hold"]
+        assert card["recommended_option_id"] == "retry"
+
     def test_replan_states_that_finished_phases_are_discarded(self) -> None:
         card = step_failure_request(
             step_key="execute_phases",

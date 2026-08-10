@@ -582,6 +582,33 @@ def execution_preflight_request(
     )
 
 
+def _recoverable_retry(*, changes_requested: bool) -> tuple[BuildControlOption, ...]:
+    """The retry option, when there is something left for it to run.
+
+    A Build that paused or failed mid-flight has a stopped step, and retry is
+    the cheapest correct answer for it. A Build whose review requested changes
+    does not: every phase already finished. Retrying that one re-executes
+    nothing, appends a second identical artifact revision, and leaves the
+    reviewer's changes unaddressed while looking like progress.
+
+    So the option is *withheld* rather than left un-recommended.
+    `recommended_option_id` is a label by design and `resolve_answer` never
+    consults it, which means an un-recommended option is still fully
+    selectable — and the person most likely to select it is the reviewer who
+    just asked for changes and wants the fastest-sounding way to get them.
+    """
+    if changes_requested:
+        return ()
+    return (
+        _option(
+            "retry",
+            "Retry the stopped step",
+            BuildControlAction.RETRY_STEP,
+            "Reuses every committed predecessor and runs only the stopped step again.",
+        ),
+    )
+
+
 def paused_build_recovery_request(
     *,
     previous: Mapping[str, Any],
@@ -594,9 +621,14 @@ def paused_build_recovery_request(
     The previous card remains an immutable record of the decision to hold.  A
     later explicit “start/retry/replan Build” therefore raises a new row rather
     than mutating or silently overriding that answer.
+
+    `changes_requested` means every phase finished and a reviewer asked for
+    changes, so there is no stopped step and `retry` is withheld — see
+    `_recoverable_retry`.
     """
     requested = _text(requested_action, limit=40).lower()
-    recommended = "replan" if requested in {"replan", "restart"} else "retry"
+    retry = _recoverable_retry(changes_requested=changes_requested)
+    recommended = "replan" if changes_requested or requested in {"replan", "restart"} else "retry"
     previous_id = _text(previous.get("id"), limit=120) or _text(previous.get("request_id"), limit=120)
     question = "This Build has requested changes. What should happen next?" if changes_requested else "This Build was paused. What should happen next?"
     rationale = (
@@ -618,12 +650,7 @@ def paused_build_recovery_request(
         input_digest=f"resume-after:{previous_id}",
         recommended_option_id=recommended,
         options=(
-            _option(
-                "retry",
-                "Retry the stopped step",
-                BuildControlAction.RETRY_STEP,
-                "Reuses every committed predecessor and runs only the stopped step again.",
-            ),
+            *retry,
             _option(
                 "replan",
                 "Replan the build",
