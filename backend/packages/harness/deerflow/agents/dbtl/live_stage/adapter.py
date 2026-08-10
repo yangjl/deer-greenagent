@@ -82,6 +82,11 @@ from deerflow.agents.dbtl.live_stage.build_review import (
     write_build_review,
 )
 from deerflow.agents.dbtl.live_stage.design_input import approved_design_artifact, resolve_build_inputs
+from deerflow.agents.dbtl.live_stage.feedback_surfaces import (
+    FeedbackSurfacePlan,
+    plan_surface,
+    registration_kwargs,
+)
 from deerflow.agents.dbtl.live_stage.replay import ReplayService
 from deerflow.agents.dbtl.live_stage.test_rerun import (
     PreparedTestRerun,
@@ -141,7 +146,6 @@ from deerflow.dbtl.build_control import (
     step_failure_request,
     worker_question_request,
 )
-from deerflow.dbtl.build_deck import BUILD_DECK_SURFACE_VERSION
 from deerflow.dbtl.build_driver import DriverPhase, driver_rerun_spec, render_driver_script
 from deerflow.dbtl.build_execution import BuildExecutionBundle, BuildRerunSpec, parse_rerun_spec
 from deerflow.dbtl.build_fulfillment import BUILD_FULFILLMENT_CONTRACT, BuildFulfillment, derive_build_fulfillment
@@ -2834,41 +2838,6 @@ def _write_stage_package(
 
 
 @dataclass(frozen=True, slots=True)
-class _FeedbackSurfacePlan:
-    """What a deck will be registered as, decided before it is rendered."""
-
-    surface_id: str
-    mode: str
-    #: Which DBTL stage this deck speaks for. A verdict recorded against
-    #: another stage's attempt is a verdict on the wrong document, so this
-    #: travels with the plan rather than being assumed by the writer.
-    stage: str
-    stage_attempt_id: str
-    originating_thread_id: str
-    round_number: int
-    evidence: Mapping[str, Any] | None = None
-    evidence_content_hash: str = ""
-    decision_request: Mapping[str, Any] | None = None
-    chair_worker_run_id: str | None = None
-
-    @property
-    def answerable(self) -> bool:
-        """Whether this deck should carry a bridge at all.
-
-        A ``read_only`` deck ships with no bridge script whatsoever rather than
-        a disabled one: the safest version of "this file cannot answer" is a
-        file containing no code that could.
-        """
-        # Design owns both chair questions and its review gate. Every later
-        # stage owns its review gate in the same HTML deck so comments stay
-        # attached to the slide they address. Chat may mirror progress, but it
-        # is not a second decision surface.
-        if self.stage == "design":
-            return self.mode in {"chair_feedback", "stage_review"}
-        return self.stage in {"build", "test", "learn"} and self.mode == "stage_review"
-
-
-@dataclass(frozen=True, slots=True)
 class RenderedDeck:
     """A written deck and the hash of the exact bytes written.
 
@@ -3229,35 +3198,6 @@ def _write_authored_design_deck(
         stage="design",
         document=document,
         commentable_slides=extract_commentable_slides(deck_html),
-    )
-
-
-def _stage_attempt_row_id(cycle: Mapping[str, Any], stage: str) -> str:
-    """The durable ``dbtl_stage_runs`` id, not the worker plan's attempt token."""
-    stages = cycle.get("stages")
-    if not isinstance(stages, Sequence) or isinstance(stages, str):
-        return ""
-    for item in stages:
-        if isinstance(item, dict) and item.get("stage") == stage:
-            return str(item.get("id") or "")
-    return ""
-
-
-def _bound_evidence(cycle: Mapping[str, Any], *, artifact_uri: str, content_hash: str) -> Mapping[str, Any] | None:
-    """The artifact row a review deck projects, matched by its exact hash.
-
-    Matched on the content hash rather than merely "the newest artifact",
-    because attachment order is not evidence: the deck must bind to the
-    document it was rendered from or to nothing at all. A retry may record the
-    same document again, so identical matches bind the newest revision.
-    """
-    artifacts = cycle.get("artifacts")
-    if not artifacts or not isinstance(artifacts, Sequence) or isinstance(artifacts, str):
-        return None
-    return max(
-        (item for item in artifacts if isinstance(item, dict) and str(item.get("content_hash") or "") == content_hash and str(item.get("uri") or "") == artifact_uri),
-        key=lambda item: int(item.get("revision") or 0),
-        default=None,
     )
 
 
@@ -6154,26 +6094,18 @@ class LiveStageAdapter:
         chair_worker_run_id: str | None = None,
         review_issue_ids: Sequence[str] = (),
         transition_gate: Mapping[str, Any] | None = None,
-    ) -> _FeedbackSurfacePlan | None:
-        """Decide the surface *before* the deck is rendered.
+    ) -> FeedbackSurfacePlan | None:
+        """Read the cycle, then let ``feedback_surfaces`` decide the surface.
 
-        The deck has to carry its own surface id — that identifier is how a
-        parent asks the server whether the file in front of it is a Design
-        surface at all — but registering binds the deck's content hash, so the
-        id cannot be assigned afterwards without changing the bytes it was
-        assigned for. Deciding first breaks that circle.
-
-        The id is derived rather than random so a retried turn produces the same
-        id, hence the same bytes, hence the same hash, and re-registration
-        collapses onto the existing row instead of superseding it with a copy
-        of itself. ``mode`` is part of the derivation because two runs of one
-        execution can legitimately differ (a round that paused, then completed),
-        and those are different surfaces.
+        Deciding before rendering breaks a circle: the deck has to carry its own
+        surface id, but registering binds the deck's content hash, so the id
+        cannot be assigned afterwards without changing the bytes it was assigned
+        for. The rules themselves live in ``feedback_surfaces.plan_surface``;
+        this method owns only the repository read they need.
 
         Returns ``None`` when there is nothing to bind to; the deck is still
         written, just without a bridge.
         """
-        thread_id = (originating_thread_id or "").strip()
         try:
             cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
         except Exception:  # noqa: BLE001 - a descriptor must not break the record
@@ -6181,63 +6113,24 @@ class LiveStageAdapter:
             return None
         if cycle is None:
             return None
-        attempt_row_id = _stage_attempt_row_id(cycle, stage)
-        if not attempt_row_id:
-            return None
-
-        evidence: Mapping[str, Any] | None = None
-        if artifact_uri and artifact_hash:
-            evidence = _bound_evidence(cycle, artifact_uri=artifact_uri, content_hash=artifact_hash)
-
-        if not thread_id:
-            mode = "read_only"
-        elif paused:
-            mode = "chair_feedback"
-        elif evidence is not None:
-            mode = "stage_review"
-        else:
-            # A completed round whose evidence could not be matched by hash.
-            # Registering it as reviewable would bind a future verdict to a
-            # document nobody confirmed this deck was rendered from.
-            mode = "read_only"
-
-        # Design ids predate the stage parameter and stay byte-for-byte stable.
-        # Build includes the renderer's surface version: its deck now embeds a
-        # live bridge, so reusing an id from bridge-less bytes would make the
-        # repository rename the new row *after* rendering and leave the id
-        # inside the file pointing at the stale descriptor.
-        identity = (execution_key, mode, str(round_number))
-        if stage == "build":
-            identity = (*identity, stage, BUILD_DECK_SURFACE_VERSION)
-        elif stage in {"test", "learn"}:
-            # These stages were originally registered as inert provenance
-            # pages. Version the interactive bytes so an existing inert row
-            # can never steal the id embedded in a replacement deck.
-            identity = (*identity, stage, "interactive-v1")
-        digest = hashlib.sha256("\x1f".join(identity).encode("utf-8")).hexdigest()
-        return _FeedbackSurfacePlan(
-            surface_id=f"dfs-{digest[:32]}",
-            mode=mode,
+        return plan_surface(
+            cycle,
             stage=stage,
-            stage_attempt_id=attempt_row_id,
-            # A read-only surface still needs a non-empty column; it names no
-            # live conversation and is refused as an answer target.
-            originating_thread_id=thread_id or "unbound",
+            execution_key=execution_key,
             round_number=round_number,
-            evidence=evidence if mode == "stage_review" else None,
-            evidence_content_hash=artifact_hash if mode == "stage_review" and evidence is not None else "",
-            decision_request={
-                **(decision_request.as_dict() if decision_request is not None else {}),
-                **({"review_issue_ids": list(review_issue_ids)} if review_issue_ids else {}),
-                **({"transition_gate": dict(transition_gate)} if transition_gate is not None else {}),
-            }
-            or None,
+            originating_thread_id=originating_thread_id,
+            paused=paused,
+            artifact_uri=artifact_uri,
+            artifact_hash=artifact_hash,
+            decision_request=decision_request,
             chair_worker_run_id=chair_worker_run_id,
+            review_issue_ids=review_issue_ids,
+            transition_gate=transition_gate,
         )
 
     async def _register_feedback_surface(
         self,
-        plan: _FeedbackSurfacePlan,
+        plan: FeedbackSurfacePlan,
         deck: RenderedDeck,
         *,
         cycle_id: str,
@@ -6249,29 +6142,12 @@ class LiveStageAdapter:
         review surface, so returning success after this write fails would leave
         an owner with a deck that can never answer its gate. Stage evidence is
         already durable at this point and remains available for a safe retry.
+
+        The row's shape is built by ``feedback_surfaces.registration_kwargs``;
+        this method owns the durable write, and it stays the only place that
+        performs it.
         """
-        decision_request = dict(plan.decision_request) if plan.decision_request is not None else {}
-        commentable_slides = getattr(deck, "commentable_slides", ())
-        if commentable_slides:
-            decision_request["commentable_slides"] = [dict(item) for item in commentable_slides]
-        kwargs = dict(
-            surface_id=plan.surface_id,
-            project_id=project_id,
-            cycle_id=cycle_id,
-            stage_attempt_id=plan.stage_attempt_id,
-            design_round=plan.round_number,
-            originating_thread_id=plan.originating_thread_id,
-            mode=plan.mode,
-            chair_worker_run_id=plan.chair_worker_run_id,
-            decision_request=decision_request or None,
-            deck_uri=deck.uri,
-            deck_content_hash=deck.content_hash,
-            evidence_artifact_id=str(plan.evidence["id"]) if plan.evidence is not None else None,
-            evidence_artifact_revision=int(plan.evidence["revision"]) if plan.evidence is not None else None,
-            evidence_content_hash=plan.evidence_content_hash or None,
-            stage=plan.stage,
-        )
-        await self._repo.register_stage_feedback_surface(**kwargs)
+        await self._repo.register_stage_feedback_surface(**registration_kwargs(plan, deck, cycle_id=cycle_id, project_id=project_id))
 
     async def bind_feedback_request(
         self,

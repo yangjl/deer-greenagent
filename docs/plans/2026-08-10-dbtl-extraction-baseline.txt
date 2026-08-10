@@ -1,0 +1,79 @@
+# DBTL extraction baseline — cycle cycle-fa067703445443339179a87256178d57
+# captured before gateway bounce, at git 9cfa2c2c
+
+## stage_runs
+stage|status|substr(created_at,1,19)
+design|approved|2026-08-09 23:58:31
+reconciliation|locked|2026-08-09 23:58:31
+build|changes_requested|2026-08-09 23:58:31
+test|locked|2026-08-09 23:58:31
+learn|locked|2026-08-09 23:58:31
+
+## build controls
+id|kind|lifecycle|recommended_option_id|substr(created_at,1,19)
+dbc_2e5c0422c37649eb9eadce1b|plan_confirmation|answered||2026-08-10 00:03:09
+dbc_71e07b15c80541c5ab2fae48|plan_confirmation|answered||2026-08-10 00:13:18
+dbc_966adaff6f084c078597a512|plan_confirmation|answered||2026-08-10 00:13:32
+dbc_f5d15701f10844dabdf33d19|plan_confirmation|answered||2026-08-10 00:14:01
+dbc_7d931aa2fe7b477cbedf9497|step_failure|answered|retry|2026-08-10 00:25:22
+dbc_8dd0cd2db8d245bf8c67bc12|step_failure|answered|replan|2026-08-10 00:27:05
+dbc_529b5c0f667744cdb4ac49c3|plan_confirmation|answered||2026-08-10 00:27:35
+dbc_74e36db7549243ff8bb6b8f7|plan_confirmation|answered||2026-08-10 00:27:45
+dbc_6b14b3e541924a0c8f8a936a|plan_confirmation|answered||2026-08-10 00:28:25
+dbc_5afff537644641bbb232925a|step_failure|answered|retry|2026-08-10 00:37:09
+dbc_8577098d33134e35a2c50ad2|step_failure|answered|retry|2026-08-10 00:48:47
+dbc_456aa7bba6c7456faac44075|step_failure|answered|retry|2026-08-10 15:24:19
+dbc_e58736ac2a7847848092326b|step_failure|answered|retry|2026-08-10 15:36:02
+
+## artifacts (id, revision, hash)
+id|revision|substr(content_hash,1,16)|substr(created_at,1,19)
+artifact-133e879f-e49e-48e1-97a7-5b5d96e669d6|1|724eb34a622202e9|2026-08-10 00:01:48
+artifact-25035f11-9ed4-4b45-96e0-de85d327bb39|1|3ba3ce40000c8e30|2026-08-10 00:06:09
+artifact-122b6e9b-43b2-43bb-8733-08220206f65a|1|e9c299a92ac97567|2026-08-10 00:11:11
+artifact-6b9cef98-61a3-4705-9c7d-6c1a45e28e7e|1|450d0fbbe9557e98|2026-08-10 00:11:11
+artifact-31d9fe65-e99c-4890-a475-4ceb3e8935bd|2|9197ec7f5d249062|2026-08-10 00:18:22
+artifact-9df5a402-b7ee-4d35-a0ec-4fe6092209e5|2|5610425fb3c463ef|2026-08-10 00:22:10
+artifact-731396df-dec1-48e6-aef2-dc3155551141|2|139af7d671b52737|2026-08-10 00:22:10
+artifact-b1314ce6-5d17-444f-8b0d-04d395fd89a6|3|9197ec7f5d249062|2026-08-10 00:25:33
+artifact-127c1d79-ec9f-4135-968d-030467aca24a|1|3625e3912073bef2|2026-08-10 00:37:09
+artifact-27197c9e-f829-412c-be63-b50cb5d13e99|2|3d32c283788a2390|2026-08-10 00:48:47
+artifact-d2c50192-3589-4be9-a824-e9ea7036f89d|4|f97f3a3e94a7705b|2026-08-10 00:54:36
+artifact-4c4ab99a-cdb5-4a69-9f2f-323731ab4b34|3|e44032b87f54732a|2026-08-10 00:58:34
+artifact-eeacf888-0a9c-4c0b-adfa-903e438b38a6|3|f32791c50c3b8282|2026-08-10 00:58:34
+artifact-9e2f9d35-f1a2-4d0f-8843-1f4428cb3313|5|f97f3a3e94a7705b|2026-08-10 15:30:11
+artifact-7fc3c40a-b316-4b0b-bd11-bf4ccb244635|6|f97f3a3e94a7705b|2026-08-10 15:36:18
+
+## DUPLICATE content hashes (the Run 6 symptom)
+h|n|revs
+9197ec7f5d249062|2|2,3
+f97f3a3e94a7705b|3|4,5,6
+
+## feedback surfaces
+id|stage|evidence_artifact_id|evidence_artifact_revision|substr(created_at,1,19)
+dfs-13af56d4f15bf34c7e6ed6838c6729dd|design|artifact-133e879f-e49e-48e1-97a7-5b5d96e669d6|1|2026-08-10 00:01:53
+dfs-abcd190f49ad46497803eb7cc8d2959f|build|artifact-25035f11-9ed4-4b45-96e0-de85d327bb39|1|2026-08-10 00:06:12
+dfs-ae5a31879d5780b591382ba7cfe66384|test|artifact-122b6e9b-43b2-43bb-8733-08220206f65a|1|2026-08-10 00:11:11
+dfs-3358b3d7a4cef41dd8ce0b044ddd0917|build|artifact-31d9fe65-e99c-4890-a475-4ceb3e8935bd|2|2026-08-10 00:18:26
+dfs-d6a6acf5a84c71791fa6c8239bee682b|test|artifact-9df5a402-b7ee-4d35-a0ec-4fe6092209e5|2|2026-08-10 00:22:10
+dfs-0d1cf10c57d86d37584b4606b15e9aab|build|artifact-31d9fe65-e99c-4890-a475-4ceb3e8935bd|2|2026-08-10 00:25:37
+dfs-b6b852908ea7bcc566801bd575ea3b0a|build|artifact-127c1d79-ec9f-4135-968d-030467aca24a|1|2026-08-10 00:37:09
+dfs-240181ab0011e4b7427f10331f14da85|build|artifact-27197c9e-f829-412c-be63-b50cb5d13e99|2|2026-08-10 00:48:47
+dfs-f17d7f5fe331b37ad9a040e09bb309aa|build|artifact-d2c50192-3589-4be9-a824-e9ea7036f89d|4|2026-08-10 00:54:40
+dfs-ccf2a5bcfdf95c534725c27cb6f42041|test|artifact-4c4ab99a-cdb5-4a69-9f2f-323731ab4b34|3|2026-08-10 00:58:34
+dfs-e66d4af1bac6a021771f53815db7a617|build|artifact-d2c50192-3589-4be9-a824-e9ea7036f89d|4|2026-08-10 15:30:16
+dfs-43d7429edeb07fd16c68a95456c51f15|build|artifact-7fc3c40a-b316-4b0b-bd11-bf4ccb244635|6|2026-08-10 15:36:21
+
+## build lineage
+count(*)
+6
+
+## POST-REPLAY (16:50, after the browser-triggered Build re-run)
+artifacts created since 16:40:
+0
+surfaces created since 16:40:
+0
+controls created since 16:40:
+0
+duplicate-hash groups (unchanged from baseline = no-op replay held):
+9197ec7f5d249062|2|2,3
+f97f3a3e94a7705b|3|4,5,6

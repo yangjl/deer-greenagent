@@ -15,7 +15,6 @@ import pytest
 from deerflow.agents.dbtl.live_stage.adapter import (
     LiveStageAdapter,
     _bind_stage_unit_workspaces,
-    _bound_evidence,
     _build_input_artifacts,
     _compact_design_history,
     _declared_skill_bindings,
@@ -30,6 +29,7 @@ from deerflow.agents.dbtl.live_stage.adapter import (
     _validated_deliverable_audit,
     _wants_new_debate,
 )
+from deerflow.agents.dbtl.live_stage.feedback_surfaces import bound_evidence as _bound_evidence
 from deerflow.agents.dbtl.live_stage.test_rerun import RERUN_EXIT_STATUS_NAME, RERUN_STDERR_NAME, RERUN_STDOUT_NAME
 from deerflow.agents.dbtl.live_stage.workspace import safe_token, verified_workspace_files
 from deerflow.dbtl.agent_selector import AgentCandidate
