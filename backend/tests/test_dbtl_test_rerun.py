@@ -9,8 +9,6 @@ import pytest
 
 from deerflow.agents.dbtl.live_stage.adapter import (
     LiveStageAdapter,
-    _has_reusable_test_evidence,
-    _reusable_test_worker_results,
 )
 from deerflow.agents.dbtl.live_stage.test_rerun import (
     RERUN_EXIT_STATUS_NAME,
@@ -30,6 +28,10 @@ from deerflow.agents.dbtl.live_stage.test_rerun import (
 )
 from deerflow.agents.dbtl.live_stage.test_rerun import (
     build_test_rerun_unit as make_test_rerun_unit,
+)
+from deerflow.agents.dbtl.live_stage.test_stage import (
+    _has_reusable_test_evidence,
+    _reusable_test_worker_results,
 )
 from deerflow.dbtl.stage_runner import WorkUnit
 from deerflow.dbtl.worker_result import StageWorkerResult, WorkerStatus
