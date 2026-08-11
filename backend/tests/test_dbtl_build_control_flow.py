@@ -745,7 +745,7 @@ class TestABoundaryAlreadyCrossedIsNotAskedAgain:
     """
 
     async def test_a_later_retry_does_not_stop_at_the_finished_phase(self, project, monkeypatch) -> None:
-        from deerflow.agents.dbtl.live_stage import adapter as adapter_module
+        from deerflow.agents.dbtl.live_stage import build_stage as build_stage_module
 
         repo, root = project
         await _ready_for_build(repo)
@@ -754,7 +754,7 @@ class TestABoundaryAlreadyCrossedIsNotAskedAgain:
 
         # Continue, and let the deck alone fail: the build is finished, and the
         # only thing left to retry is the render.
-        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        monkeypatch.setattr(build_stage_module, "write_build_deck", lambda **_kwargs: None)
         await _run(repo, root, dispatcher=_WritingDispatcher(plan=PAUSING_PLAN), run_id="run-2", build_control=_answer(paused.control_request, "continue"))
         monkeypatch.undo()
 

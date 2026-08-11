@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import shutil
 import sqlite3
 from contextlib import nullcontext
 from pathlib import Path
@@ -387,6 +388,31 @@ def test_restore_replaces_only_the_manual_live_state_and_keeps_a_backup(tmp_path
     with sqlite3.connect(backup_root / "deerflow.db") as conn:
         assert conn.execute("SELECT state FROM dbtl_cycles").fetchone()[0] == "reconciliation"
     assert (backup_root / "projects" / "Maize" / "result.txt").read_text(encoding="utf-8") == "changed later"
+
+
+def test_restore_rebinds_project_roots_when_a_scenario_moves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_root = tmp_path / "source" / "manual"
+    source_database = source_root / "live" / "db" / "deerflow.db"
+    _create_live_database(source_database)
+    source_project = source_root / "live" / "projects" / "Maize"
+    source_project.mkdir(parents=True)
+    (source_project / "result.txt").write_text("captured", encoding="utf-8")
+    monkeypatch.setattr(dbtl_manual, "_git_commit", lambda: "d" * 40)
+    dbtl_manual.capture_scenario(manual_root=source_root, scenario="portable")
+
+    target_root = tmp_path / "target" / "manual"
+    _create_live_database(target_root / "live" / "db" / "deerflow.db")
+    (target_root / "live" / "projects").mkdir(parents=True)
+    (target_root / "scenarios").mkdir(parents=True)
+    shutil.copytree(source_root / "scenarios" / "portable", target_root / "scenarios" / "portable")
+    monkeypatch.setattr(dbtl_manual, "gateway_is_listening", lambda: False)
+
+    dbtl_manual.restore_scenario(manual_root=target_root, scenario="portable")
+
+    with sqlite3.connect(target_root / "live" / "db" / "deerflow.db") as conn:
+        restored_root = conn.execute("SELECT root_path FROM projects WHERE id = 'project-1'").fetchone()[0]
+    assert restored_root == str((target_root / "live" / "projects" / "Maize").resolve())
+    assert (Path(restored_root) / "result.txt").read_text(encoding="utf-8") == "captured"
 
 
 def test_restore_refuses_while_the_gateway_is_listening(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

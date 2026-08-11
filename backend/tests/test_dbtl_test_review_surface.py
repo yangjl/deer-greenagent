@@ -295,7 +295,7 @@ class TestItCarriesTheComputedAssessmentAndRoutes:
     ):
         repo = _Repo()
         monkeypatch.setattr(
-            "deerflow.agents.dbtl.live_stage.adapter._validated_test_assessment",
+            "deerflow.agents.dbtl.live_stage.test_stage._validated_test_assessment",
             lambda *_args, **_kwargs: {
                 "metrics": [],
                 "checks": [],
@@ -363,7 +363,7 @@ class TestItCarriesTheComputedAssessmentAndRoutes:
     ):
         repo = _Repo()
         monkeypatch.setattr(
-            "deerflow.agents.dbtl.live_stage.adapter.prepare_test_rerun",
+            "deerflow.agents.dbtl.live_stage.test_stage.prepare_test_rerun",
             lambda *_args, **_kwargs: RerunRecord(
                 status=RerunStatus.FAILED,
                 command="python fit.py",

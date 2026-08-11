@@ -13,8 +13,6 @@ import functools
 import hashlib
 import json
 import logging
-import os
-import platform
 import re
 import sys
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
@@ -32,71 +30,32 @@ if TYPE_CHECKING:
 
 from deerflow.agents.dbtl.live_stage import token_usage as tokens
 from deerflow.agents.dbtl.live_stage import workspace
-from deerflow.agents.dbtl.live_stage.build_controls import DISABLED_GATE, BuildControlGate, BuildControlNotRecorded
-from deerflow.agents.dbtl.live_stage.build_meeting import BUILD_WORK_MEETING_CONTRACT, MeetingContext, meeting_units, parse_recommendation
+from deerflow.agents.dbtl.live_stage.build_controls import BuildControlGate, BuildControlNotRecorded
+from deerflow.agents.dbtl.live_stage.build_meeting import parse_recommendation
 from deerflow.agents.dbtl.live_stage.build_phase_verification import (
-    BuildPhaseVerification,
     entry_command,
-    execute_and_verify_phase,
     local_dbtl_runtime_env,
     missing_scientific_packages,
-    resolve_issued_input_tokens,
 )
 from deerflow.agents.dbtl.live_stage.build_phases import (
-    GENERALIST,
     MAX_SCANNED_ENTRY_POINT_BYTES,
     PLANNER_ROLE,
-    BuildPhaseManifest,
-    admit_capped_phase,
-    assign_phase,
-    is_capped_phase_salvageable,
     parse_phase_manifest,
     phase_completion_error,
-    phase_correction_unit,
-    phase_unit,
-    plan_notes,
-    planner_unit,
-    reconcile_published_manifest,
-    record_build_observation,
-    required_phase_manifest_version,
-    verify_granted_paths,
-    verify_phase_manifest,
-    verify_unpublished_phase_manifest,
 )
 from deerflow.agents.dbtl.live_stage.build_recorder import (
-    DISABLED_RECORDER,
     BuildStepRecorder,
     BuildStepRecordingError,
-    RecorderRequest,
     StepHandle,
-    make_build_step_recorder,
 )
 from deerflow.agents.dbtl.live_stage.build_review import (
-    MAX_RECENT_REVIEWER_FEEDBACK,
     SUMMARIZER_ROLE,
-    execution_bundle,
-    parse_summary,
-    summarizer_unit,
-    write_build_deck,
-    write_build_review,
 )
 from deerflow.agents.dbtl.live_stage.build_stage import (
-    _build_phase_context,
+    BuildStageCoordinator,
     _build_plan_display_summary,
-    _BuildSummary,
-    _control_context,
-    _declared_deliverable_fulfillments,
-    _pause_note,
-    _phase_note,
-    _PhaseRun,
-    _plan_execution,
-    _restore_build_summary,
-    _restore_phase,
-    _restored_build_plan,
-    _settled_control,
-    _stops_at_boundary,
 )
-from deerflow.agents.dbtl.live_stage.design_input import approved_design_artifact, resolve_build_inputs
+from deerflow.agents.dbtl.live_stage.design_input import approved_design_artifact
 from deerflow.agents.dbtl.live_stage.feedback_surfaces import (
     FeedbackSurfacePlan,
     RenderedDeck,
@@ -106,28 +65,14 @@ from deerflow.agents.dbtl.live_stage.feedback_surfaces import (
 )
 from deerflow.agents.dbtl.live_stage.replay import ReplayService
 from deerflow.agents.dbtl.live_stage.test_rerun import (
-    PreparedTestRerun,
-    TestRerunRecord,
     build_test_rerun_tool,
-    build_test_rerun_unit,
-    prepare_test_rerun,
-    rerun_result,
-    validate_test_rerun,
 )
 from deerflow.agents.dbtl.live_stage.test_review import (
     TestReviewService,
 )
-from deerflow.agents.dbtl.live_stage.test_review import (
-    validated_test_assessment as _validated_test_assessment,
-)
 from deerflow.agents.dbtl.live_stage.test_stage import (
+    TestStageCoordinator,
     _has_reusable_test_evidence,
-    _publish_test_owned_deliverables,
-    _read_evidence_exception_package,
-    _reusable_test_worker_results,
-    _test_owned_deliverable_candidates,
-    _write_evidence_exception_deck,
-    _write_evidence_exception_package,
 )
 from deerflow.agents.dbtl.live_stage.types import LiveStageResult
 from deerflow.agents.dbtl.live_stage.workspace import (
@@ -157,25 +102,14 @@ from deerflow.agents.middlewares.finalization_deadline_middleware import (
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.dbtl.agent_selector import AgentCandidate, Assignment, SelectionResult, build_candidates, select_agents
 from deerflow.dbtl.build_control import (
-    BuildControlAction,
     BuildControlAnswer,
-    BuildControlKind,
-    change_plan_request,
-    execution_preflight_request,
-    no_presentable_results_request,
     paused_build_recovery_request,
-    phase_pause_request,
-    plan_confirmation_request,
-    step_failure_request,
-    worker_question_request,
 )
 from deerflow.dbtl.build_driver import DriverPhase, driver_rerun_spec, render_driver_script
-from deerflow.dbtl.build_execution import BuildExecutionBundle, BuildRerunSpec, parse_rerun_spec
-from deerflow.dbtl.build_fulfillment import BUILD_FULFILLMENT_CONTRACT, BuildFulfillment, derive_build_fulfillment
+from deerflow.dbtl.build_execution import BuildRerunSpec, parse_rerun_spec
 from deerflow.dbtl.build_grant import INPUT_ENV_PREFIX, build_input_grant
-from deerflow.dbtl.build_input import BuildInputBundle, BuildInputError, restore_build_input_bundle
-from deerflow.dbtl.build_plan import BuildPhasePlan, parse_build_plan, single_phase_plan
-from deerflow.dbtl.build_workflow import BuildErrorCode, BuildStepKey, StepState, phase_output_digest, plan_output_digest, resolve_build_workflow
+from deerflow.dbtl.build_plan import parse_build_plan
+from deerflow.dbtl.build_workflow import BuildErrorCode
 from deerflow.dbtl.consensus import CONSENSUS_CONTRACT
 from deerflow.dbtl.council import (
     ROLE_BRIEFS,
@@ -213,12 +147,6 @@ from deerflow.dbtl.deliverables import (
     DELIVERABLE_MANIFEST_CONTRACT,
     DeliverableManifestRejected,
     parse_deliverable_manifest,
-)
-from deerflow.dbtl.evidence_exception import (
-    EvidenceExceptionDossier,
-    EvidenceReason,
-    build_evidence_exception_dossier,
-    invalidated_test_exception_facts,
 )
 from deerflow.dbtl.meeting_intent import _NEW_DEBATE_PATTERN as _shared_new_debate_pattern
 from deerflow.dbtl.meeting_intent import _RESTART_TYPOS as _shared_restart_typos
@@ -270,10 +198,6 @@ from deerflow.dbtl.transition_assessment import (
     build_transition_assessment_prompt,
     parse_transition_assessment,
     standard_assessment,
-)
-from deerflow.dbtl.validity import (
-    DEFAULT_VALIDITY_PACK,
-    ValidityCheckName,
 )
 from deerflow.dbtl.worker_result import (
     MAX_SUMMARY_CHARS,
@@ -3126,6 +3050,8 @@ class LiveStageAdapter:
         intent_interpreter: IntentInterpreter | None = None,
         revision_interpreter: RevisionInterpreter | None = None,
         transition_assessor: TransitionAssessor | None = None,
+        build_coordinator: Any | None = None,
+        test_coordinator: Any | None = None,
     ) -> None:
         self._repo = repo
         self._app_config = app_config
@@ -3144,6 +3070,11 @@ class LiveStageAdapter:
         # exists to justify, and an unavailable reader justifies nothing.
         self._revision_interpreter = revision_interpreter
         self._transition_assessor = transition_assessor
+        # Stage coordinators are injectable at the facade boundary so their
+        # delegation contract can be tested without dispatching workers. The
+        # defaults are installed once their stage modules own the full flow.
+        self._build_coordinator = build_coordinator or BuildStageCoordinator(self)
+        self._test_coordinator = test_coordinator or TestStageCoordinator(self)
 
     async def _assess_transition(
         self,
@@ -3232,6 +3163,43 @@ class LiveStageAdapter:
         if test_route == ("advanced_with_exception", "learn_from_invalidated_evidence"):
             marker["advanced_with_exception"] = True
         return marker
+
+    async def recover_stage_revision_handoff(
+        self,
+        *,
+        project_id: str | None,
+        cycle_id: str | None,
+        stage: str,
+    ) -> dict[str, Any] | None:
+        """Recover a governed restart after a review returned Learn to work."""
+        normalized = stage.strip().lower()
+        if not project_id or not cycle_id or normalized != "learn":
+            return None
+        cycle = await self._repo.get_cycle(cycle_id, project_id=project_id)
+        if cycle is None or _executable_stage(cycle) != normalized:
+            return None
+        attempt = _stage_attempt(cycle, normalized) or {}
+        if str(attempt.get("status") or "") != StageStatus.CHANGES_REQUESTED.value:
+            return None
+        surface = await self._repo.latest_stage_feedback_surface(
+            project_id=project_id,
+            cycle_id=cycle_id,
+            stage=normalized,
+            stage_attempt_id=str(attempt.get("id") or ""),
+            mode="stage_review",
+        )
+        surface_id = str((surface or {}).get("surface_id") or "")
+        if not surface_id:
+            return None
+        return {
+            "version": 1,
+            "cycle_id": cycle_id,
+            "cycle_revision": int(cycle.get("db_revision") or 0),
+            "approved_stage": normalized,
+            "next_stage": normalized,
+            "surface_id": surface_id,
+            "repeat_stage": True,
+        }
 
     async def recover_test_retry_control(
         self,
@@ -4251,904 +4219,6 @@ class LiveStageAdapter:
 
         return await asyncio.gather(*(run_one(unit, index) for index, unit in enumerate(units, start=1)))
 
-    async def _plan_build(
-        self,
-        *,
-        dispatcher: Callable[..., Any],
-        budget: WorkerBudget,
-        attempt_id: str,
-        inputs: BuildInputBundle,
-        cycle: Mapping[str, Any],
-        candidates: Sequence[AgentCandidate],
-        adjustment: str = "",
-        answer: str = "",
-    ) -> tuple[BuildPhasePlan, tuple[str, ...]]:
-        """Ask for a decomposition; accept a single phase; never fail here.
-
-        Every failure degrades to a one-phase plan with a recorded note, because
-        losing the decomposition costs structure while failing here costs the
-        whole Build. The note is what keeps that honest: a reviewer reading a
-        one-phase Build can tell "it did not decompose" from "we could not read
-        the planner".
-        """
-        objective = str(cycle.get("objective") or cycle.get("research_question") or "")
-        agent = next((item.name for item in candidates if item.name == GENERALIST), None) or (candidates[0].name if candidates else GENERALIST)
-        context = json.dumps(
-            {
-                "cycle": {key: cycle.get(key) for key in ("id", "title", "research_question", "objective", "success_criteria")},
-                "build_input_bundle": inputs.as_dict(),
-                # The owner's words, verbatim. Paraphrasing them into a planner-owned
-                # instruction is the failure this second exchange exists to avoid:
-                # the point of asking was to hear what *they* wanted changed.
-                **({"owner_requested_changes": adjustment} if adjustment else {}),
-                # The exchange that followed the question this planner asked
-                # last time — its own sentence and the owner's, each labelled.
-                # Without it the planner re-runs on byte-identical inputs and
-                # asks the same question again, forever.
-                **({"previous_exchange_with_the_owner": answer} if answer else {}),
-            },
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-        unit = planner_unit(attempt_id=attempt_id, agent_name=agent, context=context)
-        try:
-            dispatched = await dispatcher((unit,), budget=budget)
-        except Exception:  # noqa: BLE001 - see the docstring
-            logger.warning("The Build planner could not be dispatched.", exc_info=True)
-            return single_phase_plan(objective=objective, note="The build planner could not be run, so the build runs as one piece."), ("planner_unavailable",)
-        text = str(getattr(dispatched[0], "text", "") or "") if dispatched else ""
-        parsed = parse_build_plan(text, objective=objective)
-        if parsed.degraded:
-            logger.info("The Build plan degraded to a single phase: %s", "; ".join(parsed.reasons))
-        return parsed.plan, parsed.reasons
-
-    async def _execute_build_phases(
-        self,
-        *,
-        plan: BuildPhasePlan,
-        spec: StageSpec,
-        dispatcher: Callable[..., Any],
-        recorder: BuildStepRecorder,
-        control_gate: BuildControlGate,
-        attempt_id: str,
-        stage_attempt_id: str,
-        context: str,
-        candidates: Sequence[AgentCandidate],
-        project_root: str,
-        cycle: Mapping[str, Any],
-        datasets: Sequence[Mapping[str, Any]],
-        pre_run_files: Mapping[str, tuple[int, int]],
-        stage_workspace: str,
-        answer: str = "",
-        meeting_available: bool = False,
-        boundaries_released: bool = False,
-        user_id: str = "",
-        sandbox_state: Any = None,
-        enforce_server_execution: bool = False,
-        thread_id: str = "",
-    ) -> _PhaseRun:
-        """Run the plan's phases in order, each as its own attempt.
-
-        Sequential by design: one sandbox writer at a time is what makes the
-        workspace grant, the input snapshot, and the mutation checks tractable.
-        A phase that fails stops the run — later phases depend on outputs that
-        do not exist, and dispatching them anyway would spend budget producing
-        evidence nobody planned.
-
-        **A phase succeeds only once its outputs are in the governed tree.**
-        Publication used to happen once, after every phase had already been
-        recorded as succeeded from the worker's own JSON, so a phase naming a
-        file that was missing, escaped its workspace, or changed underneath it
-        left a *reusable success* in the chain — and a later resume would replay
-        it as work that had produced evidence. Validating and copying each
-        phase's bytes before settling its row makes the record say what actually
-        happened.
-
-        **Completion is reported, not inferred.** A failed phase, an uncovered
-        capability, and a `pause_after` boundary all stop the loop with earlier
-        phases legitimately committed, and the caller has to be able to tell
-        "the plan finished" from "some of it did".
-
-        **A boundary somebody already crossed is not a boundary.**
-        `boundaries_released` is durable, not request-scoped: it used to mean
-        only "this exact request carries a Continue", so a plan continued in one
-        turn and stopped by a later failure paused at the same finished phase on
-        every retry afterwards — the question re-asked forever and the cheap
-        summary/deck retry unreachable. A freshly run phase still stops at its
-        own boundary regardless, because that one has never been shown.
-        """
-        assignments = [assign_phase(phase, candidates) for phase in plan.phases]
-        selection = SelectionResult(
-            assignments=tuple(Assignment(capability=item.phase.capability, agent_name=item.agent_name, via_generalist=item.via_generalist or not item.covered) for item in assignments),
-            notes=plan_notes(plan, assignments),
-        )
-        units: list[WorkUnit] = []
-        results: list[StageWorkerResult] = []
-        rejected: list[str] = []
-        completed: list[Mapping[str, Any]] = []
-        published: list[dict[str, Any]] = []
-        # Each phase's exact bindings, in the order they were established. Build
-        # lineage is assembled from these rather than recomputed at the end,
-        # because only the phase loop knows which outputs already existed when a
-        # given phase ran -- the aggregate view cannot tell a phase's own output
-        # from one it legitimately read.
-        input_artifacts: list[str] = []
-        stopped = ""
-        paused = False
-        paused_title = ""
-        failure_code: BuildErrorCode | None = None
-        control_request: dict[str, Any] | None = None
-
-        declared_skill_names = tuple(name for assignment in assignments for name in assignment.phase.skills)
-        try:
-            skill_catalog = await _declared_skill_bindings(
-                declared_skill_names,
-                user_id=user_id,
-                app_config=self._app_config,
-            )
-        except Exception as exc:  # noqa: BLE001 - registry failure is a bounded phase refusal
-            logger.warning("Build could not bind its declared skill catalog.", exc_info=True)
-            return _PhaseRun(
-                outcome=StageExecutionOutcome(
-                    plan=StageExecutionPlan(spec=spec, selection=selection),
-                    rejected=(str(exc),),
-                ),
-                stopped=str(exc),
-                failure_code=BuildErrorCode.EXECUTION_CONTRACT_REJECTED,
-            )
-
-        for index, assignment in enumerate(assignments, start=1):
-            if not assignment.covered:
-                # Nothing registered can do this work. Refusing names the
-                # capability; the alternative — handing it to whichever agent
-                # sorted first — is the silent swap capability selection exists
-                # to prevent.
-                stopped = f"No registered agent can cover {assignment.phase.capability.value!r}, which phase {assignment.phase.title!r} asks for."
-                rejected.append(stopped)
-                failure_code = BuildErrorCode.PLAN_CAPABILITY_UNKNOWN
-                break
-
-            phase_skill_bindings = tuple(skill_catalog[name] for name in assignment.phase.skills)
-
-            handle = await recorder.begin(
-                BuildStepKey.EXECUTE_PHASES,
-                phase_index=index,
-                phase_key=assignment.phase.phase_key,
-                plan_digest=plan.digest,
-                capability=assignment.phase.capability.value,
-                agent_name=assignment.agent_name,
-                via_generalist=assignment.via_generalist,
-                skill_bindings=phase_skill_bindings,
-                execution={"title": assignment.phase.title},
-            )
-
-            restored = (
-                await asyncio.to_thread(
-                    _restore_phase,
-                    recorder.replay(handle),
-                    assignment=assignment,
-                    index=index,
-                    spec=spec,
-                    expected_digest=str(handle.output_digest or ""),
-                    project_root=project_root,
-                )
-                if handle.replayed
-                else None
-            )
-            if restored is None and handle.replayed:
-                # A committed success whose output cannot be produced. The work
-                # has to happen again, and it has to be *recorded* as happening
-                # again: settling nothing would leave the chain descending from
-                # a digest that no longer describes anything on disk.
-                handle = await recorder.reopen(handle)
-            if restored is not None:
-                unit, result, phase_published, phase_inputs = restored
-                units.append(unit)
-                results.append(result)
-                published.extend(phase_published)
-                _extend_unique(input_artifacts, phase_inputs)
-                completed.append(_phase_note(assignment, result))
-                # A replayed phase's boundary was already shown and answered —
-                # that is what "Continue" meant. Stopping at it again would ask
-                # the same question forever and make the plan unfinishable.
-                if _stops_at_boundary(assignment, index=index, total=len(assignments)) and not boundaries_released:
-                    stopped = _pause_note(assignment)
-                    rejected.append(stopped)
-                    paused, paused_title = True, assignment.phase.title
-                    break
-                continue
-
-            # The unit id carries the step attempt, and the isolated workspace is
-            # derived from the unit id — so a retry gets a clean directory rather
-            # than the failed attempt's half-written files.
-            phase_context = context
-            if answer:
-                phase_context = "\n\n".join(
-                    (
-                        context,
-                        "The previous attempt at this phase asked for human input. Carry this exchange verbatim into the retry:\n" + answer,
-                    )
-                )
-            granted_inputs = _phase_granted_inputs(
-                datasets=datasets,
-                prior_published=published,
-                pre_run_files=pre_run_files,
-                project_root=project_root,
-            )
-            unit = phase_unit(
-                assignment,
-                index=index,
-                attempt_id=attempt_id,
-                attempt_token=safe_token(handle.step_run_id or f"{attempt_id}:{plan.digest}:{index}"),
-                spec=spec,
-                context=phase_context,
-                completed=completed,
-                result_contract=f"{RESULT_CONTRACT}\n\n{BUILD_FULFILLMENT_CONTRACT}",
-                granted_inputs=granted_inputs,
-            )
-            units.append(unit)
-            phase_plan = StageExecutionPlan(spec=spec, selection=selection, units=(unit,))
-            try:
-                dispatched = await dispatcher((unit,), budget=spec.budget)
-            except Exception as exc:  # noqa: BLE001 - a crashed phase is a recorded phase
-                logger.warning("Build phase %s could not be dispatched.", assignment.phase.phase_key, exc_info=True)
-                dispatched = []
-                rejected.append(f"{unit.unit_id}: {exc}")
-            phase_outcome = collect_results(phase_plan, dispatched)
-            result = phase_outcome.results[0] if phase_outcome.results else None
-            rejected.extend(phase_outcome.rejected)
-
-            # The registry is live and user-editable. Re-hash after the worker
-            # returns so work cannot commit against one skill revision after
-            # executing another. A later retry resolves the new winner and
-            # therefore opens a new phase input digest.
-            try:
-                current_skill_catalog = await _declared_skill_bindings(
-                    assignment.phase.skills,
-                    user_id=user_id,
-                    app_config=self._app_config,
-                )
-                current_skill_bindings = tuple(current_skill_catalog[name] for name in assignment.phase.skills)
-                if current_skill_bindings != phase_skill_bindings:
-                    raise ValueError("A declared Build skill changed while this phase was running; retry the phase against the new skill revision.")
-            except Exception as exc:  # noqa: BLE001 - registry/read drift is a phase failure
-                stopped = str(exc)
-                results.append(
-                    failed_result(
-                        capability=assignment.phase.capability.value,
-                        agent_name=assignment.agent_name,
-                        reason=stopped,
-                    )
-                )
-                rejected.append(stopped)
-                failure_code = BuildErrorCode.INPUT_CHANGED_DURING_EXECUTION
-                await _emit_build_verification_failure(unit, stopped)
-                await recorder.fail(handle, failure_code, stopped)
-                break
-            if result is not None and result.status is WorkerStatus.NEEDS_INPUT:
-                question = str(result.clarification_question or "").strip()
-                request = worker_question_request(
-                    question=question,
-                    rationale=result.summary,
-                    step_key=BuildStepKey.EXECUTE_PHASES.value,
-                    cycle_id=str(cycle.get("id") or ""),
-                    stage_attempt_id=stage_attempt_id,
-                    workflow_spec_key=recorder.spec_key,
-                    cycle_revision=int(cycle.get("db_revision") or 0),
-                    plan_digest=plan.digest,
-                    input_digest=handle.input_digest,
-                    step_run_id=str(handle.step_run_id or ""),
-                    meeting_available=meeting_available,
-                )
-                request_id = control_gate.request_id_for(request)
-                await recorder.settle(
-                    handle,
-                    state=StepState.NEEDS_INPUT,
-                    summary=question,
-                    human_input_request_id=request_id,
-                    execution={"phase_key": assignment.phase.phase_key},
-                )
-                control_request = await control_gate.raise_control(request)
-                results.append(result)
-                stopped = question
-                paused, paused_title = True, assignment.phase.title
-                break
-
-            salvaged_cap = ""
-
-            async def dispatch_fresh_correction(
-                failure: str,
-                *,
-                correct_live_terminal: bool = False,
-            ) -> bool:
-                nonlocal unit, result, phase_outcome
-                if result is None or spec.version < 12 or unit.tool_contract.get("correction_attempt") or result.was_capped or salvaged_cap:
-                    return False
-                first_unit = unit
-                first_result = result
-                if correct_live_terminal:
-                    await _emit_build_verification_failure(first_unit, failure)
-                first_workspace = workspace.unit_stage_workspace(stage_workspace, first_unit.unit_id)
-                correction = phase_correction_unit(
-                    assignment,
-                    index=index,
-                    attempt_id=attempt_id,
-                    attempt_token=safe_token(handle.step_run_id or f"{attempt_id}:{plan.digest}:{index}"),
-                    spec=spec,
-                    previous_workspace=first_workspace,
-                    previous_result=first_result,
-                    failure=failure,
-                    result_contract=f"{RESULT_CONTRACT}\n\n{BUILD_FULFILLMENT_CONTRACT}",
-                    granted_inputs=granted_inputs,
-                )
-                # A phase has one accepted result. The rejected first worker
-                # remains visible in its task timeline and is named by
-                # `correction_of`, but keeping both units beside one corrected
-                # result violates StageExecutionOutcome's one-unit/one-result
-                # invariant and crashes the downstream strict zip.
-                units[-1] = correction
-                correction_plan = StageExecutionPlan(spec=spec, selection=selection, units=(correction,))
-                try:
-                    correction_dispatched = await dispatcher((correction,), budget=spec.budget)
-                except Exception:  # noqa: BLE001 - the normal rejection path records it
-                    logger.warning("Build phase correction could not be dispatched.", exc_info=True)
-                    correction_dispatched = []
-                correction_outcome = collect_results(correction_plan, correction_dispatched)
-                rejected.extend(entry for entry in correction_outcome.rejected if entry not in rejected)
-                corrected = correction_outcome.results[0] if correction_outcome.results else None
-                if corrected is not None and corrected.is_trustworthy:
-                    corrected = replace(
-                        corrected,
-                        token_usage=tokens._merge_token_usage(first_result.token_usage, corrected.token_usage),
-                        provenance={
-                            **corrected.provenance,
-                            "correction_of": first_unit.unit_id,
-                        },
-                    )
-                    correction_outcome = replace(correction_outcome, results=(corrected,))
-                unit = correction
-                result = corrected
-                phase_outcome = correction_outcome
-                return True
-
-            # A token-capped phase is admitted only where the server itself runs the
-            # entry point; the hard gates below then still decide. Without that
-            # conjunct nothing verifies the real-execution family and a cap would be
-            # excused on the worker's own word.
-            if result is not None and "server_executed_entry_point" in spec.validity_gates and enforce_server_execution and is_capped_phase_salvageable(result, required_version=required_phase_manifest_version(spec)):
-                result, salvaged_cap = admit_capped_phase(result)
-                phase_outcome = replace(phase_outcome, results=(result,))
-
-            completion_error = phase_completion_error(result, unit.completion_check) if result is not None else ""
-            correction_eligible = bool(result is not None and completion_error and spec.version >= 12 and not unit.tool_contract.get("correction_attempt") and not result.was_capped and not salvaged_cap)
-            if result is None or (not result.is_trustworthy and not correction_eligible):
-                results.extend(phase_outcome.results)
-                stopped = "; ".join(phase_outcome.rejected) or (str(result.summary).strip() if result is not None else "") or f"Phase {assignment.phase.title!r} returned no usable result."
-                failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
-                await recorder.fail(handle, failure_code, stopped)
-                break
-
-            if correction_eligible:
-                await dispatch_fresh_correction(completion_error)
-                if result is None or not result.is_trustworthy:
-                    results.extend(phase_outcome.results)
-                    stopped = "; ".join(phase_outcome.rejected) or (str(result.summary).strip() if result is not None else "") or f"The fresh correction for phase {assignment.phase.title!r} returned no usable result."
-                    failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
-                    await recorder.fail(handle, failure_code, stopped)
-                    break
-                completion_error = phase_completion_error(result, unit.completion_check)
-            if completion_error:
-                results.append(
-                    replace(
-                        failed_result(
-                            capability=result.capability,
-                            agent_name=result.agent_name,
-                            reason=completion_error,
-                        ),
-                        token_usage=result.token_usage,
-                    )
-                )
-                rejected.append(completion_error)
-                stopped = completion_error
-                failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
-                await recorder.fail(handle, failure_code, stopped)
-                break
-
-            server_verification: BuildPhaseVerification | None = None
-            if "server_executed_entry_point" in spec.validity_gates and enforce_server_execution:
-
-                async def verify_server_result(
-                    current_result: StageWorkerResult,
-                    current_unit: WorkUnit,
-                ) -> tuple[StageWorkerResult, BuildPhaseVerification]:
-                    raw_manifest, raw_manifest_error = verify_unpublished_phase_manifest(
-                        current_result,
-                        completion_condition=assignment.phase.done_condition,
-                        required_version=required_phase_manifest_version(spec),
-                    )
-                    unit_workspace = workspace.unit_stage_workspace(stage_workspace, current_unit.unit_id)
-                    if raw_manifest is None:
-                        return current_result, BuildPhaseVerification(False, raw_manifest_error, "")
-                    raw_manifest = resolve_issued_input_tokens(raw_manifest, issued_inputs=granted_inputs)
-                    current_result = replace(
-                        current_result,
-                        provenance={
-                            **current_result.provenance,
-                            "phase_manifest": raw_manifest.as_dict(),
-                        },
-                    )
-                    phase_rerun = parse_rerun_spec((current_result.provenance or {}).get("rerun_spec"))
-                    if phase_rerun is not None:
-                        rerun_inputs = resolve_issued_input_tokens(
-                            replace(
-                                raw_manifest,
-                                declared_inputs=tuple(phase_rerun.inputs),
-                                execution_inputs=tuple(phase_rerun.inputs),
-                            ),
-                            issued_inputs=granted_inputs,
-                        ).execution_inputs
-                        if rerun_inputs != raw_manifest.execution_inputs:
-                            return current_result, BuildPhaseVerification(
-                                False,
-                                "The Build phase rerun_spec.inputs must exactly match phase_manifest.execution_inputs in runtime order; Build and Test cannot verify different input environments.",
-                                "",
-                            )
-                    grant_error = verify_granted_paths(
-                        raw_manifest,
-                        read_source=functools.partial(_published_source_text, project_root=project_root),
-                        allowed_roots=(),
-                    )
-                    if grant_error:
-                        return current_result, BuildPhaseVerification(False, grant_error, "")
-                    verification = await asyncio.to_thread(
-                        execute_and_verify_phase,
-                        raw_manifest,
-                        project_root=project_root,
-                        unit_workspace=unit_workspace,
-                        execute=functools.partial(
-                            _execute_server_build_command,
-                            sandbox_state=sandbox_state,
-                            writable_workspace=unit_workspace,
-                            thread_id=thread_id,
-                            user_id=user_id,
-                            project_id=str(cycle.get("project_id") or ""),
-                            project_root=project_root,
-                        ),
-                        timeout_seconds=min(float(spec.budget.timeout_seconds), 300.0),
-                        issued_inputs=granted_inputs,
-                    )
-                    return current_result, verification
-
-                result, server_verification = await verify_server_result(result, unit)
-                phase_outcome = replace(phase_outcome, results=(result,))
-                if not server_verification.passed and await dispatch_fresh_correction(
-                    server_verification.reason,
-                    correct_live_terminal=True,
-                ):
-                    if result is None or not result.is_trustworthy:
-                        results.extend(phase_outcome.results)
-                        stopped = "; ".join(phase_outcome.rejected) or (str(result.summary).strip() if result is not None else "") or f"The fresh correction for phase {assignment.phase.title!r} returned no usable result."
-                        failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
-                        await recorder.fail(handle, failure_code, stopped)
-                        break
-                    completion_error = phase_completion_error(result, unit.completion_check)
-                    if completion_error:
-                        results.append(
-                            replace(
-                                failed_result(
-                                    capability=result.capability,
-                                    agent_name=result.agent_name,
-                                    reason=completion_error,
-                                ),
-                                token_usage=result.token_usage,
-                            )
-                        )
-                        rejected.append(completion_error)
-                        stopped = completion_error
-                        failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
-                        await recorder.fail(handle, failure_code, stopped)
-                        break
-                    result, server_verification = await verify_server_result(result, unit)
-                    phase_outcome = replace(phase_outcome, results=(result,))
-                if not server_verification.passed:
-                    stopped = server_verification.reason
-                    rejected.append(stopped)
-                    results.append(
-                        replace(
-                            failed_result(
-                                capability=result.capability,
-                                agent_name=result.agent_name,
-                                reason=stopped,
-                            ),
-                            token_usage=result.token_usage,
-                        )
-                    )
-                    failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
-                    await _emit_build_verification_failure(unit, stopped)
-                    await recorder.fail(
-                        handle,
-                        failure_code,
-                        stopped,
-                        execution={"server_phase_verification": server_verification.as_dict()},
-                    )
-                    break
-                result = replace(
-                    result,
-                    provenance={
-                        **result.provenance,
-                        "server_phase_verification": server_verification.as_dict(),
-                    },
-                )
-                phase_outcome = replace(phase_outcome, results=(result,))
-
-            # Publish *this* phase before its row is settled, so a success in the
-            # chain always means "the bytes are in the governed tree and hashed".
-            phase_outcome, phase_published = await asyncio.to_thread(
-                _publish_build_worker_artifacts,
-                project_root=project_root,
-                cycle=cycle,
-                outcome=phase_outcome,
-                stage_workspace=stage_workspace,
-                attempt_id=attempt_id,
-            )
-            result = phase_outcome.results[0] if phase_outcome.results else None
-            rejected.extend(entry for entry in phase_outcome.rejected if entry not in rejected)
-            if result is None or not result.is_trustworthy or not phase_published:
-                results.extend(phase_outcome.results)
-                stopped = "; ".join(phase_outcome.rejected) or f"Phase {assignment.phase.title!r} produced no output the server could verify."
-                failure_code = BuildErrorCode.EXECUTION_OUTPUT_MISSING
-                # The worker's structured JSON passed before the server
-                # inspected its artifact references, so the dispatcher already
-                # emitted task_completed. Verification is authoritative; emit
-                # the correcting terminal event under the same task id so the
-                # UI cannot keep claiming a missing artifact completed.
-                await _emit_build_verification_failure(unit, stopped)
-                await recorder.fail(handle, failure_code, stopped)
-                break
-
-            phase_manifest: BuildPhaseManifest | None = None
-            if "server_verified_phase_manifest" in spec.validity_gates:
-                phase_manifest, manifest_error = verify_phase_manifest(
-                    result,
-                    published=phase_published,
-                    completion_condition=assignment.phase.done_condition,
-                    required_version=required_phase_manifest_version(spec),
-                )
-                if manifest_error:
-                    # The entry point already ran clean and its bytes are
-                    # published by this point, so a manifest that does not name
-                    # exactly those bytes is a bookkeeping desync, not a failed
-                    # build. Bind the manifest to what was actually published so
-                    # the security scan below still targets a known entry point,
-                    # record the discrepancy as an observation for Test and the
-                    # human to weigh, and keep going. Only a manifest that cannot
-                    # be bound at all (unparseable, or an entry point missing from
-                    # the published set) stays hard.
-                    reconciled = reconcile_published_manifest(
-                        result,
-                        published=phase_published,
-                        completion_condition=assignment.phase.done_condition,
-                        required_version=required_phase_manifest_version(spec),
-                    )
-                    if reconciled is None:
-                        stopped = manifest_error
-                        rejected.append(manifest_error)
-                        results.append(
-                            replace(
-                                failed_result(
-                                    capability=result.capability,
-                                    agent_name=result.agent_name,
-                                    reason=manifest_error,
-                                ),
-                                token_usage=result.token_usage,
-                            )
-                        )
-                        failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
-                        await _emit_build_verification_failure(unit, stopped)
-                        await recorder.fail(handle, failure_code, stopped)
-                        break
-                    phase_manifest = reconciled
-                    result = record_build_observation(result, manifest_error)
-                    phase_outcome = replace(phase_outcome, results=(result,))
-
-            if phase_manifest is not None and "granted_paths_only" in spec.validity_gates:
-                grant_error = await asyncio.to_thread(
-                    verify_granted_paths,
-                    phase_manifest,
-                    read_source=functools.partial(_published_source_text, project_root=project_root),
-                    allowed_roots=(),
-                )
-                if grant_error:
-                    stopped = grant_error
-                    rejected.append(grant_error)
-                    results.append(
-                        replace(
-                            failed_result(
-                                capability=result.capability,
-                                agent_name=result.agent_name,
-                                reason=grant_error,
-                            ),
-                            token_usage=result.token_usage,
-                        )
-                    )
-                    failure_code = BuildErrorCode.EXECUTION_CONTRACT_REJECTED
-                    await _emit_build_verification_failure(unit, stopped)
-                    await recorder.fail(handle, failure_code, stopped)
-                    break
-
-            try:
-                phase_input_artifacts = _build_input_artifacts(
-                    datasets=datasets,
-                    results=(result,),
-                    project_root=project_root,
-                    pre_run_files=pre_run_files,
-                    strict_workspace_inputs=True,
-                    # Only the phases *before* this one: `published` is extended
-                    # with this phase's own outputs below, and a phase must not
-                    # be able to bind what it just wrote as something it read.
-                    run_published=_published_input_index(published, project_root=project_root),
-                    implementation_inputs=(phase_manifest.declared_inputs if phase_manifest is not None and "narrow_implementation_inputs" in spec.validity_gates else None),
-                )
-            except ValueError as exc:
-                stopped = str(exc)
-                results.append(
-                    replace(
-                        failed_result(
-                            capability=result.capability,
-                            agent_name=result.agent_name,
-                            reason=stopped,
-                        ),
-                        token_usage=result.token_usage,
-                    )
-                )
-                failure_code = BuildErrorCode.INPUT_CHANGED_DURING_EXECUTION
-                await _emit_build_verification_failure(unit, stopped)
-                await recorder.fail(handle, failure_code, stopped)
-                break
-
-            results.append(result)
-            published.extend(phase_published)
-            _extend_unique(input_artifacts, phase_input_artifacts)
-            if salvaged_cap:
-                # The cap already raised `task_failed`. Correct it only here, so a
-                # phase whose entry point then failed to verify keeps that failure.
-                await _emit_build_cap_salvage_admitted(unit, result)
-            await recorder.succeed(
-                handle,
-                # The same function the restorer recomputes with, so a replay
-                # cannot be refused — or accepted — on a difference in how the
-                # two sides happened to serialize the same result.
-                phase_output_digest(
-                    result=result.as_dict(),
-                    published=phase_published,
-                    input_artifacts=phase_input_artifacts,
-                ),
-                execution={
-                    "phase_key": assignment.phase.phase_key,
-                    "outputs": len(phase_published),
-                    "skill_binding_count": len(phase_skill_bindings),
-                    **(
-                        {
-                            "entry_point": phase_manifest.entry_point,
-                            "completion_condition_hash": hashlib.sha256(phase_manifest.completion_condition.encode("utf-8")).hexdigest(),
-                        }
-                        if phase_manifest is not None
-                        else {}
-                    ),
-                    **({"server_phase_verification": server_verification.as_dict()} if server_verification is not None else {}),
-                },
-                payload={
-                    "unit_id": unit.unit_id,
-                    "result": result.as_dict(),
-                    "published": phase_published,
-                    "input_artifacts": phase_input_artifacts,
-                    "skill_bindings": list(phase_skill_bindings),
-                    **({"phase_manifest": phase_manifest.as_dict()} if phase_manifest is not None else {}),
-                    **({"server_phase_verification": server_verification.as_dict()} if server_verification is not None else {}),
-                },
-            )
-            completed.append(_phase_note(assignment, result))
-            if _stops_at_boundary(assignment, index=index, total=len(assignments)):
-                # A phase boundary is a committed, resumable state with no worker
-                # lease held, so honouring the plan's own request to stop here
-                # costs nothing and is the cheapest possible pause.
-                stopped = _pause_note(assignment)
-                rejected.append(stopped)
-                paused, paused_title = True, assignment.phase.title
-                break
-
-        return _PhaseRun(
-            outcome=StageExecutionOutcome(
-                plan=StageExecutionPlan(spec=spec, selection=selection, units=tuple(units)),
-                results=tuple(results),
-                rejected=tuple(rejected),
-            ),
-            published=published,
-            input_artifacts=input_artifacts,
-            complete=len(completed) == len(plan.phases) and not stopped,
-            stopped_because=stopped,
-            paused=paused,
-            paused_phase_title=paused_title,
-            completed_count=len(completed),
-            failure_code=failure_code,
-            control_request=control_request,
-        )
-
-    async def _run_build_work_meeting(
-        self,
-        *,
-        dispatcher: Callable[..., Any],
-        budget: WorkerBudget,
-        attempt_id: str,
-        context: MeetingContext,
-        candidates: Sequence[AgentCandidate],
-    ) -> tuple[str, dict[str, Any]]:
-        """Convene the meeting and return ``(briefing, record)``.
-
-        Never raises and never fails the Build. The meeting is advisory, so an
-        outage costs the advice — the person still has the question in front of
-        them and can answer it directly, which is the cheaper interaction this
-        meeting was an escalation from.
-        """
-        agent = next((item.name for item in candidates if item.name == GENERALIST), None) or (candidates[0].name if candidates else GENERALIST)
-        units = meeting_units(
-            attempt_id=attempt_id,
-            agent_name=agent,
-            model=self._council_model(),
-            via_generalist=agent == GENERALIST,
-            context=context,
-        )
-        try:
-            dispatched = await dispatcher(units, budget=budget)
-        except Exception:  # noqa: BLE001 - see the docstring
-            logger.warning("The Build work meeting could not be dispatched.", exc_info=True)
-            return "", {"contract": BUILD_WORK_MEETING_CONTRACT, "refusal": "The meeting could not be run."}
-        by_id = {str(getattr(item, "unit_id", "")): str(getattr(item, "text", "") or "") for item in dispatched}
-        chair = next((unit for unit in units if unit.role == "chair"), None)
-        recommendation = parse_recommendation(by_id.get(chair.unit_id, "") if chair is not None else "")
-        record = {
-            **recommendation.as_dict(),
-            "question": context.question,
-            "step_key": context.step_key,
-            "seats": [{"unit_id": unit.unit_id, "role": unit.role, "reported": bool(by_id.get(unit.unit_id))} for unit in units],
-        }
-        return (recommendation.as_briefing() if recommendation.usable else ""), record
-
-    async def _build_pause_control(
-        self,
-        phase_run: _PhaseRun | None,
-        *,
-        gate: BuildControlGate,
-        cycle: Mapping[str, Any],
-        plan: BuildPhasePlan | None,
-        attempt: Mapping[str, Any] | None,
-        workflow_spec_key: str,
-        summary_refusal: str,
-    ) -> dict[str, Any] | None:
-        """The control this Build's stopping point calls for, if any.
-
-        Three states, three different questions. A plan that stopped at its own
-        boundary asks whether to carry on. A plan that stopped on a failure asks
-        what to do about it. And a write-up that could not be produced asks the
-        same thing about a much cheaper step — which matters, because a person
-        told only "the summary failed" has no way to know their sandbox work is
-        still pinned and reusable.
-
-        Returns ``None`` when the Build finished, when it was never running this
-        workflow, or when the plan is still whole. Raising a control for a
-        successful Build would put a question in front of somebody who has an
-        answer already.
-        """
-        common = {
-            "cycle_id": str(cycle.get("id") or ""),
-            "stage_attempt_id": str((attempt or {}).get("id") or ""),
-            "workflow_spec_key": workflow_spec_key,
-            "cycle_revision": int(cycle.get("db_revision") or 0),
-        }
-        if phase_run is not None and not phase_run.complete:
-            if phase_run.control_request is not None:
-                return phase_run.control_request
-            if phase_run.paused and plan is not None:
-                return await gate.raise_control(
-                    phase_pause_request(
-                        plan=plan,
-                        completed_phases=phase_run.completed_count,
-                        paused_phase_title=phase_run.paused_phase_title,
-                        **common,
-                    )
-                )
-            return await gate.raise_control(
-                step_failure_request(
-                    step_key=BuildStepKey.EXECUTE_PHASES.value,
-                    step_label="Run the build",
-                    error_code=(phase_run.failure_code.value if phase_run.failure_code else BuildErrorCode.INTERNAL_ERROR.value),
-                    error_summary=phase_run.stopped_because,
-                    completed_phases=phase_run.completed_count,
-                    plan_digest=str(getattr(plan, "digest", "") or ""),
-                    plan=plan,
-                    **common,
-                )
-            )
-        if summary_refusal:
-            # Presentational, and the card says so through its options: retrying
-            # the write-up reuses the execution rather than re-running it.
-            return await gate.raise_control(
-                step_failure_request(
-                    step_key=BuildStepKey.SUMMARIZE_RESULTS.value,
-                    step_label="Summarize results",
-                    error_code=BuildErrorCode.SUMMARY_CONTRACT_REJECTED.value,
-                    error_summary=summary_refusal,
-                    completed_phases=(phase_run.completed_count if phase_run is not None else 0),
-                    plan_digest=str(getattr(plan, "digest", "") or ""),
-                    plan=plan,
-                    **common,
-                )
-            )
-        return None
-
-    async def _summarize_build(
-        self,
-        *,
-        dispatcher: Callable[..., Any],
-        budget: WorkerBudget,
-        attempt_id: str,
-        outcome: StageExecutionOutcome,
-        inputs: BuildInputBundle | None,
-        cycle: Mapping[str, Any],
-        bundle: BuildExecutionBundle,
-        answer: str = "",
-    ) -> _BuildSummary:
-        """Run the read-only summarizer over the verified execution bundle.
-
-        Never raises: the execution behind this is already committed and
-        hash-bound, so a provider outage or an unparseable answer must cost the
-        write-up rather than the Build.
-
-        The worker's raw answer travels back with the parsed package because it
-        is what a replay is rebuilt from — a later run re-parses it against the
-        same bundle rather than paying for a second synthesis, and the
-        recomputed package digest is what proves the two are the same write-up.
-        """
-        agent = next((assignment.agent_name for assignment in outcome.plan.selection.assignments), "general-purpose")
-        reviewer_feedback: Sequence[Mapping[str, Any]] = ()
-        feedback_reader = getattr(self._repo, "recent_project_stage_feedback", None)
-        if callable(feedback_reader):
-            try:
-                reviewer_feedback = await feedback_reader(
-                    project_id=str(cycle.get("project_id") or ""),
-                    limit=MAX_RECENT_REVIEWER_FEEDBACK,
-                )
-            except Exception:  # noqa: BLE001 - presentation history is fail-soft
-                logger.warning("Recent project reviewer feedback could not be loaded.", exc_info=True)
-        unit = summarizer_unit(
-            attempt_id=attempt_id,
-            agent_name=agent,
-            bundle=bundle,
-            inputs=inputs,
-            cycle=cycle,
-            reviewer_feedback=reviewer_feedback,
-        )
-        if answer:
-            # Quoted rather than paraphrased: it is the one part of the
-            # write-up nobody else may decide.
-            unit = replace(unit, prompt=f"{unit.prompt}\n\n{answer}")
-        try:
-            dispatched = await dispatcher((unit,), budget=budget)
-        except Exception:  # noqa: BLE001 - see the docstring
-            logger.warning("The Build summarizer could not be dispatched.", exc_info=True)
-            return _BuildSummary(refusal="The Build summarizer could not be run.")
-        text = str(getattr(dispatched[0], "text", "") or "") if dispatched else ""
-        parsed = parse_summary(text, bundle=bundle)
-        if parsed.needs_input:
-            # A question, not a refusal, and the difference decides what the
-            # person is shown: one asks them to fix something, the other asks
-            # them to decide something. The caller turns this into a control
-            # they can answer.
-            return _BuildSummary(question=parsed.clarification_question)
-        if not parsed.ok:
-            return _BuildSummary(refusal=parsed.refusal)
-        return _BuildSummary(package=parsed.package, text=text)
-
     async def _record_human_authored_design(
         self,
         *,
@@ -5868,8 +4938,6 @@ class LiveStageAdapter:
                 cycle_id=cycle_id,
                 note=f"The {stage} stage is {status or 'unavailable'} and cannot accept worker evidence.",
             )
-        dbtl_config = getattr(self._app_config, "dbtl", None)
-        degraded_evidence_enabled = bool(getattr(dbtl_config, "degraded_evidence_continuation", False))
         recorded_spec_key = str((attempt or {}).get("stage_spec_key") or "").strip()
         try:
             spec = resolve_spec_by_key(recorded_spec_key) if recorded_spec_key else _initial_stage_spec(stage)
@@ -5879,14 +4947,10 @@ class LiveStageAdapter:
                 cycle_id=cycle_id,
                 note=f"The stage records an unavailable execution contract ({recorded_spec_key}): {exc}",
             )
-        # Build is a resumable, multi-call workflow. Test also owns a
-        # server-verified rerun contract. Pin either version before dispatch so
-        # a deployment cannot change its output or validity authority midway
-        # through an attempt.
-        # opening the first durable step so a deployment between phases cannot
-        # change the output contract, prompt budget, or retry material for an
-        # attempt that is already under way. The repository lock also resolves
-        # two concurrent starters to the same pinned version.
+        # Build is resumable and Test owns a server-verified rerun contract.
+        # Pin either version before dispatch so a deployment cannot change its
+        # output or validity authority midway through an attempt. The
+        # repository lock also resolves concurrent starters to one version.
         if stage in {"build", "test"}:
             pin_stage_spec = getattr(self._repo, "pin_stage_spec", None)
             if callable(pin_stage_spec):
@@ -5906,83 +4970,99 @@ class LiveStageAdapter:
                         note=f"The {stage.title()} execution contract could not be pinned safely: {exc}",
                     )
 
-        datasets = await self._repo.list_datasets(cycle_id, project_id=project_id)
-        reconciliation = await self._repo.reconciliation_view(cycle_id, project_id=project_id) if stage in {"design", "reconciliation", "build", "test", "learn"} else None
-        build_test = await self._repo.build_test_view(cycle_id, project_id=project_id) if stage in {"build", "test", "learn"} else None
-        upstream_evidence_exception: dict[str, Any] | None = None
-        if stage == "test" and degraded_evidence_enabled:
-            build_attempt = next(
-                (item for item in cycle.get("stages", []) if item.get("stage") == "build" and item.get("status") == StageStatus.ADVANCED_WITH_EXCEPTION.value),
-                None,
-            )
-            if build_attempt is not None:
-                artifact = max(
-                    (item for item in cycle.get("artifacts", []) if item.get("stage_attempt_id") == build_attempt.get("id") and item.get("artifact_type") == "evidence_exception"),
-                    key=lambda item: int(item.get("revision") or 0),
-                    default=None,
-                )
-                if artifact is not None:
-                    upstream_evidence_exception = await asyncio.to_thread(
-                        _read_evidence_exception_package,
-                        project_root=project_root,
-                        artifact=artifact,
-                    )
-        prior_design_runs = (
-            await self._repo.list_worker_runs(
-                cycle_id,
+        coordinator = self._build_coordinator if stage == "build" else self._test_coordinator if stage == "test" else None
+        if coordinator is not None:
+            return await coordinator.execute(
+                stage_activity=stage_activity,
                 project_id=project_id,
-                stage="design",
+                cycle_id=cycle_id,
+                cycle=cycle,
+                attempt=attempt,
+                request_text=request_text,
+                state=state,
+                config=config,
+                runtime=runtime,
+                project_root=project_root,
+                run_id=str(run_id),
+                user_id=str(user_id),
+                execution_key=execution_key,
+                spec=spec,
+                build_control=build_control,
+                reuse_recorded_test_evidence=reuse_recorded_test_evidence,
             )
-            if stage == "design"
-            else []
+
+        return await self._execute_design_reconciliation_or_learn(
+            stage=stage,
+            stage_activity=stage_activity,
+            activity=activity,
+            project_id=project_id,
+            cycle_id=cycle_id,
+            cycle=cycle,
+            attempt=attempt,
+            request_text=request_text,
+            state=state,
+            config=config,
+            runtime=runtime,
+            project_root=project_root,
+            run_id=str(run_id),
+            user_id=str(user_id),
+            execution_key=execution_key,
+            spec=spec,
+            authored_design=authored_design,
+            council_adjustment=council_adjustment,
+            participant_settings=participant_settings,
+            approved_council_proposal=approved_council_proposal,
+            clarification_answer=clarification_answer,
         )
-        # The reviewer's objection lives in a review rationale nobody read back,
-        # so a second attempt argued the same points from the same starting
-        # position and could not know what had been rejected. Failing to load
-        # the activity feed costs the focus, not the round.
+
+    async def _execute_design_reconciliation_or_learn(
+        self,
+        *,
+        stage,
+        stage_activity,
+        activity,
+        project_id,
+        cycle_id,
+        cycle,
+        attempt,
+        request_text,
+        state,
+        config,
+        runtime,
+        project_root,
+        run_id,
+        user_id,
+        execution_key,
+        spec,
+        authored_design,
+        council_adjustment,
+        participant_settings,
+        approved_council_proposal,
+        clarification_answer,
+    ) -> LiveStageResult:
+        datasets = await self._repo.list_datasets(cycle_id, project_id=project_id)
+        reconciliation = await self._repo.reconciliation_view(cycle_id, project_id=project_id)
+        build_test = await self._repo.build_test_view(cycle_id, project_id=project_id) if stage in {"build", "test", "learn"} else None
+        prior_design_runs = await self._repo.list_worker_runs(cycle_id, project_id=project_id, stage="design") if stage == "design" else []
         activity: list[dict[str, Any]] = []
         if stage == "design":
             try:
                 activity = await self._repo.list_activity(cycle_id, project_id=project_id)
-            except Exception:  # noqa: BLE001 - a missing feed must not block a design round
+            except Exception:
                 logger.warning("Could not read cycle activity for the Design council's refinement context.", exc_info=True)
         change_request = _change_request(activity)
         design_round = _design_round(activity)
-
-        # Answering the chair's question resumes the meeting; it does not
-        # convene a new one. Only a question that is actually outstanding
-        # resumes, so a stray card reply after a completed synthesis falls
-        # through to the ordinary rules below rather than re-running the chair.
         pending_question = _pending_design_question(prior_design_runs) if stage == "design" else None
         resumed_answer = (clarification_answer or "").strip() if pending_question else ""
         resumed_positions = _prior_positions(prior_design_runs) if resumed_answer else []
-
-        # "Request changes" used to reconvene the whole meeting the moment it
-        # was clicked, whatever the objection said. Most objections are
-        # corrections the chair can fold into the synthesis it already wrote,
-        # over positions that are already recorded, so the objection is read
-        # first and the reading picks the route. Every failure of that reading
-        # takes the cheap route: an unavailable reader must never be the reason
-        # four workers run.
         revision_verdict: RevisionVerdict | None = None
         revision_positions: list[dict[str, Any]] = []
-        if stage == "design" and change_request and not resumed_answer and authored_design is None:
+        if stage == "design" and change_request and (not resumed_answer) and (authored_design is None):
             revision_positions = _prior_positions(prior_design_runs)
-            revision_verdict = await interpret_revision(
-                change_request,
-                positions=tuple(str(item.get("summary") or "") for item in revision_positions),
-                interpreter=self._revision_interpreter,
-            )
-
-        # Nothing outstanding, a package already on the table, and no request to
-        # argue again: hold. A Design stage stays ``in_progress`` until a person
-        # submits it for review, so without this every later message in the
-        # cycle convened the whole meeting over again. The deterministic
-        # phrases decide first and free; the interpreter reads only what they
-        # did not match, so a typo or paraphrase still means what it meant.
-        if stage == "design" and not resumed_answer and authored_design is None and not _is_refinement_kickoff(request_text):
+            revision_verdict = await interpret_revision(change_request, positions=tuple(str(item.get("summary") or "") for item in revision_positions), interpreter=self._revision_interpreter)
+        if stage == "design" and (not resumed_answer) and (authored_design is None) and (not _is_refinement_kickoff(request_text)):
             settled = _unreviewed_design_package(cycle)
-            if settled is not None and not _wants_new_debate(request_text) and not await self._interpreted_wants_new_debate(request_text):
+            if settled is not None and (not _wants_new_debate(request_text)) and (not await self._interpreted_wants_new_debate(request_text)):
                 return LiveStageResult(
                     stage=stage,
                     cycle_id=cycle_id,
@@ -5996,436 +5076,58 @@ class LiveStageAdapter:
                         ]
                     ),
                 )
-
         attempt_id = f"dbtl-{_safe_token(execution_key)}"
         stage_workspace = None
         if stage != "design":
-            stage_workspace, _ = await asyncio.to_thread(
-                _prepare_stage_workspace,
-                project_root,
-                attempt_id=attempt_id,
-                stage=stage,
-            )
+            (stage_workspace, _) = await asyncio.to_thread(_prepare_stage_workspace, project_root, attempt_id=attempt_id, stage=stage)
         project_manifest = await asyncio.to_thread(_project_manifest, project_root)
-        pre_run_files = await asyncio.to_thread(_project_file_snapshot, project_root) if stage == "build" else {}
-
-        # `load_design` runs before anything is dispatched, because the one
-        # thing a Build must not do is spend an hour implementing a document
-        # nobody approved.
-        #
-        # It is gated on the rollout switch along with the recording, and
-        # deliberately so: this is a *new refusal* on a path that previously had
-        # none, and a deployment whose approved package is not readable through
-        # the project root — an older cycle, a different sandbox mapping — would
-        # go from running Build to being unable to run it at all. The switch is
-        # what makes that discoverable in the manual profile first rather than
-        # in somebody's experiment. With the flag off, Build behaves exactly as
-        # it did.
-        build_workflow_enabled = stage == "build" and bool(getattr(dbtl_config, "build_workflow_steps", False))
-        build_recorder = DISABLED_RECORDER
-        build_inputs: BuildInputBundle | None = None
-        control_gate = DISABLED_GATE
-        plan_adjustment = ""
-        worker_answer = ""
-        worker_answer_step = ""
-        if build_workflow_enabled:
-            stage_attempt_row_id = str((attempt or {}).get("id") or "")
-            control_gate = BuildControlGate(
-                repo=self._repo,
-                project_id=project_id,
-                cycle_id=cycle_id,
-                stage_attempt_id=stage_attempt_row_id,
-                thread_id=str(runtime.get("thread_id") or ""),
-                run_id=str(run_id or ""),
-                responder_user_id=str(user_id or ""),
-            )
-            # The answer is recorded **before** the recorder loads its material,
-            # because a restart or a replan moves the digest chain: recording it
-            # afterwards would open every step against the material of the run
-            # the person just asked to abandon, replay its committed success,
-            # and leave the button doing nothing.
-            if build_control is not None and build_control.stage_attempt_id == stage_attempt_row_id:
-                settled = _settled_control(build_control)
-                try:
-                    answered_control = await control_gate.record_answer(settled)
-                except BuildControlNotRecorded as refusal:
-                    # Replan and Restart move the digest chain through that
-                    # record. Proceeding on an unrecorded one would replay the
-                    # committed work the person asked to discard while telling
-                    # them it had been discarded.
-                    #
-                    # The control is re-presented with the refusal, because a
-                    # reply counts as answered the moment it resolves: without
-                    # this the routing fence has already stood down and "try
-                    # again" reaches ordinary chat instead of the control.
-                    return LiveStageResult(
-                        stage=stage,
-                        cycle_id=cycle_id,
-                        note=str(refusal),
-                        control_request=await control_gate.reopen_card(),
-                    )
-                if settled.action is BuildControlAction.START_MEETING:
-                    # Advisory by construction: the meeting returns options and
-                    # a recommendation, and the same question is put back with
-                    # that briefing above it. Nothing about running a meeting
-                    # resumes the Build — only the person's answer does.
-                    question = str((answered_control or {}).get("question") or "")
-                    design = _approved_design_brief(cycle) or {}
-                    briefing, record = await self._run_build_work_meeting(
-                        dispatcher=self._dispatcher
-                        or self._production_dispatcher(
-                            config=config,
-                            state=state,
-                            project_id=project_id,
-                            project_root=project_root,
-                            cycle_id=cycle_id,
-                            stage=stage,
-                            meeting=True,
-                        ),
-                        budget=spec.budget,
-                        attempt_id=attempt_id,
-                        context=MeetingContext(
-                            question=question,
-                            step_key=settled.step_key,
-                            cycle_title=str(cycle.get("title") or ""),
-                            research_question=str(cycle.get("research_question") or ""),
-                            objective=str(cycle.get("objective") or ""),
-                            success_criteria=str(cycle.get("success_criteria") or ""),
-                            design_uri=str(design.get("uri") or ""),
-                            design_hash=str(design.get("content_hash") or ""),
-                            workspace_note=WORKSPACE_PATH_NOTE,
-                            manifest=project_manifest[:24],
-                        ),
-                        candidates=self._candidates(),
-                    )
-                    logger.info("Build work meeting for %s recorded outcome %s.", cycle_id, record.get("outcome"))
-                    return LiveStageResult(
-                        stage=stage,
-                        cycle_id=cycle_id,
-                        note="The build meeting is finished. It can advise, but the decision stays yours.",
-                        control_request=await control_gate.raise_control(
-                            worker_question_request(
-                                question=question or "How should the build continue?",
-                                rationale=briefing or "The meeting could not reach a usable recommendation, so answer directly.",
-                                step_key=settled.step_key,
-                                cycle_id=cycle_id,
-                                stage_attempt_id=stage_attempt_row_id,
-                                workflow_spec_key=resolve_build_workflow().spec_key,
-                                cycle_revision=int(cycle.get("db_revision") or 0),
-                                plan_digest=settled.plan_digest,
-                                input_digest=f"meeting:{settled.request_id}",
-                            )
-                        ),
-                    )
-                if settled.action is BuildControlAction.HOLD:
-                    return LiveStageResult(
-                        stage=stage,
-                        cycle_id=cycle_id,
-                        note="Holding here. Nothing was dispatched, and every finished part of this build stays recorded.",
-                    )
-                if settled.action is BuildControlAction.CHANGE_PLAN:
-                    return LiveStageResult(
-                        stage=stage,
-                        cycle_id=cycle_id,
-                        note="Tell me what to change and I will draw the plan again from your words.",
-                        control_request=await control_gate.raise_control(
-                            change_plan_request(
-                                previous=_control_context(build_control, workflow_spec_key=resolve_build_workflow().spec_key),
-                                remaining_only=settled.kind is BuildControlKind.PHASE_PAUSE,
-                            )
-                        ),
-                    )
-                if settled.action is BuildControlAction.REPLAN_BUILD:
-                    plan_adjustment = settled.comment
-                if settled.action is BuildControlAction.ANSWER_DIRECTLY:
-                    # The answer to a worker's own question. The step that asked
-                    # settled `needs_input` — terminal and never a success — so
-                    # this run opens a fresh attempt at it, and the words have to
-                    # reach that attempt or it asks the same question again.
-                    # Labelled, because the question is the *worker's* own
-                    # sentence: shipping the two as one string would attribute
-                    # it to the person, which is the one thing every other
-                    # verbatim-capture rule here exists to prevent.
-                    asked = str((answered_control or {}).get("question") or "")
-                    worker_answer = "\n\n".join(part for part in (f"You asked: {asked}" if asked else "", f"The project owner answered: {settled.comment}") if part)
-                    worker_answer_step = settled.step_key
-
-            # Execution is part of the Build contract, so prove the worker can
-            # do it before spending even the planner's tokens.  The observed
-            # failure spent ~382k tokens authoring files in a runtime where the
-            # Bash tool had been removed by configuration; no decomposition or
-            # retry could make that run executable.
-            preflight_error = self._build_execution_preflight_error(
-                config=config,
-                stage_workspace=stage_workspace,
-                sandbox_state=state.get("sandbox"),
-            )
-            if preflight_error:
-                control = await control_gate.raise_control(
-                    execution_preflight_request(
-                        cycle_id=cycle_id,
-                        stage_attempt_id=stage_attempt_row_id,
-                        workflow_spec_key=resolve_build_workflow().spec_key,
-                        cycle_revision=int(cycle.get("db_revision") or 0),
-                    )
-                )
-                if stage_activity is not None:
-                    await stage_activity.settle(
-                        ActivityState.PAUSED,
-                        operation="stage.preflight_failed",
-                    )
-                return LiveStageResult(
-                    stage=stage,
-                    cycle_id=cycle_id,
-                    note=preflight_error,
-                    control_request=control,
-                )
-            build_recorder = await make_build_step_recorder(
-                self._repo,
-                RecorderRequest(
-                    enabled=True,
-                    project_id=project_id,
-                    cycle_id=cycle_id,
-                    stage_attempt_id=stage_attempt_row_id,
-                    parent_run_id=str(run_id),
-                    project_root=str(project_root),
-                ),
-            )
-            load_design = await build_recorder.begin(BuildStepKey.LOAD_DESIGN)
-            try:
-                current_build_inputs = await asyncio.to_thread(
-                    resolve_build_inputs,
-                    cycle,
-                    project_root=project_root,
-                    datasets=datasets,
-                    manifest=project_manifest,
-                    policy={
-                        "stage_spec_key": spec.spec_key,
-                    },
-                )
-            except BuildInputError as refusal:
-                await build_recorder.fail(load_design, refusal.code, refusal.summary)
-                return LiveStageResult(
-                    stage=stage,
-                    cycle_id=cycle_id,
-                    note=f"{refusal.summary} No Build worker was dispatched and nothing was recorded as Build evidence.",
-                )
-            if load_design.replayed:
-                restored_inputs = restore_build_input_bundle(build_recorder.replay(load_design))
-                if restored_inputs is not None and restored_inputs.digest == str(load_design.output_digest or ""):
-                    # A retry uses the exact manifest/policy bundle the committed
-                    # plan and finished phases saw. Recomputing it here mixed an
-                    # old digest chain with today's workspace and later claimed
-                    # the old phases had read today's files.
-                    build_inputs = restored_inputs
-                else:
-                    load_design = await build_recorder.reopen(load_design)
-                    build_inputs = current_build_inputs
-            else:
-                build_inputs = current_build_inputs
-            await build_recorder.succeed(
-                load_design,
-                build_inputs.digest,
-                execution={"design_revision": build_inputs.design_revision, "design_truncated": build_inputs.design_truncated},
-                payload=build_inputs.as_dict(),
-            )
-        elif stage == "test":
-            try:
-                build_inputs = await asyncio.to_thread(
-                    resolve_build_inputs,
-                    cycle,
-                    project_root=project_root,
-                    datasets=datasets,
-                    manifest=project_manifest,
-                    policy={
-                        "stage_spec_key": spec.spec_key,
-                    },
-                )
-            except BuildInputError as refusal:
-                # Legacy Test attempts predate the deliverables contract. They
-                # remain executable without silently inventing a manifest; a
-                # new hash-bound Design package resolves above and activates
-                # the strict audit path.
-                logger.info("Test has no resolvable Design deliverables manifest: %s", refusal.summary)
-
         stage_context_payload = {
             "request": request_text,
-            "cycle": {
-                key: cycle.get(key)
-                for key in (
-                    "id",
-                    "title",
-                    "cycle_class",
-                    "state",
-                    "research_question",
-                    "objective",
-                    "success_criteria",
-                )
-            },
+            "cycle": {key: cycle.get(key) for key in ("id", "title", "cycle_class", "state", "research_question", "objective", "success_criteria")},
             "declared_datasets": datasets,
-            # Do not hand later workers an unsettled reconciliation matrix as
-            # if it were a Build prerequisite. Reconciliation is shown only to
-            # its own evidence workflow; Build/Test authority comes from the
-            # server-bound lineage.
-            "reconciliation": (
-                reconciliation
-                if stage == "reconciliation"
-                else {
-                    "status": "not_required",
-                    "instruction": ("Data Reconciliation is not a Build prerequisite. Missing dataset declarations or reconciliation matrix rows are not a blocker, limitation, or failed validity check."),
-                }
-            ),
+            "reconciliation": reconciliation
+            if stage == "reconciliation"
+            else {"status": "not_required", "instruction": "Data Reconciliation is not a Build prerequisite. Missing dataset declarations or reconciliation matrix rows are not a blocker, limitation, or failed validity check."},
             "build_test": build_test,
             "input_provenance_policy": {
                 "authority": "server_bound_build_lineage",
-                "instruction": (
-                    "Build binds the exact files it reads with server-computed content hashes, and Test verifies that durable Build lineage. "
-                    "For compatibility, a validity check named reconciled_inputs means bound input provenance; judge the Build lineage, "
-                    "not the existence of reconciliation rows. An older Build package may describe absent reconciliation as a limitation; that is "
-                    "historical worker commentary, not active policy."
-                ),
+                "instruction": "Build binds the exact files it reads with server-computed content hashes, and Test verifies that durable Build lineage. For compatibility, a validity check named reconciled_inputs means bound input provenance; judge the Build lineage, not the existence of reconciliation rows. An older Build package may describe absent reconciliation as a limitation; that is historical worker commentary, not active policy.",  # noqa: E501
             },
-            "test_validity_contract": (
-                {
-                    "pack_key": DEFAULT_VALIDITY_PACK.pack_key,
-                    "required_checks": [check.value for check in DEFAULT_VALIDITY_PACK.required_checks],
-                    "metric_schema": {
-                        "required_fields": ["name", "value", "threshold", "criterion", "plausible_max", "unit"],
-                        "criterion_values": ["gte", "lte"],
-                        "instruction": (
-                            "Use only `gte` or `lte` for every metric criterion. For an exact target, use `gte` with value and threshold equal; "
-                            "the named validity checks carry exactness and direction semantics. Never emit `equal_to`, `greater_than`, or prose synonyms."
-                        ),
-                    },
-                    "authoritative_rules": [
-                        "Only required_checks may determine the overall Test outcome. Do not invent or require an additional gate.",
-                        "The server-bound Build lineage satisfies reconciled_inputs when present. Do not require a declaration, matrix, or reconciliation artifact.",
-                        (
-                            "duplicates_relatedness is not in this validity pack. Missing pedigree, genotype, kinship, or relatedness columns may be noted as a limitation, but cannot fail, block, or make this Test inconclusive."
-                            if ValidityCheckName.DUPLICATES_RELATEDNESS not in DEFAULT_VALIDITY_PACK.required_checks
-                            else "Evaluate duplicates_relatedness as a required check."
-                        ),
-                        "The approved Design and this server-owned contract outrank commentary in an older Build package.",
-                    ],
-                }
-                if stage == "test"
-                else None
-            ),
-            # Named explicitly beside the listing, because a worker that
-            # *constructs* a path (rather than copying one from the
-            # manifest) has no other way to learn the prefix its tools
-            # require, and a path outside it is refused outright.
+            "test_validity_contract": None,
             "workspace_root": WORKSPACE_VIRTUAL_ROOT,
-            "stage_workspace": (
-                {
-                    # Replaced with a distinct attempt/stage/unit path inside
-                    # the production dispatcher immediately before the unit
-                    # runs. No two concurrent workers receive the same grant.
-                    "path": STAGE_UNIT_WORKSPACE_PLACEHOLDER,
-                    "instruction": (
-                        "Write every new implementation, derived output, and execution log under this exact directory. "
-                        "Do not write under outputs/dbtl; the stage adapter publishes validated review evidence there after your result passes its contract."
-                    ),
-                    # The same idiom the phased Build workflow teaches. A worker
-                    # dispatched through the monolithic path pays the identical
-                    # per-command repeats, so leaving it out here would make the
-                    # saving depend on which dispatch shape happened to run.
-                    "shell_note": SHELL_WORKSPACE_IDIOM,
-                }
-                if stage_workspace
-                else None
-            ),
+            "stage_workspace": {
+                "path": STAGE_UNIT_WORKSPACE_PLACEHOLDER,
+                "instruction": "Write every new implementation, derived output, and execution log under this exact directory. Do not write under outputs/dbtl; the stage adapter publishes validated review evidence there after your result passes its contract.",  # noqa: E501
+                "shell_note": SHELL_WORKSPACE_IDIOM,
+            }
+            if stage_workspace
+            else None,
             "project_workspace_manifest": project_manifest,
-            "build_input_policy": (
-                {
-                    "instruction": (
-                        "Read the data files needed to implement the approved design and list every exact workspace path in "
-                        "provenance.inputs_examined. The server will compute and record their hashes automatically. "
-                        "No dataset declaration or reconciliation matrix is required, and their absence must not be reported as a failure or limitation."
-                    ),
-                }
-                if stage == "build"
-                else None
-            ),
+            "build_input_policy": None,
             "prior_design_council_runs": _compact_design_history(prior_design_runs),
-            # Accepted pre-cycle context is server-bound to the cycle and is
-            # shared before seat-specific instructions. Every Design
-            # participant sees the same package and hash; the frontend never
-            # reconstructs this from setup answers.
-            "discovery_package": (
-                {
-                    "hash": cycle.get("discovery_package_hash"),
-                    "content": cycle.get("discovery_package"),
-                }
-                if stage == "design" and cycle.get("discovery_package_hash") and isinstance(cycle.get("discovery_package"), Mapping)
-                else None
-            ),
-            # Only present once a person has approved a Design package.
-            # Its absence is meaningful: a later stage seeing no brief is
-            # working before the gate, not merely without context.
+            "discovery_package": {"hash": cycle.get("discovery_package_hash"), "content": cycle.get("discovery_package")}
+            if stage == "design" and cycle.get("discovery_package_hash") and isinstance(cycle.get("discovery_package"), Mapping)
+            else None,
             "approved_design_brief": _approved_design_brief(cycle),
-            # Build and Test get the resolved bundle: the design already read and
-            # hash-verified by the server, so the worker's first act is
-            # implementing or auditing it rather than searching for it.
-            "build_input_bundle": build_inputs.as_dict() if build_inputs is not None else None,
-            # Verbatim, not summarized. The council is being asked to answer
-            # this specific sentence, and a paraphrase is the failure mode
-            # the refinement round exists to fix.
+            "build_input_bundle": None,
             "human_change_request": change_request,
-            # The question the chair asked and the owner's own words back.
-            # Verbatim for the same reason the change request is: the
-            # synthesis is being built on this answer, and a paraphrase of a
-            # decision is not the decision.
             "chair_question_answered": pending_question if resumed_answer else None,
             "human_answer": resumed_answer or None,
             "design_round": design_round,
         }
-        stage_context = json.dumps(
-            stage_context_payload,
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-        build_phase_context = _build_phase_context(stage_context_payload, build_inputs) if stage == "build" and build_inputs is not None else stage_context
+        stage_context = json.dumps(stage_context_payload, sort_keys=True, ensure_ascii=False)
         council_plan: CouncilPlan | None = None
         approved_proposal: CouncilProposal | None = None
         if stage == "design":
-            council_plan = self._plan_council(
-                spec,
-                config=config,
-                request_text=request_text,
-                attempt_id=attempt_id,
-            )
+            council_plan = self._plan_council(spec, config=config, request_text=request_text, attempt_id=attempt_id)
             if approved_council_proposal is not None:
-                approved_proposal = _proposal_scoped_to_plan(
-                    approved_council_proposal,
-                    council_plan,
-                    change_request=change_request,
-                )
-                council_plan = plan_from_proposal(
-                    council_plan,
-                    approved_proposal,
-                )
-            # Applied to the plan as well as the dispatched units, because the
-            # plan is what the review package records — a package describing
-            # the proposal's dials while the workers ran on the owner's would
-            # misreport what happened.
+                approved_proposal = _proposal_scoped_to_plan(approved_council_proposal, council_plan, change_request=change_request)
+                council_plan = plan_from_proposal(council_plan, approved_proposal)
             council_plan = apply_participant_settings(council_plan, participant_settings)
-            # Scoping the spec is what keeps the previewed roster and the
-            # dispatched one the same computation: selection reads its worker
-            # ceiling off the spec, and so does the dispatch budget.
             spec = replace(spec, budget=council_plan.budget)
             if council_plan.depth is CouncilDepth.LIGHT:
-                # Light stays quick through a different execution contract:
-                # bounded context, bounded inspection, and a concise answer.
-                stage_context = json.dumps(
-                    _light_design_context(stage_context_payload),
-                    sort_keys=True,
-                    ensure_ascii=False,
-                )
+                stage_context = json.dumps(_light_design_context(stage_context_payload), sort_keys=True, ensure_ascii=False)
             if council_plan.human_authored:
-                # Asked *before* ``dispatchable``, which is false here for a
-                # completely different reason. Reaching the fan-out at this depth
-                # would convene the council the person just declined.
                 return await self._record_human_authored_design(
                     spec=spec,
                     cycle=cycle,
@@ -6439,144 +5141,14 @@ class LiveStageAdapter:
                     originating_thread_id=str(runtime.get("thread_id") or ""),
                 )
         base_dispatcher = self._dispatcher or self._production_dispatcher(
-            config=config,
-            state=state,
-            project_id=project_id,
-            project_root=project_root,
-            cycle_id=cycle_id,
-            stage=stage,
-            meeting=stage == "design",
-            stage_workspace=stage_workspace,
+            config=config, state=state, project_id=project_id, project_root=project_root, cycle_id=cycle_id, stage=stage, meeting=stage == "design", stage_workspace=stage_workspace
         )
 
-        async def dispatcher(
-            units: Sequence[WorkUnit],
-            *,
-            budget: WorkerBudget,
-        ) -> Sequence[DispatchOutcome]:
-            return await base_dispatcher(
-                _bind_stage_unit_workspaces(units, stage_workspace),
-                budget=budget,
-            )
-
-        # `plan_build` is cheap and re-runnable by construction: it writes
-        # nothing, runs nothing, and dispatches nobody. Its answer is data — a
-        # content-addressed plan every phase attempt binds to — so a replan
-        # invalidates the phases beneath it rather than silently rebinding them.
-        build_plan: BuildPhasePlan | None = None
-        phase_run: _PhaseRun | None = None
-        if build_workflow_enabled and build_inputs is not None:
-            plan_handle = await build_recorder.begin(BuildStepKey.PLAN_BUILD)
-            # What the chain says `load_design` produced — which on a resume is
-            # the digest that step *committed*, not the one this run recomputed.
-            # The project manifest rides in the input bundle, so a Build that
-            # wrote outputs changes its own recomputed digest; binding the plan
-            # to that would leave the plan and every phase beneath it
-            # invalidated by their own success.
-            design_output_digest = plan_handle.predecessor_digests[0] if plan_handle.predecessor_digests else build_inputs.digest
-            # A committed plan is read back rather than redrawn. Replanning is
-            # cheap, but a *different* plan would give every phase beneath it a
-            # new identity and discard finished work — the planner is not
-            # deterministic, so re-running it on a resume is how a retry turns
-            # into a restart.
-            build_plan = _restored_build_plan(
-                build_recorder.replay(plan_handle),
-                expected_digest=str(plan_handle.output_digest or ""),
-                input_digest_value=design_output_digest,
-            )
-            if build_plan is None:
-                if plan_handle.replayed:
-                    # The committed plan cannot be produced, so it is redrawn —
-                    # and the redraw is recorded. Settling nothing would leave
-                    # every phase beneath this bound to a plan nobody can read.
-                    plan_handle = await build_recorder.reopen(plan_handle)
-                build_plan, plan_reasons = await self._plan_build(
-                    dispatcher=dispatcher,
-                    budget=spec.budget,
-                    attempt_id=attempt_id,
-                    inputs=build_inputs,
-                    cycle=cycle,
-                    candidates=self._candidates(),
-                    adjustment=plan_adjustment,
-                    answer=worker_answer if worker_answer_step == BuildStepKey.PLAN_BUILD.value else "",
-                )
-                if not build_plan.dispatchable:
-                    # `needs_input`. The stage stays safely paused rather than
-                    # guessing at what the Design left unresolved — and the
-                    # question is raised as a control bound to this step, so the
-                    # answer comes back to the step that asked rather than to
-                    # whatever the next request happens to be.
-                    control = await control_gate.raise_control(
-                        worker_question_request(
-                            question=build_plan.clarification_question,
-                            rationale="Answering this lets the plan be drawn; nothing has run yet.",
-                            step_key=BuildStepKey.PLAN_BUILD.value,
-                            cycle_id=cycle_id,
-                            stage_attempt_id=str((attempt or {}).get("id") or ""),
-                            workflow_spec_key=build_recorder.spec_key,
-                            cycle_revision=int(cycle.get("db_revision") or 0),
-                            input_digest=build_inputs.digest,
-                            meeting_available=bool(getattr(dbtl_config, "build_work_meetings", False)),
-                            assumptions=build_plan.assumptions,
-                            open_questions=build_plan.open_questions,
-                        )
-                    )
-                    await build_recorder.settle(
-                        plan_handle,
-                        state=StepState.NEEDS_INPUT,
-                        summary=build_plan.clarification_question,
-                        human_input_request_id=str(control.get("request_id") or ""),
-                    )
-                    if stage_activity is not None:
-                        await stage_activity.settle(ActivityState.PAUSED, operation="stage.wait_human")
-                    return LiveStageResult(
-                        stage=stage,
-                        cycle_id=cycle_id,
-                        note="The build planner needs one decision before any work starts.",
-                        control_request=control,
-                    )
-                await build_recorder.succeed(
-                    plan_handle,
-                    # Bound to what the plan was drawn *from*, not only to what
-                    # it says. Two different approved Designs can imply the same
-                    # decomposition, and a phase chained to the plan's own
-                    # content digest would then survive a Design change that
-                    # reshaped the work. The value is the chain's, so what a
-                    # later run recomputes to check this is what was recorded.
-                    plan_output_digest(plan_digest=build_plan.digest, input_digest_value=design_output_digest),
-                    execution=_plan_execution(build_plan, degraded=bool(plan_reasons)),
-                    payload=build_plan.as_dict(),
-                )
-
-            # The cheapest intervention there is: the plan exists, nothing has
-            # run, and redirecting it costs a sentence. Behind its own switch
-            # because it interrupts every Build, and a deployment that trusts
-            # its planner should not be asked four times a day.
-            if bool(getattr(dbtl_config, "build_plan_confirmation", False)) and build_plan.dispatchable and not await control_gate.plan_is_confirmed(build_plan.digest):
-                control = await control_gate.raise_control(
-                    plan_confirmation_request(
-                        plan=build_plan,
-                        cycle_id=cycle_id,
-                        stage_attempt_id=str((attempt or {}).get("id") or ""),
-                        workflow_spec_key=build_recorder.spec_key,
-                        cycle_revision=int(cycle.get("db_revision") or 0),
-                        input_digest=build_inputs.digest,
-                    )
-                )
-                if stage_activity is not None:
-                    await stage_activity.settle(ActivityState.PAUSED, operation="stage.wait_human")
-                return LiveStageResult(
-                    stage=stage,
-                    cycle_id=cycle_id,
-                    note="Here is the plan for this build. Nothing has run yet.",
-                    control_request=control,
-                )
+        async def dispatcher(units: Sequence[WorkUnit], *, budget: WorkerBudget) -> Sequence[DispatchOutcome]:
+            return await base_dispatcher(_bind_stage_unit_workspaces(units, stage_workspace), budget=budget)
 
         proposal: CouncilProposal | None = None
-        test_rerun_record: TestRerunRecord | None = None
-        test_rerun_pair: tuple[WorkUnit, StageWorkerResult] | None = None
         resumed_chair: WorkUnit | None = None
-        #: The positions the single-chair round re-weighs, whichever round it is.
         chair_positions: Sequence[Mapping[str, Any]] = resumed_positions
         if stage == "design" and council_plan is not None and resumed_positions:
             resumed_chair = _resumed_chair_unit(
@@ -6590,16 +5162,7 @@ class LiveStageAdapter:
                 settings=participant_settings,
                 prior_execution=_prior_chair_execution(prior_design_runs),
             )
-        # A roster somebody just confirmed outranks the cheap revision route.
-        # Folding an objection into the existing synthesis is the right default
-        # for an unattended refinement — reconvening spends a second meeting
-        # re-arguing what the reviewer accepted — but it is the wrong answer to
-        # a person who read a roster of three and pressed Start meeting: the
-        # card described a council and one chair ran, which is the failure the
-        # roster proposal exists to prevent, arriving by the route that avoids
-        # its cost. The objection is not lost with the route; it travels into
-        # the round as the change request either way.
-        elif stage == "design" and council_plan is not None and approved_proposal is None and revision_verdict is not None and not revision_verdict.reconvenes and revision_positions:
+        elif stage == "design" and council_plan is not None and (approved_proposal is None) and (revision_verdict is not None) and (not revision_verdict.reconvenes) and revision_positions:
             chair_positions = revision_positions
             resumed_chair = _resumed_chair_unit(
                 council_plan,
@@ -6608,736 +5171,105 @@ class LiveStageAdapter:
                 positions=revision_positions,
                 question="",
                 answer="",
-                # Verbatim. The reading chose the route; the reviewer's own
-                # words are what the chair has to answer.
                 objection=change_request or "",
                 round_number=design_round,
                 settings=participant_settings,
                 prior_execution=_prior_chair_execution(prior_design_runs),
             )
-        # A resume seats nobody new, so there is no roster to draw. Asking for
-        # one anyway would spend a model call on a council that will not convene.
         if approved_proposal is not None:
             proposal = approved_proposal
-        elif stage == "design" and council_plan is not None and resumed_chair is None:
+        elif stage == "design" and council_plan is not None and (resumed_chair is None):
             proposal = await self._propose_roster(
                 request_text=request_text,
                 stage_context=stage_context,
-                # The depth's ceiling, not how many seats capability selection
-                # managed to fill. Selection is limited by which specialists
-                # happen to be registered, and inheriting that limit here would
-                # cap a heavy council at one position in exactly the
-                # generalist-only deployment this feature exists for.
-                max_positions=_refinement_positions(
-                    depth_policy(council_plan.depth).max_positions,
-                    change_request=change_request,
-                ),
-                # Carried from the preflight the person approved, so the roster
-                # that runs is the one they were shown. A reconvene decided by
-                # the revision reading contributes what the objection says the
-                # new seats have to argue — the reviewer's own words still
-                # travel separately as ``change_request``, so this adds focus
-                # rather than replacing them.
+                max_positions=_refinement_positions(depth_policy(council_plan.depth).max_positions, change_request=change_request),
                 adjustment=council_adjustment or (revision_verdict.roster_note if revision_verdict is not None and revision_verdict.reconvenes else None),
             )
         if resumed_chair is not None:
             resume_plan = StageExecutionPlan(
                 spec=spec,
-                selection=_resumed_selection(
-                    resumed_chair,
-                    positions=chair_positions,
-                    revision_reason=(revision_verdict.reason if revision_verdict is not None and not revision_verdict.reconvenes and not resumed_positions else ""),
-                ),
+                selection=_resumed_selection(resumed_chair, positions=chair_positions, revision_reason=revision_verdict.reason if revision_verdict is not None and (not revision_verdict.reconvenes) and (not resumed_positions) else ""),
                 units=(resumed_chair,),
             )
             outcome = collect_results(resume_plan, await dispatcher((resumed_chair,), budget=spec.budget))
         elif proposal is not None:
-            # The roster replaces selection's units rather than sitting beside
-            # them: two sources of seats would let the package describe a
-            # council that did not run, which is the failure the roster work
-            # exists to prevent.
-            units = _proposed_units(
-                proposal,
-                spec,
-                attempt_id=attempt_id,
-                context=stage_context,
-                round_number=design_round,
-                change_request=change_request,
-                settings=participant_settings,
-            )
+            units = _proposed_units(proposal, spec, attempt_id=attempt_id, context=stage_context, round_number=design_round, change_request=change_request, settings=participant_settings)
             plan = StageExecutionPlan(spec=spec, selection=_proposed_selection(proposal), units=units)
             outcome = collect_results(plan, await dispatcher(units, budget=spec.budget))
         elif stage == "design" and participant_settings:
-            # The proposal writer failed, so the seats fall back to capability
-            # selection — but the owner's edits still apply. The card numbered
-            # these seats position-1..N in selection order, and dropping a
-            # person's instructions because a model call failed would be the
-            # verbatim-carry rule losing to an outage.
             plan = plan_stage(spec, self._candidates(), attempt_id=attempt_id, context=stage_context)
-            plan = replace(
-                plan,
-                units=tuple(_unit_with_settings(unit, participant_settings.get(f"position-{index}")) for index, unit in enumerate(plan.units, start=1)),
-            )
+            plan = replace(plan, units=tuple(_unit_with_settings(unit, participant_settings.get(f"position-{index}")) for (index, unit) in enumerate(plan.units, start=1)))
             if plan.dispatchable:
                 outcome = collect_results(plan, await dispatcher(plan.units, budget=spec.budget))
             else:
                 logger.info("dbtl stage %s not dispatchable: %s", spec.spec_key, "; ".join(plan.selection.notes) or "no work units")
                 outcome = StageExecutionOutcome(plan=plan)
-        elif build_plan is not None:
-            phase_run = await self._execute_build_phases(
-                plan=build_plan,
-                spec=spec,
-                dispatcher=dispatcher,
-                recorder=build_recorder,
-                control_gate=control_gate,
-                attempt_id=attempt_id,
-                stage_attempt_id=str((attempt or {}).get("id") or ""),
-                context=build_phase_context,
-                candidates=self._candidates(),
-                project_root=project_root,
-                cycle=cycle,
-                datasets=datasets,
-                pre_run_files=pre_run_files,
-                stage_workspace=stage_workspace,
-                answer=worker_answer if worker_answer_step == BuildStepKey.EXECUTE_PHASES.value else "",
-                meeting_available=bool(getattr(dbtl_config, "build_work_meetings", False)),
-                # The answer on this request, or one already recorded against
-                # this plan. The request-scoped half carries the same scope
-                # guard every other use of the answer carries — this is the one
-                # place a cross-attempt answer could influence dispatch, and it
-                # should not be the exception — while the durable half is what
-                # keeps an answered boundary answered on every later retry.
-                boundaries_released=(
-                    (build_control is not None and build_control.stage_attempt_id == str((attempt or {}).get("id") or "") and build_control.action in {BuildControlAction.CONTINUE_BUILD, BuildControlAction.RETRY_STEP})
-                    or await control_gate.boundary_released(build_plan.digest)
-                ),
-                user_id=str(user_id),
-                sandbox_state=state.get("sandbox"),
-                # A custom dispatcher is the adapter's test/integration seam;
-                # production always executes through the run's real sandbox.
-                enforce_server_execution=self._dispatcher is None,
-                thread_id=str(self._runtime(config).get("thread_id") or ""),
-            )
-            outcome = phase_run.outcome
-        elif stage == "test" and isinstance(upstream_evidence_exception, Mapping) and upstream_evidence_exception.get("condition") == "untrusted":
-            # The human chose to carry failed evidence forward for evaluation,
-            # not to spend another worker pretending the missing execution or
-            # quarantined bytes can now be tested.
-            preliminary = plan_stage(
-                spec,
-                self._candidates(),
-                attempt_id=attempt_id,
-                context=stage_context,
-            )
-            outcome = StageExecutionOutcome(plan=preliminary)
-        elif stage == "test" and "server_verified_build_rerun" in spec.validity_gates:
-            preliminary = plan_stage(spec, self._candidates(), attempt_id=attempt_id, context=stage_context)
-            if not preliminary.dispatchable:
-                logger.info("dbtl stage %s not dispatchable: %s", spec.spec_key, "; ".join(preliminary.selection.notes) or "no work units")
-                outcome = StageExecutionOutcome(plan=preliminary)
-            else:
-                lineage = dict((build_test or {}).get("build_lineage") or {})
-                prepared = await asyncio.to_thread(
-                    prepare_test_rerun,
-                    lineage,
-                    project_root=project_root,
-                )
-                selected = preliminary.units[0]
-                reused_test_outcome = False
-                if isinstance(prepared, PreparedTestRerun):
-                    rerun_unit = build_test_rerun_unit(
-                        prepared,
-                        attempt_id=attempt_id,
-                        agent_name=selected.agent_name,
-                        via_generalist=selected.via_generalist,
-                    )
-                    reused = None
-                    if reuse_recorded_test_evidence:
-                        stored_test_runs = await self._repo.list_worker_runs(
-                            cycle_id,
-                            project_id=project_id,
-                            stage="test",
-                        )
-                        reused = _reusable_test_worker_results(
-                            stored_test_runs,
-                            stage_attempt_id=str((attempt or {}).get("id") or ""),
-                            units=(rerun_unit, *preliminary.units),
-                        )
-                    if reused is not None:
-                        reused_units, reused_results, test_rerun_record = reused
-                        outcome = StageExecutionOutcome(
-                            plan=replace(preliminary, units=reused_units),
-                            results=reused_results,
-                        )
-                        reused_test_outcome = True
-                        logger.info("Reused %d recorded Test worker results for %s after a server-side evidence refusal.", len(reused_results), cycle_id)
-                    else:
-                        rerun_budget = replace(
-                            spec.budget,
-                            max_workers=1,
-                            max_turns=min(spec.budget.max_turns, 80),
-                            max_tokens=min(spec.budget.max_tokens, 120_000),
-                            timeout_seconds=min(spec.budget.timeout_seconds, 600),
-                            token_limit_enforced=True,
-                        )
-                        dispatched_rerun = await dispatcher((rerun_unit,), budget=rerun_budget)
-                        dispatched_receipt = dispatched_rerun[0] if dispatched_rerun else DispatchOutcome(unit_id=rerun_unit.unit_id, text=None, error="The rerun worker returned no dispatch outcome.")
-                        worker_rerun = StageWorkerResult(
-                            status=(WorkerStatus.FAILED if dispatched_receipt.error else WorkerStatus.COMPLETED),
-                            summary=dispatched_receipt.error or "The command attempt returned; server verification owns its verdict.",
-                            capability=rerun_unit.capability,
-                            agent_name=rerun_unit.agent_name,
-                            stop_reason=dispatched_receipt.stop_reason,
-                            token_usage=dict(dispatched_receipt.token_usage or {}),
-                        )
-                        test_rerun_record = await asyncio.to_thread(
-                            validate_test_rerun,
-                            worker_rerun,
-                            prepared,
-                            project_root=project_root,
-                            unit_workspace=workspace.unit_stage_workspace(stage_workspace, rerun_unit.unit_id),
-                        )
-                        test_rerun_pair = (
-                            rerun_unit,
-                            rerun_result(
-                                test_rerun_record,
-                                agent_name=worker_rerun.agent_name,
-                                token_usage=dict(worker_rerun.token_usage),
-                            ),
-                        )
-                        rerun_rejected = ()
-                else:
-                    test_rerun_record = prepared
-                    rerun_unit = WorkUnit(
-                        unit_id=f"{attempt_id}-build-rerun",
-                        capability="reproducibility_rerun",
-                        agent_name="server",
-                        prompt="The server refused the Build rerun before dispatch.",
-                        role="rerun",
-                        focus="records why the Build rerun could not start",
-                    )
-                    test_rerun_pair = (
-                        rerun_unit,
-                        rerun_result(test_rerun_record, agent_name="server"),
-                    )
-                    rerun_rejected = ()
-                if not reused_test_outcome:
-                    test_context = "\n".join(
-                        [
-                            stage_context,
-                            "",
-                            "Server-owned Build rerun result (this overrides any worker-authored reproducibility check):",
-                            json.dumps(test_rerun_record.as_dict(), sort_keys=True, ensure_ascii=False),
-                        ]
-                    )
-                    outcome = await arun_stage(
-                        spec,
-                        self._candidates(),
-                        dispatcher,
-                        attempt_id=attempt_id,
-                        context=test_context,
-                    )
-                    if test_rerun_pair is not None:
-                        outcome = replace(
-                            outcome,
-                            plan=replace(outcome.plan, units=(test_rerun_pair[0], *outcome.plan.units)),
-                            results=(test_rerun_pair[1], *outcome.results),
-                            rejected=(*rerun_rejected, *outcome.rejected),
-                        )
         else:
-            outcome = await arun_stage(
-                spec,
-                self._candidates(),
-                dispatcher,
-                attempt_id=attempt_id,
-                context=stage_context,
-            )
+            outcome = await arun_stage(spec, self._candidates(), dispatcher, attempt_id=attempt_id, context=stage_context)
         unit_result_pairs = list(zip(outcome.plan.units, outcome.results, strict=True))
         chair_result = None
         if resumed_chair is not None:
-            # The chair is the only worker that ran, so it is also the result the
-            # stage is graded on. No red team: it already argued, and dispatching
-            # a fresh one here would be the second debate this path exists to
-            # avoid.
             chair_result = outcome.results[0] if outcome.results else None
         elif stage == "design" and outcome.plan.dispatchable:
-            # Unconditional: several specialists are several *positions*, not an
-            # adversarial one. Skipping the red team once a second specialist
-            # existed gave a better-configured council a weaker debate.
-            red_team_unit = _design_red_team_unit(
-                outcome,
-                attempt_id=attempt_id,
-                council=council_plan,
-                settings=participant_settings,
-            )
+            red_team_unit = _design_red_team_unit(outcome, attempt_id=attempt_id, council=council_plan, settings=participant_settings)
             if red_team_unit is not None:
-                red_team_plan = StageExecutionPlan(
-                    spec=spec,
-                    selection=outcome.plan.selection,
-                    units=(red_team_unit,),
-                )
-                red_team_dispatch = await dispatcher(
-                    (red_team_unit,),
-                    budget=spec.budget,
-                )
-                red_team_outcome = collect_results(
-                    red_team_plan,
-                    red_team_dispatch,
-                )
+                red_team_plan = StageExecutionPlan(spec=spec, selection=outcome.plan.selection, units=(red_team_unit,))
+                red_team_dispatch = await dispatcher((red_team_unit,), budget=spec.budget)
+                red_team_outcome = collect_results(red_team_plan, red_team_dispatch)
                 unit_result_pairs.append((red_team_unit, red_team_outcome.results[0]))
-                outcome = StageExecutionOutcome(
-                    plan=outcome.plan,
-                    results=outcome.results + red_team_outcome.results,
-                    rejected=outcome.rejected + red_team_outcome.rejected,
-                )
-            chair_unit = _design_chair_unit(
-                outcome,
-                attempt_id=attempt_id,
-                stage_context=stage_context,
-                council=council_plan,
-                settings=participant_settings,
-            )
+                outcome = StageExecutionOutcome(plan=outcome.plan, results=outcome.results + red_team_outcome.results, rejected=outcome.rejected + red_team_outcome.rejected)
+            chair_unit = _design_chair_unit(outcome, attempt_id=attempt_id, stage_context=stage_context, council=council_plan, settings=participant_settings)
             if chair_unit is not None:
-                chair_plan = StageExecutionPlan(
-                    spec=spec,
-                    selection=outcome.plan.selection,
-                    units=(chair_unit,),
-                )
-                chair_dispatch = await dispatcher(
-                    (chair_unit,),
-                    budget=spec.budget,
-                )
+                chair_plan = StageExecutionPlan(spec=spec, selection=outcome.plan.selection, units=(chair_unit,))
+                chair_dispatch = await dispatcher((chair_unit,), budget=spec.budget)
                 chair_outcome = collect_results(chair_plan, chair_dispatch)
                 chair_result = chair_outcome.results[0]
                 if council_plan is not None and council_plan.depth is CouncilDepth.LIGHT:
-                    chair_result = _light_pilot_chair_fallback(
-                        chair_result,
-                        dispatch=chair_dispatch[0] if chair_dispatch else None,
-                        unit=chair_unit,
-                        cycle=cycle,
-                    )
-                    chair_outcome = replace(
-                        chair_outcome,
-                        results=(chair_result,),
-                    )
+                    chair_result = _light_pilot_chair_fallback(chair_result, dispatch=chair_dispatch[0] if chair_dispatch else None, unit=chair_unit, cycle=cycle)
+                    chair_outcome = replace(chair_outcome, results=(chair_result,))
                 unit_result_pairs.append((chair_unit, chair_result))
-                outcome = StageExecutionOutcome(
-                    plan=outcome.plan,
-                    results=outcome.results + chair_outcome.results,
-                    rejected=outcome.rejected + chair_outcome.rejected,
-                )
-
-        published_build_artifacts: list[dict[str, Any]] = []
-        build_execution_record: BuildExecutionBundle | None = None
-        build_fulfillment: BuildFulfillment | None = None
-        build_fulfillment_refusal = ""
-        if phase_run is not None:
-            # Already published, one phase at a time, before each phase's own row
-            # was settled. Running the bulk publisher again here would resolve
-            # references that now point at the governed output tree rather than
-            # at a worker's isolated workspace, and reject every one of them.
-            published_build_artifacts = phase_run.published
-        elif stage == "build" and stage_workspace:
-            outcome, published_build_artifacts = await asyncio.to_thread(
-                _publish_build_worker_artifacts,
-                project_root=project_root,
-                cycle=cycle,
-                outcome=outcome,
-                stage_workspace=stage_workspace,
-                attempt_id=attempt_id,
-            )
-            unit_result_pairs = list(zip(outcome.plan.units, outcome.results, strict=True))
-        if stage == "build" and build_inputs is not None and build_inputs.deliverable_manifest is not None:
-            build_fulfillment = derive_build_fulfillment(
-                build_inputs.deliverable_manifest,
-                published=published_build_artifacts,
-                declarations=_declared_deliverable_fulfillments(outcome.results),
-            )
-            if not build_fulfillment.reviewable:
-                build_fulfillment_refusal = "Build did not attempt every approved Design deliverable, so the result is not reviewable."
-            for artifact in published_build_artifacts:
-                source_path = str(artifact.get("source_path") or "")
-                matched = next(
-                    (item.id for item in build_inputs.deliverable_manifest.deliverables if source_path in item.expected_paths),
-                    None,
-                )
-                if matched is not None:
-                    artifact["deliverable_id"] = matched
-        if stage == "build" and published_build_artifacts:
-            build_execution_record = replace(
-                execution_bundle(outcome.trustworthy_results, published=published_build_artifacts),
-                deliverable_fulfillment=build_fulfillment,
-            )
-            if phase_run is not None and build_execution_record.rerun_spec is None:
-                # The phased path derives its own record rather than merging the
-                # workers'. Only when they produced none, so a single-phase Build
-                # whose worker recorded one keeps the worker's own account.
-                driver_spec = await asyncio.to_thread(
-                    _write_build_driver,
-                    project_root=project_root,
-                    cycle=cycle,
-                    results=list(phase_run.outcome.trustworthy_results),
-                    bound_inputs=list(phase_run.input_artifacts),
-                )
-                if driver_spec is not None:
-                    build_execution_record = replace(build_execution_record, rerun_spec=driver_spec, rerun_procedure=driver_spec.command)
-        missing_structured_rerun = bool(stage == "build" and "structured_rerun_spec" in spec.validity_gates and (build_execution_record is None or build_execution_record.rerun_spec is None))
-        # **A stage can refuse for a reason no worker owns.** Every worker here
-        # may have returned a contract-valid result and the stage still not be
-        # completable — the pinned contract wants a structured rerun record and
-        # none arrived. Naming that reason once, here, is what keeps the two
-        # places that report it from describing one refusal two ways; without it
-        # the durable note fell through to the per-worker list, blamed the
-        # workers, and then listed nothing, because none of them had failed.
-        stage_refusal = MISSING_STRUCTURED_RERUN_REASON if missing_structured_rerun else ""
-        if build_workflow_enabled:
-            # Settled from the *published* artifacts, which is what makes the
-            # step reusable: the bytes are already copied into the governed
-            # output tree and hashed, so a summary or deck that fails afterwards
-            # cannot take this work with it. The container is opened here rather
-            # than before dispatch because the per-phase attempts are what a
-            # resume reads; this row is the fold over them.
-            await _settle_execution_step(
-                build_recorder,
-                await build_recorder.begin(BuildStepKey.EXECUTE_PHASES),
-                published=published_build_artifacts,
-                outcome=outcome,
-                incomplete_because=(phase_run.stopped_because if phase_run is not None and not phase_run.complete else stage_refusal),
-            )
-
+                outcome = StageExecutionOutcome(plan=outcome.plan, results=outcome.results + chair_outcome.results, rejected=outcome.rejected + chair_outcome.rejected)
+        stage_refusal = ""
         results = [
             {
                 **result.as_dict(),
                 "unit_id": unit.unit_id,
                 "via_generalist": unit.via_generalist,
-                # A clarification resumes this exact worker. Persist its dials
-                # beside the result so message compaction or a process restart
-                # cannot silently replace the chair with today's defaults.
-                "execution": {
-                    "model": unit.model,
-                    "max_tokens": unit.max_tokens,
-                    "token_limit_enforced": spec.budget.token_limit_enforced,
-                    "reasoning": unit.reasoning,
-                },
-                "counts_toward_stage_output": (stage != "design" or unit.capability == "design_council_chair"),
+                "execution": {"model": unit.model, "max_tokens": unit.max_tokens, "token_limit_enforced": spec.budget.token_limit_enforced, "reasoning": unit.reasoning},
+                "counts_toward_stage_output": stage != "design" or unit.capability == "design_council_chair",
             }
-            for unit, result in unit_result_pairs
+            for (unit, result) in unit_result_pairs
         ]
-
         artifact_uri = None
         artifact_hash = None
         artifact_type = None
         artifact_digest = ""
-        # A chair cannot turn an empty room into a concluded meeting. Light may
-        # deliberately preserve completed-but-capped participant reports as a
-        # limited pilot draft, but a provider failure or contract rejection is
-        # not a position and is not a red-team argument. A resumed chair is the
-        # exception because those two reports were durably recorded by the
-        # paused round and are supplied through ``resumed_chair``.
         debate_report_statuses = {WorkerStatus.COMPLETED, WorkerStatus.NEEDS_INPUT}
         design_debate_complete = (
             stage != "design"
             or resumed_chair is not None
             or (
-                any(unit.role == "position" and result.status in debate_report_statuses for unit, result in unit_result_pairs)
-                and any(unit.role == "red_team" and result.status in debate_report_statuses for unit, result in unit_result_pairs)
+                any(unit.role == "position" and result.status in debate_report_statuses for (unit, result) in unit_result_pairs)
+                and any(unit.role == "red_team" and result.status in debate_report_statuses for (unit, result) in unit_result_pairs)
             )
         )
         design_manifest = None
         design_contract_refusal = ""
         if stage == "design" and chair_result is not None and chair_result.is_trustworthy and cycle.get("cycle_class"):
-            design_manifest, design_contract_refusal = _design_deliverable_manifest(
-                chair_result,
-                cycle_class=str(cycle["cycle_class"]),
-            )
+            (design_manifest, design_contract_refusal) = _design_deliverable_manifest(chair_result, cycle_class=str(cycle["cycle_class"]))
         design_ready = stage != "design" or (
-            design_debate_complete and chair_result is not None and chair_result.is_trustworthy and chair_result.status is WorkerStatus.COMPLETED and (not cycle.get("cycle_class") or design_manifest is not None)
+            design_debate_complete and chair_result is not None and chair_result.is_trustworthy and (chair_result.status is WorkerStatus.COMPLETED) and (not cycle.get("cycle_class") or design_manifest is not None)
         )
         if design_contract_refusal:
             stage_refusal = design_contract_refusal
-        if build_fulfillment_refusal:
-            stage_refusal = build_fulfillment_refusal
         _deliverable_audit = None
-        deliverable_audit_refusal = ""
-        test_owned_artifacts: list[dict[str, Any]] = []
-        if stage == "test" and build_inputs is not None and build_inputs.deliverable_manifest is not None:
-            if stage_workspace:
-                test_owned_artifacts = await asyncio.to_thread(
-                    _test_owned_deliverable_candidates,
-                    project_root=project_root,
-                    stage_workspace=stage_workspace,
-                    outcome=outcome,
-                    manifest=build_inputs.deliverable_manifest,
-                )
-            _deliverable_audit, deliverable_audit_refusal = _validated_deliverable_audit(
-                outcome.trustworthy_results,
-                manifest=build_inputs.deliverable_manifest,
-                build_test=build_test,
-                stage_artifacts=test_owned_artifacts,
-            )
-            if deliverable_audit_refusal:
-                stage_refusal = deliverable_audit_refusal
-            elif test_owned_artifacts:
-                await asyncio.to_thread(
-                    _publish_test_owned_deliverables,
-                    test_owned_artifacts,
-                )
-        test_assessment = _validated_test_assessment(outcome.trustworthy_results, build_test=build_test, rerun=test_rerun_record) if stage == "test" else None
-        if stage == "test" and outcome.produced_usable_evidence and test_assessment is None:
-            stage_refusal = (
-                "The Test workers returned evidence, but no complete server-readable validity assessment was present. Every headline metric must use criterion `gte` or `lte`, and the check set must exactly match the pinned validity pack."
-            )
-        # **A plan that did not finish is not a Build.** Every phase that ran
-        # ran truthfully, so `produced_usable_evidence` is true of a Build whose
-        # second phase failed and of one that stopped at a `pause_after`
-        # boundary — and it would have written a review package and a deck for
-        # both, presenting a fraction of the planned work as the completed
-        # thing a person approves and Test measures. The committed phases stay
-        # committed and reusable; what they do not do is become evidence.
-        build_plan_incomplete = (phase_run is not None and not phase_run.complete) or missing_structured_rerun
-        produced_usable_evidence = outcome.produced_usable_evidence and design_ready and (stage != "test" or test_assessment is not None) and not deliverable_audit_refusal and not build_plan_incomplete and not build_fulfillment_refusal
-        # Not opened at all when the plan did not finish. Opening it would
-        # settle as `summary_contract_rejected` — a *presentational* code, which
-        # the UI renders as "the build ran; the write-up broke". The build did
-        # not run, and telling somebody to retry the write-up would send them to
-        # fix the one part that is fine.
-        summary_handle = await build_recorder.begin(BuildStepKey.SUMMARIZE_RESULTS) if build_workflow_enabled and not build_plan_incomplete else StepHandle(step=BuildStepKey.SUMMARIZE_RESULTS)
-        # For Build under the workflow, the summarizer *replaces* the generic
-        # package writer. The generic renderer answers "which work units ran",
-        # and a Build reviewer needs "what did we get" — the numbers and the
-        # plots. Every other stage, and Build with the switch off, is unchanged.
-        build_summary_owns_evidence = build_workflow_enabled and produced_usable_evidence and bool(published_build_artifacts)
-        build_package = None
-        summary_refusal = ""
-        summary_question = ""
-        no_slide_results = False
-        #: What a later run rebuilds this write-up from instead of paying for a
-        #: second synthesis. `None` for a replay, which wrote nothing new.
-        summary_payload: dict[str, Any] | None = None
-        if produced_usable_evidence and not build_summary_owns_evidence:
-            artifact_uri, artifact_hash, artifact_digest = await asyncio.to_thread(
-                _write_stage_package,
-                project_root=project_root,
-                cycle=cycle,
-                outcome=outcome,
-                idempotency_key=execution_key,
-                council=council_plan,
-                deliverable_audit=_deliverable_audit,
+        produced_usable_evidence = outcome.produced_usable_evidence and design_ready
+        if produced_usable_evidence:
+            (artifact_uri, artifact_hash, artifact_digest) = await asyncio.to_thread(
+                _write_stage_package, project_root=project_root, cycle=cycle, outcome=outcome, idempotency_key=execution_key, council=council_plan, deliverable_audit=_deliverable_audit
             )
             artifact_type = spec.required_artifact_types[0]
-        if build_summary_owns_evidence:
-            bundle = build_execution_record or replace(
-                execution_bundle(outcome.trustworthy_results, published=published_build_artifacts),
-                deliverable_fulfillment=build_fulfillment,
-            )
-            # The whole reason the write-up is its own step: a deck that failed
-            # to render is retried against *this* package rather than against a
-            # second, differently-hashed one nobody reviewed.
-            restored_summary = (
-                await asyncio.to_thread(
-                    _restore_build_summary,
-                    build_recorder.replay(summary_handle),
-                    bundle=bundle,
-                    expected_digest=str(summary_handle.output_digest or ""),
-                    project_root=project_root,
-                )
-                if summary_handle.replayed
-                else None
-            )
-            if restored_summary is not None:
-                if restored_summary.package.has_slide_results:
-                    build_package = restored_summary.package
-                    artifact_uri, artifact_hash, artifact_digest = restored_summary.uri, restored_summary.content_hash, restored_summary.package.headline
-                    artifact_type = spec.required_artifact_types[0]
-                else:
-                    # Older workflow rows may have committed a prose-only
-                    # package before the result-evidence rule existed. Do not
-                    # replay it into an empty, answerable deck.
-                    no_slide_results = True
-                    summary_refusal = "The Build finished, but it recorded no verified numeric outcomes or figures to present."
-                    produced_usable_evidence = False
-                    summary_handle = await build_recorder.reopen(summary_handle)
-            else:
-                if summary_handle.replayed:
-                    # Committed, but unusable. Re-running is right; re-running
-                    # invisibly is not, so the second synthesis gets its own row.
-                    summary_handle = await build_recorder.reopen(summary_handle)
-                summary = await self._summarize_build(
-                    dispatcher=dispatcher,
-                    budget=spec.budget,
-                    attempt_id=attempt_id,
-                    outcome=outcome,
-                    inputs=build_inputs,
-                    cycle=cycle,
-                    bundle=bundle,
-                    answer=worker_answer if worker_answer_step == BuildStepKey.SUMMARIZE_RESULTS.value else "",
-                )
-                build_package, summary_refusal, summary_question = summary.package, summary.refusal, summary.question
-                if build_package is not None and not build_package.has_slide_results:
-                    no_slide_results = True
-                    summary_refusal = "The Build finished, but it recorded no verified numeric outcomes or figures to present."
-                    build_package = None
-                written = (
-                    await asyncio.to_thread(
-                        write_build_review,
-                        project_root=project_root,
-                        cycle=cycle,
-                        package=build_package,
-                        execution=bundle,
-                    )
-                    if build_package is not None
-                    else None
-                )
-                if written is not None:
-                    artifact_uri, artifact_hash, artifact_digest = written.uri, written.content_hash, written.digest
-                    artifact_type = spec.required_artifact_types[0]
-                    summary_payload = {"text": summary.text, "package_digest": build_package.digest, "artifact_uri": written.uri}
-                else:
-                    # The execution stays selected and reusable; only this step
-                    # failed, and its code says so, so a person is not told to
-                    # re-run an hour of sandbox work to recover a write-up.
-                    produced_usable_evidence = False
-        summary_control: dict[str, Any] | None = None
-        if build_workflow_enabled and summary_handle.recorded:
-            if artifact_hash and build_summary_owns_evidence:
-                await build_recorder.succeed(summary_handle, artifact_hash, execution={"artifact_uri": artifact_uri or ""}, payload=summary_payload)
-            elif summary_question:
-                # `needs_input` is deliberately not a failure code: it renders
-                # as **Waiting for you**, must not count against worker failure
-                # telemetry, and the execution behind it stays selected — so the
-                # answer resumes the write-up instead of the Build.
-                summary_control = await control_gate.raise_control(
-                    worker_question_request(
-                        question=summary_question,
-                        rationale="The build ran and its outputs are recorded. This decides how they are written up.",
-                        step_key=BuildStepKey.SUMMARIZE_RESULTS.value,
-                        cycle_id=cycle_id,
-                        stage_attempt_id=str((attempt or {}).get("id") or ""),
-                        workflow_spec_key=build_recorder.spec_key,
-                        cycle_revision=int(cycle.get("db_revision") or 0),
-                        plan_digest=str(getattr(build_plan, "digest", "") or ""),
-                        meeting_available=bool(getattr(dbtl_config, "build_work_meetings", False)),
-                    )
-                )
-                await build_recorder.settle(
-                    summary_handle,
-                    state=StepState.NEEDS_INPUT,
-                    summary=summary_question,
-                    human_input_request_id=str(summary_control.get("request_id") or ""),
-                )
-            elif no_slide_results and not degraded_evidence_enabled:
-                summary_control = await control_gate.raise_control(
-                    no_presentable_results_request(
-                        cycle_id=cycle_id,
-                        stage_attempt_id=str((attempt or {}).get("id") or ""),
-                        workflow_spec_key=build_recorder.spec_key,
-                        cycle_revision=int(cycle.get("db_revision") or 0),
-                        plan_digest=str(getattr(build_plan, "digest", "") or ""),
-                        completed_phases=(phase_run.completed_count if phase_run is not None else 0),
-                        plan=build_plan,
-                    )
-                )
-                await build_recorder.settle(
-                    summary_handle,
-                    state=StepState.NEEDS_INPUT,
-                    summary=summary_refusal,
-                    human_input_request_id=str(summary_control.get("request_id") or ""),
-                )
-            else:
-                await build_recorder.fail(
-                    summary_handle,
-                    BuildErrorCode.SUMMARY_CONTRACT_REJECTED if build_package is None else BuildErrorCode.REVIEW_PACKAGE_WRITE_FAILED,
-                    summary_refusal or "; ".join(_failure_reasons(results)) or "No Build worker returned a result that satisfied the stage contract.",
-                )
-
-        evidence_exception: EvidenceExceptionDossier | None = None
-        evidence_exception_uri = ""
-        evidence_exception_hash = ""
-        test_exception_reasons, test_exception_checks = invalidated_test_exception_facts(test_assessment) if stage == "test" else ((), ())
-        if degraded_evidence_enabled and stage in {"build", "test"} and (not produced_usable_evidence or bool(test_exception_reasons) or isinstance(upstream_evidence_exception, Mapping)) and not summary_question:
-            reasons: list[EvidenceReason] = []
-            failed_checks: list[dict[str, object]] = []
-            affected_deliverables: list[dict[str, object]] = []
-            verified_facts: list[str] = []
-            available_artifacts = [
-                {
-                    "path": str(item.get("path") or item.get("source_path") or ""),
-                    "content_hash": str(item.get("content_hash") or ""),
-                }
-                for item in published_build_artifacts
-                if item.get("content_hash")
-            ]
-            if isinstance(upstream_evidence_exception, Mapping):
-                for value in upstream_evidence_exception.get("reason_codes", []):
-                    try:
-                        reasons.append(EvidenceReason(value))
-                    except ValueError:
-                        continue
-                upstream_hash = str(upstream_evidence_exception.get("content_hash") or "")
-                if upstream_hash:
-                    verified_facts.append(f"The Test decision is bound to upstream Build exception {upstream_hash}.")
-                    available_artifacts.append({"path": "upstream_build_evidence_exception", "content_hash": upstream_hash})
-            reasons.extend(test_exception_reasons)
-            failed_checks.extend(test_exception_checks)
-            if artifact_uri and artifact_hash:
-                available_artifacts.append({"path": artifact_uri, "content_hash": artifact_hash})
-            if build_fulfillment is not None:
-                affected_deliverables = [item.as_dict() for item in build_fulfillment.items if item.status.value != "delivered"]
-                statuses = {str(item.get("status") or "") for item in affected_deliverables}
-                if "not_attempted" in statuses:
-                    reasons.append(EvidenceReason.DELIVERABLE_NOT_ATTEMPTED)
-                if statuses - {"not_attempted", "not_applicable"}:
-                    reasons.append(EvidenceReason.DELIVERABLE_ATTEMPT_FAILED)
-            if missing_structured_rerun:
-                reasons.append(EvidenceReason.RERUN_UNAVAILABLE)
-                failed_checks.append({"check": "structured_rerun_spec", "status": "missing", "detail": stage_refusal})
-            if deliverable_audit_refusal:
-                reasons.append(EvidenceReason.AUDIT_INCOMPLETE)
-                failed_checks.append({"check": "deliverable_audit", "status": "failed", "detail": deliverable_audit_refusal})
-            if stage == "test" and test_assessment is None:
-                reasons.append(EvidenceReason.AUDIT_INCOMPLETE)
-                failed_checks.append({"check": "validity_pack", "status": "missing", "detail": stage_refusal})
-            if no_slide_results:
-                reasons.append(EvidenceReason.CORE_OUTPUT_MISSING)
-                failed_checks.append({"check": "presentable_core_result", "status": "missing", "detail": summary_refusal})
-            if outcome.produced_usable_evidence:
-                verified_facts.append("At least one worker returned server-readable evidence.")
-            if published_build_artifacts:
-                verified_facts.append(f"The server published and hashed {len(published_build_artifacts)} Build artifact(s).")
-            if not reasons:
-                reasons.append(EvidenceReason.EXECUTION_ABSENT)
-                failed_checks.append({"check": "stage_execution", "status": "missing", "detail": stage_refusal or "No trustworthy stage evidence was recorded."})
-            evidence_exception = build_evidence_exception_dossier(
-                stage=stage,
-                stage_attempt_id=str((attempt or {}).get("id") or ""),
-                reason_codes=reasons,
-                verified_facts=verified_facts,
-                untrusted_claims=[str(item.get("summary") or "") for item in results if str(item.get("summary") or "") and str(item.get("status") or "") not in {"completed", "needs_input"}],
-                affected_deliverables=affected_deliverables,
-                failed_checks=failed_checks,
-                available_artifacts=available_artifacts,
-                continuation_route=(
-                    "advance_to_learn" if stage == "test" and isinstance(upstream_evidence_exception, Mapping) and str(dict((test_assessment or {}).get("evaluation") or {}).get("outcome") or "") in {"supported", "not_supported"} else None
-                ),
-            )
-            if evidence_exception is not None:
-                evidence_exception_uri, evidence_exception_hash, exception_digest = await asyncio.to_thread(
-                    _write_evidence_exception_package,
-                    project_root=project_root,
-                    cycle=cycle,
-                    dossier=evidence_exception,
-                )
-                # With a complete typed Test assessment the validity report is
-                # still the core review evidence. The dossier sits beside it
-                # and supplies the permanent red flag. Only a stage with no
-                # trustworthy review package uses the dossier as its sole
-                # review artifact.
-                if not produced_usable_evidence:
-                    artifact_uri = evidence_exception_uri
-                    artifact_hash = evidence_exception_hash
-                    artifact_digest = exception_digest
-                    artifact_type = "evidence_exception"
-
+        (_test_exception_reasons, _test_exception_checks) = ((), ())
         if stage_activity is not None:
             await stage_activity.update(state=ActivityState.RECORDING, operation="stage.record")
         recorded_worker_runs = await self._repo.record_worker_runs(
@@ -7353,213 +5285,47 @@ class LiveStageAdapter:
             artifact_uri=artifact_uri,
             artifact_content_hash=artifact_hash,
         )
-        if evidence_exception is not None and produced_usable_evidence and evidence_exception_uri and evidence_exception_hash:
-            current = await self._repo.get_cycle(cycle_id, project_id=project_id)
-            if current is None:  # pragma: no cover - scope was verified above
-                raise RuntimeError("Cycle disappeared before the evidence exception could be attached.")
-            await self._repo.attach_artifact(
-                cycle_id=cycle_id,
-                project_id=project_id,
-                stage=stage,
-                artifact_type="evidence_exception",
-                uri=evidence_exception_uri,
-                content_hash=evidence_exception_hash,
-                created_by=str(user_id),
-                expected_db_revision=int(current["db_revision"]),
-                idempotency_key=f"{execution_key}:evidence-exception",
-            )
         chair_worker_run_id = None
         if chair_result is not None:
-            chair_unit_id = next(
-                (unit.unit_id for unit, result in unit_result_pairs if result is chair_result),
-                None,
-            )
-            chair_worker_run_id = next(
-                (str(item.get("id")) for item in (recorded_worker_runs or []) if chair_unit_id and item.get("unit_id") == chair_unit_id),
-                None,
-            )
-
+            chair_unit_id = next((unit.unit_id for (unit, result) in unit_result_pairs if result is chair_result), None)
+            chair_worker_run_id = next((str(item.get("id")) for item in recorded_worker_runs or [] if chair_unit_id and item.get("unit_id") == chair_unit_id), None)
         if stage == "learn":
             assessment = dict((build_test or {}).get("validity_assessment") or {})
             outcome_name = str(assessment.get("outcome") or "")
-            learn_summary, learn_candidates = _learn_synthesis_payload(
-                results,
-                test_outcome=outcome_name,
-                fallback_summary=artifact_digest,
-                required_limitations=(list(assessment.get("limitations") or []) if assessment.get("evidence_exception_hash") else []),
+            (learn_summary, learn_candidates) = _learn_synthesis_payload(
+                results, test_outcome=outcome_name, fallback_summary=artifact_digest, required_limitations=list(assessment.get("limitations") or []) if assessment.get("evidence_exception_hash") else []
             )
             current = await self._repo.get_cycle(cycle_id, project_id=project_id)
-            if current is None:  # pragma: no cover - verified above
+            if current is None:
                 raise RuntimeError("Cycle disappeared after Learn workers were recorded.")
             await self._repo.record_learn_synthesis(
-                cycle_id=cycle_id,
-                project_id=project_id,
-                summary=learn_summary,
-                candidates=learn_candidates,
-                actor_user_id=f"agent:{user_id}",
-                expected_db_revision=int(current["db_revision"]),
-                idempotency_key=f"{execution_key}:learn",
+                cycle_id=cycle_id, project_id=project_id, summary=learn_summary, candidates=learn_candidates, actor_user_id=f"agent:{user_id}", expected_db_revision=int(current["db_revision"]), idempotency_key=f"{execution_key}:learn"
             )
-
-        if stage == "build" and artifact_uri and artifact_hash and build_execution_record is not None:
-            current = await self._repo.get_cycle(cycle_id, project_id=project_id)
-            if current is None:  # pragma: no cover - scope was verified above
-                raise RuntimeError("Cycle disappeared after Build workers were recorded.")
-            metadata = dict(config.get("metadata", {}) or {})
-            supplied_code_revision = str(runtime.get("code_revision") or metadata.get("code_revision") or os.getenv("GIT_COMMIT") or "").strip()
-            code_revision = supplied_code_revision or "workspace:unversioned"
-            try:
-                config_payload = self._app_config.model_dump(mode="json")
-            except AttributeError:
-                config_payload = repr(self._app_config)
-            config_revision = "config:sha256:" + hashlib.sha256(json.dumps(config_payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
-            deviations = []
-            if not supplied_code_revision:
-                deviations.append("Runtime did not provide a source-control revision; recorded workspace:unversioned.")
-            if phase_run is not None:
-                # The phase loop already bound each phase's inputs against the
-                # state that phase actually started from. Recomputing here would
-                # judge every phase against the pre-run snapshot alone, which by
-                # construction cannot contain an earlier phase's output.
-                input_artifacts = list(phase_run.input_artifacts)
-            else:
-                input_artifacts = await asyncio.to_thread(
-                    _build_input_artifacts,
-                    datasets=datasets,
-                    results=outcome.trustworthy_results,
-                    project_root=project_root,
-                    pre_run_files=pre_run_files,
-                )
-            await self._repo.record_build_lineage(
-                cycle_id=cycle_id,
-                project_id=project_id,
-                code_revision=code_revision,
-                config_revision=config_revision,
-                environment={
-                    "python": platform.python_version(),
-                    "implementation": platform.python_implementation(),
-                    "platform": platform.platform(),
-                    "executable": sys.executable,
-                    "stage_runner": "LiveStageAdapter",
-                },
-                rerun_spec=(build_execution_record.rerun_spec.as_dict() if build_execution_record and build_execution_record.rerun_spec else None),
-                input_artifacts=input_artifacts,
-                output_artifacts=published_build_artifacts,
-                deviations=deviations,
-                logs_uri=artifact_uri,
-                recorded_by=str(user_id),
-                expected_db_revision=int(current["db_revision"]),
-                idempotency_key=f"{execution_key}:lineage",
-            )
-
         clarification_question = chair_result.clarification_question if chair_result is not None and chair_result.status is WorkerStatus.NEEDS_INPUT else None
-        independent_count = sum(1 for unit, _result in unit_result_pairs if unit.role == "position")
-        non_chair_pairs = [(unit, result) for unit, result in unit_result_pairs if unit.role != "chair"]
-        failed_participant_count = sum(1 for _unit, result in non_chair_pairs if not result.is_trustworthy)
-
-        # Written after the record, from the record. A completed or deliberately
-        # paused chair result is a meeting outcome; a failed/blocked chair result
-        # is only an audit record. Rendering the latter as a deck makes a
-        # provider outage look like a concluded meeting and creates a feedback
-        # surface for a decision that does not exist.
-        chair_has_presentable_outcome = design_debate_complete and chair_result is not None and (chair_result.is_trustworthy or (chair_result.status is WorkerStatus.NEEDS_INPUT and not chair_result.was_capped))
+        independent_count = sum(1 for (unit, _result) in unit_result_pairs if unit.role == "position")
+        non_chair_pairs = [(unit, result) for (unit, result) in unit_result_pairs if unit.role != "chair"]
+        failed_participant_count = sum(1 for (_unit, result) in non_chair_pairs if not result.is_trustworthy)
+        chair_has_presentable_outcome = design_debate_complete and chair_result is not None and (chair_result.is_trustworthy or (chair_result.status is WorkerStatus.NEEDS_INPUT and (not chair_result.was_capped)))
         deck_uri = None
         deck = None
         surface_plan = None
-        deck_registered = False
         registration_error: Exception | None = None
-        # Build, Test, and Learn each get a *pre-meeting* decision surface,
-        # rendered from the stage's own evidence rather than from a chair result
-        # — no meeting has happened when it is written. None of them carries a
-        # route menu: each stage's verdict is taken at review time against this
-        # evidence (Test's outcome is computed there from the validity pack),
-        # and a menu rendered beforehand would pre-empt the decision it exists
-        # to record. Design is the exception in the other direction: its deck
-        # *is* a chair result, so it needs one to exist.
-        stage_has_reviewable_evidence = stage in REVIEW_MEETING_STAGES and (produced_usable_evidence or evidence_exception is not None) and bool(artifact_uri and artifact_hash)
+        stage_has_reviewable_evidence = stage in REVIEW_MEETING_STAGES and (produced_usable_evidence or False) and bool(artifact_uri and artifact_hash)
         review_meeting_requirement = None
-        if (stage == "design" and chair_has_presentable_outcome) or stage_has_reviewable_evidence:
+        if stage == "design" and chair_has_presentable_outcome or stage_has_reviewable_evidence:
             transition_gate = None
             if stage_has_reviewable_evidence:
-                if evidence_exception is not None:
-                    exception_payload = evidence_exception.as_dict()
-                    if stage == "test" and str(dict((test_assessment or {}).get("evaluation") or {}).get("outcome") or "") == "invalidated":
-                        exception_payload = {
-                            **exception_payload,
-                            "scientific_effect": "invalidates_support",
-                        }
-                    transition_gate = {
-                        "stage": stage,
-                        "assessment": {
-                            "difficulty": "exception",
-                            "rationale": "The server could not establish the clean evidence contract.",
-                        },
-                        "routes": [],
-                        "evidence_exception": exception_payload,
-                    }
-                    review_meeting_requirement = MeetingRequirement.SKIPPED.value
-                elif bool(getattr(getattr(self._app_config, "dbtl", None), "progressive_gate", False)):
-                    assessment = await self._assess_transition(
-                        stage=stage,
-                        cycle=cycle,
-                        evidence_summary=artifact_digest or f"{stage.title()} evidence: {artifact_uri} ({artifact_hash})",
-                    )
-                    # Assessment only. The difficulty is what decides whether a
-                    # review meeting is skipped, offered, or required.
-                    transition_gate = {
-                        "stage": stage,
-                        "assessment": assessment.as_dict(),
-                        "routes": [],
-                    }
+                if bool(getattr(getattr(self._app_config, "dbtl", None), "progressive_gate", False)):
+                    assessment = await self._assess_transition(stage=stage, cycle=cycle, evidence_summary=artifact_digest or f"{stage.title()} evidence: {artifact_uri} ({artifact_hash})")
+                    transition_gate = {"stage": stage, "assessment": assessment.as_dict(), "routes": []}
                     meetings = getattr(getattr(self._app_config, "dbtl", None), "stage_meetings", None)
                     enabled = bool(getattr(meetings, stage, False))
-                    gate = surface_meeting_gate(
-                        stage=stage,
-                        assessed_difficulty=assessment.difficulty.value,
-                        enabled=enabled,
-                    )
+                    gate = surface_meeting_gate(stage=stage, assessed_difficulty=assessment.difficulty.value, enabled=enabled)
                     review_meeting_requirement = gate.requirement.value if gate is not None else MeetingRequirement.SKIPPED.value
             elif artifact_uri and artifact_hash and bool(getattr(getattr(self._app_config, "dbtl", None), "progressive_gate", False)):
-                assessment = await self._assess_transition(
-                    stage="design",
-                    cycle=cycle,
-                    evidence_summary=artifact_digest or f"Design evidence: {artifact_uri} ({artifact_hash})",
-                )
-                routes = compute_stage_routes(
-                    RouteContext(
-                        stage="design",
-                        outcome="approved",
-                    )
-                )
-                transition_gate = {
-                    "stage": "design",
-                    "assessment": assessment.as_dict(),
-                    "routes": [route.as_dict() for route in routes],
-                }
-            if stage == "test" and isinstance(test_assessment, Mapping):
-                evaluation = dict(test_assessment.get("evaluation") or {})
-                labels = {
-                    "advance_to_learn": "Accept outcome and advance to Learn",
-                    "learn_from_invalidated_evidence": "Learn from invalid evidence",
-                    "repeat_test": "Repeat Test",
-                    "return_to_build": "Return to Build",
-                    "return_to_design": "Return to Design",
-                    "close_cycle": "Close this cycle",
-                }
-                test_routes = [{"slug": route, "label": labels[route], "blocked": False} for route in labels if route in {str(item) for item in evaluation.get("allowed_recommendations", [])}]
-                transition_gate = {
-                    **(
-                        transition_gate
-                        or {
-                            "stage": "test",
-                            "assessment": {
-                                "difficulty": "standard",
-                                "rationale": "The server computed the Test outcome from the pinned validity pack.",
-                            },
-                        }
-                    ),
-                    "routes": test_routes,
-                }
+                assessment = await self._assess_transition(stage="design", cycle=cycle, evidence_summary=artifact_digest or f"Design evidence: {artifact_uri} ({artifact_hash})")
+                routes = compute_stage_routes(RouteContext(stage="design", outcome="approved"))
+                transition_gate = {"stage": "design", "assessment": assessment.as_dict(), "routes": [route.as_dict() for route in routes]}
             if stage == "learn" and isinstance(build_test, Mapping):
                 upstream_assessment = build_test.get("validity_assessment")
                 upstream_assessment = dict(upstream_assessment) if isinstance(upstream_assessment, Mapping) else {}
@@ -7573,11 +5339,9 @@ class LiveStageAdapter:
                                 "stage": "learn",
                                 "assessment": {
                                     "difficulty": "exception",
-                                    "rationale": (
-                                        "Learn is operating on invalidated evidence and may record process lessons only."
-                                        if invalidated_exception
-                                        else "Learn must preserve the upstream evidence exception as a limitation on every candidate."
-                                    ),
+                                    "rationale": "Learn is operating on invalidated evidence and may record process lessons only."
+                                    if invalidated_exception
+                                    else "Learn must preserve the upstream evidence exception as a limitation on every candidate.",
                                 },
                                 "routes": [],
                             }
@@ -7598,216 +5362,63 @@ class LiveStageAdapter:
                 paused=bool(clarification_question),
                 artifact_uri=artifact_uri or "",
                 artifact_hash=artifact_hash or "",
-                decision_request=(chair_result.decision_request if chair_result is not None else None),
+                decision_request=chair_result.decision_request if chair_result is not None else None,
                 chair_worker_run_id=chair_worker_run_id,
-                review_issue_ids=(tuple(f"issue-{index + 1}" for index, _item in enumerate(chair_result.consensus.disagreements)) if chair_result is not None and chair_result.consensus is not None else ()),
+                review_issue_ids=tuple(f"issue-{index + 1}" for (index, _item) in enumerate(chair_result.consensus.disagreements)) if chair_result is not None and chair_result.consensus is not None else (),
                 transition_gate=transition_gate,
             )
-            if evidence_exception is not None and not produced_usable_evidence:
-                deck = await asyncio.to_thread(
-                    _write_evidence_exception_deck,
-                    project_root=project_root,
-                    cycle=cycle,
-                    dossier=evidence_exception,
-                    package_path=artifact_uri or "",
-                    surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
-                    transition_gate=transition_gate or {},
-                )
-            elif build_package is not None:
-                # Build gets its own deck: figures embedded, numbers first. The
-                # meeting deck renders positions and a synthesis, which is the
-                # wrong shape for a result nobody argued about.
-                rendered = await asyncio.to_thread(
-                    write_build_deck,
-                    project_root=project_root,
-                    cycle=cycle,
-                    package=build_package,
-                    package_path=artifact_uri or "",
-                    surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
-                    transition_gate=transition_gate,
-                )
-                deck = RenderedDeck(uri=rendered[0], content_hash=rendered[1], commentable_slides=rendered[2]) if rendered is not None else None
-            else:
-                deck = await asyncio.to_thread(
-                    _write_council_deck,
-                    project_root=project_root,
-                    cycle=cycle,
-                    results=results,
-                    round_number=design_round,
-                    stage=stage,
-                    package_path=artifact_uri or "",
-                    clarification_question=clarification_question or "",
-                    decision_request=(chair_result.decision_request if chair_result is not None else None),
-                    surface_id=(surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else ""),
-                    surface_mode=(surface_plan.mode if surface_plan is not None else ""),
-                    transition_gate=transition_gate,
-                )
+            deck = await asyncio.to_thread(
+                _write_council_deck,
+                project_root=project_root,
+                cycle=cycle,
+                results=results,
+                round_number=design_round,
+                stage=stage,
+                package_path=artifact_uri or "",
+                clarification_question=clarification_question or "",
+                decision_request=chair_result.decision_request if chair_result is not None else None,
+                surface_id=surface_plan.surface_id if surface_plan is not None and surface_plan.answerable else "",
+                surface_mode=surface_plan.mode if surface_plan is not None else "",
+                transition_gate=transition_gate,
+            )
             if deck is not None:
                 deck_uri = deck.uri
                 if surface_plan is not None:
                     try:
-                        await self._register_feedback_surface(
-                            surface_plan,
-                            deck,
-                            cycle_id=cycle_id,
-                            project_id=project_id,
-                        )
-                        deck_registered = True
-                    except Exception as exc:  # noqa: BLE001 - recorded below, then re-raised
+                        await self._register_feedback_surface(surface_plan, deck, cycle_id=cycle_id, project_id=project_id)
+                    except Exception as exc:
                         registration_error = exc
-        if build_workflow_enabled and artifact_uri and artifact_hash and evidence_exception is None:
-            # Opened here rather than around the render call: with the summary
-            # missing there is nothing to render, and an attempt whose
-            # predecessor never succeeded would be refused by the chain anyway.
-            deck_handle = await build_recorder.begin(BuildStepKey.RENDER_REVIEW_DECK)
-            if deck is None or not deck.content_hash:
-                await build_recorder.fail(
-                    deck_handle,
-                    BuildErrorCode.DECK_RENDER_FAILED,
-                    "The Build review deck could not be rendered from the recorded review package.",
-                )
-            elif not deck_registered:
-                # **A deck nobody can answer is not a review surface.** The step
-                # used to succeed on a rendered file alone, so a registration
-                # that returned no plan left the workflow reporting a finished
-                # Build whose deck could never carry a verdict — and one that
-                # raised did so *before* this step opened, so the code that
-                # names this failure could never be recorded at all.
-                await build_recorder.fail(
-                    deck_handle,
-                    BuildErrorCode.DECK_REGISTRATION_FAILED,
-                    (str(registration_error) if registration_error is not None else "The Build review deck was rendered but could not be bound to a stage attempt, so it cannot carry a decision."),
-                )
-            else:
-                await build_recorder.succeed(deck_handle, deck.content_hash, execution={"deck_uri": deck.uri})
         if registration_error is not None:
-            # Fail-visible, and now recorded first. Stage evidence is durable by
-            # this point, so a retry is safe; returning success would hand
-            # somebody a deck that can never answer its gate.
             raise registration_error
-
-        # The Test deck is the human input surface, but it can bind a decision
-        # only after the complete typed validity pack reaches
-        # ``awaiting_review``. Move the stage across that non-decision boundary
-        # here so the deck's Human gate can record the server-computed outcome;
-        # a person can never decide against a half-written pack.
-        if stage == "test" and (produced_usable_evidence or evidence_exception is not None) and artifact_uri and artifact_hash:
-            submitter = getattr(self._repo, "submit_stage_for_review", None)
-            if callable(submitter):
-                current = await self._repo.get_cycle(cycle_id, project_id=project_id)
-                if current is None:  # pragma: no cover - scope was verified above
-                    raise RuntimeError("Cycle disappeared before Test could enter human review.")
-                await submitter(
-                    cycle_id=cycle_id,
-                    project_id=project_id,
-                    stage="test",
-                    expected_db_revision=int(current["db_revision"]),
-                    actor_user_id=str(user_id),
-                    idempotency_key=f"{execution_key}:test-auto-submit",
-                )
-
-        # A revision round has to say which route it took and why. The failure
-        # this replaces was silence: four workers ran, three of them died, and
-        # the only visible symptom was a card that never came back.
         revision_prefix = ""
         if revision_verdict is not None:
-            if not revision_verdict.reconvenes and not resumed_positions:
+            if not revision_verdict.reconvenes and (not resumed_positions):
                 revision_prefix = f"Your requested changes were read as something the meeting chair can settle on its own, so no participants were re-run. {revision_verdict.reason}".strip() + "\n\n"
             elif revision_verdict.reconvenes:
                 revision_prefix = f"Your requested changes were read as needing an argument nobody made yet, so the meeting reconvened. {revision_verdict.reason}".strip() + "\n\n"
-
         if clarification_question and resumed_chair is not None:
             note = "The meeting chair resumed on your answer and still needs one more decision before it can write the design up for review. No participants were re-run."
         elif clarification_question and failed_participant_count:
-            note = (
-                f"The meeting ran {independent_count} independent position(s) and one red team, "
-                f"but {failed_participant_count} of {len(non_chair_pairs)} returned no usable result. "
-                "The chair produced a partial synthesis from the available project context and needs "
-                "one human decision before the meeting can create a review package."
-            )
+            note = f"The meeting ran {independent_count} independent position(s) and one red team, but {failed_participant_count} of {len(non_chair_pairs)} returned no usable result. The chair produced a partial synthesis from the available project context and needs one human decision before the meeting can create a review package."  # noqa: E501
         elif clarification_question:
             note = f"Ran {independent_count} independent Design meeting position(s), one red team, and a chair synthesis. The meeting paused before creating a review package because one human decision is required."
-        elif build_plan_incomplete and phase_run is not None:
-            # The generic "none produced usable evidence" line is false here and
-            # sends the reader to the wrong place: the phases that ran did
-            # produce evidence, it is published and pinned, and the plan simply
-            # did not finish. Saying how far it got is what makes the next step
-            # obvious — resume, or fix the phase that stopped it.
-            done = sum(1 for item in phase_run.outcome.results if item.is_trustworthy)
-            note = "\n".join(
-                [
-                    f"Ran {done} of {len(build_plan.phases) if build_plan else done} planned build phase(s) and kept every finished phase's outputs, so a retry resumes rather than starting over.",
-                    f"It stopped there: {phase_run.stopped_because}" if phase_run.stopped_because else "",
-                    "No review package was written, because a plan that has not finished is not the build a person would be approving.",
-                ]
-            ).strip()
-        elif build_plan_incomplete and stage_refusal:
-            # Every worker succeeded and the stage still refused. The generic
-            # line below would say "none produced usable evidence" and then
-            # print an empty reason list — a blank explanation, which is worse
-            # than a wrong one, because it sends the reader to inspect three
-            # workers that did nothing wrong.
-            note = "\n".join(
-                [
-                    f"Ran {len(results)} bounded {stage} worker(s) and kept every outcome, but the stage could not be completed.",
-                    "",
-                    stage_refusal,
-                ]
-            )
         elif artifact_uri:
-            # The digest carries what the council concluded. A reply that is only
-            # a file path makes the reader open a file to learn anything at all.
             note = artifact_digest or f"Ran {len(results)} bounded {stage} worker(s) and attached a review package at {artifact_uri}."
         elif stage_refusal:
-            note = "\n".join(
-                [
-                    f"Ran {len(results)} bounded {stage} worker(s) and recorded every outcome, but the stage could not create review evidence.",
-                    "",
-                    stage_refusal,
-                ]
-            )
+            note = "\n".join([f"Ran {len(results)} bounded {stage} worker(s) and recorded every outcome, but the stage could not create review evidence.", "", stage_refusal])
         else:
-            # No package is written when nothing is trustworthy, so the review
-            # Markdown that normally carries "Work units not included" never
-            # reaches disk. Without the reasons here the only visible symptom is
-            # "none produced usable evidence", which reads as three bad workers
-            # and hides the one thing a person can act on — the contract
-            # violation, the cap, or the crash that actually happened.
             note = "\n".join(
                 [
                     f"Ran {len(results)} bounded {stage} worker(s) and recorded every outcome, but none produced usable evidence, so no review artifact was attached.",
                     *(["", "Why each worker did not count:", *_failure_reasons(results)] if results else []),
                 ]
             )
-        # A Build that stopped is a decision waiting to be made, not a dead end.
-        # The control is raised last, from state already committed: every phase
-        # that ran is recorded, no worker lease is held, and the person's answer
-        # starts a new attempt rather than resuming a process.
-        # A question the summarizer asked outranks a pause card derived from
-        # where the Build stopped: it is already recorded and already bound to
-        # the step waiting on it, and returning the other one would leave a
-        # control nobody can see holding an answer nobody can give.
-        control_request = (
-            summary_control
-            or await self._build_pause_control(
-                phase_run,
-                gate=control_gate,
-                cycle=cycle,
-                plan=build_plan,
-                attempt=attempt,
-                workflow_spec_key=build_recorder.spec_key,
-                summary_refusal=summary_refusal if build_workflow_enabled else "",
-            )
-            if build_workflow_enabled
-            else None
-        )
-
+        control_request = None
         if stage_activity is not None:
             if clarification_question or control_request is not None:
                 await stage_activity.settle(ActivityState.PAUSED, operation="stage.wait_human")
-            elif build_plan_incomplete or not produced_usable_evidence:
+            elif not produced_usable_evidence:
                 await stage_activity.settle(ActivityState.FAILED)
-
         _summary_chair = _chair_result_of(results) or {}
         return LiveStageResult(
             stage=stage,
@@ -7818,13 +5429,10 @@ class LiveStageAdapter:
             artifact_uri=artifact_uri,
             clarification_question=clarification_question,
             deck_uri=deck_uri,
-            feedback_surface_id=(surface_plan.surface_id if surface_plan is not None and deck is not None else None),
-            test_assessment=test_assessment,
+            feedback_surface_id=surface_plan.surface_id if surface_plan is not None and deck is not None else None,
+            test_assessment=None,
             review_meeting_requirement=review_meeting_requirement,
             control_request=control_request,
-            # Inputs for the one sentence that introduces this round in chat.
-            # Taken from the same chair result the deck is rendered from, so the
-            # reply and the deck can never describe different meetings.
             research_question=str(cycle.get("research_question") or ""),
             chair_summary=str(_summary_chair.get("summary") or ""),
             chair_consensus=_summary_chair.get("consensus"),

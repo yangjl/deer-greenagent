@@ -2568,6 +2568,82 @@ class TestLiveStageBranch:
             "repeat_test",
         ]
 
+    @pytest.mark.asyncio
+    async def test_unscoped_learn_revision_reopens_a_server_owned_start_control(self):
+        lead_calls = []
+        worker_calls = []
+
+        class Adapter:
+            async def active_cycle_status(self, *, project_id):
+                return [
+                    {
+                        "cycle_id": "cyc-1",
+                        "title": "Maize simulation",
+                        "state": "learn",
+                        "parked": False,
+                        "stages": {"learn": "changes_requested"},
+                    }
+                ]
+
+            async def recover_stage_revision_handoff(self, **kwargs):
+                assert kwargs == {
+                    "project_id": "proj-1",
+                    "cycle_id": "cyc-1",
+                    "stage": "learn",
+                }
+                return {
+                    "cycle_id": "cyc-1",
+                    "cycle_revision": 43,
+                    "approved_stage": "learn",
+                    "next_stage": "learn",
+                    "surface_id": "learn-surface-1",
+                    "repeat_stage": True,
+                }
+
+            async def execute(self, **kwargs):
+                worker_calls.append(kwargs)
+
+        graph = build_supervisor_graph(
+            lead_agent=fake_lead_agent(lead_calls),
+            context=SupervisorContext(
+                project_id="proj-1",
+                project_name="G2F",
+                selected_cycle_id=None,
+            ),
+            stage_adapter=Adapter(),
+            state_schema=SCHEMA,
+        ).compile(checkpointer=InMemorySaver())
+
+        final = await graph.ainvoke(
+            {
+                **FULL_STATE,
+                "messages": [
+                    HumanMessage(
+                        content="Fix the governed Learn stage and publish its declared synthesis output.",
+                        id="revise-learn",
+                    )
+                ],
+            },
+            config={
+                "configurable": {"thread_id": "revise-learn-control"},
+                "context": {"run_id": "run-revise-learn"},
+            },
+        )
+
+        assert lead_calls == []
+        assert worker_calls == []
+        card = final["messages"][-1]
+        assert isinstance(card, ToolMessage)
+        request = card.artifact["human_input"]
+        assert request["clarification_type"] == "dbtl_stage_handoff"
+        assert request["title"] == "Repeat Learn"
+        assert request["cycle_revision"] == 43
+        assert request["design_feedback_surface_id"] == "learn-surface-1"
+        assert [item["id"] for item in request["options"]] == [
+            "start_next_stage",
+            "hold_here",
+        ]
+
     @pytest.mark.parametrize(
         "text",
         [

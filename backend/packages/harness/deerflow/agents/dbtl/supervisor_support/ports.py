@@ -36,6 +36,8 @@ class StageExecutionPort(Protocol):
 
     async def recover_paused_build_control(self, **kwargs: Any) -> Mapping[str, Any] | None: ...
 
+    async def recover_stage_revision_handoff(self, **kwargs: Any) -> Mapping[str, Any] | None: ...
+
     async def preview_council(
         self,
         *,

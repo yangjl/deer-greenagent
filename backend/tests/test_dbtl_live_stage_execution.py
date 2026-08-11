@@ -88,6 +88,42 @@ def test_executable_stage_does_not_reopen_a_terminal_cycle_from_a_stale_row() ->
     assert _executable_stage(cycle) is None
 
 
+@pytest.mark.asyncio
+async def test_learn_changes_request_recovers_the_bound_revision_control() -> None:
+    cycle = _cycle(state="learn", status="changes_requested", revision=43)
+
+    class Repo:
+        async def get_cycle(self, cycle_id: str, *, project_id: str):
+            assert (cycle_id, project_id) == ("cycle-1", "project-1")
+            return cycle
+
+        async def latest_stage_feedback_surface(self, **kwargs):
+            assert kwargs == {
+                "project_id": "project-1",
+                "cycle_id": "cycle-1",
+                "stage": "learn",
+                "stage_attempt_id": "attempt-learn",
+                "mode": "stage_review",
+            }
+            return {"surface_id": "learn-surface-1"}
+
+    marker = await LiveStageAdapter(repo=Repo(), app_config=None).recover_stage_revision_handoff(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        stage="learn",
+    )
+
+    assert marker == {
+        "version": 1,
+        "cycle_id": "cycle-1",
+        "cycle_revision": 43,
+        "approved_stage": "learn",
+        "next_stage": "learn",
+        "surface_id": "learn-surface-1",
+        "repeat_stage": True,
+    }
+
+
 class FakeRepo:
     def __init__(self, cycle: dict | None) -> None:
         self.cycle = cycle
@@ -487,6 +523,65 @@ def _runtime_config(project_root: Path) -> dict:
         "configurable": {"thread_id": "thread-1"},
         "metadata": {"model_name": "test-model"},
     }
+
+
+class _RecordingStageCoordinator:
+    def __init__(self, stage: str) -> None:
+        self.stage = stage
+        self.calls: list[dict] = []
+
+    async def execute(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            stage=self.stage,
+            cycle_id=kwargs["cycle_id"],
+            note=f"delegated to {self.stage}",
+            worker_count=0,
+            produced_usable_evidence=False,
+            artifact_uri=None,
+            clarification_question=None,
+            deck_uri=None,
+            feedback_surface_id=None,
+            test_assessment=None,
+            review_meeting_requirement=None,
+            control_request=None,
+            research_question="",
+            chair_summary="",
+            chair_consensus=None,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("state", "stage"), (("ready_for_build", "build"), ("test", "test")))
+async def test_build_and_test_delegate_to_their_stage_coordinators(
+    tmp_path: Path,
+    state: str,
+    stage: str,
+) -> None:
+    build = _RecordingStageCoordinator("build")
+    test = _RecordingStageCoordinator("test")
+    adapter = LiveStageAdapter(
+        repo=FakeRepo(_cycle(state=state)),
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (),
+        dispatcher=FakeDispatcher(text=_structured_result()),
+        build_coordinator=build,
+        test_coordinator=test,
+    )
+
+    result = await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text=f"Run {stage}.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    selected, skipped = (build, test) if stage == "build" else (test, build)
+    assert result.note == f"delegated to {stage}"
+    assert len(selected.calls) == 1
+    assert selected.calls[0]["cycle"]["id"] == "cycle-1"
+    assert skipped.calls == []
 
 
 def test_stage_workers_do_not_implicitly_load_every_enabled_skill() -> None:

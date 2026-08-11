@@ -29,6 +29,7 @@ import pytest
 import pytest_asyncio
 
 from deerflow.agents.dbtl.live_stage import adapter as adapter_module
+from deerflow.agents.dbtl.live_stage import build_stage as build_stage_module
 from deerflow.agents.dbtl.live_stage import token_usage as token_usage_module
 from deerflow.agents.dbtl.live_stage import workspace as workspace_module
 from deerflow.agents.dbtl.live_stage.adapter import LiveStageAdapter
@@ -542,7 +543,7 @@ class TestAPresentationalFailureKeepsTheScience:
         repo, root = project
         await _ready_for_build(repo)
         stage_attempt_id = await _build_stage_attempt_id(repo)
-        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        monkeypatch.setattr(build_stage_module, "write_build_deck", lambda **_kwargs: None)
 
         result, _dispatcher = await _run_build(repo, root)
         assert result.produced_usable_evidence
@@ -1092,7 +1093,7 @@ class TestACommittedStepIsReplayedRatherThanReRun:
         repo, root = project
         await _ready_for_build(repo)
         stage_attempt_id = await _build_stage_attempt_id(repo)
-        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        monkeypatch.setattr(build_stage_module, "write_build_deck", lambda **_kwargs: None)
 
         await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
         _result, second = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-2")
@@ -1138,7 +1139,7 @@ class TestACommittedStepIsReplayedRatherThanReRun:
     async def test_the_replayed_evidence_is_the_evidence_the_first_run_published(self, project, monkeypatch) -> None:
         repo, root = project
         await _ready_for_build(repo)
-        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        monkeypatch.setattr(build_stage_module, "write_build_deck", lambda **_kwargs: None)
 
         first, _ = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
         monkeypatch.undo()
@@ -1152,7 +1153,7 @@ class TestACommittedStepIsReplayedRatherThanReRun:
     async def test_a_changed_phase_input_reopens_the_phase_instead_of_relabelling_old_work(self, project, monkeypatch) -> None:
         repo, root = project
         await _ready_for_build(repo)
-        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        monkeypatch.setattr(build_stage_module, "write_build_deck", lambda **_kwargs: None)
 
         await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
         (root / "yield.csv").write_text("id,yield\n1,9.9\n", encoding="utf-8")
@@ -1165,7 +1166,7 @@ class TestACommittedStepIsReplayedRatherThanReRun:
         """Fail-soft in the only safe direction."""
         repo, root = project
         await _ready_for_build(repo)
-        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        monkeypatch.setattr(build_stage_module, "write_build_deck", lambda **_kwargs: None)
         await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
 
         for kept in (root / "outputs" / ".dbtl-stage-work" / "steps").rglob("*.json"):
@@ -1269,7 +1270,7 @@ class TestWorkflowPersistenceIsAuthoritative:
 
         repo, root = project
         await _ready_for_build(repo)
-        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        monkeypatch.setattr(build_stage_module, "write_build_deck", lambda **_kwargs: None)
         result, _dispatcher = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN))
         assert result.artifact_uri is not None, "the test needs a package whose deck step alone failed"
         monkeypatch.setattr(
@@ -1992,9 +1993,9 @@ class TestAPartialPhaseCannotAdvanceThePlan:
         monkeypatch.setattr(adapter, "_production_dispatcher", lambda **_kwargs: dispatcher)
         monkeypatch.setattr(adapter_module, "_emit_build_verification_failure", record_corrected_terminal)
         monkeypatch.setattr(
-            adapter_module,
+            build_stage_module,
             "execute_and_verify_phase",
-            lambda *_args, **_kwargs: adapter_module.BuildPhaseVerification(
+            lambda *_args, **_kwargs: build_stage_module.BuildPhaseVerification(
                 True,
                 "The server executed the corrected entry point successfully.",
                 "python run.py",
@@ -2202,7 +2203,7 @@ class TestADeckRetryDoesNotReRunTheSummarizer:
     async def test_the_summarizer_is_not_dispatched_a_second_time(self, project, monkeypatch) -> None:
         repo, root = project
         await _ready_for_build(repo)
-        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        monkeypatch.setattr(build_stage_module, "write_build_deck", lambda **_kwargs: None)
         await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
         monkeypatch.undo()
 
@@ -2214,7 +2215,7 @@ class TestADeckRetryDoesNotReRunTheSummarizer:
         repo, root = project
         await _ready_for_build(repo)
         stage_attempt_id = await _build_stage_attempt_id(repo)
-        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        monkeypatch.setattr(build_stage_module, "write_build_deck", lambda **_kwargs: None)
         first, _ = await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
         monkeypatch.undo()
 
@@ -2235,7 +2236,7 @@ class TestADeckRetryDoesNotReRunTheSummarizer:
         repo, root = project
         await _ready_for_build(repo)
         stage_attempt_id = await _build_stage_attempt_id(repo)
-        monkeypatch.setattr(adapter_module, "write_build_deck", lambda **_kwargs: None)
+        monkeypatch.setattr(build_stage_module, "write_build_deck", lambda **_kwargs: None)
         await _run_build(repo, root, dispatcher=_WritingDispatcher(plan=TWO_PHASE_PLAN), run_id="run-1")
         monkeypatch.undo()
         for kept in (root / "outputs" / ".dbtl-stage-work" / "steps").rglob("summarize_results-*.json"):
@@ -2404,9 +2405,9 @@ async def _run_build_on_the_server_path(
     monkeypatch.setattr(adapter, "_build_execution_preflight_error", lambda **_kwargs: "")
     monkeypatch.setattr(adapter, "_production_dispatcher", lambda **_kwargs: dispatcher)
     monkeypatch.setattr(
-        adapter_module,
+        build_stage_module,
         "execute_and_verify_phase",
-        lambda *_args, **_kwargs: adapter_module.BuildPhaseVerification(
+        lambda *_args, **_kwargs: build_stage_module.BuildPhaseVerification(
             entry_point_verifies,
             "The server executed the entry point successfully." if entry_point_verifies else "The entry point exited 1.",
             "python run.py",

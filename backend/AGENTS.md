@@ -2420,6 +2420,9 @@ That retry allowlist includes Test's `choose_route` action as well as direct
 approval/advance actions; the selected route and comment still come from the
 original payload hash, so recovery can redeliver **Start Learn / Hold** without
 recomputing the Test outcome or permitting a different route.
+When a Learn review requests changes, a later explicit Learn repair request
+similarly reopens a server-authored Start/Hold card bound to the current review
+surface and cycle revision; the free-text request never dispatches the worker.
 No DBTL-specific card is mounted by proposal evaluation,
 and continuation is not a proposable route because that request already
 executes the selected stage. Emitting a card without handling its answer is the failure
@@ -2544,6 +2547,17 @@ result rather than dropped. `StageExecutionOutcome.satisfies_gate` is the Phase
 `agents/dbtl/live_stage/adapter.py` contains the concrete bridge. Replay and
 typed Test review/write authority are separate services in
 `agents/dbtl/live_stage/replay.py` and `agents/dbtl/live_stage/test_review.py`.
+Build and Test now have stage coordinators behind that facade.
+`build_stage.py` owns Build controls, planning, phased execution, publication,
+summary, lineage, replay checks, and review-deck orchestration;
+`test_stage.py` owns the independent rerun, typed audit/outcome, evidence
+exceptions/reuse, auto-submission, and Test review surface. The adapter owns
+project/cycle validation, stage/spec pinning, shared dispatch ports, and
+Design/Reconciliation/Learn compatibility before making one coordinator call.
+`feedback_surfaces.py` still owns deck binding shape and newest-exact-evidence
+selection, `workspace.py` owns file integrity, and `token_usage.py` owns DBTL
+worker metering. Keep new Build/Test behavior in its stage coordinator rather
+than rebuilding the old cross-stage branch braid in the facade.
 The adapter derives the active stage from durable cycle state, refuses
 locked/awaiting-review stages, and builds candidates from currently available
 subagents. Custom specialists opt in
@@ -2775,7 +2789,10 @@ as gates. The pack keeps `HeadlineMetric` separate from
 `ValidityCheck` and computes `supported`, `not_supported`, `inconclusive`, or
 `invalidated` fail-closed; high performance cannot override a failed validity
 check or an explicit plausible ceiling. Only supported and valid-negative
-results may recommend `advance_to_learn`.
+results may recommend `advance_to_learn`. A missed numeric headline threshold
+belongs in `HeadlineMetric` and yields `not_supported`; it is not itself a
+failed `direction` check. `direction` fails only when evidence contradicts a
+separately declared expected sign or qualitative direction.
 
 `persistence/dbtl/build_test_ops.py` is mixed into `DbtlCycleRepository` because
 Build lineage and Test decisions share the cycle revision and activity ledger.
@@ -2806,9 +2823,10 @@ route legal for that outcome. Internal principals cannot call this human review
 endpoint, and reviewer identity/role are taken from authenticated project
 membership rather than request data.
 
-`LiveStageAdapter` maps `ready_for_build` to Build, runs Build/Test through the
-same bounded fan-out, and creates Build lineage after the content-addressed
-Build package is committed. Build uses the single current
+`LiveStageAdapter` maps `ready_for_build` to Build and delegates the validated
+request to `BuildStageCoordinator` or `TestStageCoordinator`. The Build owner
+creates lineage only after the content-addressed package is committed; the Test
+owner independently stages and reruns that accepted contract. Build uses the single current
 `generic:build:v12` contract: the approved Design and server-bound workspace
 inputs are its inputs, each worker has an enforced 120K-token, 450-superstep,
 15-minute ceiling, and one failed implementation check may receive one fresh
@@ -4443,16 +4461,16 @@ and retains Design-named wrappers; `deerflow.dbtl.stage_feedback` is the
 server-side intent matrix. `/stage-feedback/` is canonical and
 `/design-feedback/` remains an alias.
 
-**A feedback surface belongs to a stage, not to Design.** `_FeedbackSurfacePlan`
-carries `stage` and `round_number`, `_plan_feedback_surface(stage=...)` binds
-that stage's own `dbtl_stage_runs` attempt, `_register_feedback_surface` records
-it, and `_write_council_deck(stage=...)` writes under that stage's output
-directory with its own deck title. The stage is deliberately **absent from the
-surface-id digest**: Design ids were derived before stages were a parameter, and
-adding one would move every already-registered Design surface off the row a
-retried turn must land back on — one execution never spans two stages, so the
-attempt id inside `execution_key` already separates them. Design output stays
-byte-identical, pinned by `test_dbtl_deck_fixture_drift.py`. Tests:
+**A feedback surface belongs to a stage, not to Design.**
+`live_stage.feedback_surfaces.FeedbackSurfacePlan` carries `stage` and
+`round_number`; its pure `plan_surface` and `registration_kwargs` functions own
+the binding rules and row shape, while the adapter wrappers retain the cycle
+read and durable registration write. `_write_council_deck(stage=...)` writes
+under that stage's output directory with its own deck title. Surface identities
+preserve the legacy Design digest, add the Build renderer's surface version for
+Build, and add the interactive version for Test/Learn, so replacement live
+decks cannot collide with older inert rows. Design output stays byte-identical,
+pinned by `test_dbtl_deck_fixture_drift.py`. Tests:
 `tests/test_dbtl_stage_meeting_surface.py`.
 
 The Phase 3 policy boundary is `deerflow.dbtl.stage_meetings`: `routine` skips

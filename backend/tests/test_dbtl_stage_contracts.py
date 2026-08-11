@@ -1212,6 +1212,21 @@ class TestBuildContract:
         assert "provenance.deliverable_audit" in test
         assert "Independently inspect every expected path" in test
 
+    def test_test_keeps_a_headline_threshold_miss_out_of_the_direction_gate(self) -> None:
+        from deerflow.dbtl.agent_selector import Assignment
+        from deerflow.dbtl.stage_runner import build_prompt
+
+        assignment = Assignment(
+            capability=Capability.VALIDITY_ASSESSMENT,
+            agent_name="general-purpose",
+            via_generalist=True,
+        )
+
+        prompt = build_prompt(resolve_stage_spec("test"), assignment, context="ctx")
+
+        assert "Missing a numeric headline threshold is not a direction failure" in prompt
+        assert "separately declared expected sign or qualitative direction" in prompt
+
 
 class TestTheCapSalvageCheckIsNonGating:
     """The salvage check is a flag on an admitted phase, not a second verdict.

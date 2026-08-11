@@ -2527,6 +2527,26 @@ def build_supervisor_graph(
                             )
                         )
                     }
+        if unscoped_stage_intent is not None and unscoped_stage_intent[1] == "learn":
+            recover_revision = getattr(stage_adapter, "recover_stage_revision_handoff", None)
+            if callable(recover_revision) and decision.cycle_id:
+                marker = recover_revision(
+                    project_id=context.project_id,
+                    cycle_id=decision.cycle_id,
+                    stage="learn",
+                )
+                if isawaitable(marker):
+                    marker = await marker
+                if isinstance(marker, Mapping):
+                    return {
+                        "messages": list(
+                            _stage_handoff_message(
+                                decision,
+                                dict(marker),
+                                request_nonce=request_nonce,
+                            )
+                        )
+                    }
         if unscoped_stage_intent is not None:
             if not active_cycles:
                 active_cycles = [item for item in await _active_cycles(stage_adapter, project_id=context.project_id) if not item.get("parked")]

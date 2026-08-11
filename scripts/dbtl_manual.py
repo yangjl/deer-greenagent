@@ -735,6 +735,27 @@ def _backfill_checkpoint_history(database: Path) -> int:
     return inserted
 
 
+def _rebind_project_roots(database: Path, projects_root: Path) -> int:
+    """Point restored projects at this manual profile's copied project tree."""
+    rebound = 0
+    try:
+        with sqlite3.connect(database) as conn:
+            if not _table_exists(conn, "projects"):
+                return 0
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(projects)")}
+            if "root_path" not in columns:
+                return 0
+            for project_id, name, root_path in conn.execute("SELECT id, name, root_path FROM projects"):
+                folder = Path(str(root_path)).name if root_path else str(name)
+                target = (projects_root / (folder or str(name))).resolve()
+                conn.execute("UPDATE projects SET root_path = ? WHERE id = ?", (str(target), project_id))
+                rebound += 1
+            conn.commit()
+    except sqlite3.Error as exc:
+        raise ManualPipelineError(f"Could not rebind restored project folders in {database}: {exc}") from exc
+    return rebound
+
+
 def _swap_live_state(*, root: Path, scenario_root: Path, scenario: str) -> None:
     """Atomically replace the isolated live pair with the scenario's copy."""
     live = _live_root(root)
@@ -744,6 +765,7 @@ def _swap_live_state(*, root: Path, scenario_root: Path, scenario: str) -> None:
         (staging / "db").mkdir(parents=True)
         shutil.copy2(scenario_root / DATABASE_FILENAME, staging / "db" / DATABASE_FILENAME)
         _copy_projects(scenario_root / "projects", staging / "projects")
+        _rebind_project_roots(staging / "db" / DATABASE_FILENAME, _projects_path(root))
         _backfill_checkpoint_history(staging / "db" / DATABASE_FILENAME)
 
         if live.exists():

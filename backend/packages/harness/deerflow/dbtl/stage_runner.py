@@ -368,6 +368,8 @@ def build_prompt(spec: StageSpec, assignment: Assignment, *, context: str) -> st
                 "- checks contains exactly the names in test_validity_contract.required_checks from Project context.",
                 "- Each check is {check, status, detail, evidence_refs}; a passed check needs at least one evidence reference.",
                 "- status is passed, failed, missing, or not_applicable. Use real JSON numbers and null, never numeric strings.",
+                "- Missing a numeric headline threshold is not a direction failure; encode that miss only in metrics so the server can compute not_supported.",
+                "- Fail direction only when evidence contradicts a separately declared expected sign or qualitative direction, independent of the headline threshold.",
                 "- rationale explains the assessment; limitations lists non-gating caveats.",
                 "- Do not put a route or overall outcome in this object. The server computes both from the pinned validity pack.",
                 "",
