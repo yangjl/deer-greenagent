@@ -967,7 +967,11 @@ class BuildStageCoordinator:
         await self._repo.reconciliation_view(cycle_id, project_id=project_id)
         build_test = await self._repo.build_test_view(cycle_id, project_id=project_id)
         activity: list[dict[str, Any]] = []
-        change_request = _change_request(activity)
+        try:
+            activity = await self._repo.list_activity(cycle_id, project_id=project_id)
+        except Exception:
+            logger.warning("Could not read cycle activity for the Build change-request context.", exc_info=True)
+        change_request = _change_request(activity, stage=stage)
         design_round = _design_round(activity)
         attempt_id = f"dbtl-{_safe_token(execution_key)}"
         stage_workspace = None
@@ -978,7 +982,7 @@ class BuildStageCoordinator:
         build_recorder = DISABLED_RECORDER
         build_inputs: BuildInputBundle | None = None
         control_gate = DISABLED_GATE
-        plan_adjustment = ""
+        plan_adjustment = change_request or ""
         worker_answer = ""
         worker_answer_step = ""
         if build_workflow_enabled:
@@ -1043,7 +1047,7 @@ class BuildStageCoordinator:
                             change_plan_request(previous=_control_context(build_control, workflow_spec_key=resolve_build_workflow().spec_key), remaining_only=settled.kind is BuildControlKind.PHASE_PAUSE)
                         ),
                     )
-                if settled.action is BuildControlAction.REPLAN_BUILD:
+                if settled.action is BuildControlAction.REPLAN_BUILD and settled.comment:
                     plan_adjustment = settled.comment
                 if settled.action is BuildControlAction.ANSWER_DIRECTLY:
                     asked = str((answered_control or {}).get("question") or "")

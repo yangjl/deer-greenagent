@@ -158,11 +158,25 @@ def summarizer_unit(
     Its whole context is the verified bundle plus the cycle's own question, so
     it cannot reach for anything the server has not already checked.
     """
+    presentation_feedback: list[dict[str, Any]] = []
+    for item in reviewer_feedback[:MAX_RECENT_REVIEWER_FEEDBACK]:
+        slide_comments = item.get("slide_comments") if isinstance(item, Mapping) else None
+        if not isinstance(slide_comments, Sequence) or isinstance(slide_comments, (str, bytes)):
+            continue
+        comments = [dict(comment) for comment in slide_comments if isinstance(comment, Mapping)]
+        if comments:
+            presentation_feedback.append(
+                {
+                    "cycle_id": item.get("cycle_id"),
+                    "stage": item.get("stage"),
+                    "slide_comments": comments,
+                }
+            )
     context = {
         "cycle": {key: cycle.get(key) for key in ("id", "title", "research_question", "objective", "success_criteria")},
         "approved_design": ({"uri": inputs.design.reference, "content_hash": inputs.design.content_hash} if inputs is not None else None),
         "execution_bundle": bundle.as_dict(),
-        "recent_project_reviewer_feedback": list(reviewer_feedback)[:MAX_RECENT_REVIEWER_FEEDBACK],
+        "recent_project_reviewer_feedback": presentation_feedback,
     }
     prompt = "\n\n".join(
         [

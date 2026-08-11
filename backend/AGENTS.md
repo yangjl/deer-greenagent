@@ -4389,7 +4389,14 @@ decision. A free-text answer to a plan card is recorded as a **replan** rather
 than a generic reply, because that is what the decision is — recording it
 otherwise would leave the epoch unmoved. Continuing past an answered boundary
 does not re-present it (that is what Continue meant), while a boundary not yet
-reached still stops.
+reached still stops. A completed Build whose review requested changes reloads
+the durable stage activity and seeds the next planner with that exact rationale;
+the recovery card itself carries only the governed Replan decision, so treating
+its empty comment as the adjustment would silently repeat the rejected plan.
+The summarizer receives only slide-specific comments from earlier feedback
+surfaces. Final-gate comments are evidence objections bound to the reviewed
+revision; replaying them as generic presentation guidance can make a corrected
+Build deck claim that the old defect still exists.
 
 Both workers that can pause a Build raise a bound control. The planner's
 `needs_input` used to render as a Design clarification card whose answer went

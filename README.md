@@ -70,7 +70,12 @@ Design–Build–Test–Learn (DBTL) governance.
   can continue without waiting for orphan cleanup. A rejected worker result
   leaves later steps visibly waiting and offers Retry/Replan/Restart/Hold; it
   does not fabricate a failed review deck for work that never produced a review
-  package. Build also tolerates descriptive implementation-file labels such as
+  package. When a human requests changes to a completed Build, Replan carries
+  the recorded reviewer rationale into the new planner instead of repeating the
+  rejected plan without its objection. That verdict comment stays bound to the
+  rejected revision; only slide-specific presentation comments may shape a
+  later Build summary. Build also tolerates descriptive
+  implementation-file labels such as
   `manifest`, `execution_log`, and `test_suite`: project-virtual paths carrying
   those labels are normalized to `workspace_file` before the usual containment,
   publication, and hashing checks. A Build worker may declare an output

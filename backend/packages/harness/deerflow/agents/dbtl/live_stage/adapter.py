@@ -1210,8 +1210,8 @@ MAX_DESIGN_ROUNDS = 5
 _CHANGE_REQUEST_CHARS = 2_000
 
 
-def _design_reviews(activity: Any) -> list[dict[str, Any]]:
-    """Design-stage review decisions, oldest first. Never raises."""
+def _stage_reviews(activity: Any, *, stage: str) -> list[dict[str, Any]]:
+    """One stage's review decisions, oldest first. Never raises."""
     if not isinstance(activity, Sequence) or isinstance(activity, str):
         return []
     reviews: list[dict[str, Any]] = []
@@ -1219,21 +1219,26 @@ def _design_reviews(activity: Any) -> list[dict[str, Any]]:
         if not isinstance(item, dict) or item.get("event_type") != "stage.reviewed":
             continue
         payload = item.get("payload")
-        if not isinstance(payload, dict) or payload.get("stage") != "design":
+        if not isinstance(payload, dict) or payload.get("stage") != stage:
             continue
         reviews.append(payload)
     return reviews
 
 
-def _change_request(activity: Any) -> str | None:
-    """The objection the council should be answering, if there is one.
+def _design_reviews(activity: Any) -> list[dict[str, Any]]:
+    """Design-stage review decisions, oldest first. Never raises."""
+    return _stage_reviews(activity, stage="design")
 
-    Only the *latest* Design review counts, and only when it asked for changes.
+
+def _change_request(activity: Any, *, stage: str = "design") -> str | None:
+    """The latest objection a stage revision should answer, if there is one.
+
+    Only the *latest* stage review counts, and only when it asked for changes.
     An approval clears a previous objection — otherwise a cycle re-opened for an
     unrelated reason would keep arguing about something already settled — and a
     rejection is not "try again addressing this", it ends the attempt.
     """
-    reviews = _design_reviews(activity)
+    reviews = _stage_reviews(activity, stage=stage)
     if not reviews:
         return None
     latest = reviews[-1]

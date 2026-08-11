@@ -27,6 +27,7 @@ from test_dbtl_build_workflow_execution import (  # noqa: F401 - fixtures are us
     _build_stage_attempt_id,
     _close_test_engine,
     _ready_for_build,
+    _revision,
     _runtime,
     _step,
     _WritingDispatcher,
@@ -238,6 +239,64 @@ class TestThePlanIsConfirmedBeforeAnythingRuns:
 
         assert result.control_request is None
         assert result.produced_usable_evidence, result.note
+
+
+class TestRequestedChangesReachTheReplan:
+    async def test_the_recorded_review_comment_is_in_the_replan_prompt(self, project) -> None:
+        """Dropping durable activity makes a replan repeat the rejected plan."""
+        repo, root = project
+        await _ready_for_build(repo)
+        first_dispatcher = _WritingDispatcher()
+        planned = await _run(repo, root, dispatcher=first_dispatcher, confirmation=True)
+        built = await _run(
+            repo,
+            root,
+            dispatcher=first_dispatcher,
+            confirmation=True,
+            run_id="run-2",
+            build_control=_answer(planned.control_request, "start"),
+        )
+        assert built.produced_usable_evidence, built.note
+        await repo.submit_stage_for_review(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            stage="build",
+            expected_db_revision=await _revision(repo),
+            actor_user_id="user-1",
+            idempotency_key="submit-build",
+        )
+        await repo.review_stage(
+            cycle_id="cycle-1",
+            project_id="project-1",
+            stage="build",
+            decision="request_changes",
+            rationale="Keep the leakage probe, but make replay metadata environment-invariant.",
+            expected_db_revision=await _revision(repo),
+            reviewer_user_id="reviewer-1",
+            reviewer_project_role="owner",
+            idempotency_key="review-build",
+        )
+
+        replan_dispatcher = _WritingDispatcher()
+        adapter = _adapter(repo, dispatcher=replan_dispatcher, confirmation=True)
+        recovery = await adapter.recover_paused_build_control(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            requested_action="replan",
+            config=_runtime(root, run_id="run-3"),
+        )
+        assert recovery is not None
+        await adapter.execute(
+            project_id="project-1",
+            cycle_id="cycle-1",
+            request_text="Replan Build.",
+            state={},
+            config=_runtime(root, run_id="run-4"),
+            build_control=_answer(recovery, "replan"),
+        )
+
+        assert len(replan_dispatcher.planner_units) == 1
+        assert "Keep the leakage probe, but make replay metadata environment-invariant." in replan_dispatcher.planner_units[0].prompt
 
 
 class TestChangingThePlanCarriesTheOwnersWords:

@@ -209,7 +209,7 @@ class TestDeclarationsAreVerifiedNotTrusted:
 
 
 class TestTheSummarizerCannotCiteWhatDoesNotExist:
-    def test_recent_reviewer_feedback_is_labelled_and_included_in_the_prompt(self) -> None:
+    def test_only_slide_feedback_reaches_the_next_summary_prompt(self) -> None:
         unit = summarizer_unit(
             attempt_id="attempt-1",
             agent_name="statistician",
@@ -220,7 +220,7 @@ class TestTheSummarizerCannotCiteWhatDoesNotExist:
                 {
                     "stage": "build",
                     "action_kind": "request_changes",
-                    "human_comment": "Keep the conclusion short.",
+                    "human_comment": "The prior revision still contains environment-dependent metadata.",
                     "slide_comments": [
                         {
                             "slide_id": "limitations",
@@ -236,6 +236,7 @@ class TestTheSummarizerCannotCiteWhatDoesNotExist:
         assert "reviewer-authored presentation guidance" in unit.prompt
         assert "Lead with the holdout caveat" in unit.prompt
         assert "Limitations" in unit.prompt
+        assert "prior revision still contains" not in unit.prompt
         assert unit.skills == ("dbtl-build-deck-style",)
 
     def test_a_cited_figure_must_be_one_the_server_verified(self) -> None:
