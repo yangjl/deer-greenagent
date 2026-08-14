@@ -58,10 +58,7 @@ export function DebatePanel({
     () => meetingsForRun(meetingsByRun(tasks), runId)[0] ?? null,
     [runId, tasks],
   );
-  const state = useMemo(
-    () => consensusState(meeting?.seats ?? []),
-    [meeting],
-  );
+  const state = useMemo(() => consensusState(meeting?.seats ?? []), [meeting]);
   const snapshot = useMemo(
     () => consensusSnapshot(meeting?.seats ?? []),
     [meeting],

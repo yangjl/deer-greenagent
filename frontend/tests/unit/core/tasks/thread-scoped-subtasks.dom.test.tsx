@@ -116,9 +116,7 @@ describe("ThreadScopedSubtasksProvider", () => {
     expect(screen.getByLabelText("worker status").textContent).toBe(
       "in_progress",
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Reconcile terminal" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Reconcile terminal" }));
     expect(screen.getByLabelText("worker status").textContent).toBe(
       "completed",
     );

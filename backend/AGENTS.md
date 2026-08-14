@@ -2423,6 +2423,21 @@ recomputing the Test outcome or permitting a different route.
 When a Learn review requests changes, a later explicit Learn repair request
 similarly reopens a server-authored Start/Hold card bound to the current review
 surface and cycle revision; the free-text request never dispatches the worker.
+The eventual revision dispatch reads the latest stage-specific review rationale
+from durable activity and binds a fresh writable unit workspace into the worker
+context. Prior stage-work paths remain read-only evidence: a worker that needs
+the old source must copy it into the new grant before execution, then write and
+verify every revised output there. It must not attempt an in-place write to the
+old workspace or create an ad hoc workspace elsewhere. Once verification is
+complete, the worker returns the shared typed result with its artifact refs and
+stops; the adapter owns package/deck publication, so a worker must not search
+for or invoke another platform revision mechanism. The executor exports the
+exact granted unit path as `DBTL_WORKSPACE` for every writable stage worker.
+Learn v2 expands the four-call legacy envelope enough for copy, execution,
+verification, and typed finalization; token use is metered rather than capped,
+while the existing turn and wall-clock guards still apply. Pinned Learn v1
+attempts receive the same operational envelope without changing their durable
+spec key.
 No DBTL-specific card is mounted by proposal evaluation,
 and continuation is not a proposable route because that request already
 executes the selected stage. Emitting a card without handling its answer is the failure

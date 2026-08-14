@@ -480,6 +480,36 @@ LEARN_SPEC_V1 = StageSpec(
     memory_write_policy=MemoryWritePolicy.CANDIDATE_ONLY,
 )
 
+
+LEARN_SPEC_V2 = StageSpec(
+    stage="learn",
+    domain_profile=GENERIC_PROFILE,
+    version=2,
+    title=LEARN_SPEC_V1.title,
+    purpose=LEARN_SPEC_V1.purpose,
+    cycle_classes=LEARN_SPEC_V1.cycle_classes,
+    cycle_weights=LEARN_SPEC_V1.cycle_weights,
+    required_inputs=LEARN_SPEC_V1.required_inputs,
+    required_artifact_types=LEARN_SPEC_V1.required_artifact_types,
+    output_schema=LEARN_SPEC_V1.output_schema,
+    required_capabilities=LEARN_SPEC_V1.required_capabilities,
+    optional_capabilities=LEARN_SPEC_V1.optional_capabilities,
+    validity_gates=LEARN_SPEC_V1.validity_gates,
+    memory_write_policy=LEARN_SPEC_V1.memory_write_policy,
+    # The default 40 graph steps permit only four model calls once executor
+    # overhead is accounted for. With three reserved for finalization, a Learn
+    # worker could inspect one file but not copy, execute, verify, and report
+    # its synthesis. Learn is metered rather than token-capped, while the turn
+    # and wall-clock guards still bound a stuck worker.
+    budget=WorkerBudget(
+        max_workers=3,
+        max_turns=143,
+        max_tokens=1_000_000,
+        timeout_seconds=900,
+        token_limit_enforced=False,
+    ),
+)
+
 TEST_REVIEW_SPEC_V1 = StageSpec(
     stage="test",
     variant="review",
@@ -546,6 +576,7 @@ _REGISTRY: dict[str, StageSpec] = {
         TEST_SPEC_V3,
         TEST_SPEC_V4,
         LEARN_SPEC_V1,
+        LEARN_SPEC_V2,
         TEST_REVIEW_SPEC_V1,
         BUILD_REVIEW_SPEC_V1,
         LEARN_REVIEW_SPEC_V1,
@@ -561,7 +592,7 @@ _CURRENT: MappingProxyType[tuple[str, str], int] = MappingProxyType(
         (GENERIC_PROFILE, "reconciliation"): RECONCILIATION_SPEC_V1.version,
         (GENERIC_PROFILE, "build"): BUILD_SPEC_V12.version,
         (GENERIC_PROFILE, "test"): TEST_SPEC_V4.version,
-        (GENERIC_PROFILE, "learn"): LEARN_SPEC_V1.version,
+        (GENERIC_PROFILE, "learn"): LEARN_SPEC_V2.version,
     }
 )
 

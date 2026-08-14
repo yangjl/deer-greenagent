@@ -33,6 +33,7 @@ from deerflow.dbtl.stage_spec import (
     DESIGN_SPEC_V2,
     EXECUTABLE_STAGES,
     LEARN_SPEC_V1,
+    LEARN_SPEC_V2,
     RECONCILIATION_SPEC_V1,
     TEST_SPEC_V1,
     TEST_SPEC_V2,
@@ -152,6 +153,9 @@ class TestStageSpecRegistry:
         assert LEARN_SPEC_V1.output_schema == "learn_summary.v1"
         assert LEARN_SPEC_V1.memory_write_policy is MemoryWritePolicy.CANDIDATE_ONLY
         assert Capability.KNOWLEDGE_SYNTHESIS in LEARN_SPEC_V1.required_capabilities
+        assert resolve_stage_spec("learn") is LEARN_SPEC_V2
+        assert LEARN_SPEC_V2.budget.max_turns >= 143
+        assert LEARN_SPEC_V2.budget.token_limit_enforced is False
 
     def test_test_uses_a_versioned_validity_pack(self) -> None:
         assert "generic-predictive:v1" in TEST_SPEC_V1.validity_gates

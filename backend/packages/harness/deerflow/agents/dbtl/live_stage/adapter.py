@@ -186,6 +186,7 @@ from deerflow.dbtl.stage_runner import (
     worker_rejection_failure,
 )
 from deerflow.dbtl.stage_spec import (
+    LEARN_SPEC_V2,
     StageSpec,
     StageSpecNotFound,
     WorkerBudget,
@@ -451,14 +452,16 @@ def _token_limit_for_worker(unit: WorkUnit, budget: WorkerBudget) -> int | None:
 
 
 def _effective_dispatch_budget(stage: str, budget: WorkerBudget) -> WorkerBudget:
-    """Apply the operational safety ceiling to legacy uncapped Build specs.
+    """Apply current operational envelopes to pinned legacy stage specs.
 
     Existing stage attempts stay pinned to the version they started under, so
-    publishing V7 alone would leave the exact V6 attempt that exposed this bug
-    able to spend another 300k tokens.  This is an executor safety boundary,
-    not a changed evidence contract: old attempts remain labelled V6 while no
-    single worker may exceed the current operational ceiling.
+    publishing a new spec alone cannot repair one already in progress. This is
+    an executor boundary, not an evidence-contract rewrite: the durable attempt
+    keeps its original spec key while each worker records the envelope it
+    actually ran under.
     """
+    if stage == "learn":
+        return LEARN_SPEC_V2.budget
     if stage != "build" or budget.token_limit_enforced:
         return budget
     return replace(
@@ -4092,7 +4095,7 @@ class LiveStageAdapter:
                         project_root=WORKSPACE_VIRTUAL_ROOT,
                         declared_inputs=tuple(unit.tool_contract.get("granted_inputs") or ()),
                     )
-                    if (unit_workspace and ((stage == "build" and unit.role == "phase") or (stage == "test" and unit.role == "rerun")))
+                    if unit_workspace and unit.role not in _READ_ONLY_ROLES
                     else None
                 ),
             )
@@ -5045,17 +5048,18 @@ class LiveStageAdapter:
         approved_council_proposal,
         clarification_answer,
     ) -> LiveStageResult:
+        spec = replace(spec, budget=_effective_dispatch_budget(stage, spec.budget))
         datasets = await self._repo.list_datasets(cycle_id, project_id=project_id)
         reconciliation = await self._repo.reconciliation_view(cycle_id, project_id=project_id)
         build_test = await self._repo.build_test_view(cycle_id, project_id=project_id) if stage in {"build", "test", "learn"} else None
         prior_design_runs = await self._repo.list_worker_runs(cycle_id, project_id=project_id, stage="design") if stage == "design" else []
         activity: list[dict[str, Any]] = []
-        if stage == "design":
+        if stage in {"design", "reconciliation", "learn"}:
             try:
                 activity = await self._repo.list_activity(cycle_id, project_id=project_id)
             except Exception:
-                logger.warning("Could not read cycle activity for the Design council's refinement context.", exc_info=True)
-        change_request = _change_request(activity)
+                logger.warning("Could not read cycle activity for the %s revision context.", stage.title(), exc_info=True)
+        change_request = _change_request(activity, stage=stage)
         design_round = _design_round(activity)
         pending_question = _pending_design_question(prior_design_runs) if stage == "design" else None
         resumed_answer = (clarification_answer or "").strip() if pending_question else ""
@@ -5116,6 +5120,19 @@ class LiveStageAdapter:
             "approved_design_brief": _approved_design_brief(cycle),
             "build_input_bundle": None,
             "human_change_request": change_request,
+            "revision_workspace_policy": {
+                "current_writable_path": STAGE_UNIT_WORKSPACE_PLACEHOLDER,
+                "prior_stage_workspaces": "read_only",
+                "instruction": (
+                    "Previous stage workspaces are read-only evidence. Copy any source you must retain into the current writable workspace before executing it. "
+                    "Write and verify every revised output there; do not try to modify an earlier stage workspace. Do not create an ad hoc workspace elsewhere."
+                    " After verification, return the shared StageWorkerResult immediately and include every verified revised output in artifact_refs. "
+                    "Do not search for or invoke a platform revision mechanism, write under outputs/dbtl, or regenerate review Markdown or decks. "
+                    "The stage adapter publishes the governed review package after your typed result passes its contract."
+                ),
+            }
+            if stage_workspace and str((attempt or {}).get("status") or "") == StageStatus.CHANGES_REQUESTED.value
+            else None,
             "chair_question_answered": pending_question if resumed_answer else None,
             "human_answer": resumed_answer or None,
             "design_round": design_round,

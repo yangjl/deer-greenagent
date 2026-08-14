@@ -50,7 +50,9 @@ async function openDeck(page: Page) {
     });
   }, deckHtml);
   // The deck announces itself on load; wait for that rather than a fixed delay.
-  await page.waitForFunction(() => (window as never as { __intents: unknown[] }).__intents.length > 0);
+  await page.waitForFunction(
+    () => (window as never as { __intents: unknown[] }).__intents.length > 0,
+  );
 }
 
 async function send(page: Page, body: Record<string, unknown>) {
@@ -77,19 +79,26 @@ function envelope(extra: Record<string, unknown>) {
 
 async function controlsEnabled(page: Page): Promise<boolean> {
   return page.evaluate(() => {
-    const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
-    const fieldset = doc.querySelector<HTMLFieldSetElement>("fieldset.decision");
+    const doc = (document.getElementById("frame") as HTMLIFrameElement)
+      .contentDocument!;
+    const fieldset =
+      doc.querySelector<HTMLFieldSetElement>("fieldset.decision");
     const submit = doc.querySelector<HTMLButtonElement>("[data-deck-submit]");
     return !!fieldset && !fieldset.disabled && !!submit && !submit.disabled;
   });
 }
 
 async function intents(page: Page) {
-  return page.evaluate(() => (window as never as { __intents: Record<string, unknown>[] }).__intents);
+  return page.evaluate(
+    () =>
+      (window as never as { __intents: Record<string, unknown>[] }).__intents,
+  );
 }
 
 test.describe("design deck bridge", () => {
-  test("announces itself once and stays inert until a parent activates it", async ({ page }) => {
+  test("announces itself once and stays inert until a parent activates it", async ({
+    page,
+  }) => {
     await openDeck(page);
 
     const received = await intents(page);
@@ -99,13 +108,29 @@ test.describe("design deck bridge", () => {
     expect(await controlsEnabled(page)).toBe(false);
   });
 
-  test("refuses activation from another surface or another protocol", async ({ page }) => {
+  test("refuses activation from another surface or another protocol", async ({
+    page,
+  }) => {
     await openDeck(page);
 
-    await send(page, envelope({ surfaceId: "dfs-someone-else", type: "initialize", allowedActions: ["chair_option"] }));
+    await send(
+      page,
+      envelope({
+        surfaceId: "dfs-someone-else",
+        type: "initialize",
+        allowedActions: ["chair_option"],
+      }),
+    );
     expect(await controlsEnabled(page)).toBe(false);
 
-    await send(page, envelope({ protocol: 99, type: "initialize", allowedActions: ["chair_option"] }));
+    await send(
+      page,
+      envelope({
+        protocol: 99,
+        type: "initialize",
+        allowedActions: ["chair_option"],
+      }),
+    );
     expect(await controlsEnabled(page)).toBe(false);
   });
 
@@ -120,23 +145,35 @@ test.describe("design deck bridge", () => {
   test("activates the choice, and preselects nothing", async ({ page }) => {
     await openDeck(page);
 
-    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"] }));
+    await send(
+      page,
+      envelope({ type: "initialize", allowedActions: ["chair_option"] }),
+    );
 
     expect(await controlsEnabled(page)).toBe(true);
     const preselected = await page.evaluate(() => {
-      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
+      const doc = (document.getElementById("frame") as HTMLIFrameElement)
+        .contentDocument!;
       return doc.querySelector("fieldset.decision input:checked") !== null;
     });
     expect(preselected).toBe(false);
   });
 
-  test("emits one submit intent carrying the choice, the channel, and no credential", async ({ page }) => {
+  test("emits one submit intent carrying the choice, the channel, and no credential", async ({
+    page,
+  }) => {
     await openDeck(page);
-    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"] }));
+    await send(
+      page,
+      envelope({ type: "initialize", allowedActions: ["chair_option"] }),
+    );
 
     await page.evaluate(() => {
-      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
-      const radios = doc.querySelectorAll<HTMLInputElement>('fieldset.decision input[type="radio"]');
+      const doc = (document.getElementById("frame") as HTMLIFrameElement)
+        .contentDocument!;
+      const radios = doc.querySelectorAll<HTMLInputElement>(
+        'fieldset.decision input[type="radio"]',
+      );
       radios[1]!.checked = true;
       doc.querySelector<HTMLButtonElement>("[data-deck-submit]")!.click();
     });
@@ -145,19 +182,29 @@ test.describe("design deck bridge", () => {
     const received = await intents(page);
     const submit = received.find((item) => item.type === "submit_intent");
     expect(submit).toBeTruthy();
-    expect((submit!.action as { optionIds: string[] }).optionIds).toEqual(["doubled_haploid"]);
+    expect((submit!.action as { optionIds: string[] }).optionIds).toEqual([
+      "doubled_haploid",
+    ]);
     expect(submit!.channel).toBe(CHANNEL);
     expect(JSON.stringify(submit)).not.toContain("token");
     // Frozen while in flight, so a second click cannot become a second answer.
     expect(await controlsEnabled(page)).toBe(false);
   });
 
-  test("a failure returns the draft rather than discarding it", async ({ page }) => {
+  test("a failure returns the draft rather than discarding it", async ({
+    page,
+  }) => {
     await openDeck(page);
-    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"] }));
+    await send(
+      page,
+      envelope({ type: "initialize", allowedActions: ["chair_option"] }),
+    );
     await page.evaluate(() => {
-      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
-      doc.querySelectorAll<HTMLInputElement>('fieldset.decision input[type="radio"]')[1]!.checked = true;
+      const doc = (document.getElementById("frame") as HTMLIFrameElement)
+        .contentDocument!;
+      doc.querySelectorAll<HTMLInputElement>(
+        'fieldset.decision input[type="radio"]',
+      )[1]!.checked = true;
       doc.querySelector<HTMLButtonElement>("[data-deck-submit]")!.click();
     });
 
@@ -165,31 +212,49 @@ test.describe("design deck bridge", () => {
 
     expect(await controlsEnabled(page)).toBe(true);
     const stillChosen = await page.evaluate(() => {
-      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
+      const doc = (document.getElementById("frame") as HTMLIFrameElement)
+        .contentDocument!;
       return doc.querySelector("fieldset.decision input:checked") !== null;
     });
     expect(stillChosen).toBe(true);
   });
 
-  test("a superseded deck goes read-only and cannot be re-armed", async ({ page }) => {
+  test("a superseded deck goes read-only and cannot be re-armed", async ({
+    page,
+  }) => {
     await openDeck(page);
-    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"] }));
+    await send(
+      page,
+      envelope({ type: "initialize", allowedActions: ["chair_option"] }),
+    );
 
-    await send(page, envelope({ type: "stale", note: "A newer round replaced this one." }));
+    await send(
+      page,
+      envelope({ type: "stale", note: "A newer round replaced this one." }),
+    );
     expect(await controlsEnabled(page)).toBe(false);
 
     // Defence in depth: the parent already refuses to re-initialize a settled
     // surface, and the file refuses to be re-armed even if one tried.
-    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"] }));
+    await send(
+      page,
+      envelope({ type: "initialize", allowedActions: ["chair_option"] }),
+    );
     expect(await controlsEnabled(page)).toBe(false);
   });
 
   test("an accepted deck cannot be re-armed either", async ({ page }) => {
     await openDeck(page);
-    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"] }));
+    await send(
+      page,
+      envelope({ type: "initialize", allowedActions: ["chair_option"] }),
+    );
 
     await send(page, envelope({ type: "accepted", note: "Recorded." }));
-    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"] }));
+    await send(
+      page,
+      envelope({ type: "initialize", allowedActions: ["chair_option"] }),
+    );
 
     expect(await controlsEnabled(page)).toBe(false);
   });
@@ -206,44 +271,70 @@ test.describe("design deck bridge", () => {
   // The per-slide note boxes are the redesign's only new path to a durable
   // record. A note that silently failed to travel would look identical to a
   // reviewer who simply wrote nothing, so these drive the real DOM.
-  test("note boxes stay inert until a parent activates them", async ({ page }) => {
+  test("note boxes stay inert until a parent activates them", async ({
+    page,
+  }) => {
     await openDeck(page);
 
     const disabledBefore = await page.evaluate(() => {
-      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
-      const notes = Array.from(doc.querySelectorAll<HTMLTextAreaElement>("[data-deck-note]"));
-      return { count: notes.length, allDisabled: notes.every((note) => note.disabled) };
+      const doc = (document.getElementById("frame") as HTMLIFrameElement)
+        .contentDocument!;
+      const notes = Array.from(
+        doc.querySelectorAll<HTMLTextAreaElement>("[data-deck-note]"),
+      );
+      return {
+        count: notes.length,
+        allDisabled: notes.every((note) => note.disabled),
+      };
     });
     expect(disabledBefore.count).toBeGreaterThan(0);
     expect(disabledBefore.allDisabled).toBe(true);
 
-    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"] }));
+    await send(
+      page,
+      envelope({ type: "initialize", allowedActions: ["chair_option"] }),
+    );
 
     // An enabled fieldset does not clear a control's own `disabled`, which is
     // exactly how the option radios were once left unusable while live.
     const enabledAfter = await page.evaluate(() => {
-      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
-      return Array.from(doc.querySelectorAll<HTMLTextAreaElement>("[data-deck-note]")).every((note) => !note.disabled);
+      const doc = (document.getElementById("frame") as HTMLIFrameElement)
+        .contentDocument!;
+      return Array.from(
+        doc.querySelectorAll<HTMLTextAreaElement>("[data-deck-note]"),
+      ).every((note) => !note.disabled);
     });
     expect(enabledAfter).toBe(true);
   });
 
-  test("a slide note is folded into the comment of the decision actually taken", async ({ page }) => {
+  test("a slide note is folded into the comment of the decision actually taken", async ({
+    page,
+  }) => {
     await openDeck(page);
-    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"] }));
+    await send(
+      page,
+      envelope({ type: "initialize", allowedActions: ["chair_option"] }),
+    );
 
     await page.evaluate(() => {
-      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
+      const doc = (document.getElementById("frame") as HTMLIFrameElement)
+        .contentDocument!;
       const note = doc.querySelector<HTMLTextAreaElement>("[data-deck-note]")!;
       note.value = "the held-out split has to be by genotype";
-      doc.querySelectorAll<HTMLInputElement>('fieldset.decision input[type="radio"]')[1]!.checked = true;
-      const comment = doc.querySelector<HTMLTextAreaElement>("[data-deck-comment]");
+      doc.querySelectorAll<HTMLInputElement>(
+        'fieldset.decision input[type="radio"]',
+      )[1]!.checked = true;
+      const comment = doc.querySelector<HTMLTextAreaElement>(
+        "[data-deck-comment]",
+      );
       if (comment) comment.value = "going with this";
       doc.querySelector<HTMLButtonElement>("[data-deck-submit]")!.click();
     });
     await page.waitForTimeout(50);
 
-    const submit = (await intents(page)).find((item) => item.type === "submit_intent");
+    const submit = (await intents(page)).find(
+      (item) => item.type === "submit_intent",
+    );
     expect(submit).toBeTruthy();
     const comment = commentOf(submit);
     expect(comment).toContain("the held-out split has to be by genotype");
@@ -253,37 +344,63 @@ test.describe("design deck bridge", () => {
     expect(comment).toContain("going with this");
   });
 
-  test("a restored comment clears the boxes so a retry cannot fold the note twice", async ({ page }) => {
+  test("a restored comment clears the boxes so a retry cannot fold the note twice", async ({
+    page,
+  }) => {
     await openDeck(page);
-    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"] }));
+    await send(
+      page,
+      envelope({ type: "initialize", allowedActions: ["chair_option"] }),
+    );
 
     await page.evaluate(() => {
-      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
-      doc.querySelector<HTMLTextAreaElement>("[data-deck-note]")!.value = "one note";
-      doc.querySelectorAll<HTMLInputElement>('fieldset.decision input[type="radio"]')[1]!.checked = true;
+      const doc = (document.getElementById("frame") as HTMLIFrameElement)
+        .contentDocument!;
+      doc.querySelector<HTMLTextAreaElement>("[data-deck-note]")!.value =
+        "one note";
+      doc.querySelectorAll<HTMLInputElement>(
+        'fieldset.decision input[type="radio"]',
+      )[1]!.checked = true;
       doc.querySelector<HTMLButtonElement>("[data-deck-submit]")!.click();
     });
     await page.waitForTimeout(50);
 
-    const firstComment = commentOf((await intents(page)).find((item) => item.type === "submit_intent"));
+    const firstComment = commentOf(
+      (await intents(page)).find((item) => item.type === "submit_intent"),
+    );
     await send(page, envelope({ type: "failed", note: "Network error." }));
     // The parent replays the comment it captured, which already contains the note.
-    await send(page, envelope({ type: "initialize", allowedActions: ["chair_option"], comment: firstComment }));
+    await send(
+      page,
+      envelope({
+        type: "initialize",
+        allowedActions: ["chair_option"],
+        comment: firstComment,
+      }),
+    );
 
     const boxesCleared = await page.evaluate(() => {
-      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
-      return Array.from(doc.querySelectorAll<HTMLTextAreaElement>("[data-deck-note]")).every((note) => note.value === "");
+      const doc = (document.getElementById("frame") as HTMLIFrameElement)
+        .contentDocument!;
+      return Array.from(
+        doc.querySelectorAll<HTMLTextAreaElement>("[data-deck-note]"),
+      ).every((note) => note.value === "");
     });
     expect(boxesCleared).toBe(true);
 
     await page.evaluate(() => {
-      const doc = (document.getElementById("frame") as HTMLIFrameElement).contentDocument!;
-      doc.querySelectorAll<HTMLInputElement>('fieldset.decision input[type="radio"]')[1]!.checked = true;
+      const doc = (document.getElementById("frame") as HTMLIFrameElement)
+        .contentDocument!;
+      doc.querySelectorAll<HTMLInputElement>(
+        'fieldset.decision input[type="radio"]',
+      )[1]!.checked = true;
       doc.querySelector<HTMLButtonElement>("[data-deck-submit]")!.click();
     });
     await page.waitForTimeout(50);
 
-    const retried = (await intents(page)).filter((item) => item.type === "submit_intent");
+    const retried = (await intents(page)).filter(
+      (item) => item.type === "submit_intent",
+    );
     const retryComment = commentOf(retried[retried.length - 1]);
     expect(retryComment.match(/one note/g)).toHaveLength(1);
   });

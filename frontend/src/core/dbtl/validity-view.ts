@@ -240,11 +240,6 @@ export function recommendationOptions(
             "return_to_design",
             "close_cycle",
           ]
-      : [
-          "repeat_test",
-          "return_to_build",
-          "return_to_design",
-          "close_cycle",
-        ];
+        : ["repeat_test", "return_to_build", "return_to_design", "close_cycle"];
   return ids.map((id) => ({ id, label: RECOMMENDATION_LABELS[id] }));
 }

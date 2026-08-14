@@ -59,7 +59,8 @@ export function useDbtlUpgradeProposal(projectId: string | null | undefined) {
         });
         if (sequence === evaluationSequence.current) {
           setEvaluation(
-            result.route_kind === "proposal" || result.route_kind === "cycle_setup"
+            result.route_kind === "proposal" ||
+              result.route_kind === "cycle_setup"
               ? result
               : null,
           );

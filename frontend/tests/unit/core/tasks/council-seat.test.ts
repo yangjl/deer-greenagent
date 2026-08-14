@@ -50,9 +50,7 @@ describe("readCouncilSeat", () => {
   });
 
   it("carries the stage for a non-Design review meeting", () => {
-    expect(readCouncilSeat(seatEvent({ stage: "build" }))?.stage).toBe(
-      "build",
-    );
+    expect(readCouncilSeat(seatEvent({ stage: "build" }))?.stage).toBe("build");
   });
 
   it("keeps a stand-in generalist visible", () => {

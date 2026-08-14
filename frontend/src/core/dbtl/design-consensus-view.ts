@@ -18,8 +18,9 @@ export function structuredPackagePath(
   reviewPath: string,
   reviewMarkdown: string,
 ): string | null {
-  const match =
-    /^- Structured package:\s*`([^`\r\n]+)`\s*$/m.exec(reviewMarkdown);
+  const match = /^- Structured package:\s*`([^`\r\n]+)`\s*$/m.exec(
+    reviewMarkdown,
+  );
   const filename = match?.[1]?.trim();
   if (!filename || filename.includes("/") || filename.includes("\\")) {
     return null;

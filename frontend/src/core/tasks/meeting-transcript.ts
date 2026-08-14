@@ -44,7 +44,9 @@ export function meetingTranscript(
  * subagent's last assistant turn is dropped from the step timeline (it is the
  * result), so a transcript built from steps alone ends mid-investigation.
  */
-export function meetingTranscriptWithResult(task: Subtask): MeetingTranscriptEntry[] {
+export function meetingTranscriptWithResult(
+  task: Subtask,
+): MeetingTranscriptEntry[] {
   const entries = meetingTranscript(task.steps);
   const closing = (task.result ?? task.error ?? "").trim();
   if (!closing) {
@@ -190,7 +192,10 @@ export function parseMeetingResult(text: string): MeetingResultView | null {
     summary: payload.summary.trim(),
     claims: stringList(payload.claims),
     limitations: stringList(payload.limitations),
-    evidence: (Array.isArray(payload.evidence_refs) ? payload.evidence_refs : [])
+    evidence: (Array.isArray(payload.evidence_refs)
+      ? payload.evidence_refs
+      : []
+    )
       .map(evidenceLine)
       .filter((line) => line.length > 0),
     nextActions: stringList(payload.recommended_next_actions),

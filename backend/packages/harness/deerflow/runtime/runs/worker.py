@@ -538,10 +538,7 @@ class _SubagentEventBuffer:
         # the card, and its live progress report, only appeared once the phase
         # terminated. Both start and end are once-per-subagent, so flushing them
         # eagerly adds no per-step lock contention on the hot stream loop.
-        if (
-            record["event_type"] in ("subagent.start", "subagent.end")
-            or len(self._pending) >= self.FLUSH_THRESHOLD
-        ):
+        if record["event_type"] in ("subagent.start", "subagent.end") or len(self._pending) >= self.FLUSH_THRESHOLD:
             await self.flush()
 
     async def flush(self) -> None:

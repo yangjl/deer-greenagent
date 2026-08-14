@@ -74,6 +74,6 @@ async def test_upgrade_repairs_missing_dbtl_columns_without_losing_rows(
         assert request_fingerprint["nullable"] is False
         assert isinstance(fingerprint, str) and len(fingerprint) == 64
         assert "uq_dbtl_cycle_create_idempotency" in {item["name"] for item in cycle_indexes}
-        assert version == "0031_dbtl_conversational_discovery"
+        assert version == "0033_dbtl_evidence_exception_assessment"
     finally:
         await engine.dispose()

@@ -292,6 +292,27 @@ class TestAStageWorkerReportsItsSteps:
         assert "PATH" not in execution_env
         assert "VIRTUAL_ENV" not in execution_env
 
+    async def test_learn_worker_receives_its_writable_workspace_environment(self, dispatch):
+        stage_workspace = "/mnt/user-data/outputs/.dbtl-stage-work/run/learn"
+
+        await dispatch(
+            [
+                WorkUnit(
+                    unit_id="learn-synthesis",
+                    capability="knowledge_synthesis",
+                    agent_name="general-purpose",
+                    prompt="Revise the Learn synthesis.",
+                )
+            ],
+            stage="learn",
+            stage_workspace=stage_workspace,
+        )
+
+        unit_workspace = f"{stage_workspace}/{adapter_module.workspace.safe_token('learn-synthesis')}"
+        execution_env = _FakeExecutor.last_kwargs["execution_env"]
+        assert execution_env["DBTL_WORKSPACE"] == unit_workspace
+        assert execution_env["DBTL_PROJECT_ROOT"] == "/mnt/user-data"
+
     async def test_each_captured_step_becomes_a_running_event(self, dispatch):
         _FakeExecutor.steps = [
             {"type": "ai", "content": "Reading the inputs", "tool_calls": [{"name": "read_file", "args": {"path": "/mnt/user-data/x.csv"}}]},

@@ -74,9 +74,7 @@ describe("parseDesignConsensusPackage", () => {
       ],
       openQuestions: ["Can Site C guarantee irrigation?"],
       limitations: ["The third site is not confirmed."],
-      failedChecks: [
-        "Leakage boundary: Families must not cross folds.",
-      ],
+      failedChecks: ["Leakage boundary: Families must not cross folds."],
       nextActions: ["Confirm irrigation at Site C."],
     });
   });

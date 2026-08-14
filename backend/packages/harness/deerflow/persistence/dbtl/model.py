@@ -822,7 +822,12 @@ class DbtlDesignFeedbackActionRow(Base):
     payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     selected_card_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     human_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
-    slide_comments: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False, default=dict)
+    slide_comments: Mapped[dict[str, str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
+    )
     active_slide_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     expected_db_revision: Mapped[int] = mapped_column(Integer, nullable=False)
     expected_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

@@ -114,7 +114,7 @@ async def test_upgrade_repairs_a_stamped_step_table_missing_phase_slot(tmp_path:
                     sync.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one(),
                 )
             )
-        assert version == "0031_dbtl_conversational_discovery"
+        assert version == "0033_dbtl_evidence_exception_assessment"
         assert {column["name"] for column in columns} >= {"phase_key", "phase_slot"}
         assert next(item for item in constraints if item["name"] == "uq_dbtl_stage_step_attempt")["column_names"] == [
             "stage_attempt_id",

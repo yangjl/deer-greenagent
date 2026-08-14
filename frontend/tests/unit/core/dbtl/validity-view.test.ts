@@ -104,8 +104,6 @@ describe("metric and validity separation", () => {
     );
 
     expect(result.outcome).toBe("supported");
-    expect(result.reason_codes).not.toContain(
-      "missing_duplicates_relatedness",
-    );
+    expect(result.reason_codes).not.toContain("missing_duplicates_relatedness");
   });
 });

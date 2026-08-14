@@ -107,7 +107,9 @@ describe("output is bounded", () => {
 
     fireEvent.click(screen.getByRole("button"));
 
-    expect(screen.getByText(/Truncated for display — 5,000 characters/)).toBeTruthy();
+    expect(
+      screen.getByText(/Truncated for display — 5,000 characters/),
+    ).toBeTruthy();
   });
 
   it("does not claim truncation for output that fits", () => {
@@ -124,7 +126,9 @@ describe("output is bounded", () => {
     fireEvent.click(screen.getByRole("button"));
 
     expect(
-      screen.getByText("The recorded output was truncated when it was captured."),
+      screen.getByText(
+        "The recorded output was truncated when it was captured.",
+      ),
     ).toBeTruthy();
   });
 });

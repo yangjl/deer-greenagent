@@ -218,6 +218,12 @@ Design–Build–Test–Learn (DBTL) governance.
   Build, Test, and Learn meetings all use the same inline transcript footprint:
   the participant lanes precede that meeting's conclusion and review deck,
   including when a failed meeting is recovered in a later run.
+  Reconciliation and Learn revisions run in a fresh governed workspace; prior
+  stage work remains read-only evidence and retained source is copied forward
+  before revised outputs are executed and verified. The stage adapter then
+  publishes the regenerated review package from the worker's typed result.
+  Learn workers receive the exact writable grant through `DBTL_WORKSPACE` and
+  use a metered, turn/time-bounded execution envelope without a token ceiling.
   Test's actual human path is chat-first: a typed, server-evaluated Test package
   automatically crosses the non-decision submission boundary into human review
   and produces a Human Input Card that offers the configured review meeting,

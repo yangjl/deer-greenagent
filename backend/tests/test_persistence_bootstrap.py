@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0031_dbtl_conversational_discovery"
+HEAD = "0033_dbtl_evidence_exception_assessment"
 BASELINE = "0001_baseline"
 
 

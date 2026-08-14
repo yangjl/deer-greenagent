@@ -103,7 +103,9 @@ export function taskEventToSubtaskUpdate(
       // Carried on the terminal event too: a page joining mid-run can miss
       // `task_started` entirely, and a stage worker with no stage has no
       // surface to render on.
-      ...(normalizeText(terminal.dbtl_stage) ? { dbtlStage: normalizeText(terminal.dbtl_stage) } : {}),
+      ...(normalizeText(terminal.dbtl_stage)
+        ? { dbtlStage: normalizeText(terminal.dbtl_stage) }
+        : {}),
     };
   }
 

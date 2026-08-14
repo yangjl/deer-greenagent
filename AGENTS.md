@@ -854,6 +854,18 @@ artifact` is server-owned in full and is now stripped from external run input:
   verdict through the deck also invalidates the `dbtl-cycles` queries: the
   rail refreshed for its own controls but not for a decision taken on the
   deck, so an approved Design left Build reading "Locked".
+- **A non-Design revision gets a new writable stage workspace.** Reconciliation
+  and Learn revision workers receive the latest bound review rationale plus an
+  explicit workspace policy: earlier `.dbtl-stage-work` trees are read-only
+  evidence, any retained source must be copied into the newly granted unit
+  workspace before execution, and revised outputs must be written and verified
+  there. The worker then returns its typed result immediately; the adapter,
+  not the worker, publishes the review package and deck. Creating an ad hoc
+  workspace elsewhere, trying to execute an old workspace in place, or seeking
+  a second publication mechanism cannot satisfy the governed revision. Every
+  writable stage worker receives that exact unit path as `DBTL_WORKSPACE`;
+  Learn v2 provides enough turns for copy, execute, verify, and typed return,
+  meters tokens without a token kill switch, and retains turn/time guards.
 - **Progressive-gate Phases 0-1** record every gate decision as an append-only
   edge on a Design/Build/Test/Learn stage graph (`dbtl_stage_transitions`);
   reconciliation is a Build-edge precondition, not a path node, so data work

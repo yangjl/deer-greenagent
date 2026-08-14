@@ -1,8 +1,23 @@
 # DBTL Ten-Run Reliability Campaign
 
-**Status:** Runs 1–4 complete; Run 5 captured as non-qualifying `invalidated` at its 500,000-token stop; revised Run 6 not started
+**Status:** Runs 1–4, 6, and 7 complete on the repaired current tip; Run 5 is
+non-qualifying; Run 8 is paused at Build recovery after its first intended
+`invalidated` Test outcome; Runs 9–10 have not started
 
 **Date:** 2026-08-09
+
+## Current campaign checkpoint — 2026-08-14
+
+- Run 6 completed through the valid `not_supported` route to Learn with no
+  promotion or publication.
+- Run 7 preserved two `inconclusive` Test attempts and closed fail-closed when
+  the immutable fixture could not establish authoritative row identity.
+- Run 8 reached the declared first `invalidated` Test outcome, returned to
+  Build through the visible control, and stopped at the durable Build-recovery
+  checkpoint with 4,119 of its 500,000-token budget remaining. Its continuation
+  requires a fresh budget and remains deliberately paused.
+- The current-tip repair, proof, and review checkpoint is being consolidated
+  separately; it does not authorize or execute the Run 8 continuation.
 
 ## Goal
 
@@ -94,7 +109,7 @@ Runs execute sequentially in increasing route complexity:
 | 4 | Design request changes | A second meeting/deck is created and the revised Design completes |
 | 5 | Build request changes | Build revises once, then passes Test and completes Learn |
 | 6 | Test `not_supported` | The valid negative outcome follows its allowed route to Learn |
-| 7 | Test `inconclusive` | Test repeats once, preserves both attempts, then routes to Learn |
+| 7 | Test `inconclusive` | Test repeats once, preserves both attempts, and closes if the required evidence is still missing |
 | 8 | Test `invalidated` | The cycle returns to Build, repairs the package, retests, and completes |
 | 9 | Recovery and idempotency | Hold, refresh, stale action, and duplicate action handling preserve state before completion |
 | 10 | Final supported replay | Replays the repaired straight-through route without a product bug |
@@ -165,6 +180,30 @@ human gate is recorded separately and does not count as model runtime.
 - Hard campaign ceiling: 5.0 million tokens and eight elapsed working hours.
 - Run 1 is the only ordinary-chat control. Runs 2 through 10 use governed DBTL
   only.
+
+### 2026-08-11 owner amendment — Run 6 replay and Run 7
+
+The owner has authorized the clean Run 6 replay and Run 7 with **no model-token
+ceiling**. This supersedes both the default later-run per-attempt ceiling and
+the aggregate campaign token ceiling for these two runs only, including their
+required canary, diagnosis, and governed replay work. The previously discussed
+additional 500,000-token allowance is therefore not a stop condition for these
+two runs.
+
+Token use and elapsed time must still be measured and reported. Every other
+campaign control remains in force: sequential execution, visible authenticated
+deck decisions, server-owned handoffs, immutable inputs, hash-bound evidence,
+read-only diagnostics, zero hidden transitions or database repair, frozen craft
+memory, product-bug stop/repair/replay rules, and a clean Run 6 result before
+Run 7 starts.
+
+The completed current-tip Run 7 replay refined the expected terminal route.
+The frozen train and holdout CSVs have no authoritative row/entity identifier,
+so the repeat cannot independently prove unit-level fold disjointness. Both
+attempts therefore correctly remain `inconclusive`; after exactly one repeat,
+the human closes the cycle and Learn stays locked. This is a successful
+fail-closed outcome, not permission to infer identities from filenames,
+feature values, positional labels, or content hashes.
 
 The working-day allocation is approximately five hours for qualifying runs, two
 hours for diagnosis and clean replays, and one hour for setup and final analysis.

@@ -15,7 +15,10 @@ const steps: SubtaskStep[] = [
     kind: "ai",
     text: "I need the prior design package first.",
     tool_calls: [
-      { name: "read_file", args: { path: "/mnt/user-data/outputs/design.json" } },
+      {
+        name: "read_file",
+        args: { path: "/mnt/user-data/outputs/design.json" },
+      },
     ],
   },
   {
@@ -93,8 +96,16 @@ const chairResult = JSON.stringify({
   claims: ["No implementation-ready protocol exists."],
   limitations: ["Generation rules remain unfrozen."],
   evidence_refs: [
-    { kind: "workspace_file", reference: "/mnt/user-data/outputs/x.json", description: "Latest package" },
-    { kind: "external", reference: "experimental-design:red_team", description: "" },
+    {
+      kind: "workspace_file",
+      reference: "/mnt/user-data/outputs/x.json",
+      description: "Latest package",
+    },
+    {
+      kind: "external",
+      reference: "experimental-design:red_team",
+      description: "",
+    },
   ],
   quality_checks: [
     { name: "threshold stated", passed: false, detail: "no denominator" },
@@ -105,8 +116,16 @@ const chairResult = JSON.stringify({
   consensus: {
     agreements: ["The lineage is a restricted benchmark."],
     disagreements: [
-      { topic: "Scope of inference", positions: ["not decidable", "already decided elsewhere"], resolution: "" },
-      { topic: "Marker count", positions: ["10 is enough", "10 is too few"], resolution: "Use 10 for the benchmark only." },
+      {
+        topic: "Scope of inference",
+        positions: ["not decidable", "already decided elsewhere"],
+        resolution: "",
+      },
+      {
+        topic: "Marker count",
+        positions: ["10 is enough", "10 is too few"],
+        resolution: "Use 10 for the benchmark only.",
+      },
     ],
     open_questions: ["Which germplasm?"],
   },
@@ -115,7 +134,9 @@ const chairResult = JSON.stringify({
 test("a chair result parses into the sections a reviewer reads", () => {
   const view = parseMeetingResult(chairResult)!;
   expect(view.status).toBe("needs_input");
-  expect(view.clarificationQuestion).toBe("Toy benchmark or credible simulator?");
+  expect(view.clarificationQuestion).toBe(
+    "Toy benchmark or credible simulator?",
+  );
   expect(view.consensus?.agreements).toEqual([
     "The lineage is a restricted benchmark.",
   ]);
@@ -148,7 +169,9 @@ test("evidence renders as reference plus description", () => {
 test("prose and malformed payloads degrade to the raw text", () => {
   expect(parseMeetingResult("I could not read the files.")).toBeNull();
   expect(parseMeetingResult("{not json")).toBeNull();
-  expect(parseMeetingResult(JSON.stringify({ status: "completed" }))).toBeNull();
+  expect(
+    parseMeetingResult(JSON.stringify({ status: "completed" })),
+  ).toBeNull();
 });
 
 test("a result with no consensus block still renders its synthesis", () => {

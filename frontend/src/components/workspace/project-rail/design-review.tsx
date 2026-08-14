@@ -155,8 +155,8 @@ function DesignConsensusMap({
           </p>
         </div>
         <span className="text-muted-foreground shrink-0 text-xs tabular-nums">
-          {view.agreements.length} agreed · {view.disagreements.length} contested
-          · {unresolved} unresolved
+          {view.agreements.length} agreed · {view.disagreements.length}{" "}
+          contested · {unresolved} unresolved
         </span>
       </header>
 
@@ -170,11 +170,7 @@ function DesignConsensusMap({
       ) : null}
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <DecisionList
-          icon={CheckIcon}
-          items={view.agreements}
-          title="Agreed"
-        />
+        <DecisionList icon={CheckIcon} items={view.agreements} title="Agreed" />
         <DecisionList
           icon={HelpCircleIcon}
           items={view.openQuestions}

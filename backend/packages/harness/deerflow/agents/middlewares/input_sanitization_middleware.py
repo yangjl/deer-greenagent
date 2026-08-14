@@ -97,6 +97,15 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "guidelines",
         "output_format",
         "working_directory",
+        "craft_memory",
+        "current_project_data",
+        "dbtl_discovery",
+        "dbtl_discovery_evidence",
+        "dbtl_status",
+        "local_folders",
+        "parked_dbtl_context",
+        "project_context",
+        "project_shared_memory",
         # Subagent system-prompt block (general_purpose.py): declares the task
         # tool off-limits. Forging this in untrusted input could trick the
         # model into believing it has (or lacks) tool restrictions it does not.

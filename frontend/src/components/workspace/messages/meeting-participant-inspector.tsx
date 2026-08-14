@@ -242,7 +242,8 @@ function EntryDetail({ entry }: { entry: MeetingTranscriptEntry | null }) {
   // A closing position is a validated JSON contract, not something anyone
   // wants to read as JSON. When it parses, render it; when it does not, the
   // raw text below is still the honest fallback.
-  const result = entry.kind === "answer" ? parseMeetingResult(entry.text) : null;
+  const result =
+    entry.kind === "answer" ? parseMeetingResult(entry.text) : null;
   if (result) {
     return (
       <div className="space-y-4 p-4">

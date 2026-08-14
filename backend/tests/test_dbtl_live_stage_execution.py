@@ -19,6 +19,7 @@ from deerflow.agents.dbtl.live_stage.adapter import (
     _compact_design_history,
     _declared_skill_bindings,
     _design_deliverable_manifest,
+    _effective_dispatch_budget,
     _executable_stage,
     _project_file_snapshot,
     _stage_worker_config,
@@ -33,11 +34,11 @@ from deerflow.agents.dbtl.live_stage.token_usage import (
     _report_subagent_token_usage,
     _summarize_token_usage,
 )
-from deerflow.agents.dbtl.live_stage.workspace import safe_token, verified_workspace_files
+from deerflow.agents.dbtl.live_stage.workspace import STAGE_UNIT_WORKSPACE_PLACEHOLDER, safe_token, verified_workspace_files
 from deerflow.dbtl.agent_selector import AgentCandidate
 from deerflow.dbtl.capabilities import Capability
 from deerflow.dbtl.stage_runner import DispatchOutcome, WorkUnit
-from deerflow.dbtl.stage_spec import WorkerBudget, resolve_stage_spec
+from deerflow.dbtl.stage_spec import LEARN_SPEC_V1, LEARN_SPEC_V2, WorkerBudget, resolve_stage_spec
 from deerflow.dbtl.validity import DEFAULT_VALIDITY_PACK
 from deerflow.dbtl.worker_result import StageWorkerResult, WorkerStatus
 from deerflow.subagents.config import SubagentConfig
@@ -2141,12 +2142,101 @@ async def test_learn_records_only_provisional_evidence_bound_candidates(
     )
 
     assert result.stage == "learn"
-    assert repo.recorded[0]["stage_spec_key"] == "generic:learn:v1"
+    assert repo.recorded[0]["stage_spec_key"] == "generic:learn:v2"
     assert len(repo.learn_syntheses) == 1
     synthesis = repo.learn_syntheses[0]
     assert synthesis["expected_db_revision"] == 4
     assert synthesis["candidates"][0]["grade"] == "supported"
     assert synthesis["candidates"][0]["evidence"]
+
+
+def test_legacy_learn_attempt_gets_the_current_uncapped_execution_envelope() -> None:
+    assert _effective_dispatch_budget("learn", LEARN_SPEC_V1.budget) == LEARN_SPEC_V2.budget
+
+
+@pytest.mark.asyncio
+async def test_legacy_learn_attempt_keeps_its_pinned_spec_key_while_using_the_current_envelope(
+    tmp_path: Path,
+) -> None:
+    cycle = _cycle(state="learn")
+    next(item for item in cycle["stages"] if item["stage"] == "learn")["stage_spec_key"] = LEARN_SPEC_V1.spec_key
+    repo = FakeRepo(cycle)
+    dispatcher = FakeDispatcher(text=_structured_result())
+    adapter = LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="knowledge-synthesizer",
+                capabilities=frozenset({Capability.KNOWLEDGE_SYNTHESIS}),
+            ),
+        ),
+        dispatcher=dispatcher,
+    )
+
+    await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Synthesize the bounded Learn closeout.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert dispatcher.calls[0][1] == LEARN_SPEC_V2.budget
+    assert repo.recorded[0]["stage_spec_key"] == LEARN_SPEC_V1.spec_key
+
+
+@pytest.mark.asyncio
+async def test_learn_revision_uses_the_bound_objection_and_a_fresh_writable_workspace(
+    tmp_path: Path,
+) -> None:
+    class RevisionRepo(FakeRepo):
+        async def list_activity(self, cycle_id: str, *, project_id: str):
+            assert (cycle_id, project_id) == ("cycle-1", "project-1")
+            return [
+                {
+                    "event_type": "stage.reviewed",
+                    "payload": {
+                        "stage": "learn",
+                        "decision": "request_changes",
+                        "rationale": "Run the existing entry point and verify artifacts/learn_synthesis.json.",
+                    },
+                }
+            ]
+
+    repo = RevisionRepo(_cycle(state="learn", status="changes_requested"))
+    dispatcher = FakeDispatcher(text=_structured_result())
+    adapter = LiveStageAdapter(
+        repo=repo,
+        app_config=SimpleNamespace(),
+        candidate_provider=lambda: (
+            AgentCandidate(
+                name="knowledge-synthesizer",
+                capabilities=frozenset({Capability.KNOWLEDGE_SYNTHESIS}),
+            ),
+        ),
+        dispatcher=dispatcher,
+    )
+
+    result = await adapter.execute(
+        project_id="project-1",
+        cycle_id="cycle-1",
+        request_text="Perform only the requested governed Learn revision.",
+        state={},
+        config=_runtime_config(tmp_path),
+    )
+
+    assert result.stage == "learn"
+    prompt = dispatcher.calls[0][0][0].prompt
+    assert "Run the existing entry point and verify artifacts/learn_synthesis.json." in prompt
+    assert "Previous stage workspaces are read-only evidence" in prompt
+    assert "Copy any source you must retain into the current writable workspace before executing it" in prompt
+    assert "Do not create an ad hoc workspace elsewhere" in prompt
+    assert "After verification, return the shared StageWorkerResult immediately" in prompt
+    assert "Do not search for or invoke a platform revision mechanism" in prompt
+    assert "The stage adapter publishes the governed review package" in prompt
+    assert STAGE_UNIT_WORKSPACE_PLACEHOLDER not in prompt
+    assert "/mnt/user-data/outputs/.dbtl-stage-work/" in prompt
 
 
 @pytest.mark.asyncio
